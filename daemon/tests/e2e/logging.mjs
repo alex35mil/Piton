@@ -1,4 +1,4 @@
-// Host logging lives in the daemon: `[logging] mode` in config.toml is the default, `piton logging` and the apps switch
+// Host logging lives in the daemon: `[host] logging` in settings.toml is the default, `piton logging` and the apps switch
 // it until it expires or the daemon restarts, and nothing is persisted elsewhere. All state is temporary.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -7,29 +7,27 @@ import { join, resolve } from "node:path";
 import net from "node:net";
 import assert from "node:assert/strict";
 
+import { writeConfig as writeConfigFiles } from "./config.mjs";
+
 const binary = resolve(import.meta.dirname, "../../target/debug/piton");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-logging-")));
 const logs = join(dir, "logs");
 const socket = join(dir, "piton.sock");
-const config = join(dir, "config.toml");
-const env = { ...process.env, PITON_CONFIG: config, PITON_LOGS_DIR: logs, PITON_RUNTIME: "sandbox" };
+const config = join(dir, "config");
+const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: join(dir, "agent"), PITON_LOGS_DIR: logs, PITON_RUNTIME: "sandbox" };
 
 function writeConfig(mode) {
-    writeFileSync(
-        config,
-        [
-            `socket = ${JSON.stringify(socket)}`,
-            `log = ${JSON.stringify(join(dir, "piton.log"))}`,
-            `keep_awake = false`,
-            ...(mode ? [`[logging]`, `mode = ${JSON.stringify(mode)}`] : []),
-            `[tailnet]`,
-            `enabled = false`,
-            `[env]`,
-            `login_shell = false`,
-            `mise = false`,
-        ].join("\n"),
-    );
+    writeConfigFiles(dir, {
+        daemon: {
+            socket,
+            log: join(dir, "piton.log"),
+            keep_awake: false,
+            tailnet: { enabled: false },
+            env: { login_shell: false, mise: false },
+        },
+        host: mode ? { logging: mode } : {},
+    });
 }
 
 async function startDaemon() {

@@ -28,20 +28,20 @@ fn domain() -> String {
     format!("gui/{}", nix::unistd::getuid())
 }
 
-/// Writes the agent's plist and (re)loads it. `exe` is the binary launchd runs; `config` is passed as `--config` when
-/// given.
-pub fn install(config: Option<&Path>) -> Result<PathBuf, ServiceError> {
+/// Writes the agent's plist and (re)loads it. `exe` is the binary launchd runs; `config_home` is passed as
+/// `--config-home` when given.
+pub fn install(config_home: Option<&Path>) -> Result<PathBuf, ServiceError> {
     let exe = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(ServiceError::Exe)?;
     let mut args = vec![exe.to_string_lossy().into_owned()];
-    if let Some(config) = config {
-        let config = std::fs::canonicalize(config).map_err(|source| ServiceError::Io {
-            path: config.into(),
+    if let Some(dir) = config_home {
+        let dir = std::fs::canonicalize(dir).map_err(|source| ServiceError::Io {
+            path: dir.into(),
             source,
         })?;
-        args.push("--config".into());
-        args.push(config.to_string_lossy().into_owned());
+        args.push("--config-home".into());
+        args.push(dir.to_string_lossy().into_owned());
     }
     args.push("daemon".into());
     install_agent(LABEL, &args)

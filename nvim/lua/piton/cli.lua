@@ -26,6 +26,7 @@
 ---| { kind: "unknown_default", checkout: string }
 ---| { kind: "not_a_worker", path: string }
 ---| { kind: "leftovers", path: string, lines: string[] }
+---| { kind: "invalid_configuration", message: string }
 ---| { kind: "failed", message: string }
 
 ---@alias PitonCreateResult
@@ -50,6 +51,7 @@ local REFUSAL_KINDS = {
     unknown_default = true,
     not_a_worker = true,
     leftovers = true,
+    invalid_configuration = true,
     failed = true,
 }
 
@@ -241,7 +243,7 @@ function M.describe(refusal_value)
         return r.path .. " is not an agent"
     elseif r.kind == "leftovers" then
         return r.path .. " isn't clean:\n" .. table.concat(r.lines, "\n")
-    elseif r.kind == "failed" then
+    elseif r.kind == "invalid_configuration" or r.kind == "failed" then
         return r.message
     end
     error("unknown piton refusal: " .. vim.inspect(r))

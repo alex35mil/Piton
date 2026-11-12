@@ -192,14 +192,72 @@ pub fn resolve(workspace: &Workspace, paths: &Paths, runtime: Runtime) -> Result
     read_chain(&chain, &workspace.path, runtime)
 }
 
-/// Only the global tier: the daemon's own settings.
+/// Only the global tier: the daemon's own settings. Refuses only the daemon's own old file; the files piton used to
+/// keep in pi's agent folder block the pi package (through [`resolve`]), not the daemon.
 pub fn resolve_global(paths: &Paths) -> Result<Resolved, SettingsError> {
     let chain = Chain::global_only(&paths.global);
-    let old = old_global(paths);
+    let old = old_daemon_config(paths);
     if !old.is_empty() {
         return Err(SettingsError::OldLayout(old));
     }
     read_chain(&chain, &paths.global, Runtime::Host)
+}
+
+/// The daemon's part of a workspace's configuration.
+#[derive(Debug, Clone)]
+pub struct DaemonSettings {
+    /// The merged `daemon[.local].toml` of the `.piton/` chain: sandbox grants, workers.
+    pub daemon: DaemonFile,
+    /// The checkout whose `.piton/` was read (a worker's source).
+    pub source: PathBuf,
+    /// The existing level folders of both chains, farthest first: a sandbox reads its whole configuration.
+    pub levels: Vec<PathBuf>,
+}
+
+/// The daemon's part of a workspace's configuration: the merged `daemon[.local].toml` of the `.piton/` chain and the
+/// chains' existing folders. Refuses only the old files the daemon itself read; the pi package's files are checked by
+/// [`resolve`] in the pi package, so they never block a launch or a worker.
+pub fn resolve_daemon(workspace: &Workspace, paths: &Paths) -> Result<DaemonSettings, SettingsError> {
+    let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
+    let old: Vec<OldPath> = old_layout(&chain, paths)
+        .into_iter()
+        .filter(|old| is_daemon_owned(&old.path))
+        .collect();
+    if !old.is_empty() {
+        return Err(SettingsError::OldLayout(old));
+    }
+    let mut reader = Reader::new();
+    let mut piton = Vec::new();
+    let mut levels = Vec::new();
+    for level in &chain.piton {
+        if check_level(level)? {
+            piton.push(level.clone());
+            levels.push(level.dir.clone());
+        }
+    }
+    for level in &chain.agents {
+        if check_level(level)? && !levels.contains(&level.dir) {
+            levels.push(level.dir.clone());
+        }
+    }
+    let mut daemon = DaemonFile::default();
+    for file in reader.read::<DaemonFile>(&piton, "daemon", Format::Toml, None)? {
+        validate_daemon(&file.value, &file.origin.path)?;
+        merge::daemon(&mut daemon, file.value);
+    }
+    Ok(DaemonSettings {
+        daemon,
+        source: chain.source.clone(),
+        levels,
+    })
+}
+
+/// Old files the daemon read: `config.toml`, `.piton.toml`, the nono overlays.
+fn is_daemon_owned(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("config.toml" | ".piton.toml" | ".nono.json" | ".nono.local.json" | "nono.json" | "nono.local.json")
+    )
 }
 
 fn read_chain(chain: &Chain, workspace: &Path, runtime: Runtime) -> Result<Resolved, SettingsError> {
@@ -419,15 +477,20 @@ fn old_layout(chain: &Chain, paths: &Paths) -> Vec<OldPath> {
 }
 
 /// The global files before the global tier: `config.toml` and the files piton kept in pi's agent folder.
-fn old_global(paths: &Paths) -> Vec<OldPath> {
-    let mut found = Vec::new();
+fn old_daemon_config(paths: &Paths) -> Vec<OldPath> {
     let config = paths.global.join("config.toml");
     if config.exists() {
-        found.push(OldPath {
+        vec![OldPath {
             path: config,
             now: "daemon.toml (how the daemon runs) and settings.toml [host] (roots, logging)",
-        });
+        }]
+    } else {
+        Vec::new()
     }
+}
+
+fn old_global(paths: &Paths) -> Vec<OldPath> {
+    let mut found = old_daemon_config(paths);
     let pi_dir = &paths.pi_agent_dir;
     for name in [
         "permissions.json",
@@ -687,8 +750,15 @@ mod tests {
         write(&t.global.join("config.toml"), "roots = []\n");
         assert!(matches!(resolve_global(&t.paths), Err(SettingsError::OldLayout(_))));
         std::fs::remove_file(t.global.join("config.toml")).unwrap();
+        // Files piton kept in pi's agent folder block the pi package's resolution, not the daemon's start.
         write(&t.paths.pi_agent_dir.join("permissions.json"), "{}");
-        assert!(matches!(resolve_global(&t.paths), Err(SettingsError::OldLayout(_))));
+        assert!(resolve_global(&t.paths).is_ok());
+        let repo = t.home.join("clean");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(matches!(
+            run(&t, &source(repo), Runtime::Host),
+            Err(SettingsError::OldLayout(_))
+        ));
     }
 
     /// A worker reads `.piton/` from its source, never its own copy.

@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
+import { writeConfig } from "./config.mjs";
+
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
 const ext = join(root, "tests/fixtures/faux-extension.ts");
@@ -32,30 +34,19 @@ function setup() {
     const whoisFile = join(dir, "whois.json");
     writeFileSync(whoisFile, OWN_PHONE);
     const log = join(dir, "piton.log");
-    const config = join(dir, "config.toml");
-    writeFileSync(
-        config,
-        [
-            `socket = ${JSON.stringify(join(dir, "piton.sock"))}`,
-            `log = ${JSON.stringify(log)}`,
-            `attach_mode = "host"`,
-            `empty_grace_ms = 60000`,
-            `keep_awake = false`,
-            `roots = [${JSON.stringify(root)}]`,
-            `[pi]`,
-            `args = ["-e", ${JSON.stringify(ext)}, "--model", "faux/faux-1"]`,
-            `[env]`,
-            `login_shell = false`,
-            `mise = false`,
-            `[tailnet]`,
-            `port = 0`,
-            `heartbeat_ms = 300`,
-            `retry_ms = 200`,
-            `cli = ${JSON.stringify(fakeTailscale)}`,
-        ].join("\n"),
-    );
+    const config = writeConfig(dir, {
+        daemon: {
+            socket: join(dir, "piton.sock"),
+            log,
+            keep_awake: false,
+            pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
+            env: { login_shell: false, mise: false },
+            tailnet: { port: 0, heartbeat_ms: 300, retry_ms: 200, cli: fakeTailscale },
+        },
+        host: { attach_mode: "host", empty_grace_ms: 60000, roots: [root] },
+    });
     const stopped = join(dir, "tailscale-stopped");
-    const env = { ...process.env, PITON_CONFIG: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40", PITON_FAKE_WHOIS: whoisFile, PITON_FAKE_STOPPED: stopped, PITON_LOGS_DIR: join(dir, "logging") };
+    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40", PITON_FAKE_WHOIS: whoisFile, PITON_FAKE_STOPPED: stopped, PITON_LOGS_DIR: join(dir, "logging") };
     return { dir, ws, whoisFile, log, stopped, env };
 }
 

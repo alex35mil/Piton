@@ -12,17 +12,14 @@
 //! files. Each file kind has one merge rule (see the per-kind modules). This module is the only implementation: the pi
 //! package and the Neovim plugin read the result through `piton config resolve` / `piton config get`.
 
-// Used from step 3 on (the daemon, `piton config`); this step adds the resolver alone.
-#![allow(dead_code, unused_imports)]
-
 mod chain;
 mod files;
 mod merge;
 mod resolve;
 
-pub use chain::{Chain, Level, LevelKind, global_tier, home};
-pub use files::{DaemonFile, SandboxTable, SettingsFile, WorkersTable, expand_home};
-pub use resolve::{Paths, Resolved, Runtime, resolve, resolve_global};
+pub use chain::{LevelKind, global_tier, home};
+pub use files::{DaemonFile, NetworkProfile, SandboxTable, SettingsFile, expand_home};
+pub use resolve::{DaemonSettings, Paths, Resolved, Runtime, resolve, resolve_daemon, resolve_global};
 
 use std::path::PathBuf;
 

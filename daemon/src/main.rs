@@ -10,6 +10,7 @@ mod project;
 mod prompts;
 mod replay;
 mod rolling;
+mod sandbox;
 mod service;
 mod session;
 mod settings;

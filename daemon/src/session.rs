@@ -260,17 +260,15 @@ pub struct LaunchSpec {
     pub mode: LaunchMode,
     pub session: SessionArg,
     pub env: Env,
+    /// The generated sandbox profile, for sandboxed launches; removed when the session ends.
+    pub profile: Option<launch::ProfileFile>,
 }
 
 pub fn spawn(config: Arc<Config>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
-    let profile = match spec.mode {
-        LaunchMode::Sandbox => launch::overlay_profile(&spec.workspace, spec.key)?,
-        LaunchMode::Host => None,
-    };
+    let profile = spec.profile;
     let argv = launch::command_line(
         &config,
         spec.mode,
-        &spec.workspace,
         &spec.session,
         profile.as_ref().map(launch::ProfileFile::path),
     );

@@ -44,14 +44,13 @@ private final class Daemon: @unchecked Sendable {
             #"{"Node":{"StableID":"iphone","Name":"iphone.tail.ts.net.","User":1},"UserProfile":{"ID":1,"LoginName":"me@example.com"}}"#
             .write(to: whois, atomically: true, encoding: .utf8)
         log = dir.appendingPathComponent("piton.log")
-        let config = dir.appendingPathComponent("config.toml")
+        // The global configuration folder: how the daemon runs, and the host preferences.
+        let config = dir.appendingPathComponent("config")
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
         try """
         socket = "\(socket)"
         log = "\(log.path)"
-        attach_mode = "host"
-        empty_grace_ms = 60000
         keep_awake = false
-        roots = ["\(root.path)"]
         [pi]
         args = ["-e", "\(ext)", "--model", "faux/faux-1"]
         [env]
@@ -63,9 +62,15 @@ private final class Daemon: @unchecked Sendable {
         [tailnet]
         port = 0
         cli = "\(tailscale)"
-        """.write(to: config, atomically: true, encoding: .utf8)
+        """.write(to: config.appendingPathComponent("daemon.toml"), atomically: true, encoding: .utf8)
+        try """
+        [host]
+        attach_mode = "host"
+        empty_grace_ms = 60000
+        roots = ["\(root.path)"]
+        """.write(to: config.appendingPathComponent("settings.toml"), atomically: true, encoding: .utf8)
         var env = ProcessInfo.processInfo.environment
-        env["PITON_CONFIG"] = config.path
+        env["PITON_CONFIG_HOME"] = config.path
         env["PI_CODING_AGENT_DIR"] = agent.path
         env["PITON_FAUX_TPS"] = "40"
         env["PITON_FAKE_WHOIS"] = whois.path

@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
+import { writeConfig } from "./config.mjs";
+
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
 const ext = join(root, "tests/fixtures/faux-extension.ts");
@@ -19,28 +21,19 @@ function setup() {
     mkdirSync(ws);
     mkdirSync(agent);
     const socket = join(dir, "piton.sock");
-    const config = join(dir, "config.toml");
-    writeFileSync(
-        config,
-        [
-            `socket = ${JSON.stringify(socket)}`,
-            `log = ${JSON.stringify(join(dir, "piton.log"))}`,
-            `attach_mode = "host"`,
-            `empty_grace_ms = 1500`,
-            `keep_awake = false`,
-            `[tailnet]`,
-            `enabled = false`,
-            `[pi]`,
-            `args = ["-e", ${JSON.stringify(ext)}, "--model", "faux/faux-1"]`,
-            `[env]`,
-            `login_shell = false`,
-            `mise = false`,
-            `[stop]`,
-            `grace_ms = 3000`,
-            `term_grace_ms = 1000`,
-        ].join("\n"),
-    );
-    const env = { ...process.env, PITON_CONFIG: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" };
+    const config = writeConfig(dir, {
+        daemon: {
+            socket,
+            log: join(dir, "piton.log"),
+            keep_awake: false,
+            tailnet: { enabled: false },
+            pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
+            env: { login_shell: false, mise: false },
+            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+        },
+        host: { attach_mode: "host", empty_grace_ms: 1500 },
+    });
+    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" };
     return { dir, ws, agent, socket, config, env };
 }
 

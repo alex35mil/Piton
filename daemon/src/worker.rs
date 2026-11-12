@@ -1,6 +1,6 @@
 //! Workers: disposable APFS copy-on-write clones of a source checkout, created next to it as `<parent>/<repo>--<name>`,
-//! where agents work in isolation. Everything is cloned except `.project/.local`, which is linked to the source's, and
-//! the project's `workers.skip` paths. See "Workers" in docs/design.md.
+//! where agents work in isolation. Everything is cloned except `.piton/.local`, which is linked to the source's, and
+//! the `[workers] skip` paths of the source's configuration. See "Workers" in docs/design.md.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -10,7 +10,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::launch::Env;
-use crate::project::{self, ProjectConfig, ProjectError, Relation, SHARED_PATH, WORKER_SEPARATOR};
+use crate::project::{self, ProjectError, Relation, SHARED_PATH, WORKER_SEPARATOR};
 
 /// How piton runs mise for workers: the resolved program and the environment it runs with (the daemon's base
 /// environment, so mise sees the user's `MISE_*` settings).
@@ -106,6 +106,9 @@ pub enum WorkerRefusal {
     NotAWorker { path: PathBuf },
     #[error("{path} has uncommitted changes or unpushed commits")]
     Leftovers { path: PathBuf, lines: Vec<String> },
+    /// The source's configuration is invalid or uses the old layout: fix it (or run `piton migrate`), then retry.
+    #[error("{message}")]
+    InvalidConfiguration { message: String },
     #[error("{message}")]
     Failed { message: String },
 }
@@ -152,8 +155,9 @@ pub fn normalize_name(name: &str) -> String {
 }
 
 /// Creates the worker. With `mise`, a worker of a mise-trusted source is trusted too: its config files are the
-/// source's, cloned, so cloning never grants trust the user hasn't given.
-pub fn create(request: &CreateRequest, mise: Option<&Mise>) -> Result<WorkerInfo> {
+/// source's, cloned, so cloning never grants trust the user hasn't given. `paths` locates the configuration chain the
+/// skip list comes from.
+pub fn create(request: &CreateRequest, mise: Option<&Mise>, paths: &crate::settings::Paths) -> Result<WorkerInfo> {
     let source = source_of(&request.from)?;
     let normalized = normalize_name(&request.name);
     if normalized.is_empty() {
@@ -172,7 +176,16 @@ pub fn create(request: &CreateRequest, mise: Option<&Mise>) -> Result<WorkerInfo
     if path.symlink_metadata().is_ok() {
         return Err(WorkerRefusal::Exists { path });
     }
-    let config = ProjectConfig::load(&source)?;
+    let workspace = project::Workspace {
+        path: source.clone(),
+        checkout: source.clone(),
+        relation: Relation::Source,
+    };
+    let skip_list = crate::settings::resolve_daemon(&workspace, paths)
+        .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?
+        .daemon
+        .workers
+        .skip;
 
     let branch = ready_branch(&source)?;
     git_ok(&source, &["fetch"]).map_err(|e| failed(format!("git fetch failed in {}: {e}", source.display())))?;
@@ -183,7 +196,7 @@ pub fn create(request: &CreateRequest, mise: Option<&Mise>) -> Result<WorkerInfo
     mkdir_like(&source, &path)?;
     let label = request.label.clone().unwrap_or_else(|| request.name.clone());
     let result = (|| {
-        let mut skip: Vec<Vec<String>> = config.workers.skip.iter().map(|s| segments(s)).collect();
+        let mut skip: Vec<Vec<String>> = skip_list.iter().map(|s| segments(s)).collect();
         skip.push(segments(SHARED_PATH));
         clone_tree(&source, &path, &skip)?;
         link_shared(&source, &path)?;
@@ -311,7 +324,7 @@ fn clonefile(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Links the worker's `.project/.local` to the source's, when the source has one.
+/// Links the worker's `.piton/.local` to the source's, when the source has one.
 fn link_shared(source: &Path, worker: &Path) -> Result<()> {
     let shared = source.join(SHARED_PATH);
     if !shared.is_dir() {
@@ -494,7 +507,15 @@ mod tests {
         );
     }
 
-    /// A source checkout with an origin, `.project/.local`, a skipped folder, and a nested one kept.
+    fn paths(root: &Path) -> crate::settings::Paths {
+        crate::settings::Paths {
+            home: root.to_path_buf(),
+            global: root.join(".config/piton"),
+            pi_agent_dir: root.join(".pi/agent"),
+        }
+    }
+
+    /// A source checkout with an origin, `.piton/.local`, a skipped folder, and a nested one kept.
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -506,9 +527,10 @@ mod tests {
         git(&source, &["config", "user.email", "t@t"]);
         git(&source, &["config", "user.name", "t"]);
         std::fs::write(source.join("README"), "hi").unwrap();
-        std::fs::write(source.join(".gitignore"), "/apps/.build\n/.project/.local\n").unwrap();
+        std::fs::write(source.join(".gitignore"), "/apps/.build\n/.piton/.local\n").unwrap();
+        std::fs::create_dir_all(source.join(".piton")).unwrap();
         std::fs::write(
-            source.join(".piton.toml"),
+            source.join(".piton/daemon.toml"),
             "[workers]\nskip = [\"apps/.build/index-build\"]\n",
         )
         .unwrap();
@@ -517,7 +539,7 @@ mod tests {
         git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]);
         git(&source, &["push", "-q", "-u", "origin", "main"]);
         git(&source, &["remote", "set-head", "origin", "main"]);
-        std::fs::create_dir_all(source.join(".project/.local/gigs")).unwrap();
+        std::fs::create_dir_all(source.join(".piton/.local/gigs")).unwrap();
         std::fs::create_dir_all(source.join("apps/.build/index-build/x")).unwrap();
         std::fs::create_dir_all(source.join("apps/.build/xcode")).unwrap();
         std::fs::write(source.join("apps/.build/xcode/keep"), "k").unwrap();
@@ -535,6 +557,7 @@ mod tests {
                 issue: Some("KID-5".into()),
             },
             None,
+            &paths(source.parent().unwrap()),
         )
         .unwrap();
         let worker = source.parent().unwrap().join("repo--fix-x");
@@ -568,6 +591,7 @@ mod tests {
                 issue: None,
             },
             None,
+            &paths(source.parent().unwrap()),
         )
         .unwrap();
         assert_eq!(second.source, source);
@@ -596,6 +620,7 @@ mod tests {
     fn dirty_source_refuses() {
         let (_dir, source) = fixture();
         std::fs::write(source.join("README"), "changed").unwrap();
+        let p = paths(source.parent().unwrap());
         match create(
             &CreateRequest {
                 from: source,
@@ -604,6 +629,7 @@ mod tests {
                 issue: None,
             },
             None,
+            &p,
         ) {
             Err(WorkerRefusal::SourceDirty { status, .. }) => assert!(status.iter().any(|l| l.contains("README"))),
             other => panic!("expected SourceDirty, got {other:?}"),
@@ -636,11 +662,12 @@ mod tests {
         };
 
         // Untrusted source: the worker isn't trusted either.
-        let untrusted = create(&request("one"), Some(&mise)).unwrap();
+        let p = paths(source.parent().unwrap());
+        let untrusted = create(&request("one"), Some(&mise), &p).unwrap();
         assert!(!mise.trusts(&untrusted.path).unwrap());
 
         mise.trust(&source).unwrap();
-        let trusted = create(&request("two"), Some(&mise)).unwrap();
+        let trusted = create(&request("two"), Some(&mise), &p).unwrap();
         assert!(mise.trusts(&trusted.path).unwrap());
         assert!(!mise.trusts(&untrusted.path).unwrap(), "only new workers are trusted");
 
@@ -681,6 +708,7 @@ mod tests {
                 issue: None,
             },
             None,
+            &paths(source.parent().unwrap()),
         )
         .unwrap();
         let inner = worker.path.join("apps/.build/xcode");

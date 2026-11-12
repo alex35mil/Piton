@@ -1,13 +1,13 @@
-//! piton's configuration: `~/.config/piton/config.toml`, or the file named by `--config` / `PITON_CONFIG`.
+//! The daemon's own configuration, from the global tier (`$XDG_CONFIG_HOME/piton/`, or `--config-home` /
+//! `PITON_CONFIG_HOME`): `daemon[.local].toml` says how the daemon runs, `settings[.local].toml` `[host]` holds the
+//! preferences the apps change. Reading and merging is settings/'s; this turns the result into values with defaults.
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
-
+use crate::settings::{DaemonFile, Paths, SettingsError, SettingsFile, expand_home as expand_with};
 use crate::wire::LaunchMode;
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// Unix socket of the daemon. An override for tests and development: the Mac app always connects to the default
     /// (`Endpoint.defaultLocal` in PitonKit), so a daemon on another socket runs without it.
@@ -31,11 +31,12 @@ pub struct Config {
     /// start sessions until the owner lists some. `piton attach` and the CLI aren't limited. A leading `~/` is
     /// expanded.
     pub roots: Vec<String>,
+    /// Where the settings chains are: home, the global tier, pi's agent folder.
+    pub paths: Paths,
 }
 
 /// The `view` protocol over WebSocket on this Mac's tailnet addresses, for the owner's other devices.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct TailnetConfig {
     pub enabled: bool,
     pub port: u16,
@@ -49,32 +50,25 @@ pub struct TailnetConfig {
 
 /// Host logging: the daemon, the Mac app, and the phone-log collector. The apps and `piton logging` switch it at runtime
 /// until the daemon restarts; this is what it starts with and returns to when a timed switch expires.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct LoggingConfig {
     pub mode: crate::diagnostics::Mode,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct PiConfig {
     /// pi executable and leading arguments; piton adds `--mode rpc`, then `args`, then session arguments.
     pub command: Vec<String>,
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct SandboxConfig {
-    /// nono executable.
+    /// nono executable. Grants come from each launch's `[sandbox]` chain (sandbox.rs).
     pub command: Vec<String>,
-    /// Base profile. A source checkout's `.nono.json` extends it; its `.project/.local` is allowed. See project.rs.
-    /// Grants every sandboxed pi needs belong in this profile, not in piton's config.
-    pub profile: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct EnvConfig {
     /// Start from the login shell's environment (captured once at daemon start) instead of the daemon's own.
     pub login_shell: bool,
@@ -82,8 +76,7 @@ pub struct EnvConfig {
     pub mise: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct StopConfig {
     /// After closing pi's stdin, how long pi may take before SIGTERM.
     pub grace_ms: u64,
@@ -91,119 +84,124 @@ pub struct StopConfig {
     pub term_grace_ms: u64,
 }
 
+impl Config {
+    /// The defaults, overridden by the merged global files.
+    pub fn from_files(daemon: DaemonFile, settings: SettingsFile, paths: Paths) -> Self {
+        let home = paths.home.clone();
+        let host = settings.host;
+        Self {
+            socket: daemon
+                .socket
+                .map(|s| expand_with(&s, &home))
+                .unwrap_or_else(|| home.join(".local/state/piton/piton.sock")),
+            log: Some(
+                daemon
+                    .log
+                    .map(|l| expand_with(&l, &home))
+                    .unwrap_or_else(|| crate::diagnostics::root().join("daemon/current.log")),
+            ),
+            attach_mode: host.attach_mode.unwrap_or(LaunchMode::Sandbox),
+            pi: PiConfig {
+                command: daemon.pi.command.unwrap_or_else(|| vec!["pi".into()]),
+                args: daemon.pi.args.unwrap_or_default(),
+            },
+            sandbox: SandboxConfig {
+                command: daemon.sandbox.command.unwrap_or_else(|| vec!["nono".into()]),
+            },
+            env: EnvConfig {
+                login_shell: daemon.env.login_shell.unwrap_or(true),
+                mise: daemon.env.mise.unwrap_or(true),
+            },
+            stop: StopConfig {
+                grace_ms: daemon.stop.grace_ms.unwrap_or(15_000),
+                term_grace_ms: daemon.stop.term_grace_ms.unwrap_or(3_000),
+            },
+            empty_grace_ms: host.empty_grace_ms.unwrap_or(10_000),
+            keep_awake: daemon.keep_awake.unwrap_or(true),
+            tailnet: TailnetConfig {
+                enabled: daemon.tailnet.enabled.unwrap_or(true),
+                port: daemon.tailnet.port.unwrap_or(7357),
+                cli: daemon.tailnet.cli.unwrap_or_else(|| "tailscale".into()),
+                heartbeat_ms: daemon.tailnet.heartbeat_ms.unwrap_or(10_000),
+                retry_ms: daemon.tailnet.retry_ms.unwrap_or(10_000),
+            },
+            logging: LoggingConfig {
+                mode: host.logging.unwrap_or_default(),
+            },
+            roots: host.roots.unwrap_or_default(),
+            paths,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            socket: home().join(".local/state/piton/piton.sock"),
-            log: Some(crate::diagnostics::root().join("daemon/current.log")),
-            attach_mode: LaunchMode::Sandbox,
-            pi: PiConfig::default(),
-            sandbox: SandboxConfig::default(),
-            env: EnvConfig::default(),
-            stop: StopConfig::default(),
-            empty_grace_ms: 10_000,
-            keep_awake: true,
-            tailnet: TailnetConfig::default(),
-            logging: LoggingConfig::default(),
-            roots: Vec::new(),
-        }
-    }
-}
-
-impl Default for TailnetConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            port: 7357,
-            cli: "tailscale".into(),
-            heartbeat_ms: 10_000,
-            retry_ms: 10_000,
-        }
-    }
-}
-
-impl Default for PiConfig {
-    fn default() -> Self {
-        Self {
-            command: vec!["pi".into()],
-            args: Vec::new(),
-        }
-    }
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            command: vec!["nono".into()],
-            profile: "piton".into(),
-        }
-    }
-}
-
-impl Default for EnvConfig {
-    fn default() -> Self {
-        Self {
-            login_shell: true,
-            mise: true,
-        }
-    }
-}
-
-impl Default for StopConfig {
-    fn default() -> Self {
-        Self {
-            grace_ms: 15_000,
-            term_grace_ms: 3_000,
-        }
+        let paths = Paths {
+            home: home(),
+            global: home().join(".config/piton"),
+            pi_agent_dir: home().join(".pi/agent"),
+        };
+        Self::from_files(DaemonFile::default(), SettingsFile::default(), paths)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("can't read {path}: {source}")]
-    Read { path: PathBuf, source: std::io::Error },
-    #[error("invalid config {path}: {source}")]
-    Parse {
-        path: PathBuf,
-        source: Box<toml::de::Error>,
-    },
-    #[error("invalid config: {0}")]
-    Invalid(&'static str),
+    #[error(transparent)]
+    Settings(#[from] SettingsError),
 }
 
-pub fn load(explicit: Option<&Path>) -> Result<Config, ConfigError> {
-    let (path, required) = match explicit {
-        Some(path) => (path.to_path_buf(), true),
-        None => (home().join(".config/piton/config.toml"), false),
-    };
-    let mut config = match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str::<Config>(&text).map_err(|source| ConfigError::Parse {
-            path: path.clone(),
-            source: Box::new(source),
-        })?,
-        Err(source) if !required && source.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(source) => return Err(ConfigError::Read { path, source }),
-    };
-    if config.pi.command.is_empty() {
-        return Err(ConfigError::Invalid("pi.command must not be empty"));
+/// Loads the global tier: `config_home` when given, else the one [`Paths::current`] finds.
+pub fn load(config_home: Option<&Path>) -> Result<Config, ConfigError> {
+    let mut paths = Paths::current();
+    if let Some(dir) = config_home {
+        paths.global = dir.to_path_buf();
     }
-    if config.sandbox.command.is_empty() {
-        return Err(ConfigError::Invalid("sandbox.command must not be empty"));
-    }
-    config.socket = expand_home(&config.socket.to_string_lossy());
-    config.log = config.log.map(|log| expand_home(&log.to_string_lossy()));
-    Ok(config)
+    let resolved = crate::settings::resolve_global(&paths)?;
+    Ok(Config::from_files(resolved.daemon, resolved.settings, paths))
 }
 
+/// The user's home folder, from the user database (see settings::home).
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    crate::settings::home()
 }
 
 pub fn expand_home(path: &str) -> PathBuf {
-    match path.strip_prefix("~/") {
-        Some(rest) => home().join(rest),
-        None => PathBuf::from(path),
+    expand_with(path, &home())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_files_override_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("piton");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(
+            global.join("daemon.toml"),
+            "socket = \"/tmp/s.sock\"\n[stop]\ngrace_ms = 5\n[sandbox]\ncommand = [\"/bin/nono\"]\n",
+        )
+        .unwrap();
+        std::fs::write(global.join("daemon.local.toml"), "[stop]\nterm_grace_ms = 7\n").unwrap();
+        std::fs::write(
+            global.join("settings.toml"),
+            "[host]\nroots = [\"~/p\"]\nattach_mode = \"host\"\nlogging = \"debug\"\n",
+        )
+        .unwrap();
+        let mut paths = Paths::current();
+        paths.global = global;
+        paths.pi_agent_dir = dir.path().join("agent");
+        let resolved = crate::settings::resolve_global(&paths).unwrap();
+        let config = Config::from_files(resolved.daemon, resolved.settings, paths);
+        assert_eq!(config.socket, PathBuf::from("/tmp/s.sock"));
+        assert_eq!((config.stop.grace_ms, config.stop.term_grace_ms), (5, 7));
+        assert_eq!(config.sandbox.command, ["/bin/nono"]);
+        assert_eq!(config.roots, ["~/p"]);
+        assert_eq!(config.attach_mode, LaunchMode::Host);
+        assert_eq!(config.logging.mode, crate::diagnostics::Mode::Debug);
+        assert_eq!(config.pi.command, ["pi"]);
+        assert_eq!(config.empty_grace_ms, 10_000);
     }
 }

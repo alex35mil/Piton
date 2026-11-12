@@ -7,6 +7,7 @@ use tokio::process::Command;
 
 use crate::config::Config;
 use crate::project::{self, ProjectError, Workspace};
+use crate::settings::{DaemonSettings, SettingsError};
 use crate::wire::LaunchMode;
 
 pub type Env = BTreeMap<String, String>;
@@ -23,6 +24,10 @@ pub enum LaunchError {
     Profile { path: PathBuf, source: std::io::Error },
     #[error(transparent)]
     Project(#[from] ProjectError),
+    #[error(transparent)]
+    Settings(#[from] SettingsError),
+    #[error(transparent)]
+    Sandbox(#[from] crate::sandbox::SandboxError),
 }
 
 /// Which session pi starts with.
@@ -85,8 +90,42 @@ fn parse_env0(bytes: &[u8]) -> Env {
         .collect()
 }
 
-/// pi's environment for `workspace`: the base environment plus `mise env` for that folder.
-pub async fn workspace_env(config: &Config, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
+/// pi's environment for `workspace` in `mode`: the base environment, `mise env` for that folder, then what piton
+/// decides, set last so a repository's `mise.toml` can't override it: the runtime (which permissions apply), the
+/// global tier, and this binary (the pi package resolves configuration through it).
+pub async fn workspace_env(
+    config: &Config,
+    base: &Env,
+    workspace: &Path,
+    mode: LaunchMode,
+) -> Result<Env, LaunchError> {
+    let mut env = mise_env(config, base, workspace).await?;
+    env.remove("PITON_RUNTIME");
+    match mode {
+        LaunchMode::Sandbox => {
+            env.insert("PITON_RUNTIME".into(), "sandbox".into());
+        }
+        LaunchMode::Host => {}
+    }
+    env.insert(
+        "PITON_CONFIG_HOME".into(),
+        config.paths.global.to_string_lossy().into_owned(),
+    );
+    // Never a value from the workspace: unset when this binary can't be found.
+    env.remove("PITON_BIN");
+    if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
+        env.insert("PITON_BIN".into(), exe.to_string_lossy().into_owned());
+    }
+    Ok(env)
+}
+
+/// The launch's configuration: the daemon's part of the workspace's chains, refusing invalid or old-layout files the
+/// daemon reads. The pi package checks its own files when pi starts.
+pub fn resolve_settings(config: &Config, workspace: &Workspace) -> Result<DaemonSettings, LaunchError> {
+    Ok(crate::settings::resolve_daemon(workspace, &config.paths)?)
+}
+
+async fn mise_env(config: &Config, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
     let mut env = base.clone();
     if config.env.mise {
         let out = Command::new(resolve_program("mise", base))
@@ -115,14 +154,9 @@ pub async fn workspace_env(config: &Config, base: &Env, workspace: &Path) -> Res
     Ok(env)
 }
 
-/// The full argument vector for pi in `mode`. `profile` is the sandbox overlay's path (see [`overlay_profile`]).
-pub fn command_line(
-    config: &Config,
-    mode: LaunchMode,
-    workspace: &Workspace,
-    session: &SessionArg,
-    profile: Option<&Path>,
-) -> Vec<String> {
+/// The full argument vector for pi in `mode`. `profile` is the generated sandbox profile (see [`write_profile`]),
+/// required for sandboxed launches.
+pub fn command_line(config: &Config, mode: LaunchMode, session: &SessionArg, profile: Option<&Path>) -> Vec<String> {
     let mut pi: Vec<String> = config.pi.command.clone();
     pi.extend(["--mode".into(), "rpc".into()]);
     pi.extend(config.pi.args.iter().cloned());
@@ -137,69 +171,61 @@ pub fn command_line(
         LaunchMode::Host => pi,
         LaunchMode::Sandbox => {
             let mut argv = config.sandbox.command.clone();
-            argv.extend(project::sandbox_args(workspace, &config.sandbox.profile, profile));
-            argv.push("--".into());
+            argv.extend(["run".into(), "-s".into(), "--profile".into()]);
+            argv.push(profile.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+            argv.extend(["--allow-cwd".into(), "--".into()]);
             argv.extend(pi);
             argv
         }
     }
 }
 
-/// The overlay profile for a sandboxed launch: the source's `.nono.json` where it is, or, with `.nono.local.json`,
-/// the two combined in a file of this launch's own (`key`), removed when the session ends ([`ProfileFile`]). The
-/// folder is the daemon's private state, which no sandbox reads; nono reads the profile before it applies the sandbox.
-pub fn overlay_profile(workspace: &Workspace, key: u64) -> Result<Option<ProfileFile>, LaunchError> {
-    match project::Overlay::read(workspace.source())? {
-        project::Overlay::None => Ok(None),
-        project::Overlay::File(path) => Ok(Some(ProfileFile::Source(path))),
-        project::Overlay::Merged(profile) => {
-            let dir = profiles_dir();
-            let write = || -> std::io::Result<PathBuf> {
-                crate::diagnostics::private_dir(&dir)?;
-                let path = dir.join(format!("{key}.json"));
-                std::fs::write(&path, serde_json::to_vec_pretty(&profile).unwrap_or_default())?;
-                Ok(path)
-            };
-            write()
-                .map(|path| Some(ProfileFile::Written(path)))
-                .map_err(|source| LaunchError::Profile {
-                    path: dir.clone(),
-                    source,
-                })
-        }
-    }
+/// Writes the launch's sandbox profile (see sandbox.rs) to a file of its own (`key`), removed when the session ends
+/// ([`ProfileFile`]). The folder is the daemon's private state, which no sandbox reads; nono reads the profile before
+/// it applies the sandbox.
+/// `base` is the daemon's base environment (the login shell's): `$VAR` grants are expanded from it.
+pub fn write_profile(
+    config: &Config,
+    resolved: &DaemonSettings,
+    base: &Env,
+    key: u64,
+) -> Result<ProfileFile, LaunchError> {
+    let profile = crate::sandbox::profile(resolved, &config.paths.home, base)?;
+    let dir = profiles_dir(config);
+    let write = || -> std::io::Result<PathBuf> {
+        crate::diagnostics::private_dir(&dir)?;
+        let path = dir.join(format!("{key}.json"));
+        std::fs::write(&path, serde_json::to_vec_pretty(&profile).unwrap_or_default())?;
+        Ok(path)
+    };
+    write().map(ProfileFile).map_err(|source| LaunchError::Profile {
+        path: dir.clone(),
+        source,
+    })
 }
 
-/// Where combined overlays are written: next to the daemon's socket, outside every sandbox.
-fn profiles_dir() -> PathBuf {
-    crate::config::home().join(".local/state/piton/profiles")
+/// Where generated profiles are written: next to the daemon's socket (its state folder), outside every sandbox.
+fn profiles_dir(config: &Config) -> PathBuf {
+    config
+        .socket
+        .parent()
+        .map(|dir| dir.join("profiles"))
+        .unwrap_or_else(|| config.paths.home.join(".local/state/piton/profiles"))
 }
 
-/// A launch's overlay profile.
+/// A launch's generated sandbox profile; removed when dropped.
 #[derive(Debug)]
-pub enum ProfileFile {
-    /// The source's `.nono.json`, used where it is.
-    Source(PathBuf),
-    /// A combined profile the daemon wrote for this launch; removed when dropped.
-    Written(PathBuf),
-}
+pub struct ProfileFile(PathBuf);
 
 impl ProfileFile {
     pub fn path(&self) -> &Path {
-        match self {
-            ProfileFile::Source(path) | ProfileFile::Written(path) => path,
-        }
+        &self.0
     }
 }
 
 impl Drop for ProfileFile {
     fn drop(&mut self) {
-        match self {
-            ProfileFile::Source(_) => {}
-            ProfileFile::Written(path) => {
-                let _ = std::fs::remove_file(path);
-            }
-        }
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -218,25 +244,14 @@ pub fn resolve_workspace(path: &Path) -> Result<Workspace, LaunchError> {
 mod tests {
     use super::*;
 
-    use crate::project::Relation;
-
-    fn source(path: &str) -> Workspace {
-        Workspace {
-            path: PathBuf::from(path),
-            checkout: PathBuf::from(path),
-            relation: Relation::Source,
-        }
-    }
-
     #[test]
     fn sandbox_wraps_pi_in_nono() {
         let config = Config::default();
         let argv = command_line(
             &config,
             LaunchMode::Sandbox,
-            &source("/nonexistent/w"),
             &SessionArg::Resume("/s.jsonl".into()),
-            None,
+            Some(Path::new("/state/profiles/1.json")),
         );
         assert_eq!(
             argv,
@@ -245,7 +260,7 @@ mod tests {
                 "run",
                 "-s",
                 "--profile",
-                "piton",
+                "/state/profiles/1.json",
                 "--allow-cwd",
                 "--",
                 "pi",
@@ -257,10 +272,34 @@ mod tests {
         );
     }
 
+    /// piton's own variables are set after mise's, so a repository's `mise.toml` can't change them.
+    #[tokio::test]
+    async fn piton_variables_win_over_the_workspace_environment() {
+        let mut config = Config::default();
+        config.env.mise = false;
+        config.paths.global = PathBuf::from("/global/piton");
+        let base: Env = [
+            ("PITON_RUNTIME".to_string(), "sandbox".to_string()),
+            ("PITON_CONFIG_HOME".to_string(), "/repo/fake".to_string()),
+            ("PITON_BIN".to_string(), "/repo/fake-piton".to_string()),
+        ]
+        .into();
+        let host = workspace_env(&config, &base, Path::new("/w"), LaunchMode::Host)
+            .await
+            .unwrap();
+        assert_eq!(host.get("PITON_RUNTIME"), None, "host runtime is unset");
+        assert_eq!(host["PITON_CONFIG_HOME"], "/global/piton");
+        assert_ne!(host["PITON_BIN"], "/repo/fake-piton");
+        let sandbox = workspace_env(&config, &Env::new(), Path::new("/w"), LaunchMode::Sandbox)
+            .await
+            .unwrap();
+        assert_eq!(sandbox["PITON_RUNTIME"], "sandbox");
+    }
+
     #[test]
     fn host_runs_pi_directly() {
         let config = Config::default();
-        let argv = command_line(&config, LaunchMode::Host, &source("/w"), &SessionArg::New, None);
+        let argv = command_line(&config, LaunchMode::Host, &SessionArg::New, None);
         assert_eq!(argv, ["pi", "--mode", "rpc"]);
     }
 

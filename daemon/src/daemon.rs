@@ -298,8 +298,16 @@ impl Daemon {
         mode: LaunchMode,
         session: SessionArg,
         env: Env,
+        settings: crate::settings::DaemonSettings,
     ) -> Result<SessionHandle, LaunchError> {
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
+        let profile = match mode {
+            LaunchMode::Sandbox => Some(
+                launch::write_profile(&self.config, &settings, &self.base_env, key)
+                    .inspect_err(|e| crate::log!("launch refused: {e}"))?,
+            ),
+            LaunchMode::Host => None,
+        };
         let weak = Arc::downgrade(self);
         let hooks = Hooks {
             ended: Box::new(move |key| {
@@ -321,6 +329,7 @@ impl Daemon {
             mode,
             session,
             env,
+            profile,
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),
@@ -352,10 +361,12 @@ impl Daemon {
         session: SessionArg,
     ) -> Result<SessionHandle, LaunchError> {
         let workspace = launch::resolve_workspace(workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
-        let env = launch::workspace_env(&self.config, &self.base_env, &workspace.path)
+        let settings =
+            launch::resolve_settings(&self.config, &workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
+        let env = launch::workspace_env(&self.config, &self.base_env, &workspace.path, mode)
             .await
             .inspect_err(|e| crate::log!("launch refused: {e}"))?;
-        self.launch(workspace, mode, session, env)
+        self.launch(workspace, mode, session, env, settings)
     }
 
     /// The live session that has `file` open, other than `except`.
@@ -484,7 +495,9 @@ impl Daemon {
             }
             ControlRequest::WorkerCreate(request) => {
                 let mise = self.mise.clone();
-                let created = tokio::task::spawn_blocking(move || crate::worker::create(&request, mise.as_ref())).await;
+                let paths = self.config.paths.clone();
+                let created =
+                    tokio::task::spawn_blocking(move || crate::worker::create(&request, mise.as_ref(), &paths)).await;
                 match created {
                     Ok(Ok(worker)) => ControlResponse::Worker { worker },
                     Ok(Err(refusal)) => ControlResponse::WorkerRefused { refusal },

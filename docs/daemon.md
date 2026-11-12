@@ -26,7 +26,8 @@ piton worker ls
 piton worker delete ../<repo>--fix-login [--force]
 ```
 
-Per-project settings live in `.piton.toml` in the source checkout (read only from there, never from a worker).
+Per-project settings live in `.piton/daemon.toml` in the source checkout (read only from there, never from a worker):
+`[workers] skip` lists paths not copied into new workers, `[sandbox]` adds grants for sandboxed pis.
 
 ## pi.nvim
 
@@ -43,17 +44,18 @@ ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a sessio
 
 ## Configuration
 
-Optional, in `~/.config/piton/config.toml`; every key has the default shown. Unknown keys are refused, so a typo stops
-the daemon from starting. The daemon reads the file at startup: run `piton service install` after changing it.
+Optional, in the global configuration folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`; `--config-home`
+or `PITON_CONFIG_HOME` for tests); every key has the default shown. Unknown keys are refused, so a typo stops the
+daemon from starting. The daemon reads the files at startup: run `piton service install` after changing them. The
+whole layout, including repository and parent-folder levels, is in "Configuration and state" in
+[design.md](design.md); `piton config check` validates a workspace's configuration and lists the files it reads.
+
+`daemon.toml` (and `daemon.local.toml`, this Mac's overrides), how the daemon runs:
 
 ```toml
 socket = "~/.local/state/piton/piton.sock"  # for tests and development only: the Mac app always uses this default
 log = "~/.local/state/piton/logs/daemon/current.log" # five files, 2 MiB each
-attach_mode = "sandbox"   # mode for `piton attach`
-empty_grace_ms = 10000    # stop a pi with no messages this long after its last client leaves
 keep_awake = true         # caffeinate -i while sessions are live (idle too); toggle in the apps
-roots = []                # where the apps may browse and start sessions; none until you list some,
-                          # e.g. ["~/Projects"]; piton attach and the CLI aren't limited
 
 [tailnet]
 enabled = true            # the apps' WebSocket on this Mac's Tailscale addresses
@@ -62,18 +64,20 @@ cli = "tailscale"
 heartbeat_ms = 10000      # ping each app this often; drop it after three unanswered pings
 retry_ms = 10000          # while Tailscale isn't up, try again this often
 
-[logging]
-mode = "info"             # host logging level ("info" or "debug"); `piton logging` and the Mac app switch it
-                          # until it expires or the daemon restarts
-
 [pi]
 command = ["pi"]
 args = []                 # added after `--mode rpc`
 
 [sandbox]
 command = ["nono"]
-profile = "piton"         # base; a source checkout's .nono.json extends it, its .project/.local is allowed.
-                          # Grants every sandboxed pi needs go in this profile.
+base = "piton"            # the nono profile it extends: your ~/.config/nono/profiles/piton.json, or a built-in
+                          # one such as "mise-dev" once its grants are in this table
+groups = []               # extra nono groups, e.g. ["git_config"]
+allow = []                # read-write grants; also read, read_file, allow_file, deny, unix_socket
+bypass = []               # lift a base-profile deny for a path granted above
+[sandbox.network]
+open_port = []            # e.g. [0]: every localhost port
+# profile = false         # no proxy filtering, or a nono network profile name
 
 [env]
 login_shell = true        # base environment from `$SHELL -l`
@@ -84,11 +88,28 @@ grace_ms = 15000          # after closing stdin, before SIGTERM
 term_grace_ms = 3000      # after SIGTERM, before SIGKILL
 ```
 
+`settings.toml` (and `settings.local.toml`, this Mac's values), the preferences the apps change:
+
+```toml
+[host]
+roots = []                # where the apps may browse and start sessions; none until you list some,
+                          # e.g. ["~/Projects"]; piton attach and the CLI aren't limited
+attach_mode = "sandbox"   # mode for `piton attach`
+empty_grace_ms = 10000    # stop a pi with no messages this long after its last client leaves
+logging = "info"          # host logging level ("info" or "debug"); `piton logging` and the Mac app switch it
+                          # until it expires or the daemon restarts
+```
+
+Every sandboxed launch gets a nono profile the daemon generates in its state folder: `sandbox.base` extended with the
+merged `[sandbox]` grants of every level, read access to the configuration chain, the source's `.piton/.local`, and
+the protected-file rules. A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after
+the workspace's mise environment.
+
 ## Logging
 
 `piton logging status`, `piton logging debug [--until-disabled]`, and `piton logging info` switch host logging through
-the daemon without restarting sessions, until the switch expires or the daemon restarts. `[logging] mode` is the
-default; debug expires after one hour unless kept on. The independent phone collector is installed with
+the daemon without restarting sessions, until the switch expires or the daemon restarts. `[host] logging` in
+`settings.toml` is the default; debug expires after one hour unless kept on. The independent phone collector is installed with
 `mise run logs:install` (host only) and removed with `piton logging uninstall`. App settings, collection, paths, and limits: [logging.md](logging.md).
 
 ## Tests

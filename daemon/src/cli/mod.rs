@@ -21,9 +21,9 @@ pub use logging::logging_state;
 // Unknown flags are errors, as with clap (usage's default treats them as values).
 #[usage(bin = "piton", version = crate::VERSION, unknown_flags = "error", completion)]
 struct Cli {
-    /// Config file (default ~/.config/piton/config.toml).
-    #[usage(long, global, env = "PITON_CONFIG")]
-    config: Option<PathBuf>,
+    /// The global configuration folder (default $XDG_CONFIG_HOME/piton, else ~/.config/piton).
+    #[usage(long, global, env = "PITON_CONFIG_HOME")]
+    config_home: Option<PathBuf>,
     /// Daemon socket; overrides the config.
     #[usage(long, global, env = "PITON_SOCKET")]
     socket: Option<PathBuf>,
@@ -179,7 +179,7 @@ pub fn main() -> ExitCode {
     let cli = Cli::parse();
     // Commands that need neither the config nor the runtime.
     match &cli.command {
-        Cmd::Service { action } => return service(action, cli.config.as_deref()),
+        Cmd::Service { action } => return service(action, cli.config_home.as_deref()),
         Cmd::Config { action } => return config::run(action),
         Cmd::Completion { shell } => {
             let shell = match shell.as_str() {
@@ -198,7 +198,7 @@ pub fn main() -> ExitCode {
         | Cmd::Worker { .. }
         | Cmd::Logging { .. } => {}
     }
-    let config = match crate::config::load(cli.config.as_deref()) {
+    let config = match crate::config::load(cli.config_home.as_deref()) {
         Ok(mut config) => {
             if let Some(socket) = cli.socket {
                 config.socket = socket;

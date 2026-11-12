@@ -16,8 +16,8 @@ omitted. The collector makes **no device calls** at Info.
 **until disabled**. Expiration is an absolute timestamp, so re-reading or reconnecting never extends the hour. Switching
 back to Info preserves existing files.
 
-**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `[logging] mode` in piton's
-`config.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
+**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `[host] logging` in piton's
+`settings.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
 app or the CLI is **temporary**: it lasts until it expires or the daemon restarts, which returns to the config. Nothing
 else stores it. The daemon pushes the policy to the apps (including when a timed switch expires), the Mac app's own
 capture follows it, and the collector asks the daemon before every poll and transfer.
@@ -39,11 +39,12 @@ disconnected. There, the expiration persists across app restarts; an expired or 
 
   These go through the daemon's control socket and fail when the daemon isn't running. No sessions are restarted. A
   transfer already in flight may finish (at most 15 seconds), but switching back or expiry prevents it from replacing
-  the published snapshot. To make debug the default, set it in `config.toml` and restart the daemon:
+  the published snapshot. To make debug the default, set it in `settings.toml` (or `settings.local.toml` for this Mac
+  only) and restart the daemon:
 
   ```toml
-  [logging]
-  mode = "debug"   # or "info" (the default)
+  [host]
+  logging = "debug"   # or "info" (the default)
   ```
 - **Clearing:** each app's Logging screen can clear its own file ring without changing the level. It does not clear
   collected copies. Files naturally age out by size as new records are written; no time-based retention is promised.
@@ -69,7 +70,7 @@ The phone stores its file ring and local `settings.json` at `Library/Logs/Piton/
 under `iphone/snapshot/`; status timestamps describe **collection time**, not when the last event occurred. Always
 check both the collector status and event timestamps before treating a capture as current.
 
-`config.toml`'s existing `log` setting still overrides the daemon's file path. Its default moved from
+`daemon.toml`'s `log` setting overrides the daemon's file path. Its default moved from
 `~/.local/state/piton/piton.log` to `logs/daemon/current.log`. Old files are not migrated or deleted. New LaunchAgents
 use the bounded file writers instead of appending a duplicate unbounded `launchd.log`. A foreground daemon's info
 records still go to stderr. Early configuration failures leave a sanitized startup marker in the default daemon log.
