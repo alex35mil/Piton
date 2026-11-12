@@ -12,6 +12,7 @@ mod replay;
 mod rolling;
 mod service;
 mod session;
+mod settings;
 mod tailnet;
 mod view;
 mod viewconn;
