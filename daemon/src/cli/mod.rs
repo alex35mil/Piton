@@ -2,6 +2,7 @@
 //! (daemon.rs); every other command is a client of it over the Unix socket, except `service` and `completion`.
 
 mod attach;
+mod config;
 mod control;
 mod logging;
 mod sessions;
@@ -75,6 +76,11 @@ enum Cmd {
         #[usage(subcommand)]
         action: LoggingAction,
     },
+    /// Show the resolved configuration of a workspace (reads files; the daemon needn't run).
+    Config {
+        #[usage(subcommand)]
+        action: ConfigAction,
+    },
     /// Print a shell completion script.
     Completion {
         #[usage(long, choices("bash", "zsh", "fish"))]
@@ -105,6 +111,30 @@ enum LoggingAction {
     },
     /// Stop and remove the collector LaunchAgent (host only).
     Uninstall,
+}
+
+#[derive(Subcommands)]
+enum ConfigAction {
+    /// Print everything resolved for the workspace as JSON (for the pi package).
+    Resolve {
+        /// Workspace (default: current directory).
+        #[usage(long)]
+        workspace: Option<PathBuf>,
+        /// host or sandbox (default: from PITON_RUNTIME).
+        #[usage(long)]
+        runtime: Option<String>,
+    },
+    /// Print one resolved file as JSON: integrations, workflows, permissions, mcp, daemon, settings.
+    Get {
+        file: String,
+        #[usage(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Validate the workspace's configuration and list the files it reads.
+    Check {
+        #[usage(long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommands)]
@@ -150,6 +180,7 @@ pub fn main() -> ExitCode {
     // Commands that need neither the config nor the runtime.
     match &cli.command {
         Cmd::Service { action } => return service(action, cli.config.as_deref()),
+        Cmd::Config { action } => return config::run(action),
         Cmd::Completion { shell } => {
             let shell = match shell.as_str() {
                 "bash" => usage_rs::complete::Shell::Bash,
@@ -197,7 +228,7 @@ pub fn main() -> ExitCode {
 
 async fn run(command: Cmd, config: crate::config::Config) -> ExitCode {
     match command {
-        Cmd::Service { .. } | Cmd::Completion { .. } => {
+        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } => {
             unreachable!("handled before the runtime starts")
         }
         Cmd::Daemon => match crate::daemon::run(config).await {
