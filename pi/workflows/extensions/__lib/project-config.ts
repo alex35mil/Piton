@@ -5,23 +5,21 @@ import { fileURLToPath } from "node:url"
 
 import { requireRuntime } from "../../../extensions/__lib/runtime.js"
 import {
-    CONFIG_FILE,
-    CONFIG_LOCAL_FILE,
+    configFileName,
+    PITON_DIR,
+    repositoryConfigFile,
     resolveGlobalSettings,
     resolveSettings,
     section,
 } from "../../../extensions/__lib/settings.js"
-import { type BranchFormat, BranchFormatSchema, PROJECT_LOCAL_ROOT, PROJECT_ROOT } from "./domain.js"
+import { type BranchFormat, BranchFormatSchema, PROJECT_LOCAL_ROOT } from "./domain.js"
 import * as Git from "./git.js"
 
 export { BranchFormatSchema }
 export type { BranchFormat }
 
-/** The repository's configuration file; `.local` for this machine's values (outside Git). */
-export const WORKFLOW_SETTINGS_PATH = `${PROJECT_ROOT}/${CONFIG_FILE}`
-export const LOCAL_WORKFLOW_SETTINGS_PATH = `${PROJECT_ROOT}/${CONFIG_LOCAL_FILE}`
 /** Every `.local` file in `.piton/` stays out of Git; setup adds this to `.git/info/exclude`. */
-export const LOCAL_SETTINGS_EXCLUDE = `/${PROJECT_ROOT}/*.local.*`
+export const LOCAL_SETTINGS_EXCLUDE = `/${PITON_DIR}/*.local.*`
 // The single repository rule that keeps every workflow entity and private evidence out of Git.
 // No trailing slash, so it also matches a worker's symlink to its source checkout's directory.
 export const PROJECT_LOCAL_IGNORE = `/${PROJECT_LOCAL_ROOT}`
@@ -43,14 +41,14 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
     const format = branches.format
     if (!format) {
         throw new Error(
-            `missing branches.format: set it in ${WORKFLOW_SETTINGS_PATH} (project setup writes it) or a parent folder's`,
+            `missing branches.format: set it in ${repositoryConfigFile("shared")} (project setup writes it) or a parent folder's`,
         )
     }
     if (!formatUsesUsername(format)) return { branches: { format } }
     const username = branches.username
     if (!username) {
         throw new Error(
-            `invalid branch configuration: branches.username is required in ${LOCAL_WORKFLOW_SETTINGS_PATH} or the global ${CONFIG_LOCAL_FILE}`,
+            `invalid branch configuration: branches.username is required in ${repositoryConfigFile("local")} or the global ${configFileName("local")}`,
         )
     }
     return { branches: { format, username } }
@@ -59,7 +57,7 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
 /** The global tier's files that can hold a username, for setup's snapshot. */
 export function globalConfigPaths(cwd: string): { shared: string; local: string } {
     const global = resolveSettings(cwd).global
-    return { shared: path.join(global, CONFIG_FILE), local: path.join(global, CONFIG_LOCAL_FILE) }
+    return { shared: path.join(global, configFileName("shared")), local: path.join(global, configFileName("local")) }
 }
 
 /**
@@ -106,7 +104,7 @@ function currentInstallation(): Installation {
  * Whether a finished workflow ends with session analysis: only in a development install, where it's on unless the
  * global `[development] session_analysis = false` turns it off.
  */
-export function loadSessionAnalysis(_cwd: string): SessionAnalysis {
+export function loadSessionAnalysis(): SessionAnalysis {
     const install = currentInstallation()
     switch (install.kind) {
         case "app":
@@ -120,10 +118,10 @@ export function loadSessionAnalysis(_cwd: string): SessionAnalysis {
 export const PITON_NEW_ISSUE_URL = "https://github.com/alex35mil/piton/issues/new"
 
 /**
- * The workflow source project: in a development install, the checkout the pi package runs from, whose tracker takes
- * workflow reports. An app install has no source project; reports go through the user ({@link PITON_NEW_ISSUE_URL}).
+ * The development checkout: in a development install, the checkout the pi package runs from, whose tracker takes
+ * workflow reports. An app install has none; reports go through the user ({@link PITON_NEW_ISSUE_URL}).
  */
-export function resolveWorkflowProject(_cwd: string): string {
+export function developmentCheckout(): string {
     const install = currentInstallation()
     switch (install.kind) {
         case "development":
@@ -223,12 +221,12 @@ function inspectArtifactPersistence(cwd: string) {
 
 /** `.piton/*.local.*` files present in the checkout. */
 function localSettingsFiles(root: string): string[] {
-    const dir = path.join(root, PROJECT_ROOT)
+    const dir = path.join(root, PITON_DIR)
     if (!fs.existsSync(dir)) return []
     return fs
         .readdirSync(dir)
         .filter((name) => /\.local\.[^.]+$/.test(name))
-        .map((name) => `${PROJECT_ROOT}/${name}`)
+        .map((name) => `${PITON_DIR}/${name}`)
 }
 
 function hasLocalSettings(root: string): boolean {
@@ -311,7 +309,7 @@ function isSymbolicLink(file: string): boolean {
 }
 
 function assertLocalSettingsOutsideGit(root: string): void {
-    const pattern = `${PROJECT_ROOT}/*.local.*`
+    const pattern = `${PITON_DIR}/*.local.*`
     const inGit = Git.run(root, ["ls-files", "--cached", "--", pattern])
     const staged = Git.run(root, ["diff", "--cached", "--name-only", "--", pattern])
     if (inGit || staged) {

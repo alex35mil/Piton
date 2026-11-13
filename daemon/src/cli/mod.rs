@@ -175,8 +175,8 @@ enum ConfigAction {
         #[usage(long)]
         global: bool,
     },
-    /// Print one resolved part as JSON: integrations, branches, permissions, mcp, web_search, daemon, settings,
-    /// development.
+    /// Print one resolved part as JSON, by its name in `config resolve`: a table (run, sandbox, workers, host, client,
+    /// development, permissions, branches, tracker, forge, web_search), mcp, mcp_global, policies, or instructions.
     Get {
         part: String,
         #[usage(long)]

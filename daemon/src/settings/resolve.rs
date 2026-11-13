@@ -6,14 +6,12 @@ use serde::Serialize;
 
 use super::chain::{Chain, Level, LevelKind, check_level};
 use super::files::{
-    BranchesFile, ConfigDoc, DaemonFile, DevelopmentFile, IntegrationsFile, Keybindings, PermissionMode,
-    PermissionRules, PermissionsFile, Scoped, SettingsFile, Sharing, Table, WebSearchFile, load_mcp, read_config,
-    read_text, validate_daemon,
+    BranchesTable, ClientTable, ConfigDoc, ConfigPair, DevelopmentTable, HostTable, Keybindings, PartValue,
+    PermissionMode, PermissionRules, PermissionsTable, RunTable, SandboxTable, Sharing, Table, WebSearchTable,
+    WorkersTable, load_mcp, read_config, read_text,
 };
-use super::{LOCAL_DIR, Origin, SettingsError, merge};
+use super::{Origin, SettingsError, merge};
 use crate::project::Workspace;
-
-pub use super::files::{Branches, DevelopmentTable, WebSearchTable};
 
 /// Where pi's permission rules apply: everywhere, or only in one launch mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -28,7 +26,8 @@ pub enum Runtime {
 /// `{"error": {"message": ...}}`.
 pub type Section<T> = Result<T, SettingsError>;
 
-/// Everything resolved for one workspace.
+/// Everything resolved for one workspace: one part per table of `config.toml` (the daemon's top-level run keys are
+/// one part, `run`), the MCP servers, policies, and instruction folders.
 #[derive(Debug, Serialize)]
 pub struct Resolved {
     pub workspace: PathBuf,
@@ -41,13 +40,29 @@ pub struct Resolved {
     pub home: PathBuf,
     pub runtime: Runtime,
     #[serde(serialize_with = "section")]
-    pub daemon: Section<DaemonFile>,
+    pub run: Section<RunTable>,
     #[serde(serialize_with = "section")]
-    pub settings: Section<SettingsFile>,
+    pub sandbox: Section<SandboxTable>,
+    #[serde(serialize_with = "section")]
+    pub workers: Section<WorkersTable>,
+    #[serde(serialize_with = "section")]
+    pub host: Section<HostTable>,
+    #[serde(serialize_with = "section")]
+    pub client: Section<ClientTable>,
     #[serde(serialize_with = "section")]
     pub development: Section<DevelopmentTable>,
     #[serde(serialize_with = "section")]
     pub permissions: Section<ResolvedPermissions>,
+    #[serde(serialize_with = "section")]
+    pub branches: Section<BranchesTable>,
+    /// The nearest `[tracker]`, whole and as written (the pi package validates it).
+    #[serde(serialize_with = "section")]
+    pub tracker: Section<Option<FileValue<serde_json::Value>>>,
+    /// The nearest `[forge]`, likewise.
+    #[serde(serialize_with = "section")]
+    pub forge: Section<Option<FileValue<serde_json::Value>>>,
+    #[serde(serialize_with = "section")]
+    pub web_search: Section<WebSearchTable>,
     /// Every level's servers.
     #[serde(serialize_with = "section")]
     pub mcp: Section<ResolvedMcp>,
@@ -55,23 +70,12 @@ pub struct Resolved {
     /// can't break them.
     #[serde(serialize_with = "section")]
     pub mcp_global: Section<ResolvedMcp>,
-    #[serde(serialize_with = "section")]
-    pub web_search: Section<WebSearchTable>,
-    #[serde(serialize_with = "section")]
-    pub branches: Section<Branches>,
-    /// The nearest `[tracker]` and `[forge]`, each whole and unchanged (the pi package validates them).
-    #[serde(serialize_with = "section")]
-    pub integrations: Section<Integrations>,
     /// Every `policies.md`, farthest first.
     #[serde(serialize_with = "section")]
     pub policies: Section<Vec<FileValue<String>>>,
     /// Rule and skill folders from the `.agents/` chain.
     #[serde(serialize_with = "section")]
     pub instructions: Section<Instructions>,
-    /// Workflow artifacts: the source's `.piton/.local`.
-    pub artifacts: PathBuf,
-    /// Where each level's configuration is written, nearest last: for tools that change it.
-    pub config_files: Vec<ConfigFiles>,
     /// Every file read, with its level.
     pub files: Vec<FileOrigin>,
     /// Every path whose appearance, change, or removal changes the result: each level folder and each candidate
@@ -83,15 +87,19 @@ impl Resolved {
     /// Every part that can't be used, by its name in the output.
     pub fn errors(&self) -> Vec<(&'static str, &SettingsError)> {
         let Resolved {
-            daemon,
-            settings,
+            run,
+            sandbox,
+            workers,
+            host,
+            client,
             development,
             permissions,
+            branches,
+            tracker,
+            forge,
+            web_search,
             mcp,
             mcp_global,
-            web_search,
-            branches,
-            integrations,
             policies,
             instructions,
             workspace: _,
@@ -100,21 +108,23 @@ impl Resolved {
             global: _,
             home: _,
             runtime: _,
-            artifacts: _,
-            config_files: _,
             files: _,
             watch: _,
         } = self;
         [
-            ("daemon", daemon.as_ref().err()),
-            ("settings", settings.as_ref().err()),
+            ("run", run.as_ref().err()),
+            ("sandbox", sandbox.as_ref().err()),
+            ("workers", workers.as_ref().err()),
+            ("host", host.as_ref().err()),
+            ("client", client.as_ref().err()),
             ("development", development.as_ref().err()),
             ("permissions", permissions.as_ref().err()),
+            ("branches", branches.as_ref().err()),
+            ("tracker", tracker.as_ref().err()),
+            ("forge", forge.as_ref().err()),
+            ("web_search", web_search.as_ref().err()),
             ("mcp", mcp.as_ref().err()),
             ("mcp_global", mcp_global.as_ref().err()),
-            ("web_search", web_search.as_ref().err()),
-            ("branches", branches.as_ref().err()),
-            ("integrations", integrations.as_ref().err()),
             ("policies", policies.as_ref().err()),
             ("instructions", instructions.as_ref().err()),
         ]
@@ -197,8 +207,8 @@ pub struct PermissionSource {
     pub level: LevelKind,
     /// `shared` (`[permissions]`) or the runtime (`[permissions.<runtime>]`).
     pub scope: PermissionScope,
-    /// From `config.local.toml`.
-    pub local: bool,
+    /// Which file of the level's pair.
+    pub sharing: Sharing,
     pub settings: PermissionSettings,
 }
 
@@ -216,25 +226,10 @@ pub struct FileValue<T> {
     pub value: T,
 }
 
-/// The nearest `[tracker]` and `[forge]`, as JSON.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct Integrations {
-    pub tracker: Option<FileValue<serde_json::Value>>,
-    pub forge: Option<FileValue<serde_json::Value>>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct FileOrigin {
     pub path: PathBuf,
     pub level: LevelKind,
-}
-
-/// One level's configuration files, existing or not.
-#[derive(Debug, Clone, Serialize)]
-pub struct ConfigFiles {
-    pub level: LevelKind,
-    pub shared: PathBuf,
-    pub local: PathBuf,
 }
 
 /// MCP servers by name, the nearest entry replacing the whole entry; names that differ only by `-` and `_` conflict.
@@ -293,8 +288,9 @@ impl Docs {
     fn read(levels: &[Level], files: &mut Vec<FileOrigin>) -> Self {
         let mut docs = Vec::new();
         for level in levels {
+            let pair = ConfigPair::in_dir(&level.dir);
             for sharing in [Sharing::Shared, Sharing::Local] {
-                let path = level.dir.join(sharing.file_name());
+                let path = pair.path(sharing).to_path_buf();
                 match read_config(&path, level.kind, sharing) {
                     Ok(None) => {}
                     Ok(Some(doc)) => {
@@ -310,8 +306,7 @@ impl Docs {
                             SettingsError::Invalid { reason, .. } => FailedRead::Invalid(reason),
                             other @ (SettingsError::GlobalOnly { .. }
                             | SettingsError::LocalOnly { .. }
-                            | SettingsError::Conflict { .. }
-                            | SettingsError::Project(_)) => FailedRead::Invalid(other.to_string()),
+                            | SettingsError::Conflict { .. }) => FailedRead::Invalid(other.to_string()),
                         };
                         docs.push(Doc::Failed { path, error });
                     }
@@ -321,19 +316,40 @@ impl Docs {
         Self { docs }
     }
 
-    /// Each file's `table` part that sets something, in merge order. A file that can't be read fails every part.
-    fn parts<T>(&self, table: Table) -> Result<Vec<(T, &ConfigDoc)>, SettingsError>
-    where
-        T: serde::de::DeserializeOwned + Scoped,
-    {
+    /// Each file's `table` part that it sets, in merge order. A file that can't be read fails every part.
+    fn parts<T: PartValue>(&self, table: Table) -> Result<Vec<(T, &ConfigDoc)>, SettingsError> {
         let mut parts = Vec::new();
         for doc in &self.docs {
             let doc = doc.get()?;
-            if doc.has(table) {
-                parts.push((doc.part::<T>(table)?, doc));
+            if let Some(value) = doc.part::<T>(table)? {
+                parts.push((value, doc));
             }
         }
         Ok(parts)
+    }
+
+    /// One part merged across the chain, farthest first.
+    fn merged<T: PartValue + Default>(&self, table: Table, merge: fn(&mut T, T)) -> Section<T> {
+        let mut merged = T::default();
+        for (value, _) in self.parts::<T>(table)? {
+            merge(&mut merged, value);
+        }
+        Ok(merged)
+    }
+
+    /// The nearest file's table, whole, as JSON.
+    fn nearest(&self, table: Table) -> Section<Option<FileValue<serde_json::Value>>> {
+        let Some((value, doc)) = self.parts::<toml::Table>(table)?.pop() else {
+            return Ok(None);
+        };
+        let value = serde_json::to_value(value).map_err(|e| SettingsError::Invalid {
+            path: doc.origin.path.clone(),
+            reason: e.to_string(),
+        })?;
+        Ok(Some(FileValue {
+            path: doc.origin.path.clone(),
+            value,
+        }))
     }
 }
 
@@ -367,11 +383,13 @@ pub fn resolve_global(paths: &Paths) -> Result<Resolved, SettingsError> {
     read_chain(&chain, &paths.global, &paths.home, Runtime::Host)
 }
 
-/// The daemon's part of a workspace's configuration.
+/// What a launch or a new worker needs from a workspace's configuration.
 #[derive(Debug, Clone)]
 pub struct DaemonSettings {
-    /// The merged daemon tables of the `.piton/` chain: sandbox grants, workers.
-    pub daemon: DaemonFile,
+    /// The merged `[sandbox]` of the `.piton/` chain.
+    pub sandbox: SandboxTable,
+    /// The merged `[workers]`.
+    pub workers: WorkersTable,
     /// The checkout whose `.piton/` was read (a worker's source).
     pub source: PathBuf,
     /// The workspace's own checkout, where pi reads `.pi/` and `.agents/skills/`.
@@ -380,9 +398,9 @@ pub struct DaemonSettings {
     pub levels: Vec<PathBuf>,
 }
 
-/// The daemon's part of a workspace's configuration: the merged daemon tables of the `.piton/` chain and the chains'
-/// existing folders. The pi package's parts are checked by [`resolve`] in the pi package, so they never block a launch
-/// or a worker.
+/// The daemon's parts of a workspace's configuration: `[sandbox]` and `[workers]` merged along the `.piton/` chain, and
+/// the chains' existing folders. Only these two parts can refuse a launch; the pi package's parts are checked by
+/// [`resolve`] in the pi package.
 pub fn resolve_daemon(workspace: &Workspace, paths: &Paths) -> Result<DaemonSettings, SettingsError> {
     let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
     let mut piton = Vec::new();
@@ -400,25 +418,12 @@ pub fn resolve_daemon(workspace: &Workspace, paths: &Paths) -> Result<DaemonSett
     }
     let docs = Docs::read(&piton, &mut Vec::new());
     Ok(DaemonSettings {
-        daemon: read_daemon(&docs)?,
+        sandbox: docs.merged(Table::Sandbox, merge::sandbox)?,
+        workers: docs.merged(Table::Workers, merge::workers)?,
         source: chain.source.clone(),
         checkout: chain.checkout.clone(),
         levels,
     })
-}
-
-fn read_daemon(docs: &Docs) -> Result<DaemonFile, SettingsError> {
-    let mut daemon = DaemonFile::default();
-    for (file, doc) in docs.parts::<DaemonFile>(Table::Daemon)? {
-        validate_daemon(&file, &doc.origin.path)?;
-        merge::daemon(&mut daemon, file);
-    }
-    Ok(daemon)
-}
-
-/// One part, read on its own: a closure so `?` inside it fails only this part.
-fn section_of<T>(read: impl FnOnce() -> Section<T>) -> Section<T> {
-    read()
 }
 
 fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) -> Result<Resolved, SettingsError> {
@@ -437,25 +442,12 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
     }
     // Every candidate, whether or not its part can be read: fixing a broken file changes the result.
     for level in &piton {
-        for name in [
-            Sharing::Shared.file_name(),
-            Sharing::Local.file_name(),
-            "mcp.json",
-            "mcp.local.json",
-            "policies.md",
-        ] {
+        let pair = ConfigPair::in_dir(&level.dir);
+        watch.extend([pair.shared, pair.local]);
+        for name in ["mcp.json", "mcp.local.json", "policies.md"] {
             watch.push(level.dir.join(name));
         }
     }
-    let config_files = chain
-        .piton
-        .iter()
-        .map(|level| ConfigFiles {
-            level: level.kind,
-            shared: level.dir.join(Sharing::Shared.file_name()),
-            local: level.dir.join(Sharing::Local.file_name()),
-        })
-        .collect();
     let global_levels: Vec<Level> = piton
         .iter()
         .filter(|level| level.kind == LevelKind::Global)
@@ -463,94 +455,18 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
         .collect();
     let docs = Docs::read(&piton, &mut files);
 
-    let daemon = section_of(|| read_daemon(&docs));
-
-    // Global-only parts: a nearer level that sets one is refused by the part's scope check.
-    let settings = section_of(|| {
-        let mut settings = SettingsFile::default();
-        for (file, _) in docs.parts::<SettingsFile>(Table::Settings)? {
-            merge::settings(&mut settings, file);
-        }
-        Ok(settings)
-    });
-    let development = section_of(|| {
-        let mut development = DevelopmentTable::default();
-        for (file, _) in docs.parts::<DevelopmentFile>(Table::Development)? {
-            merge::development(&mut development, file.development);
-        }
-        Ok(development)
-    });
-
-    let permissions = section_of(|| read_permissions(&docs, runtime));
-    let mcp = section_of(|| read_mcp(&mut files, &piton));
-    let mcp_global = section_of(|| read_mcp(&mut Vec::new(), &global_levels));
-
-    let web_search = section_of(|| {
-        let mut web_search = WebSearchTable::default();
-        for (file, _) in docs.parts::<WebSearchFile>(Table::WebSearch)? {
-            merge::web_search(&mut web_search, file.web_search);
-        }
-        Ok(web_search)
-    });
-
-    let branches = section_of(|| {
-        let mut branches = Branches::default();
-        for (file, _) in docs.parts::<BranchesFile>(Table::Branches)? {
-            merge::branches(&mut branches, file.branches);
-        }
-        Ok(branches)
-    });
-
-    let integrations = section_of(|| {
-        let mut integrations = Integrations::default();
-        for (file, doc) in docs.parts::<IntegrationsFile>(Table::Integrations)? {
-            let json = |table: toml::Table| -> Result<FileValue<serde_json::Value>, SettingsError> {
-                let value = serde_json::to_value(table).map_err(|e| SettingsError::Invalid {
-                    path: doc.origin.path.clone(),
-                    reason: e.to_string(),
-                })?;
-                Ok(FileValue {
-                    path: doc.origin.path.clone(),
-                    value,
-                })
-            };
-            // Each table whole: a nearer level's replaces a farther one's.
-            if let Some(tracker) = file.tracker {
-                integrations.tracker = Some(json(tracker)?);
-            }
-            if let Some(forge) = file.forge {
-                integrations.forge = Some(json(forge)?);
-            }
-        }
-        Ok(integrations)
-    });
-
-    let policies = section_of(|| {
-        let mut policies = Vec::new();
-        for level in &piton {
-            let path = level.dir.join("policies.md");
-            if let Some(text) = read_text(&path)? {
-                files.push(FileOrigin {
-                    path: path.clone(),
-                    level: level.kind,
-                });
-                policies.push(FileValue { path, value: text });
-            }
-        }
-        Ok(policies)
-    });
-
+    let mcp = read_mcp(&mut files, &piton);
+    let mcp_global = read_mcp(&mut Vec::new(), &global_levels);
+    let policies = read_policies(&mut files, &piton);
     // Every candidate folder, existing or not: clients watch them, and a missing one simply has no files.
-    let instructions = section_of(|| {
-        Ok(Instructions {
-            rules: chain.agents.iter().map(|level| level.dir.join("rules")).collect(),
-            skills: chain
-                .agents
-                .iter()
-                .filter(|level| level.kind != LevelKind::Repository)
-                .map(|level| level.dir.join("skills"))
-                .collect(),
-        })
+    let instructions = Ok(Instructions {
+        rules: chain.agents.iter().map(|level| level.dir.join("rules")).collect(),
+        skills: chain
+            .agents
+            .iter()
+            .filter(|level| level.kind != LevelKind::Repository)
+            .map(|level| level.dir.join("skills"))
+            .collect(),
     });
 
     Ok(Resolved {
@@ -560,30 +476,48 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
         global: chain.global.clone(),
         home: home.to_path_buf(),
         runtime,
-        daemon,
-        settings,
-        development,
-        permissions,
+        run: docs.merged(Table::Run, merge::run),
+        sandbox: docs.merged(Table::Sandbox, merge::sandbox),
+        workers: docs.merged(Table::Workers, merge::workers),
+        // Global-only parts: a nearer level that sets one is refused by the part's scope check.
+        host: docs.merged(Table::Host, merge::host),
+        client: docs.merged(Table::Client, merge::client),
+        development: docs.merged(Table::Development, merge::development),
+        permissions: read_permissions(&docs, runtime),
+        branches: docs.merged(Table::Branches, merge::branches),
+        // Each table whole: a nearer level's replaces a farther one's.
+        tracker: docs.nearest(Table::Tracker),
+        forge: docs.nearest(Table::Forge),
+        web_search: docs.merged(Table::WebSearch, merge::web_search),
         mcp,
         mcp_global,
-        web_search,
-        branches,
-        integrations,
         policies,
         instructions,
-        artifacts: chain.source.join(LOCAL_DIR),
-        config_files,
         files,
         watch,
     })
 }
 
+fn read_policies(files: &mut Vec<FileOrigin>, levels: &[Level]) -> Section<Vec<FileValue<String>>> {
+    let mut policies = Vec::new();
+    for level in levels {
+        let path = level.dir.join("policies.md");
+        if let Some(text) = read_text(&path)? {
+            files.push(FileOrigin {
+                path: path.clone(),
+                level: level.kind,
+            });
+            policies.push(FileValue { path, value: text });
+        }
+    }
+    Ok(policies)
+}
+
 /// Per file: `[permissions]`, then the runtime's `[permissions.<runtime>]`; files in merge order.
-fn read_permissions(docs: &Docs, runtime: Runtime) -> Result<ResolvedPermissions, SettingsError> {
+fn read_permissions(docs: &Docs, runtime: Runtime) -> Section<ResolvedPermissions> {
     let mut merged = PermissionSettings::default();
     let mut sources = Vec::new();
-    for (file, doc) in docs.parts::<PermissionsFile>(Table::Permissions)? {
-        let table = file.permissions;
+    for (table, doc) in docs.parts::<PermissionsTable>(Table::Permissions)? {
         let (rules, scope) = match runtime {
             Runtime::Host => (table.host, PermissionScope::Host),
             Runtime::Sandbox => (table.sandbox, PermissionScope::Sandbox),
@@ -594,10 +528,6 @@ fn read_permissions(docs: &Docs, runtime: Runtime) -> Result<ResolvedPermissions
             ask: table.ask,
             deny: table.deny,
             keybindings: table.keybindings,
-        };
-        let local = match doc.sharing {
-            Sharing::Shared => false,
-            Sharing::Local => true,
         };
         for (settings, scope) in [
             (shared, PermissionScope::Shared),
@@ -610,7 +540,7 @@ fn read_permissions(docs: &Docs, runtime: Runtime) -> Result<ResolvedPermissions
                 path: doc.origin.path.clone(),
                 level: doc.origin.level,
                 scope,
-                local,
+                sharing: doc.sharing,
                 settings: settings.clone(),
             });
             merge::permissions(&mut merged, settings);
@@ -619,28 +549,33 @@ fn read_permissions(docs: &Docs, runtime: Runtime) -> Result<ResolvedPermissions
     Ok(ResolvedPermissions { merged, sources })
 }
 
-fn read_mcp(files: &mut Vec<FileOrigin>, levels: &[Level]) -> Result<ResolvedMcp, SettingsError> {
+fn read_mcp(files: &mut Vec<FileOrigin>, levels: &[Level]) -> Section<ResolvedMcp> {
     let mut mcp = ResolvedMcp::default();
     for level in levels {
         for name in ["mcp.json", "mcp.local.json"] {
-            let Some(file) = load_mcp(&level.dir.join(name), level.kind)? else {
+            let path = level.dir.join(name);
+            let Some(file) = load_mcp(&path)? else {
                 continue;
             };
+            let origin = Origin {
+                path,
+                level: level.kind,
+            };
             files.push(FileOrigin {
-                path: file.origin.path.clone(),
+                path: origin.path.clone(),
                 level: level.kind,
             });
-            if file.value.auto_enable_codemode.is_some() {
-                mcp.auto_enable_codemode = file.value.auto_enable_codemode;
+            if file.auto_enable_codemode.is_some() {
+                mcp.auto_enable_codemode = file.auto_enable_codemode;
             }
-            for (name, config) in file.value.mcp_servers {
+            for (name, config) in file.mcp_servers {
                 let serde_json::Value::Object(config) = config else {
                     return Err(SettingsError::Invalid {
-                        path: file.origin.path.clone(),
+                        path: origin.path.clone(),
                         reason: format!("mcpServers.{name} must be an object"),
                     });
                 };
-                add_mcp_server(&mut mcp, name, config, &file.origin)?;
+                add_mcp_server(&mut mcp, name, config, &origin)?;
             }
         }
     }
@@ -804,14 +739,13 @@ api_key = "k"
 
         let r = run(&t, &source(repo.clone()), Runtime::Sandbox).unwrap();
         assert!(r.errors().is_empty(), "{:?}", r.errors());
-        let daemon = r.daemon.as_ref().unwrap();
-        let s = &daemon.sandbox;
+        let s = r.sandbox.as_ref().unwrap();
         assert_eq!(s.base.as_deref(), Some("mise-dev"));
         assert_eq!(s.groups, ["git_config"]);
         assert_eq!(s.allow, ["~/.cargo/registry", "~/Projects/work/.pi", "/local"]);
         assert_eq!(s.read, ["/r"]);
         assert_eq!(s.network.open_port, [0]);
-        assert_eq!(daemon.workers.skip, ["apps/.build"]);
+        assert_eq!(r.workers.as_ref().unwrap().skip, ["apps/.build"]);
 
         // Sandbox runtime: the host table isn't read; the repository's default_mode is nearest.
         let permissions = r.permissions.as_ref().unwrap();
@@ -842,21 +776,20 @@ api_key = "k"
         assert_eq!(branches.username.as_deref(), Some("me"));
         assert_eq!(r.development.as_ref().unwrap().session_analysis, Some(false));
         assert_eq!(
-            r.settings.as_ref().unwrap().host.roots.as_deref(),
+            r.host.as_ref().unwrap().roots.as_deref(),
             Some(&["~/Projects/personal".to_string()][..])
         );
         assert_eq!(r.web_search.as_ref().unwrap().api_key.as_deref(), Some("k"));
 
         // [tracker] is replaced whole by the nearer level; [forge] comes from the parent.
-        let integrations = r.integrations.as_ref().unwrap();
-        let tracker = integrations.tracker.as_ref().unwrap();
+        let tracker = r.tracker.as_ref().unwrap().as_ref().unwrap();
         assert_eq!(tracker.path, repo.join(".piton/config.toml"));
         assert_eq!(
             tracker.value,
             serde_json::json!({"provider": "linear", "mcp_server": "linear"})
         );
         assert_eq!(
-            integrations.forge.as_ref().unwrap().path,
+            r.forge.as_ref().unwrap().as_ref().unwrap().path,
             parent.join(".piton/config.toml")
         );
 
@@ -870,14 +803,8 @@ api_key = "k"
             !instructions.skills.contains(&repo.join(".agents/skills")),
             "pi discovers the repository's own"
         );
-        assert_eq!(r.artifacts, repo.join(".piton/.local"));
         assert!(r.watch.contains(&repo.join(".piton/config.local.toml")));
         assert!(r.files.iter().any(|f| f.path == repo.join(".piton/config.local.toml")));
-        let last = r.config_files.last().unwrap();
-        assert_eq!(
-            (last.level, &last.shared),
-            (LevelKind::Repository, &repo.join(".piton/config.toml"))
-        );
 
         let host = run(&t, &source(repo), Runtime::Host).unwrap();
         let permissions = &host.permissions.as_ref().unwrap().merged;
@@ -891,12 +818,12 @@ api_key = "k"
         let repo = t.home.join("repo");
         write(&repo.join(".piton/config.toml"), "[sandbox]\nbase = \"default\"\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.daemon, Err(SettingsError::GlobalOnly { .. })));
+        assert!(matches!(r.sandbox, Err(SettingsError::GlobalOnly { .. })));
         assert!(r.permissions.is_ok());
         // Global-only tables in a repository fail their part, even though only the global tier's are used.
         write(&repo.join(".piton/config.toml"), "[host]\nroots = []\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.settings, Err(SettingsError::GlobalOnly { .. })));
+        assert!(matches!(r.host, Err(SettingsError::GlobalOnly { .. })));
         // A username in a shared file.
         write(&repo.join(".piton/config.toml"), "[branches]\nusername = \"me\"\n");
         let r = run(&t, &source(repo), Runtime::Host).unwrap();
@@ -933,12 +860,26 @@ api_key = "k"
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.branches, Err(SettingsError::Invalid { .. })));
         assert_eq!(r.permissions.as_ref().unwrap().merged.allow, ["read"]);
-        assert!(r.integrations.is_ok() && r.mcp.is_ok() && r.policies.is_ok() && r.instructions.is_ok());
+        assert!(r.tracker.is_ok() && r.mcp.is_ok() && r.policies.is_ok() && r.instructions.is_ok());
+
+        // A typo in the global [tailnet] leaves [sandbox] readable, and launches with it.
+        write(
+            &t.global.join("config.toml"),
+            "[tailnet]\nprot = 1\n[sandbox]\nread = [\"/g\"]\n",
+        );
+        let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
+        assert!(matches!(r.run, Err(SettingsError::Invalid { .. })));
+        assert_eq!(r.sandbox.as_ref().unwrap().read, ["/g"]);
+        assert_eq!(
+            resolve_daemon(&source(repo.clone()), &t.paths).unwrap().sandbox.read,
+            ["/g"]
+        );
+        std::fs::remove_file(t.global.join("config.toml")).unwrap();
 
         write(&repo.join(".piton/config.toml"), "[permissions\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.permissions, Err(SettingsError::Invalid { .. })));
-        assert!(matches!(r.daemon, Err(SettingsError::Invalid { .. })));
+        assert!(matches!(r.sandbox, Err(SettingsError::Invalid { .. })));
         assert!(r.mcp.is_ok() && r.policies.is_ok());
         // The broken file stays watched, so fixing it invalidates a client's cache.
         assert!(r.watch.contains(&repo.join(".piton/config.toml")));
@@ -969,7 +910,6 @@ api_key = "k"
         let permissions = &r.permissions.as_ref().unwrap().merged;
         assert_eq!(permissions.deny, ["bash(*)"]);
         assert!(permissions.allow.is_empty());
-        assert_eq!(r.artifacts, src.join(".piton/.local"));
         assert_eq!(
             r.instructions.as_ref().unwrap().rules.last().unwrap(),
             &worker.join(".agents/rules")

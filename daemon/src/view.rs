@@ -1472,7 +1472,8 @@ mod tests {
                         default: crate::diagnostics::Mode::Info,
                     },
                     settings: {
-                        use crate::preferences::{AppliesInfo, KindInfo, PlacementInfo, SettingInfo, ValueType};
+                        use crate::preferences::{AppliesInfo, KindInfo, SettingInfo, ValueType};
+                        use crate::settings::Sharing;
                         vec![
                             SettingInfo {
                                 key: "keep_awake",
@@ -1485,7 +1486,7 @@ mod tests {
                             SettingInfo {
                                 key: "host.roots",
                                 value: json!(["~/Projects"]),
-                                kind: KindInfo::Config { placement: Some(PlacementInfo::Local) },
+                                kind: KindInfo::Config { placement: Some(Sharing::Local) },
                                 value_type: ValueType::TextList,
                                 applies: AppliesInfo::Live,
                                 editable: true,
@@ -1501,7 +1502,7 @@ mod tests {
                             SettingInfo {
                                 key: "tailnet.port",
                                 value: json!(9000),
-                                kind: KindInfo::Config { placement: Some(PlacementInfo::Shared) },
+                                kind: KindInfo::Config { placement: Some(Sharing::Shared) },
                                 value_type: ValueType::Integer,
                                 applies: AppliesInfo::Restart { pending: true },
                                 editable: true,

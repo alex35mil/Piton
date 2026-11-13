@@ -10,9 +10,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use toml_edit::Value as Toml;
 
-use crate::config::Config;
-use crate::settings::edit::{EditError, FilePair, Placement, Placements, Target};
-use crate::settings::{DaemonFile, LevelKind, Paths, SettingsError, SettingsFile, Sharing};
+use crate::config::{Config, GlobalSettings};
+use crate::settings::edit::{EditError, Placements, Target};
+use crate::settings::{ClientTable, ConfigPair, LevelKind, Paths, SettingsError, Sharing};
 
 /// Where a value lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,16 +178,9 @@ pub enum AppliesInfo {
 pub enum KindInfo {
     Config {
         /// Which file of the pair sets it; `None` when neither does (the default applies).
-        placement: Option<PlacementInfo>,
+        placement: Option<Sharing>,
     },
     State,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlacementInfo {
-    Shared,
-    Local,
 }
 
 /// What the files said at the last good read, and what they say now if they can't be used.
@@ -195,7 +188,7 @@ pub enum PlacementInfo {
 pub struct Snapshot {
     /// Configuration values in effect, by key.
     values: BTreeMap<&'static str, Value>,
-    placements: BTreeMap<&'static str, Option<Placement>>,
+    placements: BTreeMap<&'static str, Option<Sharing>>,
     /// Restart-only values the daemon started with.
     started: BTreeMap<&'static str, Value>,
     /// Why the files' latest version can't be used (the values are the last good ones).
@@ -237,16 +230,17 @@ impl Snapshot {
     /// kept for the apps and the previous values stay.
     pub fn reload(&mut self, paths: Paths) -> Read {
         let read = || -> Result<_, String> {
-            let resolved = crate::settings::resolve_global(&paths).map_err(|e| e.to_string())?;
-            let daemon = resolved.daemon.map_err(|e| e.to_string())?;
-            let settings = resolved.settings.map_err(|e| e.to_string())?;
+            let mut resolved = crate::settings::resolve_global(&paths).map_err(|e| e.to_string())?;
+            let client =
+                std::mem::replace(&mut resolved.client, Ok(ClientTable::default())).map_err(|e| e.to_string())?;
+            let settings = GlobalSettings::from_resolved(resolved).map_err(|e| e.to_string())?;
             let placements = files(&paths).read().map_err(|e| e.to_string())?;
-            Ok((daemon, settings, placements))
+            Ok((settings, client, placements))
         };
         match read() {
-            Ok((daemon, settings, placements)) => {
-                let config = Config::from_files(daemon.clone(), settings.clone(), paths.clone());
-                self.values = values(&daemon, &settings, &config);
+            Ok((settings, client, placements)) => {
+                let config = Config::from_settings(settings.clone(), paths.clone());
+                self.values = values(&settings, &client, &config);
                 self.placements = placement_map(&placements);
                 self.error = None;
                 Read::Good(Box::new(config))
@@ -267,10 +261,7 @@ impl Snapshot {
                     Kind::Config => (
                         self.values.get(entry.key).cloned().unwrap_or(Value::Null),
                         KindInfo::Config {
-                            placement: self.placements.get(entry.key).copied().flatten().map(|p| match p {
-                                Placement::Shared => PlacementInfo::Shared,
-                                Placement::Local => PlacementInfo::Local,
-                            }),
+                            placement: self.placements.get(entry.key).copied().flatten(),
                         },
                     ),
                 };
@@ -294,21 +285,26 @@ impl Snapshot {
 }
 
 /// The global tier's `config.toml` and `config.local.toml`.
-fn files(paths: &Paths) -> FilePair {
-    FilePair {
-        shared: paths.global.join(Sharing::Shared.file_name()),
-        local: paths.global.join(Sharing::Local.file_name()),
-    }
+fn files(paths: &Paths) -> ConfigPair {
+    ConfigPair::in_dir(&paths.global)
 }
 
 /// Every configuration key's value in effect.
-fn values(daemon: &DaemonFile, settings: &SettingsFile, config: &Config) -> BTreeMap<&'static str, Value> {
-    // The daemon's and the apps' tables own distinct top-level keys: one object holds both.
-    let mut merged = serde_json::to_value(daemon).unwrap_or(Value::Null);
-    if let (Value::Object(merged), Ok(Value::Object(settings))) = (&mut merged, serde_json::to_value(settings)) {
-        merged.extend(settings);
+fn values(settings: &GlobalSettings, client: &ClientTable, config: &Config) -> BTreeMap<&'static str, Value> {
+    // The file's shape: the run keys at the top, each table under its name.
+    let mut merged = serde_json::to_value(&settings.run).unwrap_or_else(|_| json!({}));
+    if let Value::Object(object) = &mut merged {
+        for (name, table) in [
+            ("sandbox", serde_json::to_value(&settings.sandbox)),
+            ("host", serde_json::to_value(&settings.host)),
+            ("client", serde_json::to_value(client)),
+        ] {
+            if let Ok(table) = table {
+                object.insert(name.into(), table);
+            }
+        }
     }
-    let defaults = Config::from_files(DaemonFile::default(), SettingsFile::default(), config.paths.clone());
+    let defaults = Config::from_settings(GlobalSettings::default(), config.paths.clone());
     CATALOG
         .iter()
         .filter_map(|entry| match entry.kind {
@@ -323,7 +319,7 @@ fn values(daemon: &DaemonFile, settings: &SettingsFile, config: &Config) -> BTre
         .collect()
 }
 
-fn placement_map(placements: &Placements) -> BTreeMap<&'static str, Option<Placement>> {
+fn placement_map(placements: &Placements) -> BTreeMap<&'static str, Option<Sharing>> {
     CATALOG
         .iter()
         .filter_map(|entry| match entry.kind {
@@ -401,8 +397,8 @@ pub fn validate(key: &str, value: &Value, local: Option<bool>) -> Result<Change,
             value,
             target: match local {
                 None => Target::Current,
-                Some(true) => Target::Move(Placement::Local),
-                Some(false) => Target::Move(Placement::Shared),
+                Some(true) => Target::Move(Sharing::Local),
+                Some(false) => Target::Move(Sharing::Shared),
             },
         }),
     }
@@ -455,11 +451,7 @@ pub fn write(paths: &Paths, key: &str, value: Option<Toml>, target: Target) -> R
 }
 
 /// A file's new text, checked as every reader will read it.
-pub fn validate_text(text: &str, path: &Path, level: LevelKind, placement: Placement) -> Result<(), SettingsError> {
-    let sharing = match placement {
-        Placement::Shared => Sharing::Shared,
-        Placement::Local => Sharing::Local,
-    };
+pub fn validate_text(text: &str, path: &Path, level: LevelKind, sharing: Sharing) -> Result<(), SettingsError> {
     crate::settings::validate_config(&crate::settings::ConfigDoc::parse(text, path, level, sharing)?)
 }
 
@@ -467,8 +459,8 @@ pub fn validate_text(text: &str, path: &Path, level: LevelKind, placement: Place
 /// link targets (a dotfiles repository).
 pub fn watched(paths: &Paths) -> Vec<std::path::PathBuf> {
     let mut dirs = vec![paths.global.clone()];
-    for name in [Sharing::Shared.file_name(), Sharing::Local.file_name()] {
-        let path = paths.global.join(name);
+    let pair = files(paths);
+    for path in [pair.shared, pair.local] {
         if path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
             && let Ok(target) = std::fs::canonicalize(&path)
             && let Some(dir) = target.parent()
@@ -492,7 +484,7 @@ mod tests {
     }
 
     fn config(paths: &Paths) -> Config {
-        Config::from_files(DaemonFile::default(), SettingsFile::default(), paths.clone())
+        Config::from_settings(GlobalSettings::default(), paths.clone())
     }
 
     fn info<'a>(list: &'a [SettingInfo], key: &str) -> &'a SettingInfo {
@@ -577,7 +569,7 @@ mod tests {
         assert_eq!(
             roots.kind,
             KindInfo::Config {
-                placement: Some(PlacementInfo::Local)
+                placement: Some(Sharing::Local)
             }
         );
         assert_eq!(

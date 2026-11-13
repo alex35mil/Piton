@@ -37,8 +37,8 @@ import { gateOutcome } from "./gate.js"
 import {
     assertArtifactPersistencePrepared,
     assertSandboxArtifactsLinked,
+    developmentCheckout,
     loadSessionAnalysis,
-    resolveWorkflowProject,
 } from "../__lib/project-config.js"
 import * as Git from "../__lib/git.js"
 import {
@@ -318,8 +318,8 @@ export default function (pi: ExtensionAPI): void {
         description:
             "Read whether a finished Task, Gig, Epic, or incoming PR ends with the in-chat session analysis: on in a development install (the pi package running from a git checkout of piton) unless the global `[development] session_analysis = false`, off otherwise. Reads local settings only; never calls providers or changes configuration.",
         parameters: Type.Object({}, { additionalProperties: false }),
-        async execute(_id, _params, _signal, _onUpdate, ctx) {
-            const result = { sessionAnalysis: loadSessionAnalysis(ctx.cwd) }
+        async execute() {
+            const result = { sessionAnalysis: loadSessionAnalysis() }
             return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
         },
     })
@@ -495,8 +495,7 @@ function buildWorkflowIntegrationContext(ctx: ExtensionContext, input: WorkflowC
         "target" in input
             ? {
                   target: input.target,
-                  projectRoot:
-                      input.target === "workflow" ? resolveWorkflowProject(ctx.cwd) : project.resolveRootDir(ctx.cwd),
+                  projectRoot: input.target === "workflow" ? developmentCheckout() : project.resolveRootDir(ctx.cwd),
               }
             : undefined
     const cwd = selection?.projectRoot ?? ctx.cwd

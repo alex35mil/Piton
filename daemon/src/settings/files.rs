@@ -1,10 +1,11 @@
 //! The configuration file's schema, how it's read, and which keys a level may set.
 //!
-//! Each level has one `config.toml` and its `config.local.toml` (this machine's values, never shared). The file's
-//! top-level keys belong to parts ([`Table`]), each parsed on its own, so a broken `[tracker]` never stops permission
-//! checks; a syntax error or an unknown top-level key fails the whole file. Every table is strict: unknown keys are
-//! refused. Values are optional so a nearer file can leave a key to a farther one; defaults belong to the code that uses
-//! a value.
+//! Each level has one `config.toml` and its `config.local.toml` (this machine's values, never shared). Every table of
+//! the file is a part ([`Table`]) parsed on its own, so a broken `[tracker]` never stops permission checks and a typo
+//! in `[tailnet]` never stops a sandboxed launch; the daemon's top-level run keys (`socket`, `log`, `[pi]`, `[env]`,
+//! `[stop]`, `[tailnet]`) are one part. A syntax error or an unknown top-level key fails the whole file. Every table
+//! is strict: unknown keys are refused. Values are optional so a nearer file can leave a key to a farther one; defaults
+//! belong to the code that uses a value.
 //!
 //! MCP servers stay in `mcp[.local].json`, the format other harnesses read.
 
@@ -20,10 +21,59 @@ pub const CONFIG_FILE: &str = "config.toml";
 /// Its companion with this machine's values.
 pub const CONFIG_LOCAL_FILE: &str = "config.local.toml";
 
-/// How the daemon runs (global tier only) and per-project `[sandbox]` and `[workers]`.
+/// Which file of a level's pair: the one that's shared (committed, or through dotfiles) or this machine's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sharing {
+    /// `config.toml`.
+    Shared,
+    /// `config.local.toml`.
+    Local,
+}
+
+impl Sharing {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Sharing::Shared => CONFIG_FILE,
+            Sharing::Local => CONFIG_LOCAL_FILE,
+        }
+    }
+
+    pub fn other(self) -> Sharing {
+        match self {
+            Sharing::Shared => Sharing::Local,
+            Sharing::Local => Sharing::Shared,
+        }
+    }
+}
+
+/// A level's `config.toml` and `config.local.toml`, existing or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigPair {
+    pub shared: PathBuf,
+    pub local: PathBuf,
+}
+
+impl ConfigPair {
+    pub fn in_dir(dir: &Path) -> Self {
+        Self {
+            shared: dir.join(Sharing::Shared.file_name()),
+            local: dir.join(Sharing::Local.file_name()),
+        }
+    }
+
+    pub fn path(&self, sharing: Sharing) -> &Path {
+        match sharing {
+            Sharing::Shared => &self.shared,
+            Sharing::Local => &self.local,
+        }
+    }
+}
+
+/// How the daemon runs: `socket`, `log`, `[pi]`, `[env]`, `[stop]`, `[tailnet]`. Global tier only.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct DaemonFile {
+pub struct RunTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,10 +86,6 @@ pub struct DaemonFile {
     pub stop: StopTable,
     #[serde(default, skip_serializing_if = "TailnetTable::is_empty")]
     pub tailnet: TailnetTable,
-    #[serde(default, skip_serializing_if = "SandboxTable::is_empty")]
-    pub sandbox: SandboxTable,
-    #[serde(default, skip_serializing_if = "WorkersTable::is_empty")]
-    pub workers: WorkersTable,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -137,6 +183,7 @@ pub enum NetworkProfile {
     Off(bool),
 }
 
+/// `[workers]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkersTable {
@@ -145,19 +192,10 @@ pub struct WorkersTable {
     pub skip: Vec<String>,
 }
 
-/// `[host]` and `[client]`, global tier only: preferences the apps can change.
+/// `[host]`, global tier only: this host's preferences the apps change.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SettingsFile {
-    #[serde(default, skip_serializing_if = "HostPrefs::is_empty")]
-    pub host: HostPrefs,
-    #[serde(default, skip_serializing_if = "ClientPrefs::is_empty")]
-    pub client: ClientPrefs,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostPrefs {
+pub struct HostTable {
     /// Where the apps may browse and start sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roots: Option<Vec<String>>,
@@ -173,9 +211,10 @@ pub struct HostPrefs {
     pub empty_grace_ms: Option<u64>,
 }
 
+/// `[client]`, global tier only: preferences the host serves to every client.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClientPrefs {
+pub struct ClientTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,13 +225,6 @@ pub struct ClientPrefs {
 /// git checkout of piton). Documented in docs/development.md.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct DevelopmentFile {
-    #[serde(default, skip_serializing_if = "DevelopmentTable::is_empty")]
-    pub development: DevelopmentTable,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct DevelopmentTable {
     /// A shipped Deliverable ends with an analysis of the session for workflow problems. Absent: on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,13 +232,6 @@ pub struct DevelopmentTable {
 }
 
 /// `[permissions]`: pi's tool rules, and `[permissions.host]` / `[permissions.sandbox]` for one launch mode.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct PermissionsFile {
-    #[serde(default, skip_serializing_if = "PermissionsTable::is_empty")]
-    pub permissions: PermissionsTable,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionsTable {
@@ -269,13 +294,6 @@ pub struct McpFile {
 /// `[web_search]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WebSearchFile {
-    #[serde(default, skip_serializing_if = "WebSearchTable::is_empty")]
-    pub web_search: WebSearchTable,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct WebSearchTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
@@ -284,14 +302,7 @@ pub struct WebSearchTable {
 /// `[branches]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BranchesFile {
-    #[serde(default, skip_serializing_if = "Branches::is_empty")]
-    pub branches: Branches,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Branches {
+pub struct BranchesTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<BranchFormat>,
     /// Personal: `config.local.toml` only.
@@ -309,17 +320,6 @@ pub enum BranchFormat {
     Tracker,
 }
 
-/// `[tracker]` and `[forge]`, unchanged: the pi package validates them. A nearer level's table replaces a farther one's
-/// whole.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct IntegrationsFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tracker: Option<toml::Table>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forge: Option<toml::Table>,
-}
-
 macro_rules! is_empty {
     ($($ty:ty),*) => {$(
         impl $ty {
@@ -334,51 +334,55 @@ is_empty!(
     EnvTable,
     StopTable,
     TailnetTable,
-    SandboxTable,
     NetworkTable,
-    WorkersTable,
-    HostPrefs,
-    ClientPrefs,
-    DevelopmentTable,
-    PermissionsTable,
     PermissionRules,
-    Keybindings,
-    WebSearchTable,
-    Branches
+    Keybindings
 );
 
-/// The parts of `config.toml`, by the top-level keys each owns. Each part is parsed on its own.
+/// The parts of `config.toml`: each table, and the daemon's run keys together. Each part is parsed on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Table {
-    Daemon,
-    Settings,
+    Run,
+    Sandbox,
+    Workers,
+    Host,
+    Client,
     Development,
     Permissions,
     Branches,
-    Integrations,
+    Tracker,
+    Forge,
     WebSearch,
 }
 
 impl Table {
-    pub const ALL: [Table; 7] = [
-        Table::Daemon,
-        Table::Settings,
+    pub const ALL: [Table; 11] = [
+        Table::Run,
+        Table::Sandbox,
+        Table::Workers,
+        Table::Host,
+        Table::Client,
         Table::Development,
         Table::Permissions,
         Table::Branches,
-        Table::Integrations,
+        Table::Tracker,
+        Table::Forge,
         Table::WebSearch,
     ];
 
     /// The top-level keys this part owns.
     pub fn keys(self) -> &'static [&'static str] {
         match self {
-            Table::Daemon => &["socket", "log", "pi", "env", "stop", "tailnet", "sandbox", "workers"],
-            Table::Settings => &["host", "client"],
+            Table::Run => &["socket", "log", "pi", "env", "stop", "tailnet"],
+            Table::Sandbox => &["sandbox"],
+            Table::Workers => &["workers"],
+            Table::Host => &["host"],
+            Table::Client => &["client"],
             Table::Development => &["development"],
             Table::Permissions => &["permissions"],
             Table::Branches => &["branches"],
-            Table::Integrations => &["tracker", "forge"],
+            Table::Tracker => &["tracker"],
+            Table::Forge => &["forge"],
             Table::WebSearch => &["web_search"],
         }
     }
@@ -388,12 +392,9 @@ impl Table {
     }
 }
 
-/// Top-level keys that hold a value, not a table.
-const SCALAR_KEYS: &[&str] = &["socket", "log"];
-
-/// Where a key may be set.
-pub trait Scoped {
-    /// Keys a non-global level must not set.
+/// A part's value: where its keys may be set, and the checks the schema alone can't express.
+pub trait PartValue: serde::de::DeserializeOwned {
+    /// Keys a non-global level must not set (dotted, from the top of the file).
     fn global_only_keys(&self) -> Vec<&'static str> {
         Vec::new()
     }
@@ -401,13 +402,17 @@ pub trait Scoped {
     fn local_only_keys(&self) -> Vec<&'static str> {
         Vec::new()
     }
+    /// Values the schema accepts but piton can't use.
+    fn check(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn present(keys: &[(&'static str, bool)]) -> Vec<&'static str> {
     keys.iter().filter(|(_, set)| *set).map(|(key, _)| *key).collect()
 }
 
-impl Scoped for DaemonFile {
+impl PartValue for RunTable {
     fn global_only_keys(&self) -> Vec<&'static str> {
         present(&[
             ("socket", self.socket.is_some()),
@@ -416,67 +421,101 @@ impl Scoped for DaemonFile {
             ("env", !self.env.is_empty()),
             ("stop", !self.stop.is_empty()),
             ("tailnet", !self.tailnet.is_empty()),
-            ("sandbox.command", self.sandbox.command.is_some()),
-            ("sandbox.base", self.sandbox.base.is_some()),
-            ("sandbox.groups", !self.sandbox.groups.is_empty()),
-            ("sandbox.bypass", !self.sandbox.bypass.is_empty()),
-            ("sandbox.network.profile", self.sandbox.network.profile.is_some()),
         ])
     }
-}
 
-impl Scoped for SettingsFile {
-    fn global_only_keys(&self) -> Vec<&'static str> {
-        present(&[("host", !self.host.is_empty()), ("client", !self.client.is_empty())])
-    }
-}
-
-impl Scoped for DevelopmentFile {
-    fn global_only_keys(&self) -> Vec<&'static str> {
-        present(&[("development", !self.development.is_empty())])
-    }
-}
-
-impl Scoped for PermissionsFile {
-    fn global_only_keys(&self) -> Vec<&'static str> {
-        present(&[("permissions.keybindings", !self.permissions.keybindings.is_empty())])
-    }
-}
-
-impl Scoped for BranchesFile {
-    fn local_only_keys(&self) -> Vec<&'static str> {
-        present(&[("branches.username", self.branches.username.is_some())])
-    }
-}
-
-impl Scoped for IntegrationsFile {}
-impl Scoped for WebSearchFile {}
-impl Scoped for McpFile {}
-
-/// A file that was read, with where it came from.
-#[derive(Debug, Clone)]
-pub struct Loaded<T> {
-    pub value: T,
-    pub origin: Origin,
-}
-
-/// Which file of a level's pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sharing {
-    /// `config.toml`: committed, or shared through dotfiles.
-    Shared,
-    /// `config.local.toml`: this machine's values.
-    Local,
-}
-
-impl Sharing {
-    pub fn file_name(self) -> &'static str {
-        match self {
-            Sharing::Shared => CONFIG_FILE,
-            Sharing::Local => CONFIG_LOCAL_FILE,
+    fn check(&self) -> Result<(), String> {
+        match &self.pi.command {
+            Some(command) if command.is_empty() => Err("pi.command must not be empty".into()),
+            Some(_) | None => Ok(()),
         }
     }
 }
+
+impl PartValue for SandboxTable {
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        present(&[
+            ("sandbox.command", self.command.is_some()),
+            ("sandbox.base", self.base.is_some()),
+            ("sandbox.groups", !self.groups.is_empty()),
+            ("sandbox.bypass", !self.bypass.is_empty()),
+            ("sandbox.network.profile", self.network.profile.is_some()),
+        ])
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.command.as_ref().is_some_and(Vec::is_empty) {
+            return Err("sandbox.command must not be empty".into());
+        }
+        for (key, paths) in [
+            ("allow", &self.allow),
+            ("read", &self.read),
+            ("read_file", &self.read_file),
+            ("allow_file", &self.allow_file),
+            ("deny", &self.deny),
+            ("bypass", &self.bypass),
+            ("unix_socket", &self.unix_socket),
+        ] {
+            if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
+                return Err(format!(
+                    "sandbox.{key} {grant:?}: must be absolute, or start with `~/` or `$`"
+                ));
+            }
+        }
+        match self.network.profile {
+            Some(NetworkProfile::Off(true)) => {
+                Err("sandbox.network.profile: a profile name, or `false` for no filtering".into())
+            }
+            Some(NetworkProfile::Off(false) | NetworkProfile::Named(_)) | None => Ok(()),
+        }
+    }
+}
+
+impl PartValue for WorkersTable {
+    fn check(&self) -> Result<(), String> {
+        for skip in &self.skip {
+            validate_relative(skip).map_err(|reason| format!("workers.skip {skip:?}: {reason}"))?;
+        }
+        Ok(())
+    }
+}
+
+// Global-only tables: a part exists only when a file sets its table, so setting it at all outside the global tier is
+// refused.
+impl PartValue for HostTable {
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        vec!["host"]
+    }
+}
+
+impl PartValue for ClientTable {
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        vec!["client"]
+    }
+}
+
+impl PartValue for DevelopmentTable {
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        vec!["development"]
+    }
+}
+
+impl PartValue for PermissionsTable {
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        present(&[("permissions.keybindings", !self.keybindings.is_empty())])
+    }
+}
+
+impl PartValue for BranchesTable {
+    fn local_only_keys(&self) -> Vec<&'static str> {
+        present(&[("branches.username", self.username.is_some())])
+    }
+}
+
+impl PartValue for WebSearchTable {}
+
+/// `[tracker]` and `[forge]` as written: the pi package validates them.
+impl PartValue for toml::Table {}
 
 /// One `config[.local].toml`, syntax-checked, its top-level keys known, ready to read part by part.
 #[derive(Debug, Clone)]
@@ -507,39 +546,71 @@ impl ConfigDoc {
         })
     }
 
-    /// Whether the file sets any key of `table`.
-    pub fn has(&self, table: Table) -> bool {
-        table.keys().iter().any(|key| self.table.contains_key(*key))
-    }
-
-    /// One part of the file, strictly, with the level's and the file's scope checked.
-    pub fn part<T>(&self, table: Table) -> Result<T, SettingsError>
-    where
-        T: serde::de::DeserializeOwned + Scoped,
-    {
+    /// One part of the file, strictly, with the level's and the file's scope checked; `None` when the file doesn't
+    /// set it.
+    pub fn part<T: PartValue>(&self, table: Table) -> Result<Option<T>, SettingsError> {
         let path = &self.origin.path;
-        let subset: toml::Table = self
-            .table
-            .iter()
-            .filter(|(key, _)| table.keys().contains(&key.as_str()))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        // serde reads an empty array as an empty struct: a key that names a table must hold one.
-        if let Some((key, _)) = subset
-            .iter()
-            .find(|(key, value)| !SCALAR_KEYS.contains(&key.as_str()) && !value.is_table())
-        {
-            return Err(SettingsError::Invalid {
-                path: path.clone(),
-                reason: format!("`{key}` must be a table"),
-            });
-        }
-        let value: T = toml::Value::Table(subset)
-            .try_into()
-            .map_err(|e: toml::de::Error| SettingsError::Invalid {
-                path: path.clone(),
-                reason: e.to_string(),
-            })?;
+        let invalid = |reason: String| SettingsError::Invalid {
+            path: path.clone(),
+            reason,
+        };
+        let value = match table {
+            // The run keys sit at the top of the file: the part is their subset.
+            Table::Run => {
+                let subset: toml::Table = self
+                    .table
+                    .iter()
+                    .filter(|(key, _)| table.keys().contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                if subset.is_empty() {
+                    return Ok(None);
+                }
+                // serde reads an empty array as an empty struct: a key that names a table must hold one.
+                if let Some((key, _)) = subset
+                    .iter()
+                    .find(|(key, value)| !matches!(key.as_str(), "socket" | "log") && !value.is_table())
+                {
+                    return Err(invalid(format!("`{key}` must be a table")));
+                }
+                toml::Value::Table(subset)
+            }
+            Table::Sandbox
+            | Table::Workers
+            | Table::Host
+            | Table::Client
+            | Table::Development
+            | Table::Permissions
+            | Table::Branches
+            | Table::Tracker
+            | Table::Forge
+            | Table::WebSearch => {
+                let key = table.keys()[0];
+                let Some(value) = self.table.get(key) else {
+                    return Ok(None);
+                };
+                if !value.is_table() {
+                    return Err(invalid(format!("`{key}` must be a table")));
+                }
+                value.clone()
+            }
+        };
+        let value: T = value.try_into().map_err(|e: toml::de::Error| {
+            invalid(match table {
+                Table::Run => e.to_string(),
+                Table::Sandbox
+                | Table::Workers
+                | Table::Host
+                | Table::Client
+                | Table::Development
+                | Table::Permissions
+                | Table::Branches
+                | Table::Tracker
+                | Table::Forge
+                | Table::WebSearch => format!("[{}] {e}", table.keys()[0]),
+            })
+        })?;
+        value.check().map_err(invalid)?;
         if self.origin.level != LevelKind::Global
             && let Some(key) = value.global_only_keys().first()
         {
@@ -560,7 +631,7 @@ impl ConfigDoc {
                 }
             }
         }
-        Ok(value)
+        Ok(Some(value))
     }
 }
 
@@ -588,8 +659,8 @@ pub fn read_text(path: &Path) -> Result<Option<String>, SettingsError> {
     }
 }
 
-/// Reads `mcp[.local].json` at one level.
-pub fn load_mcp(path: &Path, level: LevelKind) -> Result<Option<Loaded<McpFile>>, SettingsError> {
+/// Reads `mcp[.local].json`; `None` when it doesn't exist.
+pub fn load_mcp(path: &Path) -> Result<Option<McpFile>, SettingsError> {
     let Some(text) = read_text(path)? else {
         return Ok(None);
     };
@@ -602,73 +673,31 @@ pub fn load_mcp(path: &Path, level: LevelKind) -> Result<Option<Loaded<McpFile>>
     if !value.is_object() {
         return Err(invalid("must be a JSON object".into()));
     }
-    let value = serde_json::from_value(value).map_err(|e| invalid(e.to_string()))?;
-    Ok(Some(Loaded {
-        value,
-        origin: Origin {
-            path: path.to_path_buf(),
-            level,
-        },
-    }))
-}
-
-/// Checks values that the schema alone can't: non-empty commands, relative skip paths, absolute grant paths, and the
-/// network profile's `false`.
-pub fn validate_daemon(file: &DaemonFile, path: &Path) -> Result<(), SettingsError> {
-    let invalid = |reason: String| SettingsError::Invalid {
-        path: path.to_path_buf(),
-        reason,
-    };
-    if file.pi.command.as_ref().is_some_and(Vec::is_empty) {
-        return Err(invalid("pi.command must not be empty".into()));
-    }
-    if file.sandbox.command.as_ref().is_some_and(Vec::is_empty) {
-        return Err(invalid("sandbox.command must not be empty".into()));
-    }
-    for skip in &file.workers.skip {
-        validate_relative(skip).map_err(|reason| invalid(format!("workers.skip {skip:?}: {reason}")))?;
-    }
-    let s = &file.sandbox;
-    for (key, paths) in [
-        ("allow", &s.allow),
-        ("read", &s.read),
-        ("read_file", &s.read_file),
-        ("allow_file", &s.allow_file),
-        ("deny", &s.deny),
-        ("bypass", &s.bypass),
-        ("unix_socket", &s.unix_socket),
-    ] {
-        for grant in paths {
-            if !is_grant_path(grant) {
-                return Err(invalid(format!(
-                    "sandbox.{key} {grant:?}: must be absolute, or start with `~/` or `$`"
-                )));
-            }
-        }
-    }
-    if s.network.profile == Some(NetworkProfile::Off(true)) {
-        return Err(invalid(
-            "sandbox.network.profile: a profile name, or `false` for no filtering".into(),
-        ));
-    }
-    Ok(())
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(|e| invalid(e.to_string()))
 }
 
 /// Every part of a file, checked: for a write that must leave a file every reader accepts.
 pub fn validate_config(doc: &ConfigDoc) -> Result<(), SettingsError> {
     for table in Table::ALL {
         match table {
-            Table::Daemon => validate_daemon(&doc.part::<DaemonFile>(table)?, &doc.origin.path)?,
-            Table::Settings => doc.part::<SettingsFile>(table).map(|_| ())?,
-            Table::Development => doc.part::<DevelopmentFile>(table).map(|_| ())?,
-            Table::Permissions => doc.part::<PermissionsFile>(table).map(|_| ())?,
-            Table::Branches => doc.part::<BranchesFile>(table).map(|_| ())?,
-            Table::Integrations => doc.part::<IntegrationsFile>(table).map(|_| ())?,
-            Table::WebSearch => doc.part::<WebSearchFile>(table).map(|_| ())?,
+            Table::Run => doc.part::<RunTable>(table).map(drop_value)?,
+            Table::Sandbox => doc.part::<SandboxTable>(table).map(drop_value)?,
+            Table::Workers => doc.part::<WorkersTable>(table).map(drop_value)?,
+            Table::Host => doc.part::<HostTable>(table).map(drop_value)?,
+            Table::Client => doc.part::<ClientTable>(table).map(drop_value)?,
+            Table::Development => doc.part::<DevelopmentTable>(table).map(drop_value)?,
+            Table::Permissions => doc.part::<PermissionsTable>(table).map(drop_value)?,
+            Table::Branches => doc.part::<BranchesTable>(table).map(drop_value)?,
+            Table::Tracker | Table::Forge => doc.part::<toml::Table>(table).map(drop_value)?,
+            Table::WebSearch => doc.part::<WebSearchTable>(table).map(drop_value)?,
         }
     }
     Ok(())
 }
+
+fn drop_value<T>(_: Option<T>) {}
 
 fn is_grant_path(path: &str) -> bool {
     path.starts_with('/') || path.starts_with("~/") || path == "~" || path.starts_with('$')
@@ -699,7 +728,7 @@ mod tests {
         let err = doc("[permisions]\nallow = []\n", LevelKind::Repository, Sharing::Shared).unwrap_err();
         assert!(err.to_string().contains("permisions"), "{err}");
         let d = doc("[sandbox]\nallw = []\n", LevelKind::Repository, Sharing::Shared).unwrap();
-        let err = d.part::<DaemonFile>(Table::Daemon).unwrap_err();
+        let err = d.part::<SandboxTable>(Table::Sandbox).unwrap_err();
         assert!(err.to_string().contains("allw"), "{err}");
         let d = doc(
             "[permissions.host]\nkeybindings = {}\n",
@@ -707,75 +736,83 @@ mod tests {
             Sharing::Shared,
         )
         .unwrap();
-        assert!(d.part::<PermissionsFile>(Table::Permissions).is_err());
+        assert!(d.part::<PermissionsTable>(Table::Permissions).is_err());
         // A table key holding anything else, even an empty list (which serde reads as an empty table), is refused.
-        for (text, table) in [
-            ("permissions = []\n", Table::Permissions),
-            ("tracker = 1\n", Table::Integrations),
-        ] {
-            let d = doc(text, LevelKind::Repository, Sharing::Shared).unwrap();
-            let refused = match table {
-                Table::Permissions => d.part::<PermissionsFile>(table).is_err(),
-                Table::Integrations => d.part::<IntegrationsFile>(table).is_err(),
-                Table::Daemon | Table::Settings | Table::Development | Table::Branches | Table::WebSearch => false,
-            };
-            assert!(refused, "{text}");
-        }
+        let d = doc("permissions = []\n", LevelKind::Repository, Sharing::Shared).unwrap();
+        assert!(d.part::<PermissionsTable>(Table::Permissions).is_err());
+        let d = doc("tracker = 1\n", LevelKind::Repository, Sharing::Shared).unwrap();
+        assert!(d.part::<toml::Table>(Table::Tracker).is_err());
+        let d = doc("stop = []\n", LevelKind::Global, Sharing::Shared).unwrap();
+        assert!(d.part::<RunTable>(Table::Run).is_err());
     }
 
-    /// A broken table fails only its part.
+    /// A broken table fails only its part: a typo in `[tailnet]` leaves `[sandbox]` readable, and a bad `[client]`
+    /// leaves `[host]`.
     #[test]
     fn parts_are_parsed_on_their_own() {
         let d = doc(
-            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n",
-            LevelKind::Repository,
+            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[tailnet]\nprot = 1\n[sandbox]\nread = [\"/r\"]\n[client]\ntext_font = 1\n[host]\nroots = [\"~/p\"]\n",
+            LevelKind::Global,
             Sharing::Shared,
         )
         .unwrap();
-        assert!(d.part::<BranchesFile>(Table::Branches).is_err());
+        assert!(d.part::<BranchesTable>(Table::Branches).is_err());
+        assert!(d.part::<RunTable>(Table::Run).is_err());
+        assert!(d.part::<ClientTable>(Table::Client).is_err());
         assert_eq!(
-            d.part::<PermissionsFile>(Table::Permissions).unwrap().permissions.allow,
+            d.part::<PermissionsTable>(Table::Permissions).unwrap().unwrap().allow,
             ["read"]
         );
-        assert!(
-            d.part::<IntegrationsFile>(Table::Integrations)
-                .unwrap()
-                .tracker
-                .is_some()
-        );
+        assert_eq!(d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().read, ["/r"]);
+        assert!(d.part::<HostTable>(Table::Host).unwrap().is_some());
+        assert!(d.part::<toml::Table>(Table::Tracker).unwrap().is_some());
+        assert!(d.part::<toml::Table>(Table::Forge).unwrap().is_none());
     }
 
     #[test]
     fn global_only_and_local_only_keys() {
         let d = doc("[sandbox]\nbase = \"default\"\n", LevelKind::Parent, Sharing::Shared).unwrap();
-        let err = d.part::<DaemonFile>(Table::Daemon).unwrap_err();
+        let err = d.part::<SandboxTable>(Table::Sandbox).unwrap_err();
         assert!(matches!(err, SettingsError::GlobalOnly { ref key, .. } if key == "sandbox.base"));
-        for text in [
-            "[host]\nroots = []\n",
-            "[development]\nsession_analysis = true\n",
-            "[permissions.keybindings]\nauto_accept_edits = \"ctrl+a\"\n",
-        ] {
+        let refused = |text: &str, table: Table| {
             let d = doc(text, LevelKind::Repository, Sharing::Local).unwrap();
-            let refused = match Table::ALL.into_iter().find(|t| d.has(*t)).unwrap() {
-                Table::Settings => d.part::<SettingsFile>(Table::Settings).is_err(),
-                Table::Development => d.part::<DevelopmentFile>(Table::Development).is_err(),
-                Table::Permissions => d.part::<PermissionsFile>(Table::Permissions).is_err(),
-                Table::Daemon | Table::Branches | Table::Integrations | Table::WebSearch => false,
-            };
-            assert!(refused, "{text}");
+            match table {
+                Table::Host => d.part::<HostTable>(table).is_err(),
+                Table::Development => d.part::<DevelopmentTable>(table).is_err(),
+                Table::Permissions => d.part::<PermissionsTable>(table).is_err(),
+                Table::Run => d.part::<RunTable>(table).is_err(),
+                Table::Sandbox
+                | Table::Workers
+                | Table::Client
+                | Table::Branches
+                | Table::Tracker
+                | Table::Forge
+                | Table::WebSearch => false,
+            }
+        };
+        for (text, table) in [
+            ("[host]\nroots = []\n", Table::Host),
+            ("[development]\nsession_analysis = true\n", Table::Development),
+            (
+                "[permissions.keybindings]\nauto_accept_edits = \"ctrl+a\"\n",
+                Table::Permissions,
+            ),
+            ("[tailnet]\nport = 1\n", Table::Run),
+        ] {
+            assert!(refused(text, table), "{text}");
             assert!(validate_config(&doc(text, LevelKind::Global, Sharing::Shared).unwrap()).is_ok());
         }
 
         let text = "[branches]\nusername = \"me\"\n";
         let err = doc(text, LevelKind::Global, Sharing::Shared)
             .unwrap()
-            .part::<BranchesFile>(Table::Branches)
+            .part::<BranchesTable>(Table::Branches)
             .unwrap_err();
         assert!(matches!(err, SettingsError::LocalOnly { .. }), "{err}");
         assert!(
             doc(text, LevelKind::Repository, Sharing::Local)
                 .unwrap()
-                .part::<BranchesFile>(Table::Branches)
+                .part::<BranchesTable>(Table::Branches)
                 .is_ok()
         );
     }
@@ -791,32 +828,38 @@ mod tests {
         );
         std::fs::create_dir(&path).unwrap();
         assert!(read_config(&path, LevelKind::Global, Sharing::Shared).is_err());
-        assert!(
-            load_mcp(&dir.path().join("mcp.json"), LevelKind::Global)
-                .unwrap()
-                .is_none()
-        );
+        assert!(load_mcp(&dir.path().join("mcp.json")).unwrap().is_none());
         std::fs::write(dir.path().join("mcp.json"), "[]").unwrap();
-        assert!(load_mcp(&dir.path().join("mcp.json"), LevelKind::Global).is_err());
+        assert!(load_mcp(&dir.path().join("mcp.json")).is_err());
     }
 
     #[test]
-    fn daemon_values_are_validated() {
-        let p = Path::new("config.toml");
-        let mut file = DaemonFile::default();
-        file.sandbox.allow = vec!["relative/path".into()];
-        assert!(validate_daemon(&file, p).is_err());
-        file.sandbox.allow = vec!["~/x".into(), "/abs".into(), "$SSH_AUTH_SOCK".into()];
-        assert!(validate_daemon(&file, p).is_ok());
-        file.workers.skip = vec!["../x".into()];
-        assert!(validate_daemon(&file, p).is_err());
-        file.workers.skip = Vec::new();
-        file.sandbox.network.profile = Some(NetworkProfile::Off(true));
-        assert!(validate_daemon(&file, p).is_err());
-        file.sandbox.network.profile = Some(NetworkProfile::Off(false));
-        assert!(validate_daemon(&file, p).is_ok());
-        let toml: DaemonFile = toml::from_str("[sandbox.network]\nprofile = false\n").unwrap();
-        assert_eq!(toml.sandbox.network.profile, Some(NetworkProfile::Off(false)));
+    fn values_are_checked() {
+        let mut sandbox = SandboxTable {
+            allow: vec!["relative/path".into()],
+            ..SandboxTable::default()
+        };
+        assert!(sandbox.check().is_err());
+        sandbox.allow = vec!["~/x".into(), "/abs".into(), "$SSH_AUTH_SOCK".into()];
+        assert!(sandbox.check().is_ok());
+        sandbox.network.profile = Some(NetworkProfile::Off(true));
+        assert!(sandbox.check().is_err());
+        sandbox.network.profile = Some(NetworkProfile::Off(false));
+        assert!(sandbox.check().is_ok());
+        let workers = WorkersTable {
+            skip: vec!["../x".into()],
+        };
+        assert!(workers.check().is_err());
+        let run = RunTable {
+            pi: PiTable {
+                command: Some(Vec::new()),
+                args: None,
+            },
+            ..RunTable::default()
+        };
+        assert!(run.check().is_err());
+        let toml: SandboxTable = toml::from_str("[network]\nprofile = false\n").unwrap();
+        assert_eq!(toml.network.profile, Some(NetworkProfile::Off(false)));
     }
 
     #[test]

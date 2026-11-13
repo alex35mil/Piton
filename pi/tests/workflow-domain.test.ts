@@ -490,7 +490,7 @@ describe("workflow domain", () => {
     it("returns the labels to create new work with, from its Kind and selection", () => {
         const cwd = temporaryRepository()
         try {
-            const tracker = integrationsFromFile(section(resolveSettings(cwd).integrations).tracker!.value) as {
+            const tracker = integrationsFromFile(section(resolveSettings(cwd).tracker)!.value) as {
                 labels?: unknown
             }
             const area = {

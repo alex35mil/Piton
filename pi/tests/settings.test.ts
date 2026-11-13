@@ -62,7 +62,6 @@ describe("shared settings contract", () => {
             const resolved = resolveSettings(h.nested, "host")
             assert.equal(resolved.source, h.repositoryRoot)
             assert.equal(resolved.global, TEST_CONFIG_HOME)
-            assert.equal(resolved.artifacts, path.join(h.piton, ".local"))
             // A missing level is watched as a folder; an existing one also by its candidate files.
             assert.ok(resolved.watch.includes(h.piton))
             assert.ok(resolved.watch.includes(path.join(TEST_CONFIG_HOME, "config.toml")))
@@ -149,7 +148,9 @@ describe("shared settings contract", () => {
             const sandbox = inspectPersistentPermissions(h.nested, "sandbox")
             assert.equal(sandbox.runtime, "sandbox")
             assert.deepEqual(
-                sandbox.sources.map(({ level, scope, local }) => `${level}:${scope}${local ? ":local" : ""}`),
+                sandbox.sources.map(
+                    ({ level, scope, sharing }) => `${level}:${scope}${sharing === "local" ? ":local" : ""}`,
+                ),
                 ["global:shared", "global:sandbox", "repository:shared", "repository:sandbox:local"],
             )
             // The repository's shared file is nearer than the global runtime file, so its defaultMode wins.

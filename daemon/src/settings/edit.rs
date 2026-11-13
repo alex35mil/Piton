@@ -7,26 +7,14 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
-/// A global file and its `.local` companion (this host's values, never shared).
-#[derive(Debug, Clone)]
-pub struct FilePair {
-    pub shared: PathBuf,
-    pub local: PathBuf,
-}
-
-/// Which file of the pair a key lives in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Placement {
-    Shared,
-    Local,
-}
+use super::{ConfigPair, Sharing};
 
 /// Where a write puts the key: the file that sets it now, or one of the pair (moving it out of the other).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     /// The local file when it sets the key, else the shared one.
     Current,
-    Move(Placement),
+    Move(Sharing),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -45,28 +33,21 @@ pub enum EditError {
     Value { path: PathBuf, reason: String },
 }
 
-impl FilePair {
-    fn path(&self, placement: Placement) -> &Path {
-        match placement {
-            Placement::Shared => &self.shared,
-            Placement::Local => &self.local,
-        }
-    }
-
+impl ConfigPair {
     /// The file that sets `key`, if either does; the local file wins.
-    pub fn placement(&self, key: &[&str]) -> Result<Option<Placement>, EditError> {
+    pub fn placement(&self, key: &[&str]) -> Result<Option<Sharing>, EditError> {
         Ok(self.read()?.placement(key))
     }
 
     /// Both files, parsed once, to tell where many keys are set.
     pub fn read(&self) -> Result<Placements, EditError> {
-        let parse = |placement| -> Result<Option<DocumentMut>, EditError> {
-            let path = self.path(placement);
+        let parse = |sharing| -> Result<Option<DocumentMut>, EditError> {
+            let path = self.path(sharing);
             read(path)?.map(|text| document(&text, path)).transpose()
         };
         Ok(Placements {
-            shared: parse(Placement::Shared)?,
-            local: parse(Placement::Local)?,
+            shared: parse(Sharing::Shared)?,
+            local: parse(Sharing::Local)?,
         })
     }
 
@@ -78,16 +59,13 @@ impl FilePair {
         key: &[&str],
         value: Option<Item>,
         target: Target,
-        validate: &dyn Fn(&str, &Path, Placement) -> Result<(), super::SettingsError>,
-    ) -> Result<Placement, EditError> {
+        validate: &dyn Fn(&str, &Path, Sharing) -> Result<(), super::SettingsError>,
+    ) -> Result<Sharing, EditError> {
         let placement = match target {
-            Target::Current => self.placement(key)?.unwrap_or(Placement::Shared),
-            Target::Move(placement) => placement,
+            Target::Current => self.placement(key)?.unwrap_or(Sharing::Shared),
+            Target::Move(sharing) => sharing,
         };
-        let other = match placement {
-            Placement::Shared => Placement::Local,
-            Placement::Local => Placement::Shared,
-        };
+        let other = placement.other();
         // The destination first, so the key is never in neither file; if removing it from the other file then fails,
         // the destination goes back to what it was, so a failed move changes nothing.
         let destination = self.path(placement);
@@ -120,12 +98,12 @@ pub struct Placements {
 
 impl Placements {
     /// The file that sets `key`, if either does; the local file wins.
-    pub fn placement(&self, key: &[&str]) -> Option<Placement> {
+    pub fn placement(&self, key: &[&str]) -> Option<Sharing> {
         let sets = |doc: &Option<DocumentMut>| doc.as_ref().is_some_and(|doc| get(doc, key).is_some());
         if sets(&self.local) {
-            Some(Placement::Local)
+            Some(Sharing::Local)
         } else if sets(&self.shared) {
-            Some(Placement::Shared)
+            Some(Sharing::Shared)
         } else {
             None
         }
@@ -393,14 +371,11 @@ mod tests {
     use super::*;
     use toml_edit::Value;
 
-    fn pair(dir: &Path) -> FilePair {
-        FilePair {
-            shared: dir.join("config.toml"),
-            local: dir.join("config.local.toml"),
-        }
+    fn pair(dir: &Path) -> ConfigPair {
+        ConfigPair::in_dir(dir)
     }
 
-    fn ok(_: &str, _: &Path, _: Placement) -> Result<(), crate::settings::SettingsError> {
+    fn ok(_: &str, _: &Path, _: Sharing) -> Result<(), crate::settings::SettingsError> {
         Ok(())
     }
 
@@ -553,7 +528,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = pair(dir.path());
         std::fs::write(&files.shared, "[host]\nroots = []\n").unwrap();
-        let refuse = |_: &str, path: &Path, _: Placement| {
+        let refuse = |_: &str, path: &Path, _: Sharing| {
             Err(crate::settings::SettingsError::Invalid {
                 path: path.to_path_buf(),
                 reason: "no".into(),
@@ -587,7 +562,7 @@ mod tests {
         std::fs::write(&files.local, "[host]\nroots = [\"~/here\"]\n").unwrap();
         // Removing the key from the local file is refused (validation of the local file's new text).
         let local = files.local.clone();
-        let refuse_local = move |_: &str, path: &Path, _: Placement| {
+        let refuse_local = move |_: &str, path: &Path, _: Sharing| {
             if path == local {
                 Err(crate::settings::SettingsError::Invalid {
                     path: path.to_path_buf(),
@@ -602,7 +577,7 @@ mod tests {
                 .set(
                     &["host", "roots"],
                     Some(strings(&["~/all"])),
-                    Target::Move(Placement::Shared),
+                    Target::Move(Sharing::Shared),
                     &refuse_local
                 )
                 .is_err()
@@ -623,10 +598,10 @@ mod tests {
         let files = pair(dir.path());
         std::fs::write(&files.shared, "[host]\nroots = [\"~/a\"]\nlogging = \"info\"\n").unwrap();
         let roots = ["host", "roots"];
-        assert_eq!(files.placement(&roots).unwrap(), Some(Placement::Shared));
+        assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Shared));
 
         files
-            .set(&roots, Some(strings(&["~/here"])), Target::Move(Placement::Local), &ok)
+            .set(&roots, Some(strings(&["~/here"])), Target::Move(Sharing::Local), &ok)
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.local).unwrap(),
@@ -636,7 +611,7 @@ mod tests {
             std::fs::read_to_string(&files.shared).unwrap(),
             "[host]\nlogging = \"info\"\n"
         );
-        assert_eq!(files.placement(&roots).unwrap(), Some(Placement::Local));
+        assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Local));
         // A later write without a placement stays where the key is.
         files
             .set(&roots, Some(strings(&["~/there"])), Target::Current, &ok)
@@ -647,7 +622,7 @@ mod tests {
         );
 
         files
-            .set(&roots, Some(strings(&["~/all"])), Target::Move(Placement::Shared), &ok)
+            .set(&roots, Some(strings(&["~/all"])), Target::Move(Sharing::Shared), &ok)
             .unwrap();
         assert_eq!(std::fs::read_to_string(&files.local).unwrap(), "");
         assert_eq!(

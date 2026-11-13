@@ -8,13 +8,13 @@ import { workflowTools } from "../__lib/tools.js"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import {
-    CONFIG_FILE,
-    CONFIG_LOCAL_FILE,
+    PITON_DIR,
     projectConfigPath,
+    repositoryConfigFile,
     resolveSettings,
     settingsErrors,
 } from "../../../extensions/__lib/settings.js"
-import { EPIC_ROOT, GIG_ROOT, PROJECT_ROOT } from "../__lib/domain.js"
+import { EPIC_ROOT, GIG_ROOT } from "../__lib/domain.js"
 import * as Git from "../__lib/git.js"
 import {
     globalConfigPaths,
@@ -177,7 +177,7 @@ export default function (pi: ExtensionAPI): void {
         parameters: ProjectPermissionConfigurationSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const parsed = parse(ProjectPermissionConfigurationValidator, params)
-            const file = projectConfigPath(resolveSettings(ctx.cwd), parsed.target === "local")
+            const file = projectConfigPath(resolveSettings(ctx.cwd), parsed.target === "local" ? "local" : "shared")
             const configured = await withFileMutationQueue(file, async () =>
                 configureProjectPermissions(ctx.cwd, parsed, mcpCatalog),
             )
@@ -323,9 +323,9 @@ export default function (pi: ExtensionAPI): void {
 }
 
 const PROJECT_SETUP_FILES = [
-    `${PROJECT_ROOT}/${CONFIG_FILE}`,
-    `${PROJECT_ROOT}/${CONFIG_LOCAL_FILE}`,
-    `${PROJECT_ROOT}/policies.md`,
+    repositoryConfigFile("shared"),
+    repositoryConfigFile("local"),
+    `${PITON_DIR}/policies.md`,
     ".gitignore",
     INCOMING_PR_WORKFLOW_PATH,
 ] as const
@@ -349,8 +349,8 @@ export function inspectProjectSetup(cwd: string, projectTrusted: boolean) {
         mcp: inspectProjectMcp(cwd, projectTrusted),
         boundEntityTrackers: inspectBoundEntityTrackers(root),
         projectLocalIgnore: inspectProjectLocalIgnore(root),
-        projectPathsInGit: splitLines(Git.run(root, ["ls-files", "--cached", "--", PROJECT_ROOT])),
-        stagedProjectPaths: splitLines(Git.run(root, ["diff", "--cached", "--name-only", "--", PROJECT_ROOT])),
+        projectPathsInGit: splitLines(Git.run(root, ["ls-files", "--cached", "--", PITON_DIR])),
+        stagedProjectPaths: splitLines(Git.run(root, ["diff", "--cached", "--name-only", "--", PITON_DIR])),
     }
 }
 

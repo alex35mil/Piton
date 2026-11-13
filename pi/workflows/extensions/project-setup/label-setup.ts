@@ -341,7 +341,7 @@ function desiredFor(input: DesiredInput) {
 async function readPrevious(cwd: string, adapter: ProviderAdapter) {
     let value: unknown
     try {
-        const found = section(resolveSettings(cwd).integrations).tracker
+        const found = section(resolveSettings(cwd).tracker)
         if (!found) return null
         value = integrationsFromFile(found.value)
     } catch {

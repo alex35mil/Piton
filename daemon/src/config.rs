@@ -1,10 +1,11 @@
-//! The daemon's own configuration, from the global tier (`$XDG_CONFIG_HOME/piton/`, or `--config-home` /
-//! `PITON_CONFIG_HOME`): `daemon[.local].toml` says how the daemon runs, `settings[.local].toml` `[host]` holds the
-//! preferences the apps change. Reading and merging is settings/'s; this turns the result into values with defaults.
+//! The daemon's own configuration, from the global tier's `config.toml` (`$XDG_CONFIG_HOME/piton/`, or `--config-home`
+//! / `PITON_CONFIG_HOME`): the run keys say how the daemon runs, `[sandbox] command` which backend it launches, and
+//! `[host]` holds the preferences the apps change. Reading and merging is settings/'s; this turns the result into values
+//! with defaults.
 
 use std::path::{Path, PathBuf};
 
-use crate::settings::{DaemonFile, Paths, SettingsError, SettingsFile, expand_home as expand_with};
+use crate::settings::{HostTable, Paths, Resolved, RunTable, SandboxTable, SettingsError, expand_home as expand_with};
 use crate::wire::LaunchMode;
 
 #[derive(Debug, Clone)]
@@ -28,7 +29,7 @@ pub struct Config {
     /// start sessions until the owner lists some. `piton attach` and the CLI aren't limited. A leading `~/` is
     /// expanded.
     pub roots: Vec<String>,
-    /// Where the settings chains are: home, the global tier, pi's agent folder.
+    /// Where the settings chains are: home and the global tier.
     pub paths: Paths,
 }
 
@@ -81,45 +82,72 @@ pub struct StopConfig {
     pub term_grace_ms: u64,
 }
 
-impl Config {
-    /// The defaults, overridden by the merged global files.
-    pub fn from_files(daemon: DaemonFile, settings: SettingsFile, paths: Paths) -> Self {
-        let home = paths.home.clone();
-        let host = settings.host;
+/// The global parts the daemon runs with: its run keys, `[sandbox]` (for its `command`), and `[host]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GlobalSettings {
+    pub run: RunTable,
+    pub sandbox: SandboxTable,
+    pub host: HostTable,
+}
+
+impl GlobalSettings {
+    /// From the global tier's resolution: every part, or the first that can't be used.
+    pub fn from_resolved(resolved: Resolved) -> Result<Self, SettingsError> {
+        Ok(Self {
+            run: resolved.run?,
+            sandbox: resolved.sandbox?,
+            host: resolved.host?,
+        })
+    }
+
+    /// Each part that resolves; defaults for the rest.
+    fn lenient(resolved: Resolved) -> Self {
         Self {
-            socket: daemon
+            run: resolved.run.unwrap_or_default(),
+            sandbox: resolved.sandbox.unwrap_or_default(),
+            host: resolved.host.unwrap_or_default(),
+        }
+    }
+}
+
+impl Config {
+    /// The defaults, overridden by the global tier's merged parts.
+    pub fn from_settings(settings: GlobalSettings, paths: Paths) -> Self {
+        let home = paths.home.clone();
+        let GlobalSettings { run, sandbox, host } = settings;
+        Self {
+            socket: run
                 .socket
                 .map(|s| expand_with(&s, &home))
                 .unwrap_or_else(|| home.join(".local/state/piton/piton.sock")),
             log: Some(
-                daemon
-                    .log
+                run.log
                     .map(|l| expand_with(&l, &home))
                     .unwrap_or_else(|| crate::diagnostics::root().join("daemon/current.log")),
             ),
             attach_mode: host.attach_mode.unwrap_or(LaunchMode::Sandbox),
             pi: PiConfig {
-                command: daemon.pi.command.unwrap_or_else(|| vec!["pi".into()]),
-                args: daemon.pi.args.unwrap_or_default(),
+                command: run.pi.command.unwrap_or_else(|| vec!["pi".into()]),
+                args: run.pi.args.unwrap_or_default(),
             },
             sandbox: SandboxConfig {
-                command: daemon.sandbox.command.unwrap_or_else(|| vec!["nono".into()]),
+                command: sandbox.command.unwrap_or_else(|| vec!["nono".into()]),
             },
             env: EnvConfig {
-                login_shell: daemon.env.login_shell.unwrap_or(true),
-                mise: daemon.env.mise.unwrap_or(true),
+                login_shell: run.env.login_shell.unwrap_or(true),
+                mise: run.env.mise.unwrap_or(true),
             },
             stop: StopConfig {
-                grace_ms: daemon.stop.grace_ms.unwrap_or(15_000),
-                term_grace_ms: daemon.stop.term_grace_ms.unwrap_or(3_000),
+                grace_ms: run.stop.grace_ms.unwrap_or(15_000),
+                term_grace_ms: run.stop.term_grace_ms.unwrap_or(3_000),
             },
             empty_grace_ms: host.empty_grace_ms.unwrap_or(10_000),
             tailnet: TailnetConfig {
-                enabled: daemon.tailnet.enabled.unwrap_or(true),
-                port: daemon.tailnet.port.unwrap_or(7357),
-                cli: daemon.tailnet.cli.unwrap_or_else(|| "tailscale".into()),
-                heartbeat_ms: daemon.tailnet.heartbeat_ms.unwrap_or(10_000),
-                retry_ms: daemon.tailnet.retry_ms.unwrap_or(10_000),
+                enabled: run.tailnet.enabled.unwrap_or(true),
+                port: run.tailnet.port.unwrap_or(7357),
+                cli: run.tailnet.cli.unwrap_or_else(|| "tailscale".into()),
+                heartbeat_ms: run.tailnet.heartbeat_ms.unwrap_or(10_000),
+                retry_ms: run.tailnet.retry_ms.unwrap_or(10_000),
             },
             logging: LoggingConfig {
                 mode: host.logging.unwrap_or_default(),
@@ -136,7 +164,7 @@ impl Default for Config {
             home: home(),
             global: home().join(".config/piton"),
         };
-        Self::from_files(DaemonFile::default(), SettingsFile::default(), paths)
+        Self::from_settings(GlobalSettings::default(), paths)
     }
 }
 
@@ -153,7 +181,7 @@ pub fn load(config_home: Option<&Path>) -> Result<Config, ConfigError> {
         paths.global = dir.to_path_buf();
     }
     let resolved = crate::settings::resolve_global(&paths)?;
-    Ok(Config::from_files(resolved.daemon?, resolved.settings?, paths))
+    Ok(Config::from_settings(GlobalSettings::from_resolved(resolved)?, paths))
 }
 
 /// The global tier as far as it can be read: each part that resolves, defaults for the rest. For `piton setup`, whose
@@ -163,14 +191,11 @@ pub fn load_lenient(config_home: Option<&Path>) -> Config {
     if let Some(dir) = config_home {
         paths.global = dir.to_path_buf();
     }
-    let (daemon, settings) = match crate::settings::resolve_global(&paths) {
-        Ok(resolved) => (
-            resolved.daemon.unwrap_or_default(),
-            resolved.settings.unwrap_or_default(),
-        ),
-        Err(_) => (DaemonFile::default(), SettingsFile::default()),
+    let settings = match crate::settings::resolve_global(&paths) {
+        Ok(resolved) => GlobalSettings::lenient(resolved),
+        Err(_) => GlobalSettings::default(),
     };
-    Config::from_files(daemon, settings, paths)
+    Config::from_settings(settings, paths)
 }
 
 impl Config {
@@ -220,7 +245,7 @@ mod tests {
         let mut paths = Paths::current();
         paths.global = global;
         let resolved = crate::settings::resolve_global(&paths).unwrap();
-        let config = Config::from_files(resolved.daemon.unwrap(), resolved.settings.unwrap(), paths);
+        let config = Config::from_settings(GlobalSettings::from_resolved(resolved).unwrap(), paths);
         assert_eq!(config.socket, PathBuf::from("/tmp/s.sock"));
         assert_eq!((config.stop.grace_ms, config.stop.term_grace_ms), (5, 7));
         assert_eq!(config.sandbox.command, ["/bin/nono"]);

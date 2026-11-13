@@ -8,7 +8,8 @@ import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { workflowTools } from "../__lib/tools.js"
 
 import * as project from "../../../extensions/__lib/project.js"
-import { EPIC_ROOT, GIG_ROOT, PROJECT_ROOT, type DeliverableKind } from "../__lib/domain.js"
+import { PITON_DIR } from "../../../extensions/__lib/settings.js"
+import { EPIC_ROOT, GIG_ROOT, type DeliverableKind } from "../__lib/domain.js"
 import {
     entityLabel,
     LOCAL_REVIEWS_DIR,

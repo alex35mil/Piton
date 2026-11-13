@@ -32,7 +32,7 @@ pub enum SandboxError {
 /// `agent_socket` is the daemon's socket for sandboxed pis, which the profile lets them connect to (and nothing else of
 /// the daemon's state folder).
 pub fn profile(resolved: &DaemonSettings, home: &Path, env: &Env, agent_socket: &Path) -> Result<Value, SandboxError> {
-    let table = &resolved.daemon.sandbox;
+    let table = &resolved.sandbox;
     let expand = |paths: &[String]| -> Result<Vec<String>, SandboxError> {
         paths.iter().map(|p| expand_grant(p, home, env)).collect()
     };

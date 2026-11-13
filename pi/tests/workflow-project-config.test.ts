@@ -20,12 +20,12 @@ import {
     assertArtifactPersistencePrepared,
     assertSandboxArtifactsLinked,
     detectInstallation,
+    developmentCheckout,
     loadProjectConfig,
     loadSessionAnalysis,
     LOCAL_SETTINGS_EXCLUDE,
     prepareArtifactPersistence,
     PROJECT_LOCAL_IGNORE,
-    resolveWorkflowProject,
     setInstallationForTests,
 } from "../workflows/extensions/__lib/project-config.ts"
 import registerProjectSetup, { inspectProjectSetup } from "../workflows/extensions/project-setup/index.ts"
@@ -87,9 +87,9 @@ describe("workflow project configuration", () => {
             fs.rmSync(outside, { recursive: true, force: true })
 
             setInstallationForTests({ kind: "development", checkout: root })
-            assert.equal(resolveWorkflowProject(root), root)
+            assert.equal(developmentCheckout(), root)
             setInstallationForTests({ kind: "app" })
-            assert.throws(() => resolveWorkflowProject(root), /github\.com\/alex35mil\/piton\/issues\/new/)
+            assert.throws(() => developmentCheckout(), /github\.com\/alex35mil\/piton\/issues\/new/)
         } finally {
             setInstallationForTests(undefined)
             fs.rmSync(root, { recursive: true, force: true })
@@ -101,14 +101,14 @@ describe("workflow project configuration", () => {
         resetGlobalSettings()
         try {
             setInstallationForTests({ kind: "development", checkout: root })
-            assert.equal(loadSessionAnalysis(root), "enabled")
+            assert.equal(loadSessionAnalysis(), "enabled")
             writeSettings("global", { "development.session_analysis": false })
-            assert.equal(loadSessionAnalysis(root), "disabled")
+            assert.equal(loadSessionAnalysis(), "disabled")
             // Only the global tier may set it.
             assert.throws(() => writeSettings(root, { "development.session_analysis": true }), /global tier/)
             setInstallationForTests({ kind: "app" })
             writeSettings("global", { "development.session_analysis": true })
-            assert.equal(loadSessionAnalysis(root), "disabled")
+            assert.equal(loadSessionAnalysis(), "disabled")
         } finally {
             setInstallationForTests(undefined)
             resetGlobalSettings()
@@ -352,7 +352,7 @@ describe("workflow project configuration", () => {
                     missing: [],
                     existing: [],
                     incompatible: ["branches"],
-                    malformed: ["permissions", "web_search", "branches", "integrations"],
+                    malformed: ["permissions", "web_search", "branches", "tracker", "forge", "development"],
                 }
                 assert.deepEqual(
                     broken.map((error) => error.part),
@@ -557,7 +557,9 @@ describe("workflow project configuration", () => {
             assert.match(text, /default_mode = "deny"/)
             assert.match(text, /allow = \["read"\]/)
             clearSettingsCache()
-            const local = inspectPersistentPermissions(root, "host").sources.find((source) => source.local)!.settings
+            const local = inspectPersistentPermissions(root, "host").sources.find(
+                (source) => source.sharing === "local",
+            )!.settings
             assert.deepEqual(local.ask, ["write(existing.md)", ...rules])
 
             assert.deepEqual(
@@ -597,9 +599,12 @@ describe("workflow project configuration", () => {
                 clearSettingsCache()
             }
             raw('[branches]\nformat = "identifier-title"\nextra = true\n')
-            assert.throws(() => loadProjectConfig(root), /config\.toml: unknown field `extra`/)
+            assert.throws(() => loadProjectConfig(root), /config\.toml: \[branches\] unknown field `extra`/)
             raw('[branches]\nformat = "feature/identifier"\n')
-            assert.throws(() => loadProjectConfig(root), /config\.toml: unknown variant `feature\/identifier`/)
+            assert.throws(
+                () => loadProjectConfig(root),
+                /config\.toml: \[branches\] unknown variant `feature\/identifier`/,
+            )
             raw('[branches.format]\nepic = "identifier"\n')
             assert.throws(() => loadProjectConfig(root), /config\.toml/)
 

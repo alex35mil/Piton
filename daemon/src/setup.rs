@@ -505,7 +505,8 @@ impl std::fmt::Display for StepReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{DaemonFile, Paths, SettingsFile};
+    use crate::config::GlobalSettings;
+    use crate::settings::Paths;
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -529,7 +530,7 @@ mod tests {
             home: root.clone(),
             global: root.join(".config/piton"),
         };
-        let mut config = Config::from_files(DaemonFile::default(), SettingsFile::default(), paths);
+        let mut config = Config::from_settings(GlobalSettings::default(), paths);
         config.socket = root.join("state/piton.sock");
         let env = [(
             "PATH".to_string(),

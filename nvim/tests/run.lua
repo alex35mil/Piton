@@ -242,13 +242,11 @@ test("queue reads its tracker and credential through piton config get", function
     local queue = require("piton.queue")
     local calls = {}
     local responses = {
-        integrations = {
+        tracker = {
             code = 0,
             stdout = vim.json.encode({
-                tracker = {
-                    path = source .. "/.piton/config.toml",
-                    value = { provider = "other", mcp_server = "linear" },
-                },
+                path = source .. "/.piton/config.toml",
+                value = { provider = "other", mcp_server = "linear" },
             }),
         },
         mcp = {
@@ -268,14 +266,14 @@ test("queue reads its tracker and credential through piton config get", function
     end)
     equal("LINEAR_KEY", queue.credential(source, "linear"))
     fails("Unsupported tracker provider in " .. source .. "/.piton/config.toml", function() queue.load(source) end)
-    equal({ "mcp", "integrations", "mcp" }, calls)
+    equal({ "mcp", "tracker", "mcp" }, calls)
 
-    responses.integrations = { code = 0, stdout = vim.json.encode({ tracker = vim.NIL, forge = vim.NIL }) }
+    responses.tracker = { code = 0, stdout = "null" }
     fails("No tracker configured", function() queue.load(source) end)
     -- A broken file: the resolver's message, unchanged.
-    responses.integrations = {
+    responses.tracker = {
         code = 3,
-        stdout = vim.json.encode({ format = 2, error = { kind = "invalid", message = "invalid config.toml" } }),
+        stdout = vim.json.encode({ format = 3, error = { kind = "invalid", message = "invalid config.toml" } }),
     }
     fails("invalid config.toml", function() queue.load(source) end)
 end)

@@ -22,9 +22,10 @@ mod resolve;
 
 pub use chain::{LevelKind, global_tier, home};
 pub use files::{
-    ConfigDoc, DaemonFile, NetworkProfile, SandboxTable, SettingsFile, Sharing, expand_home, validate_config,
+    ClientTable, ConfigDoc, ConfigPair, HostTable, NetworkProfile, RunTable, SandboxTable, Sharing, expand_home,
+    validate_config,
 };
-pub use resolve::{DaemonSettings, Paths, Resolved, Runtime, Section, resolve, resolve_daemon, resolve_global};
+pub use resolve::{DaemonSettings, Paths, Resolved, Runtime, resolve, resolve_daemon, resolve_global};
 
 use std::path::PathBuf;
 
@@ -58,6 +59,4 @@ pub enum SettingsError {
     LocalOnly { path: PathBuf, key: String },
     #[error("{path}: `{key}` {reason}")]
     Conflict { path: PathBuf, key: String, reason: String },
-    #[error(transparent)]
-    Project(#[from] crate::project::ProjectError),
 }

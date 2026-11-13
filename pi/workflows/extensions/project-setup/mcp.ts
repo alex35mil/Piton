@@ -66,7 +66,7 @@ export async function configureProjectMcp(cwd: string, input: unknown) {
     const parsed = parse(ProjectMcpConfigurationValidator, input)
     const root = setupRoot(cwd)
     const resolved = resolveSettings(cwd)
-    const targetPath = projectMcpPath(resolved, parsed.target === "local")
+    const targetPath = projectMcpPath(resolved, parsed.target === "local" ? "local" : "shared")
     const target = readMcpSettings(targetPath)
     const names = new Set<string>()
     const additions: Array<{ registration: Registration; config: Record<string, unknown> }> = []

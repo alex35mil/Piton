@@ -183,7 +183,6 @@ pub fn create(request: &CreateRequest, mise: Option<&Mise>, paths: &crate::setti
     };
     let skip_list = crate::settings::resolve_daemon(&workspace, paths)
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?
-        .daemon
         .workers
         .skip;
 

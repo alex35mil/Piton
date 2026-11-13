@@ -533,10 +533,10 @@ describe("workflow integration configuration", () => {
         try {
             assert.throws(() => loadIntegrationConfig(cwd), /missing required \[tracker\] and \[forge\]/)
             writeProjectConfig(cwd, { forge: forgeConfig() })
-            assert.throws(() => loadIntegrationConfig(cwd), /missing required \[tracker\] in/)
+            assert.throws(() => loadIntegrationConfig(cwd), /missing required \[tracker\]:/)
             writeConfig(cwd, { forge: null })
             writeProjectConfig(cwd, { tracker: config() })
-            assert.throws(() => loadIntegrationConfig(cwd), /missing required \[forge\] in/)
+            assert.throws(() => loadIntegrationConfig(cwd), /missing required \[forge\]:/)
             writeProjectConfig(cwd, { forge: forgeConfig() })
             assert.deepEqual(loadIntegrationConfig(cwd), {
                 tracker: config(),
@@ -710,15 +710,15 @@ describe("workflow integration configuration", () => {
             const missingIssueCanceled = linearConfig()
             delete (missingIssueCanceled.statuses.issues as Partial<typeof statuses>).canceled
             write(missingIssueCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
 
             const missingProjectCanceled = linearConfig()
             delete (missingProjectCanceled.statuses.projects as Partial<typeof statuses>).canceled
             write(missingProjectCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
 
             write({ ...linearConfig(), repository: { owner: "x", repo: "y" } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -737,7 +737,7 @@ describe("workflow integration configuration", () => {
             const missingCanceled = config("project")
             delete (missingCanceled.fields.status.values as Partial<typeof statuses>).canceled
             writeConfig(missingCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
 
             const duplicateProjectField = config("project")
             duplicateProjectField.fields.priority.field = duplicateProjectField.fields.status.field
@@ -1182,9 +1182,9 @@ describe("workflow integration configuration", () => {
             })
             assert.throws(() => loadIntegrationConfig(cwd), /`kind` label group values must be exactly/)
             write({ ...valid, fields: { ...valid.fields, type: { scope: "project", field: "Kind" } } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
             write({ ...valid, fields: { labels: true } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -1239,10 +1239,10 @@ describe("workflow integration configuration", () => {
                 github({ groups: { gate: { ...gate, values: { ...gate.values, review: label("Gate: Review") } } } }),
                 /unknown gate "review"; known gates: "plan"/,
             )
-            rejects(github({ groups: { Area: area } }), /invalid \.piton\/config\.toml/)
-            rejects(github({ groups: { area: { ...area, appliesTo: [] } } }), /invalid \.piton\/config\.toml/)
-            rejects(github({ groups: { area: { ...area, values: {} } } }), /invalid \.piton\/config\.toml/)
-            rejects(github({ groups: { area: { ...area, cardinality: "some" } } }), /invalid \.piton\/config\.toml/)
+            rejects(github({ groups: { Area: area } }), /invalid .*\.piton\/config\.toml/)
+            rejects(github({ groups: { area: { ...area, appliesTo: [] } } }), /invalid .*\.piton\/config\.toml/)
+            rejects(github({ groups: { area: { ...area, values: {} } } }), /invalid .*\.piton\/config\.toml/)
+            rejects(github({ groups: { area: { ...area, cardinality: "some" } } }), /invalid .*\.piton\/config\.toml/)
             rejects(
                 github({
                     groups: { area, other: { ...area, values: { fe: label("area: frontend") } } },
@@ -1331,13 +1331,13 @@ describe("workflow integration configuration", () => {
                 ...config("project", false),
                 labels: { kind: { epic: "Kind: Epic", deliverableKinds: { feature: "Kind: Feature" } } },
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
             const linear = linearConfig()
             write({
                 ...linear,
                 phase: { ...linear.phase, issues: { scope: "workspace", group: "Phase", values: phaseValues } },
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/config\.toml/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

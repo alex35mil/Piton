@@ -1,7 +1,14 @@
 import { type Static, Type } from "typebox"
 
 import { compile } from "../../../extensions/__lib/schema.js"
-import { camelKeys, type DataKeys, resolveSettings, section, snakeKeys } from "../../../extensions/__lib/settings.js"
+import {
+    camelKeys,
+    type DataKeys,
+    repositoryConfigFile,
+    resolveSettings,
+    section,
+    snakeKeys,
+} from "../../../extensions/__lib/settings.js"
 import { PRIORITY_NOT_SET } from "../__lib/domain.js"
 import {
     assertGitHubLabels,
@@ -11,9 +18,6 @@ import {
     LinearPhaseGroupsSchema,
 } from "./labels.js"
 import { linearPriorityNumber } from "./records.js"
-
-/** Where integrations live: `[tracker]` and `[forge]` of the repository's configuration file. */
-export const INTEGRATION_CONFIG_PATH = ".piton/config.toml"
 
 const FieldNameSchema = Type.String({ minLength: 1 })
 
@@ -210,12 +214,17 @@ export function integrationsToFile(value: unknown): unknown {
 // Workflows need both a tracker and a GitHub forge: the nearest `[tracker]` and `[forge]` in piton's configuration
 // chain, each whole.
 export function loadIntegrationConfig(cwd: string): IntegrationConfig {
-    const { tracker, forge } = section(resolveSettings(cwd).integrations)
+    const settings = resolveSettings(cwd)
+    const tracker = section(settings.tracker)
+    const forge = section(settings.forge)
     if (!tracker || !forge) {
         const missing = [!tracker && "[tracker]", !forge && "[forge]"].filter(Boolean).join(" and ")
-        throw new Error(`missing required ${missing} in ${INTEGRATION_CONFIG_PATH}: configure a tracker and a forge`)
+        throw new Error(
+            `missing required ${missing}: configure a tracker and a forge in ${repositoryConfigFile("shared")} or a parent folder's`,
+        )
     }
-    return validateIntegrationConfig(integrationsFromFile({ tracker: tracker.value, forge: forge.value }))
+    const files = [...new Set([tracker.path, forge.path])].join(" and ")
+    return validateIntegrationConfig(integrationsFromFile({ tracker: tracker.value, forge: forge.value }), files)
 }
 
 export type IntegrationPresence = { kind: "configured" } | { kind: "absent" } | { kind: "unreadable"; error: string }
@@ -223,7 +232,9 @@ export type IntegrationPresence = { kind: "configured" } | { kind: "absent" } | 
 /** Whether any level of the chain configures integrations, or why that can't be told. */
 export function integrationPresence(cwd: string): IntegrationPresence {
     try {
-        const { tracker, forge } = section(resolveSettings(cwd).integrations)
+        const settings = resolveSettings(cwd)
+        const tracker = section(settings.tracker)
+        const forge = section(settings.forge)
         return tracker || forge ? { kind: "configured" } : { kind: "absent" }
     } catch (error) {
         return { kind: "unreadable", error: error instanceof Error ? error.message : String(error) }
@@ -249,13 +260,14 @@ function filePath(pointer: string): string {
     return named.length > 0 ? named.join(".") : "(top level)"
 }
 
-function validateIntegrationConfig(value: unknown): IntegrationConfig {
+/** Validates the merged `[tracker]` and `[forge]`; errors name `files`, where they came from. */
+function validateIntegrationConfig(value: unknown, files: string): IntegrationConfig {
     if (!IntegrationConfigValidator.check(value)) {
         // Errors name keys as the file has them: `tracker.fields.status.values.in_progress`.
         const details = IntegrationConfigValidator.errors(value)
             .map((error) => `${filePath(error.path)}: ${error.message}`)
             .join("; ")
-        throw new Error(`invalid ${INTEGRATION_CONFIG_PATH}: ${details}`)
+        throw new Error(`invalid ${files}: ${details}`)
     }
     try {
         if (value.tracker.provider === "github") assertGitHubTrackerInvariants(value.tracker)
@@ -266,7 +278,7 @@ function validateIntegrationConfig(value: unknown): IntegrationConfig {
         }
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`invalid ${INTEGRATION_CONFIG_PATH}: ${message}`)
+        throw new Error(`invalid ${files}: ${message}`)
     }
 
     return value

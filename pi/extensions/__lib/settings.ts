@@ -22,7 +22,7 @@ import { requireRuntime, type Runtime } from "./runtime.js"
 
 export const BIN_ENV = "PITON_BIN"
 /** The `piton config resolve` output version this client understands. */
-export const RESOLVE_FORMAT = 2
+export const RESOLVE_FORMAT = 3
 
 export type PermissionMode = "allow" | "ask" | "deny"
 export type LevelKind = "global" | "parent" | "repository"
@@ -50,14 +50,15 @@ export interface ResolvedMcp {
 }
 
 export type PermissionScope = "shared" | Runtime
+/** Which file of a level's pair: `config.toml` (shared) or `config.local.toml` (this machine's). */
+export type Sharing = "shared" | "local"
 
 /** One permission table that sets something: `[permissions]` (`shared`) or `[permissions.<runtime>]`. */
 export interface ResolvedPermissionSource {
     path: string
     level: LevelKind
     scope: PermissionScope
-    /** From `config.local.toml`. */
-    local: boolean
+    sharing: Sharing
     settings: ResolvedPermissions
 }
 
@@ -73,13 +74,16 @@ export function section<T>(part: Section<T>): T {
     return part.ok
 }
 
+/** The parts the pi package reads. */
 const PARTS = [
     "permissions",
     "mcp",
     "mcp_global",
     "web_search",
     "branches",
-    "integrations",
+    "tracker",
+    "forge",
+    "development",
     "policies",
     "instructions",
 ] as const satisfies readonly (keyof ResolvedSettings)[]
@@ -103,19 +107,6 @@ export interface FileValue<T> {
     value: T
 }
 
-/** The nearest `[tracker]` and `[forge]`, each whole, as the file has them (snake_case keys), unvalidated. */
-export interface ResolvedIntegrations {
-    tracker: FileValue<unknown> | null
-    forge: FileValue<unknown> | null
-}
-
-/** One level's configuration files, existing or not. */
-export interface LevelFiles {
-    level: LevelKind
-    shared: string
-    local: string
-}
-
 export interface ResolvedSettings {
     format: typeof RESOLVE_FORMAT
     workspace: string
@@ -135,7 +126,10 @@ export interface ResolvedSettings {
     mcp_global: Section<ResolvedMcp>
     web_search: Section<{ api_key?: string }>
     branches: Section<ResolvedBranches>
-    integrations: Section<ResolvedIntegrations>
+    /** The nearest `[tracker]`, whole, as the file has it (snake_case keys), unvalidated. */
+    tracker: Section<FileValue<unknown> | null>
+    /** The nearest `[forge]`, likewise. */
+    forge: Section<FileValue<unknown> | null>
     /** `[development]`, global tier only: switches for a development install. */
     development: Section<{ session_analysis?: boolean }>
     /** Every `policies.md`, farthest first. */
@@ -146,10 +140,6 @@ export interface ResolvedSettings {
         /** Skill folders piton adds to pi's own discovery, farthest first. */
         skills: string[]
     }>
-    /** Workflow artifacts: the source's `.piton/.local`. */
-    artifacts: string
-    /** Each level's `config.toml` and `config.local.toml`, farthest first. */
-    config_files: LevelFiles[]
     files: { path: string; level: LevelKind }[]
     watch: string[]
 }
@@ -202,19 +192,37 @@ export function clearSettingsCache(): void {
     cache.clear()
 }
 
-/** The folder piton's tools read in a repository or parent folder. */
+/** The folder piton's tools read in a repository or parent folder; a repository's also holds workflow artifacts. */
 export const PITON_DIR = ".piton"
-export const CONFIG_FILE = "config.toml"
-export const CONFIG_LOCAL_FILE = "config.local.toml"
 
-/** The repository's `config.toml`, or `config.local.toml` for this machine's values: where setup writes settings. */
-export function projectConfigPath(settings: ResolvedSettings, local: boolean): string {
-    return path.join(settings.source, PITON_DIR, local ? CONFIG_LOCAL_FILE : CONFIG_FILE)
+/** A level's configuration file of one sharing: `config.toml`, or `config.local.toml` for this machine's values. */
+export function configFileName(sharing: Sharing): string {
+    switch (sharing) {
+        case "shared":
+            return "config.toml"
+        case "local":
+            return "config.local.toml"
+    }
 }
 
-/** The repository's `mcp.json`, or `mcp.local.json`: MCP servers stay JSON, the format other harnesses read. */
-export function projectMcpPath(settings: ResolvedSettings, local: boolean): string {
-    return path.join(settings.source, PITON_DIR, local ? "mcp.local.json" : "mcp.json")
+/** A repository's configuration file, relative to its root, for messages and Git paths. */
+export function repositoryConfigFile(sharing: Sharing): string {
+    return `${PITON_DIR}/${configFileName(sharing)}`
+}
+
+/** The source checkout's configuration file: where setup writes settings. */
+export function projectConfigPath(settings: ResolvedSettings, sharing: Sharing): string {
+    return path.join(settings.source, repositoryConfigFile(sharing))
+}
+
+/** The source checkout's `mcp.json`, or `mcp.local.json`: MCP servers stay JSON, the format other harnesses read. */
+export function projectMcpPath(settings: ResolvedSettings, sharing: Sharing): string {
+    switch (sharing) {
+        case "shared":
+            return path.join(settings.source, PITON_DIR, "mcp.json")
+        case "local":
+            return path.join(settings.source, PITON_DIR, "mcp.local.json")
+    }
 }
 
 /**
@@ -226,10 +234,10 @@ export function projectMcpPath(settings: ResolvedSettings, local: boolean): stri
 export function plannedConfigEdit(
     cwd: string,
     changes: Record<string, unknown>,
-    local: boolean,
+    sharing: Sharing,
 ): { path: string; content: string | null } {
     const args = ["config", "set", JSON.stringify(changes), "--changes", "--dry-run", "--workspace", path.resolve(cwd)]
-    if (local) args.push("--local")
+    if (sharing === "local") args.push("--local")
     const output = runPiton(args, "piton config set") as { path?: unknown; content?: unknown }
     if (typeof output.path !== "string" || (typeof output.content !== "string" && output.content !== null)) {
         throw new Error("piton config set printed an unexpected result")

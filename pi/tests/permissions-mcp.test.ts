@@ -25,7 +25,7 @@ import { fixtureToolName } from "./mcp-catalog-fixture.ts"
 const noOverrides = new Map<string, Mode>()
 
 function source(settings: PermissionSettings, level: PermissionSource["level"] = "global"): PermissionSource {
-    return { level, scope: "shared", local: false, path: `/${level}/config.toml`, settings }
+    return { level, scope: "shared", sharing: "shared", path: `/${level}/config.toml`, settings }
 }
 
 function catalog(...tools: McpToolMetadata[]): McpToolCatalog {

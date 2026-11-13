@@ -1,10 +1,9 @@
 import { type Static, Type } from "typebox"
 import { compile } from "../../../extensions/__lib/schema.js"
+import { PITON_DIR } from "../../../extensions/__lib/settings.js"
 
-/** The folder piton's tools read in a repository; workflow configuration and artifacts live in it. */
-export const PROJECT_ROOT = ".piton"
 // Everything under the local root is machine-local and never committed.
-export const PROJECT_LOCAL_ROOT = `${PROJECT_ROOT}/.local`
+export const PROJECT_LOCAL_ROOT = `${PITON_DIR}/.local`
 export const EPIC_ROOT = `${PROJECT_LOCAL_ROOT}/epics`
 export const GIG_ROOT = `${PROJECT_LOCAL_ROOT}/gigs`
 

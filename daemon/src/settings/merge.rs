@@ -1,8 +1,8 @@
 //! How each part merges across levels, farthest first: `merge(base, nearer)`.
 
 use super::files::{
-    Branches, ClientPrefs, DaemonFile, DevelopmentTable, EnvTable, HostPrefs, Keybindings, NetworkTable, PiTable,
-    SandboxTable, SettingsFile, StopTable, TailnetTable, WebSearchTable, WorkersTable,
+    BranchesTable, ClientTable, DevelopmentTable, EnvTable, HostTable, Keybindings, NetworkTable, PiTable, RunTable,
+    SandboxTable, StopTable, TailnetTable, WebSearchTable, WorkersTable,
 };
 use super::resolve::PermissionSettings;
 
@@ -21,15 +21,13 @@ fn nearer<T>(base: &mut Option<T>, nearer: Option<T>) {
     }
 }
 
-pub fn daemon(base: &mut DaemonFile, n: DaemonFile) {
+pub fn run(base: &mut RunTable, n: RunTable) {
     nearer(&mut base.socket, n.socket);
     nearer(&mut base.log, n.log);
     pi(&mut base.pi, n.pi);
     env(&mut base.env, n.env);
     stop(&mut base.stop, n.stop);
     tailnet(&mut base.tailnet, n.tailnet);
-    sandbox(&mut base.sandbox, n.sandbox);
-    workers(&mut base.workers, n.workers);
 }
 
 fn pi(base: &mut PiTable, n: PiTable) {
@@ -79,17 +77,12 @@ fn network(base: &mut NetworkTable, n: NetworkTable) {
     nearer(&mut base.profile, n.profile);
 }
 
-fn workers(base: &mut WorkersTable, n: WorkersTable) {
+pub fn workers(base: &mut WorkersTable, n: WorkersTable) {
     union(&mut base.skip, n.skip);
 }
 
-/// `[host]` and `[client]`: the local file's value wins per key.
-pub fn settings(base: &mut SettingsFile, n: SettingsFile) {
-    host(&mut base.host, n.host);
-    client(&mut base.client, n.client);
-}
-
-fn host(base: &mut HostPrefs, n: HostPrefs) {
+/// `[host]`: the local file's value wins per key.
+pub fn host(base: &mut HostTable, n: HostTable) {
     nearer(&mut base.roots, n.roots);
     nearer(&mut base.favorites, n.favorites);
     nearer(&mut base.logging, n.logging);
@@ -97,7 +90,7 @@ fn host(base: &mut HostPrefs, n: HostPrefs) {
     nearer(&mut base.empty_grace_ms, n.empty_grace_ms);
 }
 
-fn client(base: &mut ClientPrefs, n: ClientPrefs) {
+pub fn client(base: &mut ClientTable, n: ClientTable) {
     nearer(&mut base.text_font, n.text_font);
     nearer(&mut base.code_font, n.code_font);
 }
@@ -125,7 +118,7 @@ pub fn web_search(base: &mut WebSearchTable, n: WebSearchTable) {
 }
 
 /// Per key: a level can set the format and leave the username to `config.local.toml`.
-pub fn branches(base: &mut Branches, n: Branches) {
+pub fn branches(base: &mut BranchesTable, n: BranchesTable) {
     nearer(&mut base.format, n.format);
     nearer(&mut base.username, n.username);
 }
@@ -181,8 +174,8 @@ mod tests {
 
     #[test]
     fn scalars_take_the_nearer_value() {
-        let mut base: DaemonFile = toml::from_str("[stop]\ngrace_ms = 1\nterm_grace_ms = 2\n").unwrap();
-        daemon(&mut base, toml::from_str("[stop]\ngrace_ms = 9\n").unwrap());
+        let mut base: RunTable = toml::from_str("[stop]\ngrace_ms = 1\nterm_grace_ms = 2\n").unwrap();
+        run(&mut base, toml::from_str("[stop]\ngrace_ms = 9\n").unwrap());
         assert_eq!((base.stop.grace_ms, base.stop.term_grace_ms), (Some(9), Some(2)));
     }
 }

@@ -44,8 +44,7 @@ local M = {}
 ---@param source string
 ---@return QueueItem[]
 function M.load(source)
-    local integrations = cli.config("integrations", source)
-    local found = type(integrations) == "table" and integrations.tracker or nil
+    local found = cli.config("tracker", source)
     if type(found) ~= "table" then
         util.refuse("No tracker configured: no [tracker] in " .. source .. "/.piton/config.toml or its parent folders")
     end

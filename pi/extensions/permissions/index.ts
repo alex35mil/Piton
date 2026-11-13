@@ -46,7 +46,14 @@ import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@ear
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
 import { requireRuntime, type Runtime } from "../__lib/runtime.js"
 import { PROTECTED_HINT, protectedKind } from "../__lib/protected.js"
-import { camelKeys, type LevelKind, resolveSettings, section } from "../__lib/settings.js"
+import {
+    camelKeys,
+    type LevelKind,
+    type PermissionScope,
+    resolveSettings,
+    section,
+    type Sharing,
+} from "../__lib/settings.js"
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
@@ -84,7 +91,7 @@ interface ResolvedPermissions {
     settings: PermissionSettings
     runtime: Runtime
     // Files that exist and were merged, in merge order.
-    files: { level: LevelKind; scope: PermissionScope; local: boolean; path: string }[]
+    files: { level: LevelKind; scope: PermissionScope; sharing: Sharing; path: string }[]
 }
 
 type SettingsResult = ResolvedPermissions | { error: Error }
@@ -362,14 +369,11 @@ export function deniedProtectedWrite(output: string, isProtected: (file: string)
     })
 }
 
-// A level's shared file applies everywhere; its runtime file applies only in that runtime.
-export type PermissionScope = "shared" | Runtime
-
-/** One permission file that exists, with its own contents. */
+/** One permission table that sets something, with its own rules: `[permissions]` applies everywhere, `[permissions.<runtime>]` only in that runtime. */
 export interface PermissionSource {
     level: LevelKind
     scope: PermissionScope
-    local: boolean
+    sharing: Sharing
     path: string
     settings: PermissionSettings
 }
@@ -380,7 +384,7 @@ export function inspectPersistentPermissions(cwd: string, runtime: Runtime = req
     const sources: PermissionSource[] = resolved.sources.map((source) => ({
         level: source.level,
         scope: source.scope,
-        local: source.local,
+        sharing: source.sharing,
         path: source.path,
         settings: validatePermissionSettings(camelKeys(source.settings) as PermissionSettings),
     }))
@@ -392,7 +396,7 @@ function loadSettings(cwd: string): ResolvedPermissions {
     return {
         runtime,
         settings,
-        files: sources.map(({ level, scope, local, path: file }) => ({ level, scope, local, path: file })),
+        files: sources.map(({ level, scope, sharing, path: file }) => ({ level, scope, sharing, path: file })),
     }
 }
 

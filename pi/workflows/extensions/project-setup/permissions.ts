@@ -5,12 +5,12 @@ import { Type } from "typebox"
 import { compile, parse } from "../../../extensions/__lib/schema.js"
 import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import {
-    CONFIG_LOCAL_FILE,
     clearSettingsCache,
-    PITON_DIR,
     plannedConfigEdit,
     projectConfigPath,
+    repositoryConfigFile,
     resolveSettings,
+    type Sharing,
 } from "../../../extensions/__lib/settings.js"
 import {
     inspectMcpAllowRules,
@@ -20,8 +20,6 @@ import {
 import { writeProtected } from "../../../extensions/__lib/protected.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
 import { setupRoot } from "./root.js"
-
-const LOCAL_CONFIG_FILE = `${PITON_DIR}/${CONFIG_LOCAL_FILE}`
 
 const SettingsTargetSchema = Type.Enum(["project", "local"], { type: "string" })
 const PermissionRuleSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
@@ -43,7 +41,7 @@ export function inspectProjectPermissions(cwd: string, input: unknown, catalog: 
     const parsed = parse(PermissionInspectionValidator, input)
     const { sources } = inspectPersistentPermissions(cwd)
     return {
-        scope: "Persistent global, project, and local settings, shared and current-runtime files; excludes session overrides and skill-derived allows.",
+        scope: "Persistent [permissions] and current-runtime [permissions.<runtime>] tables of every level's config.toml and config.local.toml; excludes session overrides and skill-derived allows.",
         rules: inspectMcpAllowRules(parsed.rules, sources, catalog),
     }
 }
@@ -57,8 +55,8 @@ export async function configureProjectPermissions(cwd: string, input: unknown, c
     const { sources } = inspectPersistentPermissions(cwd)
     // Setup writes only `[permissions]` of the source checkout's config.toml (or its .local); runtime tables are
     // maintained by hand.
-    const local = parsed.target === "local"
-    const settingsPath = projectConfigPath(resolved, local)
+    const sharing: Sharing = parsed.target === "local" ? "local" : "shared"
+    const settingsPath = projectConfigPath(resolved, sharing)
     // The target takes part in the inspection below, so rules added earlier in this request cover later ones. A table
     // that doesn't exist yet joins the sources as the nearest one.
     let target = sources.find((source) => source.path === settingsPath && source.scope === "shared")
@@ -66,7 +64,7 @@ export async function configureProjectPermissions(cwd: string, input: unknown, c
         target = {
             level: "repository",
             scope: "shared",
-            local: parsed.target === "local",
+            sharing,
             path: settingsPath,
             settings: {},
         }
@@ -91,13 +89,14 @@ export async function configureProjectPermissions(cwd: string, input: unknown, c
         ...(added.allow.length > 0 ? { allow: [...(existing.allow ?? []), ...added.allow] } : {}),
         ...(added.ask.length > 0 ? { ask: [...(existing.ask ?? []), ...added.ask] } : {}),
     })
-    const exclusion = changed && local ? ensureLocalSettingsExclusion(root, LOCAL_CONFIG_FILE) : undefined
+    const exclusion =
+        changed && sharing === "local" ? ensureLocalSettingsExclusion(root, repositoryConfigFile("local")) : undefined
     if (changed) {
         // Only the changed lists, so the rest of the file keeps its comments and layout.
         const edit = plannedConfigEdit(
             cwd,
             Object.fromEntries(Object.entries(lists).map(([list, rules]) => [`permissions.${list}`, rules])),
-            local,
+            sharing,
         )
         // A protected file: under the daemon, the user sees the diff and approves it.
         if (edit.content !== null) await writeProtected(edit.path, edit.content)

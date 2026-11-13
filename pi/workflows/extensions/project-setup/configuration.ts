@@ -5,10 +5,10 @@ import { Type } from "typebox"
 import { writeProtected } from "../../../extensions/__lib/protected.js"
 import { compile, parse } from "../../../extensions/__lib/schema.js"
 import {
-    CONFIG_LOCAL_FILE,
     clearSettingsCache,
-    PITON_DIR,
     plannedConfigEdit,
+    repositoryConfigFile,
+    type Sharing,
 } from "../../../extensions/__lib/settings.js"
 import { BranchFormatSchema } from "../__lib/domain.js"
 import { GitHubForgeSchema, integrationsToFile, TrackerConfigSchema } from "../integrations/config.js"
@@ -54,16 +54,18 @@ export async function configureProject(cwd: string, input: unknown) {
     const local: Record<string, unknown> = parsed.username === undefined ? {} : { "branches.username": parsed.username }
     if (Object.keys(shared).length + Object.keys(local).length === 0) throw new Error("nothing to configure")
 
-    const planned = [
-        ...(Object.keys(shared).length > 0 ? [plannedConfigEdit(cwd, shared, false)] : []),
-        ...(Object.keys(local).length > 0 ? [plannedConfigEdit(cwd, local, true)] : []),
-    ]
+    const planned = (
+        [
+            ["shared", shared],
+            ["local", local],
+        ] as [Sharing, Record<string, unknown>][]
+    )
+        .filter(([, changes]) => Object.keys(changes).length > 0)
+        .map(([sharing, changes]) => ({ sharing, ...plannedConfigEdit(cwd, changes, sharing) }))
     const written: string[] = []
     for (const edit of planned) {
         if (edit.content === null) continue
-        if (path.basename(edit.path) === CONFIG_LOCAL_FILE) {
-            ensureLocalSettingsExclusion(root, `${PITON_DIR}/${CONFIG_LOCAL_FILE}`)
-        }
+        if (edit.sharing === "local") ensureLocalSettingsExclusion(root, repositoryConfigFile("local"))
         await writeProtected(edit.path, edit.content)
         written.push(path.relative(root, edit.path))
     }

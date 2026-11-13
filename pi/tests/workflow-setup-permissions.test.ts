@@ -293,7 +293,9 @@ describe("project setup permissions", () => {
             assert.deepEqual(snapshot.settings.allow, [hint, writeRule])
             assert.deepEqual(snapshot.settings.deny, [writeRule])
             assert.deepEqual(
-                snapshot.sources.map((source) => `${source.level}:${source.local ? "local" : source.scope}`),
+                snapshot.sources.map(
+                    (source) => `${source.level}:${source.sharing === "local" ? "local" : source.scope}`,
+                ),
                 ["global:shared", "repository:shared", "repository:local"],
             )
         } finally {

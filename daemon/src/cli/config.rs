@@ -10,9 +10,9 @@ use super::ConfigAction;
 use crate::settings::{Paths, Resolved, Runtime, SettingsError};
 
 /// Version of `piton config resolve --json`. Clients refuse a version they don't know.
-pub const RESOLVE_FORMAT: u32 = 2;
+pub const RESOLVE_FORMAT: u32 = 3;
 
-/// Exit code for invalid or old-layout configuration, so callers can tell it from a failure to run.
+/// Exit code for invalid configuration, so callers can tell it from a failure to run.
 const EXIT_INVALID: u8 = 3;
 
 #[derive(Serialize)]
@@ -202,7 +202,6 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
     let workspace =
         crate::launch::resolve_workspace(&path).map_err(|e| ErrorBody::Workspace { message: e.to_string() })?;
     crate::settings::resolve(&workspace, &Paths::current(), runtime).map_err(|e| match e {
-        SettingsError::Project(e) => ErrorBody::Workspace { message: e.to_string() },
         SettingsError::Read { .. }
         | SettingsError::Invalid { .. }
         | SettingsError::GlobalOnly { .. }
@@ -212,24 +211,20 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
 }
 
 /// One resolved part, for tools that need only that (the Neovim plugin's tracker queue): its value, or why its files
-/// can't be used. `None` for an unknown name.
+/// can't be used. `None` for a name that isn't a part (each part serializes as `{ok}` or `{error: {message}}`).
 fn get(resolved: &Resolved, part: &str) -> Option<Result<serde_json::Value, String>> {
-    fn value<T: Serialize>(section: &crate::settings::Section<T>) -> Result<serde_json::Value, String> {
-        match section {
-            Ok(value) => serde_json::to_value(value).map_err(|e| e.to_string()),
-            Err(error) => Err(error.to_string()),
-        }
-    }
-    Some(match part {
-        "integrations" => value(&resolved.integrations),
-        "branches" => value(&resolved.branches),
-        "permissions" => value(&resolved.permissions),
-        "mcp" => value(&resolved.mcp),
-        "web_search" => value(&resolved.web_search),
-        "daemon" => value(&resolved.daemon),
-        "settings" => value(&resolved.settings),
-        "development" => value(&resolved.development),
-        _ => return None,
+    let mut json = serde_json::to_value(resolved).ok()?;
+    let serde_json::Value::Object(mut section) = json.get_mut(part)?.take() else {
+        return None;
+    };
+    Some(match (section.remove("ok"), section.remove("error")) {
+        (Some(value), None) => Ok(value),
+        (None, Some(error)) => Err(error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()),
+        (Some(_), Some(_)) | (None, None) => return None,
     })
 }
 
@@ -275,13 +270,10 @@ fn set(request: &SetRequest) -> ExitCode {
             Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
         }
     };
-    let (sharing, placement) = if request.local {
-        (crate::settings::Sharing::Local, crate::settings::edit::Placement::Local)
+    let sharing = if request.local {
+        crate::settings::Sharing::Local
     } else {
-        (
-            crate::settings::Sharing::Shared,
-            crate::settings::edit::Placement::Shared,
-        )
+        crate::settings::Sharing::Shared
     };
     let file = dir.join(sharing.file_name());
     // Each change: a dotted key, and its JSON value (`None`: remove it).
@@ -336,7 +328,7 @@ fn set(request: &SetRequest) -> ExitCode {
             value: item.as_ref(),
         })
         .collect();
-    let validate = |text: &str, path: &Path| crate::preferences::validate_text(text, path, level, placement);
+    let validate = |text: &str, path: &Path| crate::preferences::validate_text(text, path, level, sharing);
     if request.dry_run {
         let current = match std::fs::read_to_string(&file) {
             Ok(text) => Some(text),
@@ -411,7 +403,10 @@ mod tests {
         assert_eq!(json["runtime"], "sandbox");
         // Each part is `{ok}` or `{error: {message}}`.
         assert_eq!(json["permissions"]["ok"]["merged"]["allow"][0], "read");
-        assert!(json["integrations"]["ok"]["tracker"].is_null());
+        assert!(json["tracker"]["ok"].is_null());
+        assert_eq!(get(&resolved, "tracker").unwrap().unwrap(), serde_json::Value::Null);
+        assert!(get(&resolved, "branches").unwrap().is_err());
+        assert!(get(&resolved, "watch").is_none());
         assert!(
             json["branches"]["error"]["message"]
                 .as_str()
@@ -419,7 +414,6 @@ mod tests {
                 .contains("config.toml")
         );
         assert!(json["branches"].get("ok").is_none());
-        assert_eq!(json["artifacts"], repo.join(".piton/.local").to_string_lossy().as_ref());
         assert!(json["watch"].as_array().unwrap().len() > 5);
 
         let error = serde_json::to_value(ErrorOutput {
