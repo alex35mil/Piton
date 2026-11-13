@@ -1472,8 +1472,8 @@ mod tests {
                         default: crate::diagnostics::Mode::Info,
                     },
                     settings: {
-                        use crate::preferences::{AppliesInfo, KindInfo, SettingInfo, ValueType};
-                        use crate::settings::Sharing;
+                        use crate::app_settings::{AppliesInfo, KindInfo, SettingInfo, ValueType};
+                        use crate::config::Sharing;
                         vec![
                             SettingInfo {
                                 key: "keep_awake",

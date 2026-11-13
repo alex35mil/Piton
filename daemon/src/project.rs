@@ -1,6 +1,6 @@
 //! A workspace's relation to its project: whether it's a source checkout or a worker cloned from one.
 //!
-//! Everything that decides the sandbox and what agents may do is read from the **source** checkout (settings/), never
+//! Everything that decides the sandbox and what agents may do is read from the **source** checkout (config/), never
 //! from a worker, so an agent can't widen its own sandbox by editing files in its clone. The relation itself comes from
 //! the worker's local git config (`agent.source`), which lives in `.git/` and is checked against the folder layout
 //! (`<parent>/<repo>--<name>` next to `<parent>/<repo>`).
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The only path a worker shares with its source, as a symlink (the pi package's workflow artifacts).
-pub const SHARED_PATH: &str = crate::settings::LOCAL_DIR;
+pub const SHARED_PATH: &str = crate::config::LOCAL_DIR;
 /// Separator between a source's folder name and a worker's name.
 pub const WORKER_SEPARATOR: &str = "--";
 

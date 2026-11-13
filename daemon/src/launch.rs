@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
 
-use crate::config::Config;
+use crate::config::DaemonConfig;
+use crate::config::{ConfigError, LaunchConfig};
 use crate::project::{self, ProjectError, Workspace};
-use crate::settings::{DaemonSettings, SettingsError};
 use crate::wire::LaunchMode;
 
 pub type Env = BTreeMap<String, String>;
@@ -25,7 +25,7 @@ pub enum LaunchError {
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
-    Settings(#[from] SettingsError),
+    Config(#[from] ConfigError),
     #[error(transparent)]
     Sandbox(#[from] crate::sandbox::SandboxError),
 }
@@ -94,7 +94,7 @@ fn parse_env0(bytes: &[u8]) -> Env {
 /// decides, set last so a repository's `mise.toml` can't override it: the runtime (which permissions apply), the
 /// global tier, and this binary (the pi package resolves configuration through it).
 pub async fn workspace_env(
-    config: &Config,
+    config: &DaemonConfig,
     base: &Env,
     workspace: &Path,
     mode: LaunchMode,
@@ -121,11 +121,11 @@ pub async fn workspace_env(
 
 /// The launch's configuration: `[sandbox]` and `[workers]` of the workspace's chain, refusing them when they're invalid.
 /// The pi package checks its own parts when pi starts.
-pub fn resolve_settings(config: &Config, workspace: &Workspace) -> Result<DaemonSettings, LaunchError> {
-    Ok(crate::settings::resolve_daemon(workspace, &config.paths)?)
+pub fn resolve_config(config: &DaemonConfig, workspace: &Workspace) -> Result<LaunchConfig, LaunchError> {
+    Ok(crate::config::resolve_launch(workspace, &config.paths)?)
 }
 
-async fn mise_env(config: &Config, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
+async fn mise_env(config: &DaemonConfig, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
     let mut env = base.clone();
     if config.env.mise {
         let out = Command::new(resolve_program("mise", base))
@@ -156,7 +156,12 @@ async fn mise_env(config: &Config, base: &Env, workspace: &Path) -> Result<Env, 
 
 /// The full argument vector for pi in `mode`. `profile` is the generated sandbox profile (see [`write_profile`]),
 /// required for sandboxed launches.
-pub fn command_line(config: &Config, mode: LaunchMode, session: &SessionArg, profile: Option<&Path>) -> Vec<String> {
+pub fn command_line(
+    config: &DaemonConfig,
+    mode: LaunchMode,
+    session: &SessionArg,
+    profile: Option<&Path>,
+) -> Vec<String> {
     let mut pi: Vec<String> = config.pi.command.clone();
     pi.extend(["--mode".into(), "rpc".into()]);
     pi.extend(config.pi.args.iter().cloned());
@@ -185,8 +190,8 @@ pub fn command_line(config: &Config, mode: LaunchMode, session: &SessionArg, pro
 /// it applies the sandbox.
 /// `base` is the daemon's base environment (the login shell's): `$VAR` grants are expanded from it.
 pub fn write_profile(
-    config: &Config,
-    resolved: &DaemonSettings,
+    config: &DaemonConfig,
+    resolved: &LaunchConfig,
     base: &Env,
     key: u64,
 ) -> Result<ProfileFile, LaunchError> {
@@ -205,7 +210,7 @@ pub fn write_profile(
 }
 
 /// Where generated profiles are written: next to the daemon's socket (its state folder), outside every sandbox.
-fn profiles_dir(config: &Config) -> PathBuf {
+fn profiles_dir(config: &DaemonConfig) -> PathBuf {
     config.state_dir().join("profiles")
 }
 
@@ -242,7 +247,7 @@ mod tests {
 
     #[test]
     fn sandbox_wraps_pi_in_nono() {
-        let config = Config::default();
+        let config = DaemonConfig::for_tests();
         let argv = command_line(
             &config,
             LaunchMode::Sandbox,
@@ -271,7 +276,7 @@ mod tests {
     /// piton's own variables are set after mise's, so a repository's `mise.toml` can't change them.
     #[tokio::test]
     async fn piton_variables_win_over_the_workspace_environment() {
-        let mut config = Config::default();
+        let mut config = DaemonConfig::for_tests();
         config.env.mise = false;
         config.paths.global = PathBuf::from("/global/piton");
         let base: Env = [
@@ -294,7 +299,7 @@ mod tests {
 
     #[test]
     fn host_runs_pi_directly() {
-        let config = Config::default();
+        let config = DaemonConfig::for_tests();
         let argv = command_line(&config, LaunchMode::Host, &SessionArg::New, None);
         assert_eq!(argv, ["pi", "--mode", "rpc"]);
     }

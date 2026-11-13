@@ -1,15 +1,25 @@
-//! The daemon's own configuration, from the global tier's `config.toml` (`$XDG_CONFIG_HOME/piton/`, or `--config-home`
-//! / `PITON_CONFIG_HOME`): the run keys say how the daemon runs, `[sandbox] command` which backend it launches, and
-//! `[host]` holds the preferences the apps change. Reading and merging is settings/'s; this turns the result into values
-//! with defaults.
+//! The global tier's tables as one value, and the daemon's options: those tables with the daemon's defaults applied.
 
 use std::path::{Path, PathBuf};
 
-use crate::settings::{HostTable, Paths, Resolved, RunTable, SandboxTable, SettingsError, expand_home as expand_with};
+use super::paths::{Paths, expand_home};
+use super::tables::{ClientTable, HostTable, RunTable, SandboxTable, WorkersTable};
 use crate::wire::LaunchMode;
 
+/// The global tier's tables the daemon and the apps read, merged (`config.local.toml` over `config.toml`), as written:
+/// absent keys stay absent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GlobalConfig {
+    pub run: RunTable,
+    pub sandbox: SandboxTable,
+    pub workers: WorkersTable,
+    pub host: HostTable,
+    pub client: ClientTable,
+}
+
+/// How the daemon runs: the global tables with defaults applied.
 #[derive(Debug, Clone)]
-pub struct Config {
+pub struct DaemonConfig {
     /// Unix socket of the daemon. An override for tests and development: the Mac app always connects to the default
     /// (`Endpoint.defaultLocal` in PitonKit), so a daemon on another socket runs without it.
     pub socket: PathBuf,
@@ -29,7 +39,7 @@ pub struct Config {
     /// start sessions until the owner lists some. `piton attach` and the CLI aren't limited. A leading `~/` is
     /// expanded.
     pub roots: Vec<String>,
-    /// Where the settings chains are: home and the global tier.
+    /// Where configuration lives: home and the global tier.
     pub paths: Paths,
 }
 
@@ -82,47 +92,19 @@ pub struct StopConfig {
     pub term_grace_ms: u64,
 }
 
-/// The global parts the daemon runs with: its run keys, `[sandbox]` (for its `command`), and `[host]`.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct GlobalSettings {
-    pub run: RunTable,
-    pub sandbox: SandboxTable,
-    pub host: HostTable,
-}
-
-impl GlobalSettings {
-    /// From the global tier's resolution: every part, or the first that can't be used.
-    pub fn from_resolved(resolved: Resolved) -> Result<Self, SettingsError> {
-        Ok(Self {
-            run: resolved.run?,
-            sandbox: resolved.sandbox?,
-            host: resolved.host?,
-        })
-    }
-
-    /// Each part that resolves; defaults for the rest.
-    fn lenient(resolved: Resolved) -> Self {
-        Self {
-            run: resolved.run.unwrap_or_default(),
-            sandbox: resolved.sandbox.unwrap_or_default(),
-            host: resolved.host.unwrap_or_default(),
-        }
-    }
-}
-
-impl Config {
-    /// The defaults, overridden by the global tier's merged parts.
-    pub fn from_settings(settings: GlobalSettings, paths: Paths) -> Self {
+impl DaemonConfig {
+    /// The defaults, overridden by the global tables.
+    pub fn new(global: &GlobalConfig, paths: Paths) -> Self {
         let home = paths.home.clone();
-        let GlobalSettings { run, sandbox, host } = settings;
+        let GlobalConfig { run, sandbox, host, .. } = global.clone();
         Self {
             socket: run
                 .socket
-                .map(|s| expand_with(&s, &home))
+                .map(|s| expand_home(&s, &home))
                 .unwrap_or_else(|| home.join(".local/state/piton/piton.sock")),
             log: Some(
                 run.log
-                    .map(|l| expand_with(&l, &home))
+                    .map(|l| expand_home(&l, &home))
                     .unwrap_or_else(|| crate::diagnostics::root().join("daemon/current.log")),
             ),
             attach_mode: host.attach_mode.unwrap_or(LaunchMode::Sandbox),
@@ -156,49 +138,22 @@ impl Config {
             paths,
         }
     }
-}
 
-impl Default for Config {
-    fn default() -> Self {
-        let paths = Paths {
-            home: home(),
-            global: home().join(".config/piton"),
-        };
-        Self::from_settings(GlobalSettings::default(), paths)
+    /// Only defaults: no global file sets anything.
+    pub fn defaults(paths: Paths) -> Self {
+        Self::new(&GlobalConfig::default(), paths)
     }
-}
 
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    #[error(transparent)]
-    Settings(#[from] SettingsError),
-}
-
-/// Loads the global tier: `config_home` when given, else the one [`Paths::current`] finds.
-pub fn load(config_home: Option<&Path>) -> Result<Config, ConfigError> {
-    let mut paths = Paths::current();
-    if let Some(dir) = config_home {
-        paths.global = dir.to_path_buf();
+    /// Only defaults, for this user's home and its default global tier.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        let home = super::paths::home();
+        Self::defaults(Paths {
+            global: home.join(".config/piton"),
+            home,
+        })
     }
-    let resolved = crate::settings::resolve_global(&paths)?;
-    Ok(Config::from_settings(GlobalSettings::from_resolved(resolved)?, paths))
-}
 
-/// The global tier as far as it can be read: each part that resolves, defaults for the rest. For `piton setup`, whose
-/// job is to report a broken configuration rather than refuse to start over it.
-pub fn load_lenient(config_home: Option<&Path>) -> Config {
-    let mut paths = Paths::current();
-    if let Some(dir) = config_home {
-        paths.global = dir.to_path_buf();
-    }
-    let settings = match crate::settings::resolve_global(&paths) {
-        Ok(resolved) => GlobalSettings::lenient(resolved),
-        Err(_) => GlobalSettings::default(),
-    };
-    Config::from_settings(settings, paths)
-}
-
-impl Config {
     /// The daemon's state folder: next to its socket, outside every sandbox.
     pub fn state_dir(&self) -> PathBuf {
         self.socket
@@ -215,44 +170,5 @@ impl Config {
     /// The socket sandboxed pis reach the daemon on (see agent.rs).
     pub fn agent_socket(&self) -> PathBuf {
         self.state_dir().join(crate::agent::FILE)
-    }
-}
-
-/// The user's home folder, from the user database (see settings::home).
-pub fn home() -> PathBuf {
-    crate::settings::home()
-}
-
-pub fn expand_home(path: &str) -> PathBuf {
-    expand_with(path, &home())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn global_files_override_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let global = dir.path().join("piton");
-        std::fs::create_dir_all(&global).unwrap();
-        std::fs::write(
-            global.join("config.toml"),
-            "socket = \"/tmp/s.sock\"\n[stop]\ngrace_ms = 5\n[sandbox]\ncommand = [\"/bin/nono\"]\n[host]\nroots = [\"~/p\"]\nattach_mode = \"host\"\nlogging = \"debug\"\n",
-        )
-        .unwrap();
-        std::fs::write(global.join("config.local.toml"), "[stop]\nterm_grace_ms = 7\n").unwrap();
-        let mut paths = Paths::current();
-        paths.global = global;
-        let resolved = crate::settings::resolve_global(&paths).unwrap();
-        let config = Config::from_settings(GlobalSettings::from_resolved(resolved).unwrap(), paths);
-        assert_eq!(config.socket, PathBuf::from("/tmp/s.sock"));
-        assert_eq!((config.stop.grace_ms, config.stop.term_grace_ms), (5, 7));
-        assert_eq!(config.sandbox.command, ["/bin/nono"]);
-        assert_eq!(config.roots, ["~/p"]);
-        assert_eq!(config.attach_mode, LaunchMode::Host);
-        assert_eq!(config.logging.mode, crate::diagnostics::Mode::Debug);
-        assert_eq!(config.pi.command, ["pi"]);
-        assert_eq!(config.empty_grace_ms, 10_000);
     }
 }

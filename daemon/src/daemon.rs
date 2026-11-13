@@ -12,7 +12,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, mpsc};
 
-use crate::config::Config;
+use crate::config::DaemonConfig;
 use crate::launch::{self, Env, LaunchError, SessionArg};
 use crate::project::{Relation, Workspace};
 use crate::session::{
@@ -26,9 +26,9 @@ use crate::wire::{
 pub struct Daemon {
     /// The configuration in effect: replaced when the global files change. Each launch, session, and request takes
     /// the current one; keys that need a restart are read once at start from `started`.
-    config: std::sync::RwLock<Arc<Config>>,
+    config: std::sync::RwLock<Arc<DaemonConfig>>,
     /// The global files as the apps see them: values, where each is set, and keys waiting for a restart.
-    preferences: Mutex<crate::preferences::Snapshot>,
+    app_settings: Mutex<crate::app_settings::Snapshot>,
     base_env: Env,
     /// mise for worker trust; `None` when the config turns mise off.
     mise: Option<crate::worker::Mise>,
@@ -60,7 +60,7 @@ pub enum DaemonError {
     State(#[from] crate::state::StateError),
 }
 
-pub async fn run(config: Config) -> Result<(), DaemonError> {
+pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     let socket = config.socket.clone();
     crate::diagnostics::set(crate::diagnostics::State {
         policy: config.logging.mode.policy(),
@@ -141,10 +141,10 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
         program: launch::resolve_program("mise", &base_env),
         env: base_env.clone(),
     });
-    let preferences = crate::preferences::Snapshot::new(&config);
+    let app_settings = crate::app_settings::Snapshot::new(&config);
     let daemon = Arc::new(Daemon {
         config: std::sync::RwLock::new(Arc::new(config)),
-        preferences: Mutex::new(preferences),
+        app_settings: Mutex::new(app_settings),
         base_env,
         mise,
         sessions: Mutex::new(BTreeMap::new()),
@@ -279,7 +279,7 @@ impl Daemon {
     pub fn state(&self) -> crate::wire::DaemonState {
         let sessions = self.session_count();
         let keep_awake = self.keep_awake();
-        let preferences = lock(&self.preferences);
+        let app_settings = lock(&self.app_settings);
         crate::wire::DaemonState {
             version: crate::VERSION.to_string(),
             host_id: self.host_id.clone(),
@@ -287,8 +287,8 @@ impl Daemon {
             awake: keep_awake && sessions > 0,
             sessions,
             logging: crate::diagnostics::current(),
-            settings: preferences.info(keep_awake),
-            settings_error: preferences.error.clone(),
+            settings: app_settings.info(keep_awake),
+            settings_error: app_settings.error.clone(),
         }
     }
 
@@ -306,7 +306,7 @@ impl Daemon {
     }
 
     /// The configuration in effect now.
-    pub fn config(&self) -> Arc<Config> {
+    pub fn config(&self) -> Arc<DaemonConfig> {
         self.config
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -316,17 +316,17 @@ impl Daemon {
     /// Rereads the global files after a change (from the apps or by hand). A valid result replaces the configuration
     /// (the socket stays the running one) and is pushed to the apps; an invalid one keeps the last good values and
     /// tells the apps why.
-    pub fn reload_preferences(&self) {
-        let mut snapshot = lock(&self.preferences);
+    pub fn reload_config(&self) {
+        let mut snapshot = lock(&self.app_settings);
         self.reload_locked(&mut snapshot);
     }
 
-    /// Rereads with the preferences lock held, so a write and the reload after it never interleave with another
+    /// Rereads with the app settings lock held, so a write and the reload after it never interleave with another
     /// writer or the watcher, and an older read never replaces a newer configuration.
-    fn reload_locked(&self, snapshot: &mut crate::preferences::Snapshot) {
+    fn reload_locked(&self, snapshot: &mut crate::app_settings::Snapshot) {
         let current = self.config();
         match snapshot.reload(current.paths.clone()) {
-            crate::preferences::Read::Good(new) => {
+            crate::app_settings::Read::Good(new) => {
                 let mut new = *new;
                 // What needs a restart keeps the values the daemon started with; the apps see them as pending.
                 new.socket = current.socket.clone();
@@ -343,7 +343,7 @@ impl Daemon {
                 }
                 crate::log!("settings: reloaded the global files");
             }
-            crate::preferences::Read::Kept => {
+            crate::app_settings::Read::Kept => {
                 crate::log!("settings: the global files can't be used; keeping the last good values");
             }
         }
@@ -351,14 +351,14 @@ impl Daemon {
     }
 
     /// Applies a change from the apps: state to the database, configuration to its global file.
-    pub fn set_preference(&self, change: crate::preferences::Change) -> Result<(), crate::preferences::SetError> {
+    pub fn set_app_setting(&self, change: crate::app_settings::Change) -> Result<(), crate::app_settings::SetError> {
         match change {
-            crate::preferences::Change::State(crate::state::Setting::KeepAwake, value) => {
+            crate::app_settings::Change::State(crate::state::Setting::KeepAwake, value) => {
                 self.set_keep_awake(value.unwrap_or(true))?;
             }
-            crate::preferences::Change::Config { key, value, target } => {
-                let mut snapshot = lock(&self.preferences);
-                crate::preferences::write(&self.config().paths, key, value, target)?;
+            crate::app_settings::Change::Config { key, value, target } => {
+                let mut snapshot = lock(&self.app_settings);
+                crate::app_settings::write(&self.config().paths, key, value, target)?;
                 crate::log!("settings: {key} changed from the apps");
                 self.reload_locked(&mut snapshot);
             }
@@ -393,7 +393,7 @@ impl Daemon {
         mode: LaunchMode,
         session: SessionArg,
         mut env: Env,
-        settings: crate::settings::DaemonSettings,
+        settings: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
         // How this pi reaches the daemon for protected writes; set after the workspace's environment, so a
@@ -476,7 +476,7 @@ impl Daemon {
         let workspace = launch::resolve_workspace(workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let config = self.config();
         let settings =
-            launch::resolve_settings(&config, &workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
+            launch::resolve_config(&config, &workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let env = launch::workspace_env(&config, &self.base_env, &workspace.path, mode)
             .await
             .inspect_err(|e| crate::log!("launch refused: {e}"))?;

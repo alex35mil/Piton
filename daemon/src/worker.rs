@@ -39,8 +39,9 @@ impl Mise {
     fn trusts(&self, dir: &Path) -> std::result::Result<bool, String> {
         let out = self.run(&["trust".as_ref(), "--show".as_ref(), "-C".as_ref(), dir.as_os_str()])?;
         Ok(out.lines().any(|line| {
-            line.rsplit_once(": ")
-                .is_some_and(|(path, status)| status == "trusted" && crate::config::expand_home(path) == dir)
+            line.rsplit_once(": ").is_some_and(|(path, status)| {
+                status == "trusted" && crate::config::expand_home(path, &crate::config::home()) == dir
+            })
         }))
     }
 
@@ -157,7 +158,7 @@ pub fn normalize_name(name: &str) -> String {
 /// Creates the worker. With `mise`, a worker of a mise-trusted source is trusted too: its config files are the
 /// source's, cloned, so cloning never grants trust the user hasn't given. `paths` locates the configuration chain the
 /// skip list comes from.
-pub fn create(request: &CreateRequest, mise: Option<&Mise>, paths: &crate::settings::Paths) -> Result<WorkerInfo> {
+pub fn create(request: &CreateRequest, mise: Option<&Mise>, paths: &crate::config::Paths) -> Result<WorkerInfo> {
     let source = source_of(&request.from)?;
     let normalized = normalize_name(&request.name);
     if normalized.is_empty() {
@@ -181,7 +182,7 @@ pub fn create(request: &CreateRequest, mise: Option<&Mise>, paths: &crate::setti
         checkout: source.clone(),
         relation: Relation::Source,
     };
-    let skip_list = crate::settings::resolve_daemon(&workspace, paths)
+    let skip_list = crate::config::resolve_launch(&workspace, paths)
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?
         .workers
         .skip;
@@ -506,8 +507,8 @@ mod tests {
         );
     }
 
-    fn paths(root: &Path) -> crate::settings::Paths {
-        crate::settings::Paths {
+    fn paths(root: &Path) -> crate::config::Paths {
+        crate::config::Paths {
             home: root.to_path_buf(),
             global: root.join(".config/piton"),
         }

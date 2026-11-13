@@ -6,13 +6,13 @@ use std::process::ExitCode;
 
 use super::WorkerAction;
 use super::control::{control, report};
-use crate::config::Config;
+use crate::config::DaemonConfig;
 use crate::wire::{ControlRequest, ControlResponse};
 
 /// Exit code for a refused worker operation, so callers can tell it from a failure.
 const EXIT_REFUSED: u8 = 4;
 
-pub async fn run(config: &Config, action: WorkerAction, json: bool) -> ExitCode {
+pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> ExitCode {
     let here = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let request = match action {
         WorkerAction::Create {

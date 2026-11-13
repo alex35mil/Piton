@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::resolve::FileOrigin;
+use crate::config::read::parse::FileOrigin;
 
 /// Keys whose value is a secret, compared without case, `_`, and `-` (`api_key`, `apiKey`, `Authorization`).
 const SECRET_KEYS: [&str; 6] = ["apikey", "token", "password", "secret", "authorization", "accesstoken"];
@@ -131,7 +131,7 @@ fn tracked_by_git(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::LevelKind;
+    use crate::config::model::level::LevelKind;
 
     fn git(dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git")

@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use serde::Serialize;
 
 use super::ConfigAction;
-use crate::settings::{Paths, Resolved, Runtime, SettingsError};
+use crate::config::{ConfigError, Paths, Resolved, Runtime};
 
 /// Version of `piton config resolve --json`. Clients refuse a version they don't know.
 pub const RESOLVE_FORMAT: u32 = 3;
@@ -45,7 +45,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
             global: true,
         } => {
             let _ = (workspace, runtime);
-            match crate::settings::resolve_global(&Paths::current()) {
+            match crate::config::read::resolve::resolve_global(&Paths::current()) {
                 Ok(resolved) => {
                     let output = Output {
                         format: RESOLVE_FORMAT,
@@ -129,7 +129,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                     println!("  {:?}  {}", file.level, file.path.display());
                 }
                 // Portability: warnings only, the files still work here.
-                for warning in crate::settings::portability::warnings(&resolved.files, &resolved.home) {
+                for warning in crate::config::check::portability::warnings(&resolved.files, &resolved.home) {
                     eprintln!("piton: warning: {warning}");
                 }
                 if errors.is_empty() {
@@ -205,12 +205,12 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         .unwrap_or_else(|| PathBuf::from("."));
     let workspace =
         crate::launch::resolve_workspace(&path).map_err(|e| ErrorBody::Workspace { message: e.to_string() })?;
-    crate::settings::resolve(&workspace, &Paths::current(), runtime).map_err(|e| match e {
-        SettingsError::Read { .. }
-        | SettingsError::Invalid { .. }
-        | SettingsError::GlobalOnly { .. }
-        | SettingsError::LocalOnly { .. }
-        | SettingsError::Conflict { .. } => ErrorBody::Invalid { message: e.to_string() },
+    crate::config::resolve(&workspace, &Paths::current(), runtime).map_err(|e| match e {
+        ConfigError::Read { .. }
+        | ConfigError::Invalid { .. }
+        | ConfigError::GlobalOnly { .. }
+        | ConfigError::LocalOnly { .. }
+        | ConfigError::Conflict { .. } => ErrorBody::Invalid { message: e.to_string() },
     })
 }
 
@@ -254,11 +254,13 @@ struct Planned {
 /// `piton config set`: one key of a level's `config.toml` or `config.local.toml`, written with its comments and layout
 /// kept, and refused when the file would no longer be valid.
 fn set(request: &SetRequest) -> ExitCode {
-    use crate::settings::edit::{Change, edited, item_from_json, write_changes};
+    use crate::config::Sharing;
+    use crate::config::write::edit::{Change, item_from_json};
+    use crate::config::write::target::{File, Level};
     let invalid = |message: String| print_error(ErrorBody::Invalid { message });
     let paths = Paths::current();
-    let (dir, level) = if request.global {
-        (paths.global.clone(), crate::settings::LevelKind::Global)
+    let level = if request.global {
+        Level::Global
     } else {
         let path = request
             .workspace
@@ -266,20 +268,15 @@ fn set(request: &SetRequest) -> ExitCode {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         match crate::launch::resolve_workspace(&path) {
-            // The source: a worker's own copy is never read.
-            Ok(workspace) => (
-                workspace.source().join(crate::settings::PITON_DIR),
-                crate::settings::LevelKind::Repository,
-            ),
+            Ok(workspace) => Level::Repository {
+                source: workspace.source().to_path_buf(),
+            },
             Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
         }
     };
-    let sharing = if request.local {
-        crate::settings::Sharing::Local
-    } else {
-        crate::settings::Sharing::Shared
-    };
-    let file = dir.join(sharing.file_name());
+    let sharing = if request.local { Sharing::Local } else { Sharing::Shared };
+    let target = File { level, sharing };
+    let file = target.path(&paths);
     // Each change: a dotted key, and its JSON value (`None`: remove it).
     let requested: Vec<(String, Option<serde_json::Value>)> = match (request.changes, request.unset, request.value) {
         (true, false, None) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(request.key) {
@@ -332,22 +329,11 @@ fn set(request: &SetRequest) -> ExitCode {
             value: item.as_ref(),
         })
         .collect();
-    let validate = |text: &str, path: &Path| crate::preferences::validate_text(text, path, level, sharing);
     if request.dry_run {
-        let current = match std::fs::read_to_string(&file) {
-            Ok(text) => Some(text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return invalid(format!("{}: {e}", file.display())),
-        };
-        let content = match edited(current.as_deref(), &changes, &file) {
+        let content = match target.plan(&paths, &changes) {
             Ok(content) => content,
             Err(e) => return invalid(e.to_string()),
         };
-        if let Some(text) = &content
-            && let Err(e) = validate(text, &file)
-        {
-            return invalid(e.to_string());
-        }
         let planned = Planned {
             format: RESOLVE_FORMAT,
             path: file,
@@ -356,7 +342,7 @@ fn set(request: &SetRequest) -> ExitCode {
         println!("{}", serde_json::to_string(&planned).unwrap_or_default());
         return ExitCode::SUCCESS;
     }
-    match write_changes(&file, &changes, &validate) {
+    match target.write(&paths, &changes) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => invalid(e.to_string()),
     }
@@ -397,7 +383,7 @@ mod tests {
             checkout: repo.clone(),
             relation: Relation::Source,
         };
-        let resolved = crate::settings::resolve(&workspace, &paths, Runtime::Sandbox).unwrap();
+        let resolved = crate::config::resolve(&workspace, &paths, Runtime::Sandbox).unwrap();
         let json = serde_json::to_value(Output {
             format: RESOLVE_FORMAT,
             resolved: &resolved,

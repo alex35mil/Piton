@@ -1,18 +1,16 @@
-//! The settings the apps see and change: the daemon's and the apps' keys of the global `config.toml` /
-//! `config.local.toml` (configuration, written by [`crate::settings::edit`]) and the host's state values (in the state
-//! database). One catalog says, for each key, where it lives, its type, whether a change applies to the next launch or
-//! needs a restart, and whether the apps may change it.
+//! The settings list the apps show and change: keys of the global `config.toml` / `config.local.toml` (configuration)
+//! and the host's state values (in the state database). One catalog says, for each key, where it lives, its type,
+//! whether a change applies to the next launch or needs a restart, and whether the apps may change it. Reads and
+//! writes go through [`crate::config`] and [`crate::state`]; this module only describes the list.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use serde::Serialize;
 use serde_json::{Value, json};
 use toml_edit::Value as Toml;
 
-use crate::config::{Config, GlobalSettings};
-use crate::settings::edit::{EditError, Placements, Target};
-use crate::settings::{ClientTable, ConfigPair, LevelKind, Paths, Resolved, SettingsError, Sharing, WorkersTable};
+use crate::config::write::edit::{EditError, Placements, Target};
+use crate::config::{DaemonConfig, GlobalConfig, Paths, Sharing};
 
 /// Where a value lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,10 +55,15 @@ pub struct Entry {
     /// `socket` is a test and development override the apps don't change.
     pub editable: bool,
     /// The value when no file sets it, from the daemon's defaults.
-    default: fn(&Config) -> Value,
+    default: fn(&DaemonConfig) -> Value,
 }
 
-const fn config(key: &'static str, value_type: ValueType, applies: Applies, default: fn(&Config) -> Value) -> Entry {
+const fn config(
+    key: &'static str,
+    value_type: ValueType,
+    applies: Applies,
+    default: fn(&DaemonConfig) -> Value,
+) -> Entry {
     Entry {
         key,
         kind: Kind::Config,
@@ -71,11 +74,11 @@ const fn config(key: &'static str, value_type: ValueType, applies: Applies, defa
     }
 }
 
-fn empty(_: &Config) -> Value {
+fn empty(_: &DaemonConfig) -> Value {
     json!([])
 }
 
-fn null(_: &Config) -> Value {
+fn null(_: &DaemonConfig) -> Value {
     Value::Null
 }
 
@@ -199,14 +202,14 @@ pub struct Snapshot {
 #[derive(Debug)]
 pub enum Read {
     /// The new configuration.
-    Good(Box<Config>),
+    Good(Box<DaemonConfig>),
     /// Invalid: the previous configuration stays in effect, and the snapshot's `error` says why.
     Kept,
 }
 
 impl Snapshot {
     /// Reads the global files for a daemon that runs with `config`.
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &DaemonConfig) -> Self {
         let mut snapshot = Self {
             values: BTreeMap::new(),
             placements: BTreeMap::new(),
@@ -230,15 +233,14 @@ impl Snapshot {
     /// kept for the apps and the previous values stay.
     pub fn reload(&mut self, paths: Paths) -> Read {
         let read = || -> Result<_, String> {
-            let resolved = crate::settings::resolve_global(&paths).map_err(|e| e.to_string())?;
-            let tables = Tables::from_resolved(resolved).map_err(|e| e.to_string())?;
-            let placements = files(&paths).read().map_err(|e| e.to_string())?;
-            Ok((tables, placements))
+            let global = crate::config::global(&paths).map_err(|e| e.to_string())?;
+            let placements = paths.global_files().read().map_err(|e| e.to_string())?;
+            Ok((global, placements))
         };
         match read() {
-            Ok((tables, placements)) => {
-                let config = Config::from_settings(tables.daemon.clone(), paths.clone());
-                self.values = values(&tables, &config);
+            Ok((global, placements)) => {
+                let config = DaemonConfig::new(&global, paths.clone());
+                self.values = values(&global, &paths);
                 self.placements = placement_map(&placements);
                 self.error = None;
                 Read::Good(Box::new(config))
@@ -282,59 +284,30 @@ impl Snapshot {
     }
 }
 
-/// The global tier's `config.toml` and `config.local.toml`.
-fn files(paths: &Paths) -> ConfigPair {
-    ConfigPair::in_dir(&paths.global)
-}
-
-/// The global parts the catalog shows: the daemon's (its run keys, `[sandbox]`, `[host]`), `[workers]`, and `[client]`.
-#[derive(Debug)]
-struct Tables {
-    daemon: GlobalSettings,
-    workers: WorkersTable,
-    client: ClientTable,
-}
-
-impl Tables {
-    /// Every part, or the first that can't be used.
-    fn from_resolved(resolved: Resolved) -> Result<Self, SettingsError> {
-        let Resolved {
-            run,
-            sandbox,
-            workers,
-            host,
-            client,
-            ..
-        } = resolved;
-        Ok(Self {
-            daemon: GlobalSettings {
-                run: run?,
-                sandbox: sandbox?,
-                host: host?,
-            },
-            workers: workers?,
-            client: client?,
-        })
-    }
-}
-
-/// Every configuration key's value in effect.
-fn values(tables: &Tables, config: &Config) -> BTreeMap<&'static str, Value> {
+/// Every configuration key's value in effect: the file's, else the daemon's default.
+fn values(global: &GlobalConfig, paths: &Paths) -> BTreeMap<&'static str, Value> {
     // The file's shape: the run keys at the top, each table under its name.
-    let mut merged = serde_json::to_value(&tables.daemon.run).unwrap_or_else(|_| json!({}));
+    let GlobalConfig {
+        run,
+        sandbox,
+        workers,
+        host,
+        client,
+    } = global;
+    let mut merged = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
     if let Value::Object(object) = &mut merged {
         for (name, table) in [
-            ("sandbox", serde_json::to_value(&tables.daemon.sandbox)),
-            ("workers", serde_json::to_value(&tables.workers)),
-            ("host", serde_json::to_value(&tables.daemon.host)),
-            ("client", serde_json::to_value(&tables.client)),
+            ("sandbox", serde_json::to_value(sandbox)),
+            ("workers", serde_json::to_value(workers)),
+            ("host", serde_json::to_value(host)),
+            ("client", serde_json::to_value(client)),
         ] {
             if let Ok(table) = table {
                 object.insert(name.into(), table);
             }
         }
     }
-    let defaults = Config::from_settings(GlobalSettings::default(), config.paths.clone());
+    let defaults = DaemonConfig::defaults(paths.clone());
     CATALOG
         .iter()
         .filter_map(|entry| match entry.kind {
@@ -469,41 +442,16 @@ fn toml(entry: &Entry, value: &Value) -> Result<Toml, SetError> {
     }
 }
 
-/// Writes a configuration change, refusing a result the daemon wouldn't accept.
+/// Writes a configuration change to the global pair.
 pub fn write(paths: &Paths, key: &str, value: Option<Toml>, target: Target) -> Result<(), SetError> {
-    files(paths).set(
-        &path(key),
-        value.map(toml_edit::Item::Value),
-        target,
-        &|text, path, placement| validate_text(text, path, LevelKind::Global, placement),
-    )?;
+    crate::config::write::target::set_global(paths, &path(key), value.map(toml_edit::Item::Value), target)?;
     Ok(())
-}
-
-/// A file's new text, checked as every reader will read it.
-pub fn validate_text(text: &str, path: &Path, level: LevelKind, sharing: Sharing) -> Result<(), SettingsError> {
-    crate::settings::validate_config(&crate::settings::ConfigDoc::parse(text, path, level, sharing)?)
-}
-
-/// Every path whose change can change the global configuration: the global folder, and the folders of the files'
-/// link targets (a dotfiles repository).
-pub fn watched(paths: &Paths) -> Vec<std::path::PathBuf> {
-    let mut dirs = vec![paths.global.clone()];
-    let pair = files(paths);
-    for path in [pair.shared, pair.local] {
-        if path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
-            && let Ok(target) = std::fs::canonicalize(&path)
-            && let Some(dir) = target.parent()
-            && !dirs.iter().any(|d| d == dir)
-        {
-            dirs.push(dir.to_path_buf());
-        }
-    }
-    dirs
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn paths(dir: &Path) -> Paths {
@@ -513,8 +461,8 @@ mod tests {
         }
     }
 
-    fn config(paths: &Paths) -> Config {
-        Config::from_settings(GlobalSettings::default(), paths.clone())
+    fn config(paths: &Paths) -> DaemonConfig {
+        DaemonConfig::defaults(paths.clone())
     }
 
     fn info<'a>(list: &'a [SettingInfo], key: &str) -> &'a SettingInfo {
@@ -552,7 +500,7 @@ mod tests {
             };
             // `toml` is what `validate` uses; calling it directly covers the non-editable `socket` too.
             let value = toml(entry, &sample).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
-            let pair = files(&paths);
+            let pair = paths.global_files();
             let _ = std::fs::remove_file(&pair.shared);
             write(&paths, entry.key, Some(value), Target::Current).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
             let mut snapshot = Snapshot::new(&defaults);

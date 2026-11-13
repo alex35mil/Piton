@@ -8,7 +8,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::settings::{LOCAL_DIR, PITON_DIR};
+use crate::config::{LOCAL_DIR, PITON_DIR};
 
 /// The roots protection is computed for: one launch's source and workspace checkouts (canonical).
 #[derive(Debug, Clone)]

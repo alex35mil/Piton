@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::config::expand_home;
+use crate::config::{expand_home, home};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -38,7 +38,7 @@ pub enum WorkspaceError {
 pub fn roots(configured: &[String]) -> Vec<PathBuf> {
     configured
         .iter()
-        .filter_map(|r| std::fs::canonicalize(expand_home(r)).ok())
+        .filter_map(|r| std::fs::canonicalize(expand_home(r, &home())).ok())
         .filter(|p| p.is_dir())
         .collect()
 }

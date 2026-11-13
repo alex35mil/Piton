@@ -3,11 +3,11 @@
 use std::process::ExitCode;
 
 use super::LoggingAction;
-use crate::config::Config;
+use crate::config::DaemonConfig;
 use crate::diagnostics::{Expiration, Policy};
 use crate::wire::{ControlRequest, ControlResponse};
 
-pub async fn run(action: LoggingAction, config: &Config) -> ExitCode {
+pub async fn run(action: LoggingAction, config: &DaemonConfig) -> ExitCode {
     let root = crate::diagnostics::root();
     let result: Result<(), String> = match action {
         LoggingAction::Status => logging_state(&config.socket, ControlRequest::Logging)
@@ -70,7 +70,7 @@ fn host_only(what: &str) -> Result<(), String> {
 }
 
 /// Switches the daemon's logging until the policy expires or the daemon restarts.
-async fn set(config: &Config, policy: Policy) -> Result<(), String> {
+async fn set(config: &DaemonConfig, policy: Policy) -> Result<(), String> {
     let state = logging_state(&config.socket, ControlRequest::SetLogging { policy }).await?;
     println!(
         "{}",

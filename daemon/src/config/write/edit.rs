@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
-use super::{ConfigPair, Sharing};
+use crate::config::ConfigError;
+use crate::config::model::paths::{FilePair, Sharing};
 
 /// Where a write puts the key: the file that sets it now, or one of the pair (moving it out of the other).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,14 +27,14 @@ pub enum EditError {
     #[error("{path}: `{key}` is inside a value that isn't a table")]
     NotATable { path: PathBuf, key: String },
     #[error(transparent)]
-    Invalid(#[from] super::SettingsError),
+    Invalid(#[from] ConfigError),
     #[error("{path} kept changing while piton wrote it; try again")]
     Busy { path: PathBuf },
     #[error("{path}: {reason}")]
     Value { path: PathBuf, reason: String },
 }
 
-impl ConfigPair {
+impl FilePair {
     /// The file that sets `key`, if either does; the local file wins.
     pub fn placement(&self, key: &[&str]) -> Result<Option<Sharing>, EditError> {
         Ok(self.read()?.placement(key))
@@ -59,7 +60,7 @@ impl ConfigPair {
         key: &[&str],
         value: Option<Item>,
         target: Target,
-        validate: &dyn Fn(&str, &Path, Sharing) -> Result<(), super::SettingsError>,
+        validate: &dyn Fn(&str, &Path, Sharing) -> Result<(), ConfigError>,
     ) -> Result<Sharing, EditError> {
         let placement = match target {
             Target::Current => self.placement(key)?.unwrap_or(Sharing::Shared),
@@ -115,7 +116,7 @@ pub fn write_key(
     path: &Path,
     key: &[&str],
     value: Option<&Item>,
-    validate: &dyn Fn(&str, &Path) -> Result<(), super::SettingsError>,
+    validate: &dyn Fn(&str, &Path) -> Result<(), ConfigError>,
 ) -> Result<(), EditError> {
     write_changes(path, &[Change { key, value }], validate)
 }
@@ -131,7 +132,7 @@ pub struct Change<'a> {
 pub fn write_changes(
     path: &Path,
     changes: &[Change],
-    validate: &dyn Fn(&str, &Path) -> Result<(), super::SettingsError>,
+    validate: &dyn Fn(&str, &Path) -> Result<(), ConfigError>,
 ) -> Result<(), EditError> {
     write_key_with(path, changes, validate, &mut || {})
 }
@@ -211,7 +212,7 @@ fn place(item: &mut Item, position: Option<isize>) {
 fn write_key_with(
     path: &Path,
     changes: &[Change],
-    validate: &dyn Fn(&str, &Path) -> Result<(), super::SettingsError>,
+    validate: &dyn Fn(&str, &Path) -> Result<(), ConfigError>,
     before_commit: &mut dyn FnMut(),
 ) -> Result<(), EditError> {
     let target = link_target(path)?;
@@ -371,11 +372,11 @@ mod tests {
     use super::*;
     use toml_edit::Value;
 
-    fn pair(dir: &Path) -> ConfigPair {
-        ConfigPair::in_dir(dir)
+    fn pair(dir: &Path) -> FilePair {
+        FilePair::in_dir(dir)
     }
 
-    fn ok(_: &str, _: &Path, _: Sharing) -> Result<(), crate::settings::SettingsError> {
+    fn ok(_: &str, _: &Path, _: Sharing) -> Result<(), ConfigError> {
         Ok(())
     }
 
@@ -529,7 +530,7 @@ mod tests {
         let files = pair(dir.path());
         std::fs::write(&files.shared, "[host]\nroots = []\n").unwrap();
         let refuse = |_: &str, path: &Path, _: Sharing| {
-            Err(crate::settings::SettingsError::Invalid {
+            Err(ConfigError::Invalid {
                 path: path.to_path_buf(),
                 reason: "no".into(),
             })
@@ -564,7 +565,7 @@ mod tests {
         let local = files.local.clone();
         let refuse_local = move |_: &str, path: &Path, _: Sharing| {
             if path == local {
-                Err(crate::settings::SettingsError::Invalid {
+                Err(ConfigError::Invalid {
                     path: path.to_path_buf(),
                     reason: "no".into(),
                 })

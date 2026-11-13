@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use super::control::{control, report};
-use crate::config::Config;
+use crate::config::DaemonConfig;
 use crate::wire::{ControlRequest, ControlResponse, LaunchMode, SessionInfo};
 
-pub async fn ls(config: &Config, json: bool) -> ExitCode {
+pub async fn ls(config: &DaemonConfig, json: bool) -> ExitCode {
     match control(&config.socket, ControlRequest::List).await {
         Ok(ControlResponse::Sessions { sessions }) => {
             print_sessions(&sessions, json);
@@ -17,7 +17,7 @@ pub async fn ls(config: &Config, json: bool) -> ExitCode {
     }
 }
 
-pub async fn start(config: &Config, workspace: Option<PathBuf>, host: bool, prompt: Option<String>) -> ExitCode {
+pub async fn start(config: &DaemonConfig, workspace: Option<PathBuf>, host: bool, prompt: Option<String>) -> ExitCode {
     let workspace = match workspace.map_or_else(std::env::current_dir, Ok) {
         Ok(dir) => dir,
         Err(e) => {
@@ -45,7 +45,7 @@ pub async fn start(config: &Config, workspace: Option<PathBuf>, host: bool, prom
     }
 }
 
-pub async fn stop(config: &Config, session: String) -> ExitCode {
+pub async fn stop(config: &DaemonConfig, session: String) -> ExitCode {
     match control(&config.socket, ControlRequest::Stop { session }).await {
         Ok(ControlResponse::Stopped { forced }) => {
             if forced {

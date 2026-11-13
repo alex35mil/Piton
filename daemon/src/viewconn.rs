@@ -114,8 +114,8 @@ fn handle(
             Handled::Later(
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        crate::preferences::validate(&key, &value, local)
-                            .and_then(|change| daemon.set_preference(change))
+                        crate::app_settings::validate(&key, &value, local)
+                            .and_then(|change| daemon.set_app_setting(change))
                             .map(|()| json!({"state": daemon.state()}))
                             .map_err(|e| e.to_string())
                     })

@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::config::model::tables::SandboxTable;
+use crate::config::{LOCAL_DIR, LaunchConfig, expand_home};
 use crate::launch::Env;
-use crate::settings::LOCAL_DIR;
-use crate::settings::{DaemonSettings, SandboxTable, expand_home};
 
 /// The base profile when the global tier names none.
 pub const DEFAULT_BASE: &str = "piton";
@@ -31,7 +31,7 @@ pub enum SandboxError {
 /// The nono profile for one sandboxed launch. `env` is the daemon's base environment, for `$VAR` in grants;
 /// `agent_socket` is the daemon's socket for sandboxed pis, which the profile lets them connect to (and nothing else of
 /// the daemon's state folder).
-pub fn profile(resolved: &DaemonSettings, home: &Path, env: &Env, agent_socket: &Path) -> Result<Value, SandboxError> {
+pub fn profile(resolved: &LaunchConfig, home: &Path, env: &Env, agent_socket: &Path) -> Result<Value, SandboxError> {
     let table = &resolved.sandbox;
     let expand = |paths: &[String]| -> Result<Vec<String>, SandboxError> {
         paths.iter().map(|p| expand_grant(p, home, env)).collect()
@@ -99,7 +99,7 @@ pub fn profile(resolved: &DaemonSettings, home: &Path, env: &Env, agent_socket: 
 }
 
 /// The protected roots, canonical as Seatbelt compares them.
-fn protected_roots(resolved: &DaemonSettings) -> crate::protected::Roots {
+fn protected_roots(resolved: &LaunchConfig) -> crate::protected::Roots {
     let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     crate::protected::Roots {
         source: canonical(&resolved.source),
@@ -140,7 +140,7 @@ fn expand_grant(grant: &str, home: &Path, env: &Env) -> Result<String, SandboxEr
 /// The canonical targets of the configuration entries that are symlinks, so the sandbox can read through them (for
 /// example the global tier's files, linked into a dotfiles repository): each entry of every level folder, and the
 /// `rules` and `skills` folders under `.agents/` levels.
-fn link_targets(resolved: &DaemonSettings) -> Vec<PathBuf> {
+fn link_targets(resolved: &LaunchConfig) -> Vec<PathBuf> {
     let mut targets = Vec::new();
     let mut candidates = Vec::new();
     for level in &resolved.levels {
@@ -161,7 +161,7 @@ fn link_targets(resolved: &DaemonSettings) -> Vec<PathBuf> {
 }
 
 fn network(table: &SandboxTable) -> Option<Value> {
-    use crate::settings::NetworkProfile;
+    use crate::config::model::tables::NetworkProfile;
     let mut network = serde_json::Map::new();
     if !table.network.open_port.is_empty() {
         network.insert("open_port".into(), json!(table.network.open_port));
@@ -179,17 +179,17 @@ fn network(table: &SandboxTable) -> Option<Value> {
 }
 
 /// Every existing level folder of both chains: the sandbox reads its whole configuration.
-fn chain_dirs(resolved: &DaemonSettings) -> Vec<PathBuf> {
+fn chain_dirs(resolved: &LaunchConfig) -> Vec<PathBuf> {
     resolved.levels.clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Paths;
     use crate::project::{Relation, Workspace};
-    use crate::settings::Paths;
 
-    fn resolved(home: &Path, repo: &Path) -> DaemonSettings {
+    fn resolved(home: &Path, repo: &Path) -> LaunchConfig {
         let paths = Paths {
             home: home.to_path_buf(),
             global: home.join(".config/piton"),
@@ -199,7 +199,7 @@ mod tests {
             checkout: repo.to_path_buf(),
             relation: Relation::Source,
         };
-        crate::settings::resolve_daemon(&ws, &paths).unwrap()
+        crate::config::resolve_launch(&ws, &paths).unwrap()
     }
 
     fn env(pairs: &[(&str, &str)]) -> Env {

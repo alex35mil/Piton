@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::config::Config;
+use crate::config::DaemonConfig;
 
 /// Version of the JSON output. The Mac app refuses one it doesn't know.
 pub const FORMAT: u32 = 1;
@@ -104,7 +104,7 @@ pub struct Report {
 
 /// What setup looks at, so tests can run over fixture homes.
 pub struct Host<'a> {
-    pub config: &'a Config,
+    pub config: &'a DaemonConfig,
     /// The environment tools are looked up in (the login shell's).
     pub env: &'a crate::launch::Env,
     /// The `piton` binary the CLI link points to.
@@ -140,7 +140,7 @@ impl Tool {
     }
 
     /// The command the daemon runs: the configured one where piton has a setting for it.
-    fn program(self, config: &Config) -> String {
+    fn program(self, config: &DaemonConfig) -> String {
         let configured = match self {
             Tool::Pi => config.pi.command.first().cloned(),
             Tool::Nono => config.sandbox.command.first().cloned(),
@@ -251,7 +251,7 @@ fn prerequisites(host: &Host) -> Status {
     }
 }
 
-fn configuration(config: &Config) -> Status {
+fn configuration(config: &DaemonConfig) -> Status {
     let paths = &config.paths;
     if !paths.global.is_dir() {
         return Status::Missing {
@@ -265,7 +265,7 @@ fn configuration(config: &Config) -> Status {
         };
     }
     let mut problems = Vec::new();
-    match crate::settings::resolve_global(paths) {
+    match crate::config::read::resolve::resolve_global(paths) {
         Ok(resolved) => {
             for (part, error) in resolved.errors() {
                 problems.push(format!("{part}: {error}"));
@@ -502,13 +502,12 @@ impl std::fmt::Display for StepReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GlobalSettings;
-    use crate::settings::Paths;
+    use crate::config::Paths;
 
     struct Fixture {
         _dir: tempfile::TempDir,
         root: PathBuf,
-        config: Config,
+        config: DaemonConfig,
         env: crate::launch::Env,
     }
 
@@ -527,7 +526,7 @@ mod tests {
             home: root.clone(),
             global: root.join(".config/piton"),
         };
-        let mut config = Config::from_settings(GlobalSettings::default(), paths);
+        let mut config = DaemonConfig::defaults(paths);
         config.socket = root.join("state/piton.sock");
         let env = [(
             "PATH".to_string(),

@@ -1,8 +1,14 @@
-//! Which folders apply to a workspace, farthest first.
+//! Levels and chains: which folders apply to a workspace, farthest first.
+//!
+//! - `.piton/`: the source checkout (a worker's source, the checkout around a subfolder), then each ancestor folder
+//!   strictly below the home folder, then the global tier. Settings that decide what an agent may do are read from the
+//!   source, never from a worker, so an agent can't change them by editing its clone.
+//! - `.agents/`: the workspace's own checkout (a worker reads its own copy, so instructions apply where they're
+//!   edited), then the same ancestors, then the global tier's `agents/`.
 
 use std::path::{Path, PathBuf};
 
-use super::{AGENTS_DIR, PITON_DIR, SettingsError};
+use super::paths::{AGENTS_DIR, PITON_DIR};
 use crate::project::Workspace;
 
 /// What a level is, for scope checks (global-only keys) and messages.
@@ -97,51 +103,6 @@ fn levels(checkout: &Path, name: &str, home: &Path, global: PathBuf) -> Vec<Leve
     nearest_first
 }
 
-/// The user's home folder, from the user database: a repository's `mise.toml` can set `$HOME` for the processes it
-/// runs, and the chain must not follow it. `$HOME` only when the user database has no entry.
-pub fn home() -> PathBuf {
-    nix::unistd::User::from_uid(nix::unistd::getuid())
-        .ok()
-        .flatten()
-        .map(|user| user.dir)
-        .unwrap_or_else(crate::config::home)
-}
-
-/// The global tier. Inside a pi the daemon launched, `PITON_CONFIG_HOME` names it (set after the mise environment, so
-/// a repository can't move it); otherwise `$XDG_CONFIG_HOME/piton`, else `~/.config/piton`. The daemon resolves it
-/// once at start, from its own (login-shell) environment.
-pub fn global_tier() -> PathBuf {
-    global_tier_from(
-        std::env::var_os("PITON_CONFIG_HOME").map(PathBuf::from),
-        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-        &home(),
-    )
-}
-
-fn global_tier_from(piton: Option<PathBuf>, xdg: Option<PathBuf>, home: &Path) -> PathBuf {
-    match (piton, xdg) {
-        (Some(piton), _) if piton.is_absolute() => piton,
-        (_, Some(xdg)) if xdg.is_absolute() => xdg.join("piton"),
-        (Some(_) | None, Some(_) | None) => home.join(".config/piton"),
-    }
-}
-
-/// A level folder that exists but can't be listed is an error: skipping it would silently drop a deny rule.
-pub(super) fn check_level(level: &Level) -> Result<bool, SettingsError> {
-    match std::fs::read_dir(&level.dir) {
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(SettingsError::Invalid {
-            path: level.dir.clone(),
-            reason: "must be a folder".into(),
-        }),
-        Err(source) => Err(SettingsError::Read {
-            path: level.dir.clone(),
-            source,
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,28 +174,6 @@ mod tests {
                 (LevelKind::Global, "/g".into()),
                 (LevelKind::Repository, "/opt/repo/.piton".into())
             ]
-        );
-    }
-
-    #[test]
-    fn the_global_tier_follows_xdg() {
-        let home = Path::new("/Users/a");
-        assert_eq!(
-            global_tier_from(Some("/x/p".into()), Some("/x".into()), home),
-            PathBuf::from("/x/p")
-        );
-        assert_eq!(
-            global_tier_from(None, Some("/x".into()), home),
-            PathBuf::from("/x/piton")
-        );
-        assert_eq!(
-            global_tier_from(None, None, home),
-            PathBuf::from("/Users/a/.config/piton")
-        );
-        // Relative values are ignored, as the XDG spec says.
-        assert_eq!(
-            global_tier_from(Some("rel".into()), Some("rel".into()), home),
-            PathBuf::from("/Users/a/.config/piton")
         );
     }
 }

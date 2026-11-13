@@ -15,7 +15,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
-use crate::config::Config;
+use crate::config::DaemonConfig;
 use crate::launch::{self, Env, LaunchError, SessionArg};
 use crate::prompts::PromptQueue;
 use crate::replay::Replay;
@@ -273,7 +273,7 @@ pub struct LaunchSpec {
     pub protected: crate::protected::Roots,
 }
 
-pub fn spawn(config: Arc<Config>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
+pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
     let profile = spec.profile;
     let argv = launch::command_line(
         &config,
@@ -438,7 +438,7 @@ enum StopPhase {
 }
 
 struct SessionTask {
-    config: Arc<Config>,
+    config: Arc<DaemonConfig>,
     protected: crate::protected::Roots,
     /// The protected write waiting for the user: one per session.
     protected_write: Option<PendingWrite>,

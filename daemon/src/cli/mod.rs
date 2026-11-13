@@ -289,7 +289,7 @@ pub fn main() -> ExitCode {
     }
     // Setup reports a broken configuration (its configuration step) instead of refusing to start over it.
     let loaded = match &cli.command {
-        Cmd::Setup { .. } => Ok(crate::config::load_lenient(cli.config_home.as_deref())),
+        Cmd::Setup { .. } => Ok(crate::config::daemon_lenient(cli.config_home.as_deref())),
         Cmd::Daemon
         | Cmd::Attach
         | Cmd::Ls { .. }
@@ -300,7 +300,7 @@ pub fn main() -> ExitCode {
         | Cmd::Logging { .. }
         | Cmd::Service { .. }
         | Cmd::Config { .. }
-        | Cmd::Completion { .. } => crate::config::load(cli.config_home.as_deref()),
+        | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
     };
     let config = match loaded {
         Ok(mut config) => {
@@ -330,7 +330,7 @@ pub fn main() -> ExitCode {
     code
 }
 
-async fn run(command: Cmd, config: crate::config::Config) -> ExitCode {
+async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
     match command {
         Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } => {
             unreachable!("handled before the runtime starts")
@@ -357,7 +357,7 @@ async fn run(command: Cmd, config: crate::config::Config) -> ExitCode {
     }
 }
 
-async fn setup(action: SetupAction, json: bool, config: &crate::config::Config) -> ExitCode {
+async fn setup(action: SetupAction, json: bool, config: &crate::config::DaemonConfig) -> ExitCode {
     let (binary, link) = match &action {
         SetupAction::Check { binary, link } | SetupAction::Apply { binary, link, .. } => (binary.clone(), link.clone()),
     };
@@ -413,7 +413,7 @@ async fn setup(action: SetupAction, json: bool, config: &crate::config::Config) 
     }
 }
 
-async fn state(action: StateAction, config: &crate::config::Config) -> ExitCode {
+async fn state(action: StateAction, config: &crate::config::DaemonConfig) -> ExitCode {
     let db = config.state_db();
     let result = match action {
         StateAction::Export { file } => {

@@ -649,7 +649,7 @@ file per level, and the message names the line.
   pi package's files at pi start and `/reload`. `piton config check` validates, lists the files read, and warns about
   what doesn't travel (below); `piton config get` serves one resolved part to other tools (the Neovim plugin's tracker
   queue).
-- **One resolver.** The Rust `settings` module is the only implementation. The pi package and the Neovim plugin call
+- **One resolver.** The daemon crate's `config` module is the only implementation (layout below). The pi package and the Neovim plugin call
   `piton config resolve` / `piton config get`, which read files and don't need the daemon running. The daemon passes
   the binary's path in `PITON_BIN` after the mise environment; the pi package caches the result and calls again only
   when a watched file changed. The result is per part: one per table of `config.toml`, named as the table (the
@@ -658,6 +658,17 @@ file per level, and the message names the line.
   `[tracker]` stops workflows, never permission checks, and a typo in `[tailnet]` never blocks `[sandbox]`. A syntax
   error fails every part of its file. `--global` resolves the global tier alone, for `[development]`, which a
   consuming project's files mustn't block.
+- **Code layout.** `daemon/src/config/` is the only code that reads or writes these files, in four layers:
+  - `model/`: what configuration is, with no I/O: paths and the file pair, levels and chains, one file per table
+    (its schema, global- or local-only keys, checks, merge rule), and the daemon's options with defaults.
+  - `read/`: one file into its parts, a chain into one value or error per part, the global tier's tables.
+  - `write/`: key edits that keep comments and layout, and the one write path (which file, checked before writing)
+    for `piton config set` and the apps.
+  - `check/`: read-only diagnostics such as the portability warnings.
+
+  Outside it, and using its API: `cli/config.rs` (the `piton config` command), `app_settings.rs` (the apps' settings
+  list over config and state), `watch.rs` (reloads the global files), `sandbox.rs` (`[sandbox]` into a nono
+  profile), and `state.rs` (the state database).
 
 #### Config and state together
 

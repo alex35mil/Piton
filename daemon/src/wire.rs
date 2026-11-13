@@ -267,7 +267,7 @@ pub struct DaemonState {
     /// Host logging (this Mac's app, the daemon, and the phone-log collector).
     pub logging: crate::diagnostics::State,
     /// Every setting the apps show: its value, where it lives, and whether it waits for a restart.
-    pub settings: Vec<crate::preferences::SettingInfo>,
+    pub settings: Vec<crate::app_settings::SettingInfo>,
     /// Why the global files' latest version can't be used (the settings are the last good values).
     pub settings_error: Option<String>,
 }

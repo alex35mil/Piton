@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::config::Paths;
 use crate::daemon::Daemon;
 
 /// Changes closer together than this are one reread (an editor's save is several events).
@@ -40,7 +41,7 @@ pub fn spawn(daemon: Arc<Daemon>) {
             tokio::time::sleep(SETTLE).await;
             while rx.try_recv().is_ok() {}
             let reloading = daemon.clone();
-            let _ = tokio::task::spawn_blocking(move || reloading.reload_preferences()).await;
+            let _ = tokio::task::spawn_blocking(move || reloading.reload_config()).await;
             watching.sync(&daemon);
         }
     });
@@ -54,7 +55,7 @@ struct Watching {
 impl Watching {
     /// Watches the folders the files are in now, and stops watching the ones they left.
     fn sync(&mut self, daemon: &Daemon) {
-        let wanted: BTreeSet<PathBuf> = crate::preferences::watched(&daemon.config().paths)
+        let wanted: BTreeSet<PathBuf> = watched(&daemon.config().paths)
             .into_iter()
             .filter_map(nearest_existing)
             .collect();
@@ -74,6 +75,23 @@ impl Watching {
             }
         }
     }
+}
+
+/// Every folder whose change can change the global configuration: the global folder, and the folders of the files'
+/// link targets (a dotfiles repository).
+fn watched(paths: &Paths) -> Vec<PathBuf> {
+    let mut dirs = vec![paths.global.clone()];
+    let pair = paths.global_files();
+    for path in [pair.shared, pair.local] {
+        if path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
+            && let Ok(target) = std::fs::canonicalize(&path)
+            && let Some(dir) = target.parent()
+            && !dirs.iter().any(|d| d == dir)
+        {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+    dirs
 }
 
 /// `dir`, or its nearest parent that exists.
