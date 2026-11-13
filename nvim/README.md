@@ -10,9 +10,11 @@ sandbox settings, pi processes, and deletion. This plugin owns the editor UI, no
 - [snacks.nvim](https://github.com/folke/snacks.nvim), with its picker enabled.
 - [pi.nvim](https://github.com/alex35mil/pi.nvim), configured to attach through piton (see
   [daemon setup](../docs/daemon.md#pinvim)).
-- For the queue: the source's `.project/integrations.json` with a GitHub or Linear tracker. Its MCP registration must
-  specify `Authorization: Bearer ${ENV_VAR}`; the credential is resolved through `mise exec -C <source>`, never read
-  into Neovim. Without tracker configuration, named agents still work and the queue shows as unavailable.
+- For the queue: a GitHub or Linear tracker in the nearest `integrations.json` of piton's configuration chain (the
+  source's `.piton/`, its parent folders', or the global tier's), read through `piton config get`; the plugin reads
+  no configuration file itself. Its MCP registration must specify `Authorization: Bearer ${ENV_VAR}`; the credential
+  is resolved through `mise exec -C <source>`, never read into Neovim. Without tracker configuration, named agents
+  still work and the queue shows as unavailable.
 
 ## Setup
 

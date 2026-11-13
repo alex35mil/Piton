@@ -1,6 +1,7 @@
 -- The source's queued (Todo and Backlog) tracker work, read from the tracker
--- configured in `<source>/.project/integrations.json`, with the credential
--- the tracker's MCP registration names.
+-- configured in the nearest `integrations.json` of piton's configuration chain,
+-- with the credential the tracker's MCP registration names. Both come from
+-- `piton config get`; the plugin reads no configuration file itself.
 
 ---@class QueueParent
 ---@field mention string How a workflow command names the Epic.
@@ -33,21 +34,21 @@
 ---@field credential string Name of the environment variable holding the token.
 
 local util = require("piton.util")
+local cli = require("piton.cli")
 
 local M = {}
-
-local INTEGRATIONS = ".project/integrations.json"
 
 --- Queued items, Todo before Backlog, each in tracker priority order.
 --- Refuses when the tracker can't be read.
 ---@param source string
 ---@return QueueItem[]
 function M.load(source)
-    local file = vim.fs.joinpath(source, INTEGRATIONS)
-    if not vim.uv.fs_stat(file) then
-        util.refuse("No tracker configured: " .. file .. " doesn't exist")
+    local integrations = cli.config("integrations", source)
+    if type(integrations) ~= "table" then
+        util.refuse("No tracker configured: no integrations.json in " .. source .. "/.piton or its parent folders")
     end
-    local config = util.read_json(file)
+    local file = tostring(integrations.path)
+    local config = integrations.value
     local tracker = type(config) == "table" and config.tracker or nil
     if type(tracker) ~= "table" or type(tracker.mcpServer) ~= "string" then
         util.refuse("No tracker configured in " .. file)
@@ -65,30 +66,20 @@ function M.load(source)
 end
 
 --- The environment variable the MCP registration authorizes with, from the
---- same settings files piton's pi package reads (global, then project, then local).
+--- same resolved MCP servers piton's pi package registers.
 ---@param source string
 ---@param server string
 ---@return string
 function M.credential(source, server)
-    local agent_dir = vim.env.PI_CODING_AGENT_DIR and vim.fs.normalize(vim.env.PI_CODING_AGENT_DIR)
-        or vim.fs.joinpath(vim.env.HOME, ".pi", "agent")
-    local files = {
-        vim.fs.joinpath(agent_dir, "mcp.json"),
-        vim.fs.joinpath(source, ".agents", "mcp.json"),
-        vim.fs.joinpath(source, ".agents", "mcp.local.json"),
-    }
+    local mcp = cli.config("mcp", source)
     local registration
-    for _, file in ipairs(files) do
-        if vim.uv.fs_stat(file) then
-            local settings = util.read_json(file)
-            local servers = type(settings) == "table" and settings.mcpServers or nil
-            if type(servers) == "table" and servers[server] ~= nil then
-                registration = servers[server]
-            end
+    for _, entry in ipairs(type(mcp) == "table" and type(mcp.servers) == "table" and mcp.servers or {}) do
+        if type(entry) == "table" and entry.name == server then
+            registration = entry.config
         end
     end
     if type(registration) ~= "table" then
-        util.refuse("MCP server " .. server .. " isn't registered in:\n" .. table.concat(files, "\n"))
+        util.refuse("MCP server " .. server .. " isn't registered in " .. source .. "'s configuration (mcp.json)")
     end
     local authorization = type(registration.headers) == "table" and registration.headers.Authorization or nil
     local variable = type(authorization) == "string" and authorization:match("^Bearer %${([%a_][%w_]*)}$")

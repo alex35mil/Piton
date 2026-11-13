@@ -218,6 +218,27 @@ function M.preview_folder(source_path, name)
     return vim.fs.basename(source_path) .. "--" .. normalized
 end
 
+-- Exit code of `piton config get` when the part's files are invalid or use the old layout.
+local EXIT_INVALID_CONFIG = 3
+
+--- One part of the workspace's resolved configuration (`piton config get`):
+--- piton's resolver is the only reader of configuration files. Refuses with
+--- the resolver's message when the part can't be used.
+---@param part "integrations" | "mcp"
+---@param workspace string
+---@return any value nil when the part is unset (`integrations` with no file)
+function M.config(part, workspace)
+    local result = util.exec({ "piton", "config", "get", part, "--workspace", workspace })
+    local ok, value = pcall(vim.json.decode, result.stdout or "", { luanil = { object = true, array = true } })
+    if result.code == EXIT_OK and ok then
+        return value
+    end
+    if result.code == EXIT_INVALID_CONFIG and ok and type(value) == "table" and type(value.error) == "table" then
+        util.refuse(tostring(value.error.message))
+    end
+    util.refuse("piton config get " .. part .. " failed (exit " .. result.code .. "):\n" .. vim.trim(result.stderr or ""))
+end
+
 ---@param refusal_value PitonWorkerRefusal
 ---@return string
 function M.describe(refusal_value)
