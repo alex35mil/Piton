@@ -141,22 +141,19 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
 
 ## Sandboxed agent workers
 
-- The shared nono profile `piton` sets `PITON_RUNTIME=sandbox`. The Swift tasks then turn off SwiftPM's and the
+- Every sandboxed pi gets `PITON_RUNTIME=sandbox` from the daemon. The Swift tasks then turn off SwiftPM's and the
   compiler's own sandboxes (`--disable-sandbox`, `OTHER_SWIFT_FLAGS=-disable-sandbox`), since macOS doesn't nest
   sandboxes. `mise run --dry-run <task>` shows the command.
-- `.nono.json` at the repository root is this project's overlay: read-write `~/Library/Caches/org.swift.swiftpm`,
+- `.piton/daemon.toml` `[sandbox]` holds this project's grants: read-write `~/Library/Caches/org.swift.swiftpm`,
   read `~/Library/org.swift.swiftpm/security` and `~/Library/Preferences/com.apple.dt.Xcode.plist`, and read the
   log-only directory `~/.local/state/piton/logs` and the legacy daemon log files (never their parent directory,
-  which contains the control socket). It's read from the main checkout, so an agent can't widen its own sandbox. The launch command applies it as the profile, extending
-  `piton`: `nono run -s --profile <main checkout>/.nono.json --extends piton --allow-cwd ... -- pi --mode rpc`.
-  Without it, `mise run apps:build` fails at package resolution ("ManifestLoading couldn't be saved"); `apps:test`
-  still works.
-- `.nono.local.json` (gitignored), next to it, holds this machine's grants, for example a neighbouring checkout to
-  read (`"filesystem": {"read": ["$HOME/Projects/personal/tooling/pi.nvim"]}`). Same format; it can only add: its
-  lists extend `.nono.json`'s, and changing a value `.nono.json` sets refuses the launch. With a local file the
-  daemon writes the two combined to `~/.local/state/piton/profiles/<session>.json` (outside every sandbox, removed
-  when the session ends) and launches with that. Read from the main checkout like `.nono.json`, and applied to
-  sessions started after a change.
+  which contains the control socket). It's read from the source checkout, so an agent can't widen its own sandbox.
+  The daemon merges it with the global `[sandbox]` and the parent folders' into a profile it generates for each
+  launch. Without these grants, `mise run apps:build` fails at package resolution ("ManifestLoading couldn't be
+  saved"); `apps:test` still works.
+- `.piton/daemon.local.toml` (ignored through `/.piton/*.local.*`) holds this machine's grants, for example a
+  neighbouring checkout to read (`[sandbox]` `read = ["~/Projects/personal/tooling/pi.nvim"]`). Grant lists only
+  add across files and levels. Applied to sessions started after a change.
 - The hidden Xcode preference `IDEPackageSupportDisableManifestSandbox` must be set on the host, once per machine:
   `defaults write com.apple.dt.Xcode IDEPackageSupportDisableManifestSandbox -bool YES`.
 - nono can't start inside nono, so the daemon's sandbox launch mode can't be tested from a sandboxed worker; the e2e

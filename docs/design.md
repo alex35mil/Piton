@@ -554,8 +554,10 @@ font, content in the text font. Views take colors, fonts, and shapes only from t
 the roomier reading line spacing apply to the session list and conversations, not to Settings. Liquid Glass stays on
 system chrome (bars, alerts, menus): iOS 27 has no opt-out.
 
-Fonts are a device setting (Settings > Appearance): a text font and a code font, each the system font or any family
-available to the app, scaled with Dynamic Type. The Mac lists its installed fonts. On the phone, fonts the user owns
+Fonts are client preferences (Settings > Appearance): a text font and a code font, each the system font or any family
+available to the app, scaled with Dynamic Type. Each is shared through the host (`[client]` in its `settings.toml`,
+the same on every device, cached for offline start) unless Local keeps a value on this device; a shared font a
+device lacks shows as the system font there. Settings > Host shows every host setting with where it comes from. The Mac lists its installed fonts. On the phone, fonts the user owns
 (a paid one like Berkeley Mono can't be bundled) are imported from .otf/.ttf files: copied into the app's Application
 Support and registered for the process at launch. Fonts installed system-wide through configuration-profile apps need
 the "Use Installed Fonts" entitlement, which the app doesn't have.
@@ -567,8 +569,9 @@ directory, never the control socket or device tooling. See [logging.md](logging.
 
 ### Configuration and state
 
-Status: settled in #206, being implemented. Sections above that name `.piton.toml`, `.nono*.json`, `.project/`, or
-`~/.config/piton/config.toml` describe the layout this replaces.
+Status: implemented in #206, except the protected files (being implemented after host checks). The layout before
+this one (`.piton.toml`, `.nono*.json`, `.project/`, `~/.config/piton/config.toml`, piton's files in pi's agent
+folder) is refused with where each file goes; `piton migrate` moves a repository.
 
 **Hosts and clients.** A host runs the daemon: it runs pi, holds the projects, and owns the state database. A client
 is an app connected to a host (the Mac app, the iPhone and iPad apps). A Mac can be a host, a client of another host,

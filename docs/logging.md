@@ -75,15 +75,16 @@ check both the collector status and event timestamps before treating a capture a
 use the bounded file writers instead of appending a duplicate unbounded `launchd.log`. A foreground daemon's info
 records still go to stderr. Early configuration failures leave a sanitized startup marker in the default daemon log.
 
-The shared sandbox profile should grant **read-only access to the logs directory**, not its parent (which contains the
-control socket). This project's `.nono.json` grants it locally. For agents in other projects, add this entry to the
-shared `piton` profile in the dotfiles:
+The sandbox should grant **read-only access to the logs directory**, not its parent (which contains the control
+socket). This project's `.piton/daemon.toml` grants it. For agents in other projects, add it to the global
+`daemon.toml` (`~/.config/piton/`) in the dotfiles:
 
-```json
-"read": ["$HOME/.local/state/piton/logs"]
+```toml
+[sandbox]
+read = ["~/.local/state/piton/logs"]
 ```
 
-Merge with existing grants; do not replace them. Grants apply to newly launched sandbox processes, not existing ones.
+Grant lists only add across levels. Grants apply to newly launched sandbox processes, not existing ones.
 Agents receive no CoreDevice access, settings write access, daemon control socket access, or host command execution.
 
 `PITON_LOGS_DIR` can select a different host root for development and tests; the Mac app and CLI understand it. All test
