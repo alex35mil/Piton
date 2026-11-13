@@ -50,13 +50,20 @@ pub struct ViewEnvelope {
 pub enum ViewRequest {
     #[serde(rename = "sessions.list")]
     SessionsList,
-    /// Daemon-wide state (keep-awake). Also pushed as `daemon` lines after `sessions.subscribe`, on change.
+    /// Daemon-wide state (keep-awake, settings). Also pushed as `daemon` lines after `sessions.subscribe`, on change.
     #[serde(rename = "daemon.state")]
     DaemonState,
-    /// Turn keep-awake on or off; kept across restarts.
-    #[serde(rename = "daemon.keep_awake")]
-    DaemonKeepAwake { on: bool },
-    /// Switch host logging until the policy expires or the daemon restarts (the config's `[logging] mode` is the
+    /// Change one setting: a state value in the database, or a configuration key in its global file. `value: null`
+    /// returns it to the default. `local` (configuration only) moves the key to the `.local` file (`true`) or the
+    /// shared one (`false`); omitted, it stays in the file that sets it.
+    #[serde(rename = "settings.set")]
+    SettingsSet {
+        key: String,
+        value: serde_json::Value,
+        #[serde(default)]
+        local: Option<bool>,
+    },
+    /// Switch host logging until the policy expires or the daemon restarts (`[host] logging` in `settings.toml` is the
     /// default).
     #[serde(rename = "daemon.logging")]
     DaemonLogging { policy: crate::diagnostics::Policy },
@@ -246,7 +253,7 @@ pub struct WorkerEntry {
 }
 
 /// Daemon-wide state for the apps.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DaemonState {
     /// `<package version> (<git commit>[-dirty])` of the running daemon.
     pub version: String,
@@ -259,6 +266,10 @@ pub struct DaemonState {
     pub sessions: usize,
     /// Host logging (this Mac's app, the daemon, and the phone-log collector).
     pub logging: crate::diagnostics::State,
+    /// Every setting the apps show: its value, where it lives, and whether it waits for a restart.
+    pub settings: Vec<crate::preferences::SettingInfo>,
+    /// Why the global files' latest version can't be used (the settings are the last good values).
+    pub settings_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,7 @@
 // End-to-end tests of the `view` protocol (native clients) against real pi with the faux extension.
 // Usage (in daemon/): cargo build && node tests/e2e/view.mjs, or `mise run daemon:test`.
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
+import { lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import net from "node:net";
@@ -36,7 +36,7 @@ function setup(options = {}) {
         },
         host: { attach_mode: "host", empty_grace_ms: 60000, ...(options.roots === false ? {} : { roots: [root] }) },
     });
-    return { dir, root, ws, socket, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
+    return { dir, root, ws, socket, config, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
 }
 
 async function startDaemon(ctx) {
@@ -356,22 +356,32 @@ const tests = {
         const daemonLine = (pred) => c.wait((m) => m.type === "daemon" && pred(m.state));
         // The test's state database has keep-awake off.
         await daemonLine((s) => s.keep_awake === false && s.awake === false && s.sessions === 0);
-        await c.req("daemon.keep_awake", { on: true });
+        const keepAwake = (on) => c.req("settings.set", { key: "keep_awake", value: on });
+        await keepAwake(true);
         await daemonLine((s) => s.keep_awake === true && s.awake === false);
         const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
         // Held for an idle session: no prompt was sent.
         await daemonLine((s) => s.awake === true && s.sessions === 1);
-        const off = await c.req("daemon.keep_awake", { on: false });
+        const off = await keepAwake(false);
         assert.equal(off.state.keep_awake, false);
         await daemonLine((s) => s.keep_awake === false && s.awake === false && s.sessions === 1);
-        await c.req("daemon.keep_awake", { on: true });
+        await keepAwake(true);
         await daemonLine((s) => s.keep_awake === true && s.awake === true);
         await c.req("session.stop", { session: session.key });
         await daemonLine((s) => s.awake === false && s.sessions === 0);
         const state = await c.req("daemon.state");
-        const { version, ...rest } = state.state;
+        const { version, settings, ...rest } = state.state;
         assert.match(version, /^\d+\.\d+\.\d+ \([0-9a-f]{10}(-dirty)?\)$/, "version with the git commit");
+        assert.deepEqual(settings.find((s) => s.key === "keep_awake"), {
+            key: "keep_awake",
+            value: true,
+            kind: { kind: "state" },
+            value_type: { kind: "bool" },
+            applies: { kind: "live" },
+            editable: true,
+        });
         assert.deepEqual(rest, {
+            settings_error: null,
             host_id: "e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0",
             keep_awake: true,
             awake: false,
@@ -382,6 +392,69 @@ const tests = {
         // The choice is state: it's in the database for the next start.
         const saved = execFileSync("sqlite3", [join(ctx.dir, "piton.db"), "SELECT value FROM settings WHERE key = 'keep_awake'"]);
         assert.equal(saved.toString().trim(), "true");
+    },
+
+    async "settings: changed from the view, kept in the files, hand edits applied live"(ctx) {
+        const c = viewClient(ctx, "mac");
+        await c.req("sessions.subscribe");
+        const setting = (state, key) => state.settings.find((s) => s.key === key);
+        const daemonLine = (pred) => c.waitNew((m) => m.type === "daemon" && pred(m.state));
+        const settingsFile = join(ctx.config, "settings.toml");
+        const localFile = join(ctx.config, "settings.local.toml");
+
+        // A preference moves to this host's file and stays commented and ordered in the shared one.
+        writeFileSync(settingsFile, readFileSync(settingsFile, "utf8").replace("[host]", "# mine\n[host]"));
+        const roots = [ctx.root];
+        const set = await c.req("settings.set", { key: "host.favorites", value: [ctx.ws], local: true });
+        assert.deepEqual(setting(set.state, "host.favorites").kind, { kind: "config", file: "settings", placement: "local" });
+        assert.equal(readFileSync(localFile, "utf8"), `[host]\nfavorites = ${JSON.stringify([ctx.ws])}\n`);
+        assert.match(readFileSync(settingsFile, "utf8"), /^# mine\n\[host\]/);
+        assert.deepEqual(setting(set.state, "host.roots").value, roots);
+
+        // A key that needs a restart is written, and waits.
+        const port = await c.req("settings.set", { key: "tailnet.port", value: 9123 });
+        assert.deepEqual(setting(port.state, "tailnet.port").applies, { kind: "restart", pending: true });
+
+        // Refused before anything is written.
+        const bad = await c.reqRaw("settings.set", { key: "socket", value: "/elsewhere" });
+        assert.equal(bad.ok, false);
+        const wrong = await c.reqRaw("settings.set", { key: "host.roots", value: "not a list" });
+        assert.equal(wrong.ok, false);
+        const state = await c.reqRaw("settings.set", { key: "keep_awake", value: true, local: true });
+        assert.equal(state.ok, false);
+
+        // A hand edit applies without a restart; a broken one keeps the last good values and says why.
+        writeFileSync(localFile, `[host]\nfavorites = []\n`);
+        await daemonLine((s) => setting(s, "host.favorites").value.length === 0);
+        writeFileSync(localFile, "[host\n");
+        await daemonLine((s) => s.settings_error !== null && setting(s, "host.roots").value.length === 1);
+        writeFileSync(localFile, "");
+        await daemonLine((s) => s.settings_error === null);
+
+        // Two changes to one file at once: both kept.
+        await Promise.all([
+            c.req("settings.set", { key: "host.empty_grace_ms", value: 61000 }),
+            c.req("settings.set", { key: "client.text_font", value: "Iosevka" }),
+        ]);
+        const both = readFileSync(settingsFile, "utf8");
+        assert.match(both, /empty_grace_ms = 61000/);
+        assert.match(both, /text_font = "Iosevka"/);
+
+        // A file linked into a dotfiles folder after the daemon started: edits there apply too, and app writes keep
+        // the link.
+        const dotfiles = join(ctx.dir, "dotfiles");
+        mkdirSync(dotfiles);
+        const linked = join(dotfiles, "settings.local.toml");
+        writeFileSync(linked, "");
+        rmSync(localFile);
+        symlinkSync(linked, localFile);
+        await sleep(500);
+        writeFileSync(linked, `[host]\nfavorites = ["/from/dotfiles"]\n`);
+        await daemonLine((s) => setting(s, "host.favorites").value[0] === "/from/dotfiles");
+        await c.req("settings.set", { key: "host.favorites", value: ["/from/app"] });
+        assert.ok(lstatSync(localFile).isSymbolicLink());
+        assert.match(readFileSync(linked, "utf8"), /\/from\/app/);
+        c.close();
     },
 
     async "workspaces: browse the roots; start only inside them"(ctx) {

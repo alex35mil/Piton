@@ -114,10 +114,11 @@ public actor Connection {
         try await send(.sessionsSubscribe)
     }
 
-    /// Turns keep-awake on or off until the daemon restarts; returns the new state.
+    /// Changes one setting (see `Request.settingsSet`); returns the new state.
     @discardableResult
-    public func setKeepAwake(_ on: Bool) async throws -> DaemonState {
-        try decode(try await send(.daemonKeepAwake(on))["state"], as: DaemonState.self)
+    public func setSetting(_ key: String, to value: JSON, local: Bool? = nil) async throws -> DaemonState {
+        try decode(
+            try await send(.settingsSet(key: key, value: value, local: local))["state"], as: DaemonState.self)
     }
 
     /// Switches host logging until the policy expires or the daemon restarts; returns the new state.

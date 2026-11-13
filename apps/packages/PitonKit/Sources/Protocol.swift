@@ -490,11 +490,160 @@ public struct DaemonState: Codable, Sendable, Hashable {
     public let sessions: Int
     /// Host logging: this Mac's app, the daemon, and the phone-log collector.
     public let logging: HostLogging
+    /// Every setting the apps show: its value, where it lives, and whether it waits for a restart.
+    public let settings: [Setting]
+    /// Why the host's configuration files can't be used right now (the settings are the last good values).
+    public let settingsError: String?
 
     enum CodingKeys: String, CodingKey {
-        case version, awake, sessions, logging
+        case version, awake, sessions, logging, settings
         case hostID = "host_id"
         case keepAwake = "keep_awake"
+        case settingsError = "settings_error"
+    }
+
+    public func setting(_ key: String) -> Setting? {
+        settings.first { $0.key == key }
+    }
+}
+
+/// One setting of the host: configuration in a global file (`settings.toml` or `daemon.toml`), or state the host keeps.
+public struct Setting: Codable, Sendable, Hashable, Identifiable {
+    public let key: String
+    /// The value in effect: the file's (or the host's state), else the default.
+    public let value: JSON
+    public let kind: SettingKind
+    public let valueType: SettingValueType
+    public let applies: SettingApplies
+    /// Whether the apps may change it.
+    public let editable: Bool
+
+    public var id: String { key }
+
+    enum CodingKeys: String, CodingKey {
+        case key, value, kind, applies, editable
+        case valueType = "value_type"
+    }
+}
+
+public enum SettingFile: String, Codable, Sendable {
+    case settings
+    case daemon
+}
+
+/// Which file of a pair sets a key: the shared one (every host through dotfiles) or the `.local` one (this host).
+public enum SettingPlacement: String, Codable, Sendable {
+    case shared
+    case local
+}
+
+public enum SettingKind: Codable, Sendable, Hashable {
+    /// Configuration in `file`; `placement` is nil when neither file sets it (the default applies).
+    case config(file: SettingFile, placement: SettingPlacement?)
+    /// The host's state, kept in its database; it has no Local choice.
+    case state
+
+    enum CodingKeys: String, CodingKey { case kind, file, placement }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "config":
+            self = .config(
+                file: try c.decode(SettingFile.self, forKey: .file),
+                placement: try c.decodeIfPresent(SettingPlacement.self, forKey: .placement))
+        case "state": self = .state
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c, debugDescription: "unknown setting kind \(other)")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .config(let file, let placement):
+            try c.encode("config", forKey: .kind)
+            try c.encode(file, forKey: .file)
+            try c.encode(placement, forKey: .placement)
+        case .state:
+            try c.encode("state", forKey: .kind)
+        }
+    }
+}
+
+public enum SettingValueType: Codable, Sendable, Hashable {
+    case bool
+    case text
+    case textList
+    case integer
+    case integerList
+    case choice(options: [String])
+    /// A network profile name, or `false` for no proxy filtering.
+    case networkProfile
+
+    enum CodingKeys: String, CodingKey { case kind, options }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "bool": self = .bool
+        case "text": self = .text
+        case "text_list": self = .textList
+        case "integer": self = .integer
+        case "integer_list": self = .integerList
+        case "choice": self = .choice(options: try c.decode([String].self, forKey: .options))
+        case "network_profile": self = .networkProfile
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c, debugDescription: "unknown setting value type \(other)")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .bool: try c.encode("bool", forKey: .kind)
+        case .text: try c.encode("text", forKey: .kind)
+        case .textList: try c.encode("text_list", forKey: .kind)
+        case .integer: try c.encode("integer", forKey: .kind)
+        case .integerList: try c.encode("integer_list", forKey: .kind)
+        case .choice(let options):
+            try c.encode("choice", forKey: .kind)
+            try c.encode(options, forKey: .options)
+        case .networkProfile: try c.encode("network_profile", forKey: .kind)
+        }
+    }
+}
+
+/// When a change takes effect.
+public enum SettingApplies: Codable, Sendable, Hashable {
+    /// At once, or for the next session.
+    case live
+    /// When the daemon restarts; `pending` when it changed since the daemon started.
+    case restart(pending: Bool)
+
+    enum CodingKeys: String, CodingKey { case kind, pending }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "live": self = .live
+        case "restart": self = .restart(pending: try c.decode(Bool.self, forKey: .pending))
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c, debugDescription: "unknown setting applies \(other)")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .live: try c.encode("live", forKey: .kind)
+        case .restart(let pending):
+            try c.encode("restart", forKey: .kind)
+            try c.encode(pending, forKey: .pending)
+        }
     }
 }
 
@@ -583,7 +732,9 @@ public enum Request: Sendable, Hashable {
     case sessionsList
     case sessionsSubscribe
     case daemonState
-    case daemonKeepAwake(Bool)
+    /// Changes one setting; `value: .null` returns it to the default. `local` (configuration only) moves it to this
+    /// host's `.local` file (`true`) or the shared one (`false`); nil keeps it where it is.
+    case settingsSet(key: String, value: JSON, local: Bool?)
     /// Switches host logging until the policy expires or the daemon restarts.
     case daemonLogging(LoggingPolicy)
     /// Folders under the daemon's roots, one level (the roots when `path` is nil).
@@ -611,9 +762,11 @@ public enum Request: Sendable, Hashable {
             fields["type"] = .string("sessions.list")
         case .daemonState:
             fields["type"] = .string("daemon.state")
-        case .daemonKeepAwake(let on):
-            fields["type"] = .string("daemon.keep_awake")
-            fields["on"] = .bool(on)
+        case .settingsSet(let key, let value, let local):
+            fields["type"] = .string("settings.set")
+            fields["key"] = .string(key)
+            fields["value"] = value
+            if let local { fields["local"] = .bool(local) }
         case .daemonLogging(let policy):
             fields["type"] = .string("daemon.logging")
             // Encoding a plain Codable enum can't fail.

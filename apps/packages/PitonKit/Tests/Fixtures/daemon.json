@@ -15,6 +15,95 @@
         }
       },
       "default": "info"
-    }
+    },
+    "settings": [
+      {
+        "key": "keep_awake",
+        "value": true,
+        "kind": {
+          "kind": "state"
+        },
+        "value_type": {
+          "kind": "bool"
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "host.roots",
+        "value": [
+          "~/Projects"
+        ],
+        "kind": {
+          "kind": "config",
+          "file": "settings",
+          "placement": "local"
+        },
+        "value_type": {
+          "kind": "text_list"
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "host.logging",
+        "value": "info",
+        "kind": {
+          "kind": "config",
+          "file": "settings",
+          "placement": null
+        },
+        "value_type": {
+          "kind": "choice",
+          "options": [
+            "info",
+            "debug"
+          ]
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "tailnet.port",
+        "value": 9000,
+        "kind": {
+          "kind": "config",
+          "file": "daemon",
+          "placement": "shared"
+        },
+        "value_type": {
+          "kind": "integer"
+        },
+        "applies": {
+          "kind": "restart",
+          "pending": true
+        },
+        "editable": true
+      },
+      {
+        "key": "socket",
+        "value": "/Users/me/.local/state/piton/piton.sock",
+        "kind": {
+          "kind": "config",
+          "file": "daemon",
+          "placement": null
+        },
+        "value_type": {
+          "kind": "text"
+        },
+        "applies": {
+          "kind": "restart",
+          "pending": false
+        },
+        "editable": false
+      }
+    ],
+    "settings_error": null
   }
 }

@@ -294,10 +294,15 @@ public final class Store {
         await attempt { try await self.require().answer(session, dialog: dialog, with: answer) }
     }
 
-    /// Turns keep-awake on or off until the daemon restarts.
+    /// Turns keep-awake on or off; the host keeps the choice across restarts.
     public func setKeepAwake(_ on: Bool) async -> Bool {
+        await setSetting("keep_awake", to: .bool(on))
+    }
+
+    /// Changes one of the host's settings (see `Request.settingsSet`).
+    public func setSetting(_ key: String, to value: JSON, local: Bool? = nil) async -> Bool {
         do {
-            daemon = try await require().setKeepAwake(on)
+            daemon = try await require().setSetting(key, to: value, local: local)
             return true
         } catch {
             lastError = String(describing: error)

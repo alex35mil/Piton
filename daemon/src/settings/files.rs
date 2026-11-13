@@ -386,13 +386,29 @@ where
     let Some(text) = read_text(path)? else {
         return Ok(None);
     };
+    let value = parse(&text, path, level, format)?;
+    Ok(Some(Loaded {
+        value,
+        origin: Origin {
+            path: path.to_path_buf(),
+            level,
+        },
+    }))
+}
+
+/// Parses one file's text strictly, as `path` at `level`: moved keys, unknown keys, and keys the level may not set are
+/// refused.
+pub fn parse<T>(text: &str, path: &Path, level: LevelKind, format: Format) -> Result<T, SettingsError>
+where
+    T: serde::de::DeserializeOwned + Scoped,
+{
     let invalid = |reason: String| SettingsError::Invalid {
         path: path.to_path_buf(),
         reason,
     };
     let value: T = match format {
         Format::Toml => {
-            let table: toml::Table = toml::from_str(&text).map_err(|e| invalid(e.to_string()))?;
+            let table: toml::Table = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
             if let Some((key, now)) = MOVED_DAEMON_KEYS.iter().find(|(key, _)| table.contains_key(*key))
                 && is_daemon_file(path)
             {
@@ -406,11 +422,11 @@ where
                     "`sandbox.profile` is now `sandbox.base`, and its grants go in [sandbox]".into(),
                 ));
             }
-            toml::from_str(&text).map_err(|e| invalid(e.to_string()))?
+            toml::from_str(text).map_err(|e| invalid(e.to_string()))?
         }
         Format::Json => {
             // serde reads a JSON array into a struct too; a settings file must be an object.
-            let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?;
+            let value: serde_json::Value = serde_json::from_str(text).map_err(|e| invalid(e.to_string()))?;
             if !value.is_object() {
                 return Err(invalid("must be a JSON object".into()));
             }
@@ -426,13 +442,7 @@ where
             global: super::global_tier(),
         });
     }
-    Ok(Some(Loaded {
-        value,
-        origin: Origin {
-            path: path.to_path_buf(),
-            level,
-        },
-    }))
+    Ok(value)
 }
 
 fn is_daemon_file(path: &Path) -> bool {

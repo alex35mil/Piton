@@ -46,7 +46,11 @@ ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a sessio
 
 Optional, in the global configuration folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`; `--config-home`
 or `PITON_CONFIG_HOME` for tests); every key has the default shown. Unknown keys are refused, so a typo stops the
-daemon from starting. The daemon reads the files at startup: run `piton service install` after changing them. The
+daemon from starting. The daemon watches the files: a change applies to the next session at once, and the apps show
+`log`, `[env]`, and `[tailnet]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
+the last good values and the apps say why. The apps change every key except `socket`, keeping your comments and
+order, writing through a symlink into a dotfiles repository, and moving a key to the `.local` file when you check
+Local. The
 whole layout, including repository and parent-folder levels, is in "Configuration and state" in
 [design.md](design.md); `piton config check` validates a workspace's configuration and lists the files it reads.
 

@@ -107,13 +107,23 @@ fn handle(
     match request {
         ViewRequest::SessionsList => Ok(sessions_value(daemon)).into(),
         ViewRequest::DaemonState => Ok(json!({"state": daemon.state()})).into(),
-        ViewRequest::DaemonKeepAwake { on } => {
-            crate::log!("view client {watcher}: keep-awake {}", if on { "on" } else { "off" });
-            daemon
-                .set_keep_awake(on)
-                .map(|()| json!({"state": daemon.state()}))
-                .map_err(|e| format!("can't save keep-awake: {e}"))
-                .into()
+        ViewRequest::SettingsSet { key, value, local } => {
+            crate::log!("view client {watcher}: set {key}");
+            let daemon = daemon.clone();
+            // Writes files and the database: off the connection's loop.
+            Handled::Later(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        crate::preferences::validate(&key, &value, local)
+                            .and_then(|change| daemon.set_preference(change))
+                            .map(|()| json!({"state": daemon.state()}))
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                }
+                .boxed(),
+            )
         }
         ViewRequest::DaemonLogging { policy } => {
             crate::log!("view client {watcher}: logging change");

@@ -362,8 +362,8 @@ arrive out of request order.
 | --- | --- |
 | `sessions.list` | `{sessions}`: live sessions (key, id, file, workspace, checkout, mode, status, clients, pid, title) |
 | `sessions.subscribe` | `{}`; then pushes `sessions` and `daemon {state}` lines on change |
-| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`) |
-| `daemon.keep_awake {on}` | `{state}`; kept in the state database across restarts |
+| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `value`, `kind` (`config` with `file` and `placement`, or `state`), `value_type`, `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
+| `settings.set {key, value, local?}` | `{state}`; state to the database, configuration to its global file; `value: null` resets; `local` moves the key between the shared and `.local` file |
 | `daemon.logging {policy}` | `{state}`; until it expires or the daemon restarts |
 | `workspaces.browse {path?}` | `{entries}`; see "Workspace roots" |
 | `session.start {workspace, mode?, prompt?}` | `{session}`; mode defaults to `sandbox`; `workspace` must be a checkout under a root |
@@ -485,7 +485,7 @@ Attention is derived from the event stream:
   assertion (`caffeinate -i`), so the phone can reach sessions it might want to steer; released when the last
   session ends. Idle sessions count: a Mac that slept with only idle sessions made the phone lose access
   (2026-11-08). The display may still sleep and the screen lock; the daemon and Tailscale keep running.
-- On/off: state in the host's database (default on); the apps toggle it (`daemon.keep_awake`, the macOS menu bar
+- On/off: state in the host's database (default on); the apps toggle it (`settings.set` `keep_awake`, the macOS menu bar
   item and Settings > General on both platforms), and the choice survives restarts. A `keep_awake` key in
   `daemon.toml` is refused: it's state, not configuration.
 - Lid closed on battery without an external display sleeps regardless. For that, `piton-sleepd` toggles
@@ -498,8 +498,8 @@ Attention is derived from the event stream:
 The Info level records essential events; opt-in Debug adds detailed traces and expires after an hour by default unless
 explicitly kept on. The apps retain bounded files alongside Apple's unified logger. Host logging (the
 Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `[host] logging` in `settings.toml`
-is the default, and `daemon.logging` (the Mac app) or `piton logging` switches it until it expires or the daemon restarts,
-like keep-awake. The policy is part of the pushed daemon state. The phone's capture setting is a device setting, local
+is the default, and `daemon.logging` (the Mac app) or `piton logging` switches it until it expires or the daemon restarts.
+The policy is part of the pushed daemon state. The phone's capture setting is a device setting, local
 to the phone, and works offline. No logging control changes pi's settings, uses its RPC channel, or restarts sessions.
 
 Settings ownership: each setting lives in exactly one place; see "Configuration and state" below.
@@ -645,7 +645,9 @@ $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
   `settings` or `daemon` file for config. The daemon edits with `toml_edit`, keeping comments and order, writes
   through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. Every global key is editable
   except `socket`, a test and development override the apps don't show. The apps never write repository or
-  parent-folder files.
+  parent-folder files. A change is checked against the schema before it's written. The daemon watches the global
+  folder (and a symlink's target folder): edits apply at once; `log`, `[env]`, and `[tailnet]` wait for a restart
+  and show as pending; an invalid file keeps the last good values and `settings_error` says why.
 - `daemon.state` carries each setting with its value, kind (config with its file, or state), whether it's local,
   whether the apps may change it, and any pending restart. Clients never see file contents.
 

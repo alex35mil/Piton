@@ -14,12 +14,13 @@
 
 mod chain;
 pub mod convert;
+pub mod edit;
 mod files;
 mod merge;
 mod resolve;
 
 pub use chain::{LevelKind, global_tier, home};
-pub use files::{DaemonFile, NetworkProfile, SandboxTable, SettingsFile, expand_home};
+pub use files::{DaemonFile, Format, NetworkProfile, SandboxTable, SettingsFile, expand_home, parse, validate_daemon};
 pub use merge::sandbox as merge_sandbox;
 pub use resolve::{DaemonSettings, Part, Paths, Resolved, Runtime, Section, resolve, resolve_daemon, resolve_global};
 

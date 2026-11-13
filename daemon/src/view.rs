@@ -1471,6 +1471,52 @@ mod tests {
                         },
                         default: crate::diagnostics::Mode::Info,
                     },
+                    settings: {
+                        use crate::preferences::{AppliesInfo, File, KindInfo, PlacementInfo, SettingInfo, ValueType};
+                        vec![
+                            SettingInfo {
+                                key: "keep_awake",
+                                value: json!(true),
+                                kind: KindInfo::State,
+                                value_type: ValueType::Bool,
+                                applies: AppliesInfo::Live,
+                                editable: true,
+                            },
+                            SettingInfo {
+                                key: "host.roots",
+                                value: json!(["~/Projects"]),
+                                kind: KindInfo::Config { file: File::Settings, placement: Some(PlacementInfo::Local) },
+                                value_type: ValueType::TextList,
+                                applies: AppliesInfo::Live,
+                                editable: true,
+                            },
+                            SettingInfo {
+                                key: "host.logging",
+                                value: json!("info"),
+                                kind: KindInfo::Config { file: File::Settings, placement: None },
+                                value_type: ValueType::Choice { options: &["info", "debug"] },
+                                applies: AppliesInfo::Live,
+                                editable: true,
+                            },
+                            SettingInfo {
+                                key: "tailnet.port",
+                                value: json!(9000),
+                                kind: KindInfo::Config { file: File::Daemon, placement: Some(PlacementInfo::Shared) },
+                                value_type: ValueType::Integer,
+                                applies: AppliesInfo::Restart { pending: true },
+                                editable: true,
+                            },
+                            SettingInfo {
+                                key: "socket",
+                                value: json!("/Users/me/.local/state/piton/piton.sock"),
+                                kind: KindInfo::Config { file: File::Daemon, placement: None },
+                                value_type: ValueType::Text,
+                                applies: AppliesInfo::Restart { pending: false },
+                                editable: false,
+                            },
+                        ]
+                    },
+                    settings_error: None,
                 }})
                 .to_string(),
             ),

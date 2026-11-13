@@ -180,6 +180,17 @@ private let decoder = JSONDecoder()
     }
     #expect(state.version == "0.1.0 (abc1234567)")
     #expect(state.hostID == "0123456789abcdef0123456789abcdef")
+    #expect(state.settingsError == nil)
+    #expect(state.setting("keep_awake")?.kind == .state)
+    let roots = try #require(state.setting("host.roots"))
+    #expect(roots.kind == .config(file: .settings, placement: .local))
+    #expect(roots.valueType == .textList && roots.value == .array([.string("~/Projects")]))
+    #expect(state.setting("host.logging")?.valueType == .choice(options: ["info", "debug"]))
+    #expect(state.setting("host.logging")?.kind == .config(file: .settings, placement: nil))
+    let port = try #require(state.setting("tailnet.port"))
+    #expect(port.applies == .restart(pending: true))
+    #expect(roots.applies == .live)
+    #expect(state.setting("socket")?.editable == false)
     #expect(state.keepAwake && state.awake && state.sessions == 2)
     #expect(
         state.logging
