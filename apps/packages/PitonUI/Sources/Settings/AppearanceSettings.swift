@@ -1,42 +1,34 @@
+import PitonKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The Appearance settings section: the text and code fonts. A device setting, stored on each device.
+/// The Appearance settings section: the text and code fonts. Each is shared through the host (the same on every
+/// device, kept in the host's settings.toml `[client]`) unless its Local box is checked, which keeps a value on this
+/// device only. A shared change needs the connection; a local one doesn't.
 public struct AppearanceSettings: View {
-    @AppStorage(FontChoice.textKey) private var text: FontChoice = .system
-    @AppStorage(FontChoice.codeKey) private var code: FontChoice = .system
+    /// The host connection, for shared values; nil while there's none (the phone before setup).
+    let store: Store?
+    @State private var fonts = FontPreferences()
     @State private var importing = false
     @State private var imported: [String] = []
     @State private var problem: String?
     @Environment(\.typography) private var typography
 
-    public init() {}
+    public init(store: Store?) {
+        self.store = store
+    }
 
     public var body: some View {
         Form {
             Section {
-                NavigationLink {
-                    FontList(title: "Text Font", selection: $text, design: .default)
-                } label: {
-                    LabeledContent {
-                        Text(name(text))
-                    } label: {
-                        Text("Text")
-                        Text("Messages and titles.")
-                    }
-                }
-                NavigationLink {
-                    FontList(title: "Code Font", selection: $code, design: .monospaced)
-                } label: {
-                    LabeledContent {
-                        Text(name(code))
-                    } label: {
-                        Text("Code")
-                        Text("Labels, tool calls, and output.")
-                    }
-                }
+                fontRow(.textFont, title: "Text", detail: "Messages and titles.", design: .default)
+                fontRow(.codeFont, title: "Code", detail: "Labels, tool calls, and output.", design: .monospaced)
             } header: {
                 Text("Fonts")
+            } footer: {
+                Text(
+                    "Shared fonts are the same on every device connected to this host. Check Local to choose one for this device only. A font this device doesn't have shows as the system font."
+                )
             }
             Section("Preview") {
                 VStack(alignment: .leading, spacing: 8) {
@@ -64,9 +56,6 @@ public struct AppearanceSettings: View {
                     Button("Remove Imported Fonts", role: .destructive) {
                         FontLibrary.removeImported()
                         imported = []
-                        for key in [FontChoice.textKey, FontChoice.codeKey] {
-                            UserDefaults.standard.removeObject(forKey: key)
-                        }
                     }
                 }
                 if let problem {
@@ -101,6 +90,64 @@ public struct AppearanceSettings: View {
         case .system: "System"
         case .family(let family): family
         }
+    }
+
+    @ViewBuilder
+    private func fontRow(
+        _ preference: ClientPreference, title: String, detail: String, design: Font.Design
+    ) -> some View {
+        let source = fonts.source(preference)
+        NavigationLink {
+            FontList(title: "\(title) Font", selection: selection(preference), design: design)
+        } label: {
+            LabeledContent {
+                Text(name(FontChoice(preference: source.value)))
+            } label: {
+                Text(title)
+                Text(detail)
+            }
+        }
+        .disabled(!canChange(source))
+        Toggle("Local to this device", isOn: local(preference))
+    }
+
+    /// A shared value changes on the host: it needs the connection.
+    private func canChange(_ source: PreferenceSource) -> Bool {
+        switch source {
+        case .local: true
+        case .shared: store?.daemon != nil
+        }
+    }
+
+    private func selection(_ preference: ClientPreference) -> Binding<FontChoice> {
+        Binding(
+            get: { FontChoice(preference: fonts.source(preference).value) },
+            set: { choice in
+                switch fonts.source(preference) {
+                case .local: ClientPreferences().setLocal(preference, choice.preference)
+                case .shared:
+                    let value: JSON = choice.preference.map(JSON.string) ?? .null
+                    Task { _ = await store?.setSetting(preference.rawValue, to: value) }
+                }
+            })
+    }
+
+    /// Checking Local keeps the font in use on this device; unchecking returns to the host's shared one.
+    private func local(_ preference: ClientPreference) -> Binding<Bool> {
+        Binding(
+            get: {
+                switch fonts.source(preference) {
+                case .local: true
+                case .shared: false
+                }
+            },
+            set: { isLocal in
+                let preferences = ClientPreferences()
+                switch isLocal {
+                case true: preferences.setLocal(preference, fonts.source(preference).value)
+                case false: preferences.useShared(preference)
+                }
+            })
     }
 }
 

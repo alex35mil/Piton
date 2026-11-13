@@ -5,11 +5,13 @@ import SwiftUI
 /// Mac's Settings window (`SettingsSplit`) and in the iPad's app window (RootView's settings mode), a list that pushes
 /// sections in the phone's Settings tab. Declared in display order.
 public enum SettingsSection: String, CaseIterable, Identifiable, Hashable, Sendable {
-    /// Daemon state and keep-awake (the Mac).
+    /// Daemon state and keep-awake.
     case general
-    /// The phone's Mac address (device settings).
+    /// Where this device connects: the phone's host address; the Mac's role.
     case connection
-    /// Fonts (device settings).
+    /// Every setting of the host (its files and its state).
+    case host
+    /// Fonts: shared through the host, or local to this device.
     case appearance
     case logging
 
@@ -19,6 +21,7 @@ public enum SettingsSection: String, CaseIterable, Identifiable, Hashable, Senda
         switch self {
         case .connection: "Connection"
         case .general: "General"
+        case .host: "Host"
         case .appearance: "Appearance"
         case .logging: "Logging"
         }
@@ -28,6 +31,7 @@ public enum SettingsSection: String, CaseIterable, Identifiable, Hashable, Senda
         switch self {
         case .connection: "network"
         case .general: "gearshape"
+        case .host: "server.rack"
         case .appearance: "textformat"
         case .logging: "waveform.path.ecg"
         }
@@ -125,12 +129,14 @@ struct SettingsSplit<Content: View>: View {
         }
 
         public var body: some View {
-            SettingsSplit(sections: [.general, .connection, .appearance, .logging], sidebarWidth: Self.sidebarWidth) {
-                section in
+            SettingsSplit(
+                sections: [.general, .connection, .host, .appearance, .logging], sidebarWidth: Self.sidebarWidth
+            ) { section in
                 switch section {
                 case .general: GeneralSettings(store: store)
                 case .connection: MacConnectionSettings(role: $role, hostAddress: $hostAddress)
-                case .appearance: AppearanceSettings()
+                case .host: HostSettings(store: store)
+                case .appearance: AppearanceSettings(store: store)
                 case .logging: LoggingSettings(scope: .host(store))
                 }
             }
@@ -224,7 +230,7 @@ struct SettingsSplit<Content: View>: View {
     }
 
     /// A device's settings sections (iPhone, iPad): the daemon in General, then the device's own settings.
-    let deviceSections: [SettingsSection] = [.general, .connection, .appearance, .logging]
+    let deviceSections: [SettingsSection] = [.general, .connection, .host, .appearance, .logging]
 
     /// One of a device's settings sections (iPhone, iPad).
     struct DeviceSettingsSection: View {
@@ -237,7 +243,8 @@ struct SettingsSplit<Content: View>: View {
             switch section {
             case .general: GeneralSettings(store: store)
             case .connection: ConnectionSettings(host: $host, port: $port)
-            case .appearance: AppearanceSettings()
+            case .host: HostSettings(store: store)
+            case .appearance: AppearanceSettings(store: store)
             case .logging: LoggingSettings(scope: .device)
             }
         }
@@ -268,8 +275,9 @@ struct SettingsSplit<Content: View>: View {
                 switch (section, store) {
                 case (.connection, _): ConnectionSettings(host: $host, port: $port)
                 case (.general, .some(let store)): GeneralSettings(store: store)
-                case (.general, nil): EmptyView()
-                case (.appearance, _): AppearanceSettings()
+                case (.general, nil), (.host, nil): EmptyView()
+                case (.host, .some(let store)): HostSettings(store: store)
+                case (.appearance, let store): AppearanceSettings(store: store)
                 case (.logging, _): LoggingSettings(scope: .device)
                 }
             }
@@ -277,7 +285,7 @@ struct SettingsSplit<Content: View>: View {
 
         private var sections: [SettingsSection] {
             switch store {
-            case .some: [.general, .connection, .appearance, .logging]
+            case .some: [.general, .connection, .host, .appearance, .logging]
             case nil: [.connection, .appearance, .logging]
             }
         }

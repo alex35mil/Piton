@@ -57,13 +57,24 @@ extension SessionStatus {
 
 // MARK: Typography
 
-/// A font the user chose: the system's, or an installed (or, on the phone, imported) family. A device setting.
+/// A font the user chose: the system's, or an installed (or, on the phone, imported) family. A client preference:
+/// shared through the host (`[client]` in its settings.toml) or local to this device.
 public enum FontChoice: Hashable, Sendable, RawRepresentable {
     case system
     case family(String)
 
-    static let textKey = "appearance.font.text"
-    static let codeKey = "appearance.font.code"
+    /// A preference value: a family name, or nil for the system font.
+    init(preference: String?) {
+        self = preference.map(FontChoice.family) ?? .system
+    }
+
+    /// As a preference value.
+    var preference: String? {
+        switch self {
+        case .system: nil
+        case .family(let name): name
+        }
+    }
 
     public init?(rawValue: String) {
         if rawValue == "system" {
@@ -135,11 +146,10 @@ extension EnvironmentValues {
 /// Applies the theme to a whole scene: dark, accent tint, the user's fonts in the environment. Settings forms keep the
 /// system's type; conversation views opt into the reading type with `readingType()`.
 struct PitonTheme: ViewModifier {
-    @AppStorage(FontChoice.textKey) private var text: FontChoice = .system
-    @AppStorage(FontChoice.codeKey) private var code: FontChoice = .system
+    @State private var fonts = FontPreferences()
 
     func body(content: Content) -> some View {
-        let typography = Typography(text: text, code: code)
+        let typography = Typography(text: fonts.choice(.textFont), code: fonts.choice(.codeFont))
         content
             .environment(\.typography, typography)
             .tint(Theme.accent)

@@ -848,7 +848,11 @@ are designed for the runtime to be replaced:
   stay together behind one adapter; nothing else in the daemon reads pi records.
 - **Configuration is piton's.** The resolver's parts (permissions, MCP, rules, skills, policies, workflows,
   settings) are runtime-neutral; only their delivery is pi-specific (a pi extension today, hooks and sections in a
-  pi-durable runner). New settings go into piton's files, never into pi's `settings.json`.
+  pi-durable runner). Settings piton adds (daemon, sandbox, host and client preferences, and what piton's
+  extensions read) live in piton's files, never in pi's `settings.json`. pi's own configuration (its
+  `settings.json`: default model, theme, packages; `auth.json`, keybindings, sessions, a project's `.pi/`) stays
+  pi's, and piton doesn't write it. If the apps ever change something pi owns (the default model, say), it's a
+  piton setting the adapter applies to pi.
 - **pi-specific pieces are named as such:** the protected `.pi/` folder, skill discovery through
   `resources_discover`, `PI_CODING_AGENT_DIR`, and pi's session files. They're the parts a switch removes.
 
