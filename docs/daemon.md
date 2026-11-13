@@ -48,14 +48,15 @@ ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a sessio
 
 Optional, in `config.toml` (and `config.local.toml`, this Mac's values) of the global configuration folder
 `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`; `--config-home` or `PITON_CONFIG_HOME` for tests); every key
-has the default shown. Unknown keys are refused, so a typo stops the daemon from starting. The daemon watches the files: a change applies to the next session at once, and the apps show
+has the default shown. Unknown keys are refused, and a table that can't be read stops only what reads it: a typo in
+`[tailnet]` stops the daemon from starting, never a launch's `[sandbox]`. The daemon watches the files: a change applies to the next session at once, and the apps show
 `log`, `[env]`, and `[tailnet]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
-the last good values and the apps say why. The apps change every key except `socket`, keeping your comments and
+the last good values and the apps say why. The apps change the keys below (`socket` shown read-only), keeping your comments and
 order, writing through a symlink into a dotfiles repository, and moving a key to the `.local` file when you check
 Local. The
 whole layout, including repository and parent-folder levels and the tables the pi package reads, is in
-"Configuration and state" in [design.md](design.md); `piton config check` validates a workspace's configuration and
-lists the files it reads; `piton config set KEY VALUE [--global] [--local]` changes one key the same way the apps do.
+"Configuration and state" in [design.md](design.md); `piton config check` validates a workspace's configuration,
+lists the files it reads, and warns about a path under another user's home or a secret in a file Git tracks; `piton config set KEY VALUE [--global] [--local]` changes one key the same way the apps do.
 
 How the daemon runs:
 

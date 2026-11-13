@@ -234,12 +234,12 @@ mod tests {
 
     #[test]
     fn the_dialog_is_pi_nvims_diff_format_with_the_current_content() {
-        let d = dialog("piton:w:1", Path::new("/r/.piton/permissions.json"), Some("old"), "{}");
+        let d = dialog("piton:w:1", Path::new("/r/.piton/config.toml"), Some("old"), "{}");
         assert_eq!(d["type"], "extension_ui_request");
         assert_eq!(d["method"], "select");
         let title: Value = serde_json::from_str(d["title"].as_str().unwrap()).unwrap();
         assert_eq!(title["toolName"], "write");
-        assert_eq!(title["toolInput"]["path"], "/r/.piton/permissions.json");
+        assert_eq!(title["toolInput"]["path"], "/r/.piton/config.toml");
         assert_eq!(title["toolInput"]["content"], "{}");
         assert_eq!(title["current"], "old");
         let new = dialog("piton:w:2", Path::new("/r/.pi/x"), None, "y");

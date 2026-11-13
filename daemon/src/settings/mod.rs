@@ -18,12 +18,13 @@ mod chain;
 pub mod edit;
 mod files;
 mod merge;
+pub mod portability;
 mod resolve;
 
 pub use chain::{LevelKind, global_tier, home};
 pub use files::{
-    ClientTable, ConfigDoc, ConfigPair, HostTable, NetworkProfile, RunTable, SandboxTable, Sharing, expand_home,
-    validate_config,
+    ClientTable, ConfigDoc, ConfigPair, HostTable, NetworkProfile, RunTable, SandboxTable, Sharing, WorkersTable,
+    expand_home, validate_config,
 };
 pub use resolve::{DaemonSettings, Paths, Resolved, Runtime, resolve, resolve_daemon, resolve_global};
 

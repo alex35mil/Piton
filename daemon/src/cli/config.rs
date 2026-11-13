@@ -128,6 +128,10 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 for file in &resolved.files {
                     println!("  {:?}  {}", file.level, file.path.display());
                 }
+                // Portability: warnings only, the files still work here.
+                for warning in crate::settings::portability::warnings(&resolved.files, &resolved.home) {
+                    eprintln!("piton: warning: {warning}");
+                }
                 if errors.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -166,7 +170,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 }
                 (Some(path), false) => {
                     let target = crate::protected::canonical_target(&workspace.path.join(path));
-                    let protected = roots.classify(&target);
+                    let protected = roots.protected_root(&target).is_some();
                     let output = serde_json::json!({"format": RESOLVE_FORMAT, "path": target, "protected": protected});
                     println!("{output}");
                     ExitCode::SUCCESS

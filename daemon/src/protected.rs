@@ -8,22 +8,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use serde::Serialize;
-
 use crate::settings::{LOCAL_DIR, PITON_DIR};
-
-/// What a protected path is, which decides whether a change needs the user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", content = "file", rename_all = "snake_case")]
-pub enum Protected {
-    /// A file in the source's `.piton/`: settings, permissions, sandbox grants.
-    Configuration,
-    /// A file under a `.pi/` folder: pi's own project settings and extensions, which run code.
-    Pi,
-    /// A file under an `.agents/skills/` folder: skill instructions (their `allowed-tools` grant permissions) and the
-    /// scripts skills run.
-    Skill,
-}
 
 /// The roots protection is computed for: one launch's source and workspace checkouts (canonical).
 #[derive(Debug, Clone)]
@@ -33,23 +18,17 @@ pub struct Roots {
 }
 
 impl Roots {
-    /// The checkout a protected path of this kind is in: the source for configuration, the workspace's checkout for
-    /// `.pi/` and skills.
-    pub fn root_for(&self, kind: &Protected) -> &Path {
-        match kind {
-            Protected::Configuration => &self.source,
-            Protected::Pi | Protected::Skill => &self.checkout,
-        }
-    }
-
-    /// What `path` (canonical, absolute) is, or None when it isn't protected. Names compare case-insensitively: APFS
-    /// is case-insensitive by default, so `.PI/settings.json` is the file pi reads as `.pi/settings.json`.
-    pub fn classify(&self, path: &Path) -> Option<Protected> {
+    /// The checkout a protected `path` (canonical, absolute) is in, which a write to it stays inside: the source for its
+    /// `.piton/` (settings, permissions, sandbox grants), the workspace's checkout for `.pi/` (pi's settings and
+    /// extensions, which run code) and `.agents/skills/` (skills and the scripts they run). `None` when it isn't
+    /// protected. Every protected write asks the user. Names compare case-insensitively: APFS is case-insensitive by
+    /// default, so `.PI/settings.json` is the file pi reads as `.pi/settings.json`.
+    pub fn protected_root(&self, path: &Path) -> Option<&Path> {
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
         let path = lower(path);
         let source = lower(&self.source);
         if path.starts_with(source.join(PITON_DIR)) && !path.starts_with(source.join(LOCAL_DIR)) {
-            return Some(Protected::Configuration);
+            return Some(&self.source);
         }
         let relative = path.strip_prefix(lower(&self.checkout)).ok()?;
         let parts: Vec<&str> = relative
@@ -59,13 +38,8 @@ impl Roots {
                 Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => None,
             })
             .collect();
-        if parts.contains(&".pi") {
-            return Some(Protected::Pi);
-        }
-        parts
-            .windows(2)
-            .any(|w| w == [".agents", "skills"])
-            .then_some(Protected::Skill)
+        let protected = parts.contains(&".pi") || parts.windows(2).any(|w| w == [".agents", "skills"]);
+        protected.then_some(self.checkout.as_path())
     }
 
     /// The Seatbelt rules for a sandboxed launch: deny every write to the protected paths. Paths are canonical, as
@@ -165,13 +139,15 @@ mod tests {
     #[test]
     fn classifies_paths() {
         let r = roots();
-        let c = |p: &str| r.classify(Path::new(p));
-        assert_eq!(c("/u/p/repo/.piton/permissions.json"), Some(Protected::Configuration));
+        let c = |p: &str| r.protected_root(Path::new(p)).map(Path::to_path_buf);
+        let source = Some(PathBuf::from("/u/p/repo"));
+        let checkout = Some(PathBuf::from("/u/p/repo--w"));
+        assert_eq!(c("/u/p/repo/.piton/config.toml"), source);
         assert_eq!(c("/u/p/repo/.piton/.local/gigs/x/notes.md"), None);
         // A worker's own `.piton/` isn't read, so it isn't protected; its `.pi/` and skills are.
-        assert_eq!(c("/u/p/repo--w/.piton/permissions.json"), None);
-        assert_eq!(c("/u/p/repo--w/.pi/settings.json"), Some(Protected::Pi));
-        assert_eq!(c("/u/p/repo--w/apps/sub/.pi/extensions/x.ts"), Some(Protected::Pi));
+        assert_eq!(c("/u/p/repo--w/.piton/config.toml"), None);
+        assert_eq!(c("/u/p/repo--w/.pi/settings.json"), checkout);
+        assert_eq!(c("/u/p/repo--w/apps/sub/.pi/extensions/x.ts"), checkout);
         // Every file pi could load as a skill, at any depth.
         for skill in [
             "/u/p/repo--w/.agents/skills/deploy/SKILL.md",
@@ -179,12 +155,12 @@ mod tests {
             "/u/p/repo--w/apps/.agents/skills/tools/run.md",
             "/u/p/repo--w/.agents/skills/deploy/scripts/run",
         ] {
-            assert_eq!(c(skill), Some(Protected::Skill), "{skill}");
+            assert_eq!(c(skill), checkout, "{skill}");
         }
         // Any case: APFS is case-insensitive.
-        assert_eq!(c("/u/p/repo--w/.PI/settings.json"), Some(Protected::Pi));
-        assert_eq!(c("/u/p/repo--w/.Agents/Skills/x/SKILL.md"), Some(Protected::Skill));
-        assert_eq!(c("/u/p/repo/.PITON/config.toml"), Some(Protected::Configuration));
+        assert_eq!(c("/u/p/repo--w/.PI/settings.json"), checkout);
+        assert_eq!(c("/u/p/repo--w/.Agents/Skills/x/SKILL.md"), checkout);
+        assert_eq!(c("/u/p/repo/.PITON/config.toml"), source);
         assert_eq!(c("/u/p/repo/.piton/.LOCAL/x"), None);
         assert_eq!(c("/u/p/repo--w/.agents/rules/r.md"), None);
         assert_eq!(c("/u/p/repo--w/src/main.rs"), None);

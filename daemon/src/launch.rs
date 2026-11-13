@@ -119,8 +119,8 @@ pub async fn workspace_env(
     Ok(env)
 }
 
-/// The launch's configuration: the daemon's part of the workspace's chains, refusing invalid or old-layout files the
-/// daemon reads. The pi package checks its own files when pi starts.
+/// The launch's configuration: `[sandbox]` and `[workers]` of the workspace's chain, refusing them when they're invalid.
+/// The pi package checks its own parts when pi starts.
 pub fn resolve_settings(config: &Config, workspace: &Workspace) -> Result<DaemonSettings, LaunchError> {
     Ok(crate::settings::resolve_daemon(workspace, &config.paths)?)
 }

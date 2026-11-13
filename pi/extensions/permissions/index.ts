@@ -45,7 +45,7 @@ import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@ear
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
 import { requireRuntime, type Runtime } from "../__lib/runtime.js"
-import { PROTECTED_HINT, protectedKind } from "../__lib/protected.js"
+import { isProtected, PROTECTED_HINT } from "../__lib/protected.js"
 import {
     camelKeys,
     type LevelKind,
@@ -346,7 +346,7 @@ export default function (pi: ExtensionAPI) {
     pi.on("tool_result", async (event, ctx) => {
         if (event.toolName !== "bash" || process.env.PITON_RUNTIME !== "sandbox") return undefined
         const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
-        if (!deniedProtectedWrite(text, (file) => protectedKind(ctx.cwd, file) !== undefined)) return undefined
+        if (!deniedProtectedWrite(text, (file) => isProtected(ctx.cwd, file))) return undefined
         return { content: [...event.content, { type: "text" as const, text: PROTECTED_HINT }] }
     })
     return registerReviewCodemode(pi)

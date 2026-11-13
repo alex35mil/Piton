@@ -1,5 +1,6 @@
 //! The `piton` command line: its arguments, and each command as the user runs it. `daemon` hands over to the daemon
-//! (daemon.rs); every other command is a client of it over the Unix socket, except `service` and `completion`.
+//! (daemon.rs). `config`, `setup`, `state`, `service`, and `completion` work on files and the system directly; the
+//! rest are clients of the daemon over its Unix socket.
 
 mod attach;
 mod config;

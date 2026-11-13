@@ -237,7 +237,7 @@ export function incomingRevisionDirectory(revision: IncomingRevision): string {
 }
 
 // Evidence and responses must stay in this PR's ignored local area, including through symlinks.
-// The one allowed link is a worker's `.project/.local` pointing at its source checkout's directory.
+// The one allowed link is a worker's `.piton/.local` pointing at its source checkout's directory.
 export function resolveIncomingLocalPath(root: string, selected: IncomingPullRequest, raw: string): string {
     const local = path.resolve(root, incomingLocalDirectory(selected))
     const resolved = path.resolve(root, raw.replace(/^@/, ""))

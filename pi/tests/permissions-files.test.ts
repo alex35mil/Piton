@@ -431,7 +431,7 @@ describe("native file permission execution", () => {
         }
     })
 
-    it("keeps checking tools when an unrelated configuration file is broken", async () => {
+    it("keeps checking tools when other tables of config.toml are broken", async () => {
         const h = fixture("allow")
         try {
             const file = path.join(h.root, ".piton/config.toml")

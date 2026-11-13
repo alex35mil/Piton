@@ -3,9 +3,9 @@
  * and `.pi/` and `.agents/skills/` at any depth). piton's binary is the one definition (`piton config protected`),
  * shared with the sandbox rules and the daemon's check.
  *
- * In a sandboxed session the OS denies every write to them; the agent asks the daemon instead (`agent.sock`, with the
- * session's token), which asks the user in every client and writes on approval. On the host, the permissions extension
- * asks the user itself before the tool writes.
+ * Every pi the daemon launches, sandboxed or on the host, writes them through the daemon (`agent.sock`, with the
+ * session's token), which asks the user in every client and writes on approval; in a sandbox the OS also denies every
+ * direct write. Only a pi running outside piton (no agent channel) asks the user itself before the tool writes.
  */
 
 import { execFileSync } from "node:child_process"
@@ -18,31 +18,29 @@ import { BIN_ENV, pitonBinary, RESOLVE_FORMAT } from "./settings.js"
 export const TOKEN_ENV = "PITON_SESSION_TOKEN"
 export const SOCKET_ENV = "PITON_AGENT_SOCKET"
 
-export type Protected = { kind: "configuration" } | { kind: "pi" } | { kind: "skill" }
-
 /**
  * Answers by workspace and path: protection depends only on where a path resolves, so asking the binary once per path
  * is enough. (Retargeting a symlink along a path could change it; the sandbox still denies such a write, and the
  * daemon checks the path again.)
  */
-const kinds = new Map<string, Protected | null>()
+const answers = new Map<string, boolean>()
 
 /** Forgets cached answers, for tests. */
 export function clearProtectedCache(): void {
-    kinds.clear()
+    answers.clear()
 }
 
-/** Whether `file` (relative to `cwd`, or absolute) is protected, and what it is. */
-export function protectedKind(cwd: string, file: string): Protected | undefined {
+/** Whether `file` (relative to `cwd`, or absolute) is protected: every write to it needs the user's approval. */
+export function isProtected(cwd: string, file: string): boolean {
     const key = `${path.resolve(cwd)}\0${path.resolve(cwd, file)}`
-    const cached = kinds.get(key)
-    if (cached !== undefined) return cached ?? undefined
-    const kind = askBinary(cwd, file)
-    kinds.set(key, kind ?? null)
-    return kind
+    const cached = answers.get(key)
+    if (cached !== undefined) return cached
+    const answer = askBinary(cwd, file)
+    answers.set(key, answer)
+    return answer
 }
 
-function askBinary(cwd: string, file: string): Protected | undefined {
+function askBinary(cwd: string, file: string): boolean {
     const bin = pitonBinary()
     let stdout: string
     try {
@@ -59,9 +57,10 @@ function askBinary(cwd: string, file: string): Protected | undefined {
         }
         throw new Error(`can't tell whether ${file} is protected: ${failure.stderr?.trim() || failure.message}`)
     }
-    const output = JSON.parse(stdout) as { format: number; protected: Protected | null }
+    const output = JSON.parse(stdout) as { format: number; protected: unknown }
     if (output.format !== RESOLVE_FORMAT) throw new Error(`piton config protected printed format ${output.format}`)
-    return output.protected ?? undefined
+    if (typeof output.protected !== "boolean") throw new Error("piton config protected printed an unexpected result")
+    return output.protected
 }
 
 /** What the daemon did with a protected write. */

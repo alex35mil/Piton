@@ -21,7 +21,7 @@ pub const FORMAT: u32 = 1;
 pub enum Step {
     /// The tools a host runs: the agent runtime (pi), mise, tailscale, nono.
     Prerequisites,
-    /// The global configuration folder exists and its files are valid, in the current layout.
+    /// The global configuration folder exists, its files are valid, and its `.local` files stay out of Git.
     Configuration,
     /// `piton` on PATH for terminals and editors.
     Cli,
@@ -283,10 +283,7 @@ fn configuration(config: &Config) -> Status {
         false => Status::Missing {
             problems,
             fix: Fix::Manual {
-                instructions: vec![
-                    "Fix the files named above; `piton config check` shows each one.".into(),
-                    "Files from the layout before .piton/: `piton config check` prints where each goes.".into(),
-                ],
+                instructions: vec!["Fix the files named above; `piton config check` lists the files read.".into()],
             },
         },
     }

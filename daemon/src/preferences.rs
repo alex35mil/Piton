@@ -12,7 +12,7 @@ use toml_edit::Value as Toml;
 
 use crate::config::{Config, GlobalSettings};
 use crate::settings::edit::{EditError, Placements, Target};
-use crate::settings::{ClientTable, ConfigPair, LevelKind, Paths, SettingsError, Sharing};
+use crate::settings::{ClientTable, ConfigPair, LevelKind, Paths, Resolved, SettingsError, Sharing, WorkersTable};
 
 /// Where a value lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,17 +230,15 @@ impl Snapshot {
     /// kept for the apps and the previous values stay.
     pub fn reload(&mut self, paths: Paths) -> Read {
         let read = || -> Result<_, String> {
-            let mut resolved = crate::settings::resolve_global(&paths).map_err(|e| e.to_string())?;
-            let client =
-                std::mem::replace(&mut resolved.client, Ok(ClientTable::default())).map_err(|e| e.to_string())?;
-            let settings = GlobalSettings::from_resolved(resolved).map_err(|e| e.to_string())?;
+            let resolved = crate::settings::resolve_global(&paths).map_err(|e| e.to_string())?;
+            let tables = Tables::from_resolved(resolved).map_err(|e| e.to_string())?;
             let placements = files(&paths).read().map_err(|e| e.to_string())?;
-            Ok((settings, client, placements))
+            Ok((tables, placements))
         };
         match read() {
-            Ok((settings, client, placements)) => {
-                let config = Config::from_settings(settings.clone(), paths.clone());
-                self.values = values(&settings, &client, &config);
+            Ok((tables, placements)) => {
+                let config = Config::from_settings(tables.daemon.clone(), paths.clone());
+                self.values = values(&tables, &config);
                 self.placements = placement_map(&placements);
                 self.error = None;
                 Read::Good(Box::new(config))
@@ -289,15 +287,47 @@ fn files(paths: &Paths) -> ConfigPair {
     ConfigPair::in_dir(&paths.global)
 }
 
+/// The global parts the catalog shows: the daemon's (its run keys, `[sandbox]`, `[host]`), `[workers]`, and `[client]`.
+#[derive(Debug)]
+struct Tables {
+    daemon: GlobalSettings,
+    workers: WorkersTable,
+    client: ClientTable,
+}
+
+impl Tables {
+    /// Every part, or the first that can't be used.
+    fn from_resolved(resolved: Resolved) -> Result<Self, SettingsError> {
+        let Resolved {
+            run,
+            sandbox,
+            workers,
+            host,
+            client,
+            ..
+        } = resolved;
+        Ok(Self {
+            daemon: GlobalSettings {
+                run: run?,
+                sandbox: sandbox?,
+                host: host?,
+            },
+            workers: workers?,
+            client: client?,
+        })
+    }
+}
+
 /// Every configuration key's value in effect.
-fn values(settings: &GlobalSettings, client: &ClientTable, config: &Config) -> BTreeMap<&'static str, Value> {
+fn values(tables: &Tables, config: &Config) -> BTreeMap<&'static str, Value> {
     // The file's shape: the run keys at the top, each table under its name.
-    let mut merged = serde_json::to_value(&settings.run).unwrap_or_else(|_| json!({}));
+    let mut merged = serde_json::to_value(&tables.daemon.run).unwrap_or_else(|_| json!({}));
     if let Value::Object(object) = &mut merged {
         for (name, table) in [
-            ("sandbox", serde_json::to_value(&settings.sandbox)),
-            ("host", serde_json::to_value(&settings.host)),
-            ("client", serde_json::to_value(client)),
+            ("sandbox", serde_json::to_value(&tables.daemon.sandbox)),
+            ("workers", serde_json::to_value(&tables.workers)),
+            ("host", serde_json::to_value(&tables.daemon.host)),
+            ("client", serde_json::to_value(&tables.client)),
         ] {
             if let Ok(table) = table {
                 object.insert(name.into(), table);
@@ -493,20 +523,31 @@ mod tests {
 
     #[test]
     fn every_catalog_key_is_a_key_of_its_file() {
-        // Writing each key's default to an empty file must parse: the catalog can't name a key the schema lacks.
+        // Writing each key's default to an empty file must parse: the catalog can't name a key the schema lacks. And
+        // the catalog shows what the file sets: every part it reads reaches the apps.
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
         let defaults = config(&paths);
         for entry in CATALOG {
             let Kind::Config = entry.kind else { continue };
+            // Not the default, so reading it back proves the file's value reached the catalog.
+            let default = (entry.default)(&defaults);
             let sample = match entry.value_type {
                 ValueType::NetworkProfile => json!(false),
-                Bool | Text | TextList | Integer | IntegerList | ValueType::Choice { .. } => {
-                    let default = (entry.default)(&defaults);
-                    match (entry.value_type, default) {
-                        (Text, Value::Null) => json!("x"),
-                        (_, default) => default,
-                    }
+                Bool => json!(default != json!(true)),
+                Text => json!("/x"),
+                // `workers.skip` takes relative paths, `[sandbox]` absolute ones.
+                TextList if entry.key == "workers.skip" => json!(["x"]),
+                TextList => json!(["~/x"]),
+                Integer => json!(default.as_u64().unwrap_or(0) + 1),
+                IntegerList => json!([1]),
+                ValueType::Choice { options } => {
+                    json!(
+                        options
+                            .iter()
+                            .find(|option| json!(option) != default)
+                            .unwrap_or(&options[0])
+                    )
                 }
             };
             // `toml` is what `validate` uses; calling it directly covers the non-editable `socket` too.
@@ -514,6 +555,9 @@ mod tests {
             let pair = files(&paths);
             let _ = std::fs::remove_file(&pair.shared);
             write(&paths, entry.key, Some(value), Target::Current).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
+            let mut snapshot = Snapshot::new(&defaults);
+            assert!(matches!(snapshot.reload(paths.clone()), Read::Good(_)), "{}", entry.key);
+            assert_eq!(info(&snapshot.info(true), entry.key).value, sample, "{}", entry.key);
         }
     }
 

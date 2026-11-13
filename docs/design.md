@@ -646,35 +646,38 @@ file per level, and the message names the line.
 - Paths in every file accept `~` and `$HOME`.
 - **When read.** The global files at daemon start and on every change (watched; keys that need a restart are
   reported as pending); the project chain at every launch and `worker create`; the
-  pi package's files at pi start and `/reload`. `piton config check` validates and shows each value's source;
-  `piton config get` serves resolved files to other tools (the Neovim plugin's tracker queue).
+  pi package's files at pi start and `/reload`. `piton config check` validates, lists the files read, and warns about
+  what doesn't travel (below); `piton config get` serves one resolved part to other tools (the Neovim plugin's tracker
+  queue).
 - **One resolver.** The Rust `settings` module is the only implementation. The pi package and the Neovim plugin call
   `piton config resolve` / `piton config get`, which read files and don't need the daemon running. The daemon passes
   the binary's path in `PITON_BIN` after the mise environment; the pi package caches the result and calls again only
-  when a watched file changed. The result is per part (permissions, MCP, the global tier's MCP alone, web search,
-  branches, integrations, development, policies, rule and skill folders), each its value or its error, so a broken
-  table or an old-layout file fails only the tools that read it: a malformed `[tracker]` stops workflows, never
-  permission checks. `--global` resolves the global tier alone, for `[development]`, which a consuming project's files
-  mustn't block.
+  when a watched file changed. The result is per part: one per table of `config.toml`, named as the table (the
+  daemon's top-level keys together as `run`), plus MCP, the global tier's MCP alone, policies, and rule and skill
+  folders. Each is its value or its error, so a broken table fails only the tools that read it: a malformed
+  `[tracker]` stops workflows, never permission checks, and a typo in `[tailnet]` never blocks `[sandbox]`. A syntax
+  error fails every part of its file. `--global` resolves the global tier alone, for `[development]`, which a
+  consuming project's files mustn't block.
 
 #### Config and state together
 
 - **Config or state.** Config is what you decide: roots, favorites, appearance, the logging default, sandbox grants,
   permissions. State is what happened on this host: sessions, drafts, recent projects, keep-awake. Each value is one
-  or the other; a config key for a state value is refused with a message saying where it's set.
+  or the other; `config.toml` doesn't accept a state key (it's an unknown key there).
 - **Shared unless Local.** Each preference has one Local checkbox. Unchecked, it lives in `config.toml`: host
   preferences apply on every host through dotfiles, client preferences are served by the host to every client (which
   caches them for offline start). Checked, it moves to `config.local.toml` (this host) or into the app (this
   client). A shared client choice a client can't honor (a font it lacks) falls back there only.
 - **The apps change both.** `settings.set {key, value, local?}` goes to the database for state and to the global
   `config.toml` pair for config. The daemon edits with `toml_edit`, keeping comments and order, writes
-  through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. Every global key is editable
-  except `socket`, a test and development override the apps don't show. The apps never write repository or
+  through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. The apps edit the daemon's keys
+  (`socket` shown read-only), `[sandbox]`, `[workers]`, `[host]`, and `[client]`; `[development]`, `[permissions]`,
+  `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited in the file. The apps never write repository or
   parent-folder files. A change is checked against the schema before it's written. The daemon watches the global
   folder (and a symlink's target folder): edits apply at once; `log`, `[env]`, and `[tailnet]` wait for a restart
   and show as pending; an invalid file keeps the last good values and `settings_error` says why.
-- `daemon.state` carries each setting with its value, kind (config with its file, or state), whether it's local,
-  whether the apps may change it, and any pending restart. Clients never see file contents.
+- `daemon.state` carries each setting with its value, kind (config with the file of the pair that sets it, or
+  state), whether the apps may change it, and any pending restart. Clients never see file contents.
 
 #### State database
 
@@ -699,9 +702,9 @@ local drafts) as versioned Codable files in Application Support, moved aside whe
 #### A new or second Mac
 
 A host: clone the dotfiles (the global tier) and repositories, then run `piton setup` (the Mac app runs it on first
-launch). It's idempotent: it checks `pi`, `nono`, `mise`, and `tailscale`; validates configuration and lists
-old-layout files and `.local` files this host lacks; installs the service and creates the database; and prints the
-tailnet address for clients. A client needs only a host's address. What doesn't travel is by design: this host's
+launch). It's idempotent: it checks `pi`, `nono`, `mise`, and `tailscale`; validates the global configuration and
+that its `.local` files stay out of Git; installs the `piton` command and creates the database; and reports the
+tailnet address for clients. Registering the daemon to run at login is the Mac app's step. A client needs only a host's address. What doesn't travel is by design: this host's
 state (a replacement Mac imports it, above), `.local` files (secrets, per-host values, local preferences; recreated
 by hand), and workflow artifacts, which resume from the tracker. `piton config check` warns about absolute paths
 under another user's home and secrets in tracked files.
@@ -735,15 +738,15 @@ next tool call. Changes are gated where they're written:
    the rules, and `daemon/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames, hard
    links, symlinks, other cases).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
-   the pi package. In a sandboxed session it sends the path and contents over `~/.local/state/piton/agent.sock`
-   (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps
+   the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
+   over `~/.local/state/piton/agent.sock` (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps
    and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
    approve: answers come only from clients. One pending request per session; it ends when the agent stops waiting or
    its run ends. Every protected write asks, skills included. The dialog carries the file's current content, so the
    apps show a diff without reading the file. On approval the daemon walks the path from the checkout without
    following any symlink, so a folder the agent swapped for a link while the user decided can't redirect the write.
-   In a host session, or a pi outside piton, the permissions extension asks itself and writes directly, whatever
-   `defaultMode` or auto-accept says.
+   Only a pi running outside piton (no session token) has the permissions extension ask itself and write directly,
+   whatever `defaultMode` or auto-accept says.
 
 A rejected change never reaches disk. Limits: shell writes in host sessions aren't gated (as in Claude Code without
 its sandbox); the rule is macOS-only. Codex and Claude Code don't need step 2 because they sandbox each shell command and run their

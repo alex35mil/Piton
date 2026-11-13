@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import type { TSchema } from "typebox"
 
-import { agentChannel, protectedKind, requestProtectedWrite, type ProtectedOutcome } from "../__lib/protected.js"
+import { agentChannel, isProtected, requestProtectedWrite, type ProtectedOutcome } from "../__lib/protected.js"
 import { EditorChoiceValidator, fileReviewResult, isFileReviewDetails, type FileReviewDetails } from "./review.js"
 
 type FileKind = "edit" | "write"
@@ -186,8 +186,8 @@ function wrapFileTool<TParams extends TSchema, TDetails, TRenderState>(
             if (permission.mode === "deny") throw new Error(permission.reason)
             // A protected file always goes to the user, whatever the permission mode: through the daemon when this pi
             // runs under it (the sandbox can't write it), else with the review below.
-            const isProtected = protectedKind(ctx.cwd, input.path) !== undefined
-            const channel = isProtected ? agentChannel() : undefined
+            const protectedFile = isProtected(ctx.cwd, input.path)
+            const channel = protectedFile ? agentChannel() : undefined
             if (channel) {
                 const tool = protectedTool(kind, ctx.cwd, (file, content) =>
                     writeThroughDaemon(channel, file, content, signal, () => ctx.abort()),
@@ -200,7 +200,7 @@ function wrapFileTool<TParams extends TSchema, TDetails, TRenderState>(
                     return error.result
                 }
             }
-            if (permission.mode === "allow" && !isProtected) return native.execute(id, input, signal, onUpdate, ctx)
+            if (permission.mode === "allow" && !protectedFile) return native.execute(id, input, signal, onUpdate, ctx)
             if (!ctx.hasUI) throw new Error(`[rejected] Blocked (no UI for confirmation): ${native.name}`)
             const reviewed = makeReviewed(ctx.cwd, () => reviewFile(kind, input, ctx, signal))
             try {

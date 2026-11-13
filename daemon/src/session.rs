@@ -2,7 +2,7 @@
 //! events, keeps the replay state that neither `get_state` nor `get_entries` contains, and runs the stop sequence.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -442,7 +442,7 @@ struct SessionTask {
     protected: crate::protected::Roots,
     /// The protected write waiting for the user: one per session.
     protected_write: Option<PendingWrite>,
-    /// The sandbox overlay pi was launched with; a combined one is removed when the session ends.
+    /// The sandbox profile pi was launched with, removed when the session ends.
     _profile: Option<launch::ProfileFile>,
     shared: Arc<Mutex<Shared>>,
     hooks: Hooks,
@@ -647,8 +647,7 @@ impl SessionTask {
     }
 
     /// A protected write the agent asked for: refused unless the path is one of this session's protected files and no
-    /// other is pending; written at once when it's a skill's instructions with unchanged `allowed-tools`; otherwise
-    /// asked of the user with a dialog every client shows.
+    /// other is pending; otherwise asked of the user with a dialog every client shows. Every protected write asks.
     fn protected_write(
         &mut self,
         request: crate::protected_write::Request,
@@ -658,7 +657,7 @@ impl SessionTask {
         let refuse = |reason: String| Outcome::Refused { reason };
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
         let path = crate::protected::canonical_target(&request.path);
-        let Some(kind) = self.protected.classify(&path) else {
+        let Some(root) = self.protected.protected_root(&path).map(Path::to_path_buf) else {
             let _ = reply.send(refuse(format!(
                 "{} isn't a protected file of this session; write it with the write or edit tool",
                 request.path.display()
@@ -678,12 +677,8 @@ impl SessionTask {
         let key = lock(&self.shared).key;
         self.next_internal += 1;
         let id = format!("piton:write:{}", self.next_internal);
-        crate::log!(
-            "session {key}: asking about a protected write to {} ({kind:?})",
-            path.display()
-        );
+        crate::log!("session {key}: asking about a protected write to {}", path.display());
         let record = dialog(&id, &path, before.as_deref(), &request.content);
-        let root = self.protected.root_for(&kind).to_path_buf();
         self.protected_write = Some(PendingWrite {
             id,
             root,
