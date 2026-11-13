@@ -46,6 +46,8 @@ pub struct Daemon {
     host_id: String,
     /// Fires when host logging changes, so the expiry task re-arms.
     logging_changed: Arc<Notify>,
+    /// Session tokens for `agent.sock`.
+    agent_tokens: crate::agent::Tokens,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +88,11 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
         source,
     })?;
     set_owner_only(&socket);
+    let agent_socket = config.agent_socket();
+    let agent_listener = crate::agent::bind(&agent_socket).map_err(|source| DaemonError::Socket {
+        path: agent_socket.clone(),
+        source,
+    })?;
 
     let mut base_env: Env = match config.env.login_shell {
         true => match launch::login_shell_env().await {
@@ -149,10 +156,12 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
         state: Mutex::new(state),
         host_id,
         logging_changed: Arc::new(Notify::new()),
+        agent_tokens: crate::agent::Tokens::default(),
     });
     tokio::spawn(crate::awake::run(daemon.clone()));
     tokio::spawn(logging_expiry(daemon.clone()));
     crate::watch::spawn(daemon.clone());
+    tokio::spawn(crate::agent::serve(daemon.clone(), agent_listener));
     let tailnet = daemon.config().tailnet.clone();
     if tailnet.enabled {
         // Remote access is optional: without Tailscale the daemon still serves local clients.
@@ -185,6 +194,7 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
     daemon.shutdown().await;
     crate::log!("stopped");
     let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&agent_socket);
     Ok(())
 }
 
@@ -290,6 +300,11 @@ impl Daemon {
         &self.list_changed
     }
 
+    /// Who may ask over `agent.sock`: one token per live session.
+    pub fn agent_tokens(&self) -> &crate::agent::Tokens {
+        &self.agent_tokens
+    }
+
     /// The configuration in effect now.
     pub fn config(&self) -> Arc<Config> {
         self.config
@@ -382,10 +397,21 @@ impl Daemon {
         workspace: Workspace,
         mode: LaunchMode,
         session: SessionArg,
-        env: Env,
+        mut env: Env,
         settings: crate::settings::DaemonSettings,
     ) -> Result<SessionHandle, LaunchError> {
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
+        // How this pi reaches the daemon for protected writes; set after the workspace's environment, so a
+        // repository can't change it.
+        let token = self.agent_tokens.issue(key).map_err(|source| LaunchError::Spawn {
+            program: "session token".into(),
+            source,
+        })?;
+        env.insert(crate::agent::TOKEN_ENV.into(), token);
+        env.insert(
+            crate::agent::SOCKET_ENV.into(),
+            self.config().agent_socket().to_string_lossy().into_owned(),
+        );
         let profile = match mode {
             LaunchMode::Sandbox => Some(
                 launch::write_profile(&self.config(), &settings, &self.base_env, key)
@@ -397,6 +423,7 @@ impl Daemon {
         let hooks = Hooks {
             ended: Box::new(move |key| {
                 if let Some(daemon) = weak.upgrade() {
+                    daemon.agent_tokens.forget(key);
                     lock(&daemon.sessions).remove(&key);
                     let _ = daemon.list_changed.send(());
                 }
@@ -408,6 +435,11 @@ impl Daemon {
             Relation::Source => String::new(),
             Relation::Worker { source, .. } => format!(", worker of {}", source.display()),
         };
+        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let protected = crate::protected::Roots {
+            source: canonical(&settings.source),
+            checkout: canonical(&settings.checkout),
+        };
         let spec = LaunchSpec {
             key,
             workspace,
@@ -415,6 +447,7 @@ impl Daemon {
             session,
             env,
             profile,
+            protected,
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),

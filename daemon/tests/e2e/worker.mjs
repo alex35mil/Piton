@@ -118,6 +118,12 @@ const tests = {
         assert.ok(profile.filesystem.read.includes("/source-grant"));
         assert.ok(profile.filesystem.read.includes(join(ctx.source, ".piton")), "the chain is readable");
         assert.ok(!JSON.stringify(profile).includes('"/"'), "the worker's own grants are ignored");
+        // Protected files: the source's .piton/ (not .local/), and .pi/ and .agents/skills/ in the worker's checkout.
+        const [configuration, pi, skills] = profile.unsafe_macos_seatbelt_rules;
+        assert.ok(configuration.includes(`(subpath "${join(ctx.source, ".piton")}")`), configuration);
+        assert.ok(configuration.includes(`(require-not (subpath "${join(ctx.source, ".piton/.local")}"))`));
+        assert.match(pi, /\\\.pi\(\/\|\$\)/);
+        assert.ok(skills.includes("--"), "the worker's checkout, not the source's");
         assert.ok(log.includes(`worker of ${ctx.source}`), "launch logs the relation");
 
         const listed = await cli(ctx, ["worker", "ls", "--json"]);

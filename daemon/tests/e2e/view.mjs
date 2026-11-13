@@ -119,7 +119,91 @@ function viewClient(ctx, name) {
     return c;
 }
 
+/// One request on the daemon's agent socket, as a pi in the session would send it.
+function agentRequest(socket, request) {
+    return new Promise((resolve, reject) => {
+        const sock = net.connect(socket);
+        let buf = "";
+        sock.on("data", (chunk) => (buf += chunk));
+        sock.on("end", () => {
+            try {
+                resolve(JSON.parse(buf));
+            } catch (e) {
+                reject(e);
+            }
+        });
+        sock.on("error", reject);
+        sock.write(JSON.stringify(request) + "\n");
+    });
+}
+
 const tests = {
+    async "protected writes: asked of the user in every client, written by the daemon"(ctx) {
+        const c = viewClient(ctx, "mac");
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        await c.req("session.watch", { session: key });
+        // The pi gets its token and the socket from the daemon.
+        await c.req("session.send", { session: key, message_id: "e", text: "env" });
+        await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.model(key).items.some((i) => i.type === "tool" && i.status === "done"), 20000);
+        const tool = c.model(key).items.find((i) => i.type === "tool");
+        const { token, socket } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
+        assert.equal(socket, join(ctx.dir, "agent.sock"));
+        assert.match(token, /^[0-9a-f]{64}$/);
+
+        const target = join(ctx.ws, ".piton", "permissions.json");
+        // Not this session's, or not protected, or not a session at all: refused without asking.
+        assert.equal((await agentRequest(socket, { type: "protected_write", token: "guess", path: target, content: "{}" })).type, "error");
+        const plain = await agentRequest(socket, { type: "protected_write", token, path: join(ctx.ws, "src.rs"), content: "x" });
+        assert.equal(plain.outcome, "refused");
+
+        // A protected write waits for the user: a dialog in the shape pi.nvim's diff view opens.
+        const pending = agentRequest(socket, { type: "protected_write", token, path: target, content: '{"allow":["read"]}\n' });
+        const st = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        assert.equal(st.change.state.status, "needs_input");
+        const dialog = st.change.state.dialogs[0];
+        assert.match(dialog.id, /^piton:write:/);
+        const title = JSON.parse(dialog.title);
+        assert.equal(title.toolName, "write");
+        assert.equal(title.toolInput.path, realpathSync(ctx.ws) + "/.piton/permissions.json");
+        // One at a time.
+        const second = await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" });
+        assert.equal(second.outcome, "refused");
+        // The user approves with their own version and a note; the daemon writes it, and never tells pi. The dialog
+        // closes in every client (waited for from before the answer, so the change can't slip past).
+        const closed = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        await c.req("session.answer", {
+            session: key,
+            request_id: dialog.id,
+            answer: { value: JSON.stringify({ result: "AcceptModified", content: '{"allow":[]}\n', notes: [{ note: "n" }] }) },
+        });
+        const outcome = await pending;
+        assert.deepEqual(outcome, { type: "protected_write", outcome: "approved", modified: true, content: '{"allow":[]}\n', notes: [{ note: "n" }] });
+        assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
+        assert.equal((await closed).change.state.status, "idle");
+
+        // Rejected: nothing written.
+        const rejected = agentRequest(socket, { type: "protected_write", token, path: target, content: "bad" });
+        const again = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        await c.req("session.answer", { session: key, request_id: again.change.state.dialogs[0].id, answer: { value: "Reject" } });
+        assert.equal((await rejected).outcome, "rejected");
+        assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
+
+        // A skill's instructions with unchanged allowed-tools are written without asking.
+        const skill = join(ctx.ws, ".agents", "skills", "s", "SKILL.md");
+        mkdirSync(join(ctx.ws, ".agents", "skills", "s"), { recursive: true });
+        writeFileSync(skill, "---\nallowed-tools:\n  - read\n---\nold\n");
+        const quiet = await agentRequest(socket, { type: "protected_write", token, path: skill, content: "---\nallowed-tools:\n  - read\n---\nnew\n" });
+        assert.equal(quiet.outcome, "written");
+        assert.match(readFileSync(skill, "utf8"), /new/);
+
+        // The session ends: its token stops working.
+        await c.req("session.stop", { session: key });
+        await sleep(300);
+        assert.equal((await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" })).type, "error");
+        c.close();
+    },
+
     async "start, watch, prompt, stream, settle"(ctx) {
         const c = viewClient(ctx, "phone");
         await c.req("sessions.subscribe");

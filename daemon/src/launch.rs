@@ -190,7 +190,7 @@ pub fn write_profile(
     base: &Env,
     key: u64,
 ) -> Result<ProfileFile, LaunchError> {
-    let profile = crate::sandbox::profile(resolved, &config.paths.home, base)?;
+    let profile = crate::sandbox::profile(resolved, &config.paths.home, base, &config.agent_socket())?;
     let dir = profiles_dir(config);
     let write = || -> std::io::Result<PathBuf> {
         crate::diagnostics::private_dir(&dir)?;

@@ -187,6 +187,11 @@ impl Config {
     pub fn state_db(&self) -> PathBuf {
         self.state_dir().join(crate::state::FILE)
     }
+
+    /// The socket sandboxed pis reach the daemon on (see agent.rs).
+    pub fn agent_socket(&self) -> PathBuf {
+        self.state_dir().join(crate::agent::FILE)
+    }
 }
 
 /// The user's home folder, from the user database (see settings::home).

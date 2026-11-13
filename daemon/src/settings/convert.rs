@@ -326,12 +326,14 @@ mod tests {
                 ..Default::default()
             },
             source: PathBuf::from("/nonexistent/repo"),
+            checkout: PathBuf::from("/nonexistent/repo"),
             levels: Vec::new(),
         };
         let env = [("SSH_AUTH_SOCK".to_string(), "/tmp/agent.sock".to_string())]
             .into_iter()
             .collect();
-        let generated = crate::sandbox::profile(&settings, Path::new("/Users/a"), &env).unwrap();
+        let generated =
+            crate::sandbox::profile(&settings, Path::new("/Users/a"), &env, Path::new("/s/agent.sock")).unwrap();
         let original: Value = serde_json::from_str(BASE).unwrap();
         let expand = |value: &Value| -> Value {
             let text = value
@@ -344,13 +346,17 @@ mod tests {
         assert_eq!(generated["groups"], original["groups"]);
         assert_eq!(generated["workdir"], original["workdir"]);
         assert_eq!(generated["network"], original["network"]);
-        for key in ["allow", "read", "read_file", "deny", "unix_socket", "bypass_protection"] {
+        for key in ["allow", "read", "read_file", "deny", "bypass_protection"] {
             assert_eq!(
                 generated["filesystem"][key],
                 expand(&original["filesystem"][key]),
                 "{key}"
             );
         }
+        // The profile's own socket grants, then the daemon's socket for sandboxed pis.
+        let mut sockets = expand(&original["filesystem"]["unix_socket"]);
+        sockets.as_array_mut().unwrap().push(Value::from("/s/agent.sock"));
+        assert_eq!(generated["filesystem"]["unix_socket"], sockets);
     }
 
     #[test]

@@ -155,6 +155,11 @@ pub enum SessionCmd {
         reason: StopReason,
         done: Option<oneshot::Sender<StopOutcome>>,
     },
+    /// A protected write the agent asked for (agent.sock): asked of the user in every client, written on approval.
+    ProtectedWrite {
+        request: crate::protected_write::Request,
+        reply: oneshot::Sender<crate::protected_write::Outcome>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -262,6 +267,8 @@ pub struct LaunchSpec {
     pub env: Env,
     /// The generated sandbox profile, for sandboxed launches; removed when the session ends.
     pub profile: Option<launch::ProfileFile>,
+    /// What this session's protected files are (canonical source and checkout).
+    pub protected: crate::protected::Roots,
 }
 
 pub fn spawn(config: Arc<Config>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
@@ -345,6 +352,8 @@ pub fn spawn(config: Arc<Config>, spec: LaunchSpec, hooks: Hooks) -> Result<Sess
 
     let task = SessionTask {
         config,
+        protected: spec.protected,
+        protected_write: None,
         _profile: profile,
         shared,
         hooks,
@@ -405,6 +414,14 @@ enum Sent {
     Accepted(Value),
 }
 
+/// A protected write the user is being asked about: the dialog's id, and where the outcome goes.
+struct PendingWrite {
+    id: String,
+    path: PathBuf,
+    content: String,
+    reply: oneshot::Sender<crate::protected_write::Outcome>,
+}
+
 /// How many message ids a session remembers for repeats.
 const SENT_KEPT: usize = 256;
 
@@ -418,6 +435,9 @@ enum StopPhase {
 
 struct SessionTask {
     config: Arc<Config>,
+    protected: crate::protected::Roots,
+    /// The protected write waiting for the user: one per session.
+    protected_write: Option<PendingWrite>,
     /// The sandbox overlay pi was launched with; a combined one is removed when the session ends.
     _profile: Option<launch::ProfileFile>,
     shared: Arc<Mutex<Shared>>,
@@ -613,8 +633,104 @@ impl SessionTask {
                 command,
                 reply,
             } => self.view_command(watcher, command, reply),
+            SessionCmd::ProtectedWrite { request, reply } => self.protected_write(request, reply),
             SessionCmd::Stop { .. } => unreachable!("handled in run"),
         }
+    }
+
+    /// A protected write the agent asked for: refused unless the path is one of this session's protected files and no
+    /// other is pending; written at once when it's a skill's instructions with unchanged `allowed-tools`; otherwise
+    /// asked of the user with a dialog every client shows.
+    fn protected_write(
+        &mut self,
+        request: crate::protected_write::Request,
+        reply: oneshot::Sender<crate::protected_write::Outcome>,
+    ) {
+        use crate::protected::{Protected, SkillFile};
+        use crate::protected_write::{Outcome, dialog, same_allowed_tools, write};
+        let refuse = |reason: String| Outcome::Refused { reason };
+        // The path as the file system will resolve it: the existing parent's canonical path and the name.
+        let path = canonical_target(&request.path);
+        let Some(kind) = self.protected.classify(&path) else {
+            let _ = reply.send(refuse(format!(
+                "{} isn't a protected file of this session; write it with the write or edit tool",
+                request.path.display()
+            )));
+            return;
+        };
+        if self.protected_write.is_some() {
+            let _ = reply.send(refuse(
+                "another protected write is waiting for the user; try again after it's answered".into(),
+            ));
+            return;
+        }
+        let before = std::fs::read_to_string(&path).unwrap_or_default();
+        let silent = match &kind {
+            Protected::Skill(SkillFile::Definition) => same_allowed_tools(&before, &request.content),
+            Protected::Skill(SkillFile::Support) => true,
+            Protected::Skill(SkillFile::Script) | Protected::Configuration | Protected::Pi => false,
+        };
+        let key = lock(&self.shared).key;
+        if silent {
+            let outcome = match write(&path, &request.content) {
+                Ok(()) => Outcome::Written,
+                Err(e) => refuse(format!("can't write {}: {e}", path.display())),
+            };
+            crate::log!(
+                "session {key}: protected write {} without asking ({kind:?})",
+                path.display()
+            );
+            let _ = reply.send(outcome);
+            return;
+        }
+        self.next_internal += 1;
+        let id = format!("piton:write:{}", self.next_internal);
+        crate::log!(
+            "session {key}: asking about a protected write to {} ({kind:?})",
+            path.display()
+        );
+        let record = dialog(&id, &path, &request.content);
+        self.protected_write = Some(PendingWrite {
+            id,
+            path,
+            content: request.content,
+            reply,
+        });
+        // To every client like a dialog of pi's, and kept for replay until it's answered.
+        self.on_pi_line(record.to_string());
+    }
+
+    /// A client's answer to the pending protected write's dialog: write or not, and tell the agent.
+    fn answer_protected_write(&mut self, answer: &Map<String, Value>) {
+        use crate::protected_write::{Decision, Outcome, write};
+        let Some(pending) = self.protected_write.take() else {
+            return;
+        };
+        let key = lock(&self.shared).key;
+        let outcome = match Decision::from_answer(answer) {
+            Decision::Approve { content, notes } => {
+                let modified = content.as_ref().is_some_and(|c| *c != pending.content);
+                let content = content.unwrap_or(pending.content);
+                match write(&pending.path, &content) {
+                    Ok(()) => {
+                        crate::log!("session {key}: protected write to {} approved", pending.path.display());
+                        Outcome::Approved {
+                            modified,
+                            content,
+                            notes,
+                        }
+                    }
+                    Err(e) => Outcome::Refused {
+                        reason: format!("approved, but can't write {}: {e}", pending.path.display()),
+                    },
+                }
+            }
+            Decision::Reject { notes } => {
+                crate::log!("session {key}: protected write to {} rejected", pending.path.display());
+                Outcome::Rejected { notes }
+            }
+        };
+        let _ = pending.reply.send(outcome);
     }
 
     fn watch(&mut self, watcher: ClientId, tx: WatchTx, from: WatchFrom) {
@@ -804,6 +920,14 @@ impl SessionTask {
                 let Some(id) = id else { return };
                 if !self.replay.answer_dialog(&id) {
                     // Already answered by another client, expired, or unknown: pi would ignore it.
+                    return;
+                }
+                // The daemon's own dialog: answered here, never sent to pi (which didn't ask).
+                if self.protected_write.as_ref().is_some_and(|w| w.id == id) {
+                    self.answer_protected_write(&command);
+                    // The status first, then the state with it: the dialog closes in every client.
+                    self.sync_shared();
+                    self.publish_view_state();
                     return;
                 }
                 self.writer = Some(client);
@@ -1122,4 +1246,36 @@ fn command_type(command: &Map<String, Value>) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// A path as the file system will resolve it: canonical when it exists; otherwise its nearest existing ancestor made
+/// canonical, with the rest appended (a new file, possibly in new folders). `..` and `.` are resolved first, so a
+/// request can't step out of a protected folder by name.
+fn canonical_target(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => clean.push(component),
+        }
+    }
+    if let Ok(real) = std::fs::canonicalize(&clean) {
+        return real;
+    }
+    let mut rest = Vec::new();
+    let mut base = clean.as_path();
+    while let Some(parent) = base.parent() {
+        if let Some(name) = base.file_name() {
+            rest.push(name.to_os_string());
+        }
+        base = parent;
+        if let Ok(real) = std::fs::canonicalize(base) {
+            return rest.iter().rev().fold(real, |path, name| path.join(name));
+        }
+    }
+    clean
 }

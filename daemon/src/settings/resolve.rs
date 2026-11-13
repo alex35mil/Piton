@@ -350,6 +350,8 @@ pub struct DaemonSettings {
     pub daemon: DaemonFile,
     /// The checkout whose `.piton/` was read (a worker's source).
     pub source: PathBuf,
+    /// The workspace's own checkout, where pi reads `.pi/` and `.agents/skills/`.
+    pub checkout: PathBuf,
     /// The existing level folders of both chains, farthest first: a sandbox reads its whole configuration.
     pub levels: Vec<PathBuf>,
 }
@@ -388,6 +390,7 @@ pub fn resolve_daemon(workspace: &Workspace, paths: &Paths) -> Result<DaemonSett
     Ok(DaemonSettings {
         daemon,
         source: chain.source.clone(),
+        checkout: chain.checkout.clone(),
         levels,
     })
 }

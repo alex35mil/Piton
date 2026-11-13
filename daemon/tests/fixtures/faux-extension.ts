@@ -6,6 +6,7 @@
 //   "ask"        ask a select dialog through the `faux_ask` tool, then answer with the choice
 //   "picture"    call the `faux_picture` tool, which returns a 2 MB image (larger than a phone's WebSocket message)
 //   "status"     call the `faux_status` tool, which sets a status line and a widget, then clears them on "status clear"
+//   "env"        call the `faux_env` tool, which returns the daemon's variables for this pi (token, agent socket)
 import { fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -37,6 +38,9 @@ export default function (pi: ExtensionAPI) {
         }
         if (text.startsWith("picture")) {
             return fauxAssistantMessage([fauxToolCall("faux_picture", {})], { stopReason: "toolUse" });
+        }
+        if (text.startsWith("env")) {
+            return fauxAssistantMessage([fauxToolCall("faux_env", {})], { stopReason: "toolUse" });
         }
         if (text.startsWith("status")) {
             return fauxAssistantMessage([fauxToolCall("faux_status", { clear: text.includes("clear") })], {
@@ -73,6 +77,20 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.setStatus("faux", clear ? undefined : "busy");
             ctx.ui.setWidget("faux", clear ? undefined : ["line one", "line two"]);
             return { content: [{ type: "text", text: clear ? "cleared" : "set" }], details: {} };
+        },
+    });
+
+    pi.registerTool({
+        name: "faux_env",
+        label: "Faux env",
+        description: "Return the daemon's variables for this pi (test tool).",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+            const env = {
+                token: process.env.PITON_SESSION_TOKEN ?? null,
+                socket: process.env.PITON_AGENT_SOCKET ?? null,
+            };
+            return { content: [{ type: "text", text: JSON.stringify(env) }], details: env };
         },
     });
 

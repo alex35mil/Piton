@@ -1,3 +1,4 @@
+mod agent;
 mod awake;
 mod cli;
 mod collector;
@@ -10,6 +11,8 @@ mod migrate;
 mod preferences;
 mod project;
 mod prompts;
+mod protected;
+mod protected_write;
 mod replay;
 mod rolling;
 mod sandbox;
