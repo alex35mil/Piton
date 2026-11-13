@@ -1,0 +1,50 @@
+{
+  "format": 1,
+  "steps": [
+    {
+      "step": "prerequisites",
+      "status": "ok",
+      "detail": "pi: /opt/bin/pi"
+    },
+    {
+      "step": "cli",
+      "status": "missing",
+      "problems": [
+        "/Users/me/.local/bin/piton doesn't exist"
+      ],
+      "fix": {
+        "kind": "apply",
+        "summary": "Link it"
+      }
+    },
+    {
+      "step": "daemon",
+      "status": "missing",
+      "problems": [
+        "the daemon isn't running"
+      ],
+      "fix": {
+        "kind": "app",
+        "summary": "Start piton at login"
+      }
+    },
+    {
+      "step": "remote_access",
+      "status": "missing",
+      "problems": [
+        "tailscale isn't running"
+      ],
+      "fix": {
+        "kind": "manual",
+        "instructions": [
+          "Start Tailscale"
+        ]
+      }
+    },
+    {
+      "step": "state",
+      "status": "failed",
+      "message": "disk full"
+    }
+  ]
+}

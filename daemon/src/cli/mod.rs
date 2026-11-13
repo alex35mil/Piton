@@ -90,6 +90,14 @@ enum Cmd {
         #[usage(long)]
         dry_run: bool,
     },
+    /// Check what this host needs (the Mac app's onboarding runs this), and do the steps piton can do itself.
+    Setup {
+        #[usage(subcommand)]
+        action: SetupAction,
+        /// Print JSON (for the Mac app).
+        #[usage(long, global)]
+        json: bool,
+    },
     /// Move this host's state database (host identity, keep-awake, ...) to a replacement Mac.
     State {
         #[usage(subcommand)]
@@ -99,6 +107,27 @@ enum Cmd {
     Completion {
         #[usage(long, choices("bash", "zsh", "fish"))]
         shell: String,
+    },
+}
+
+#[derive(Subcommands)]
+enum SetupAction {
+    /// Report every step: ok, missing (with its fix), or failed. Exits 0 when every step is ok, 3 otherwise.
+    Check {
+        /// The `piton` the CLI link points to (default: this binary; the Mac app passes the bundled one).
+        #[usage(long)]
+        binary: Option<PathBuf>,
+        /// Where the CLI link goes (default ~/.local/bin/piton).
+        #[usage(long)]
+        link: Option<PathBuf>,
+    },
+    /// Do one step piton can do itself: configuration, cli, or state.
+    Apply {
+        step: String,
+        #[usage(long)]
+        binary: Option<PathBuf>,
+        #[usage(long)]
+        link: Option<PathBuf>,
     },
 }
 
@@ -229,9 +258,26 @@ pub fn main() -> ExitCode {
         | Cmd::Stop { .. }
         | Cmd::Worker { .. }
         | Cmd::State { .. }
+        | Cmd::Setup { .. }
         | Cmd::Logging { .. } => {}
     }
-    let config = match crate::config::load(cli.config_home.as_deref()) {
+    // Setup reports a broken configuration (its configuration step) instead of refusing to start over it.
+    let loaded = match &cli.command {
+        Cmd::Setup { .. } => Ok(crate::config::load_lenient(cli.config_home.as_deref())),
+        Cmd::Daemon
+        | Cmd::Attach
+        | Cmd::Ls { .. }
+        | Cmd::Start { .. }
+        | Cmd::Stop { .. }
+        | Cmd::Worker { .. }
+        | Cmd::State { .. }
+        | Cmd::Logging { .. }
+        | Cmd::Service { .. }
+        | Cmd::Config { .. }
+        | Cmd::Migrate { .. }
+        | Cmd::Completion { .. } => crate::config::load(cli.config_home.as_deref()),
+    };
+    let config = match loaded {
         Ok(mut config) => {
             if let Some(socket) = cli.socket {
                 config.socket = socket;
@@ -282,6 +328,63 @@ async fn run(command: Cmd, config: crate::config::Config) -> ExitCode {
         Cmd::Worker { action, json } => worker::run(&config, action, json).await,
         Cmd::Logging { action } => logging::run(action, &config).await,
         Cmd::State { action } => state(action, &config).await,
+        Cmd::Setup { action, json } => setup(action, json, &config).await,
+    }
+}
+
+async fn setup(action: SetupAction, json: bool, config: &crate::config::Config) -> ExitCode {
+    let (binary, link) = match &action {
+        SetupAction::Check { binary, link } | SetupAction::Apply { binary, link, .. } => (binary.clone(), link.clone()),
+    };
+    let binary = binary
+        .or_else(|| std::env::current_exe().and_then(std::fs::canonicalize).ok())
+        .unwrap_or_else(|| PathBuf::from("piton"));
+    let link = link.unwrap_or_else(|| config.paths.home.join(".local/bin/piton"));
+    let env: crate::launch::Env = match crate::launch::login_shell_env().await {
+        Some(env) => env,
+        None => std::env::vars().collect(),
+    };
+    let tailscale = crate::launch::resolve_program(&config.tailnet.cli, &env);
+    let host = crate::setup::Host {
+        config,
+        env: &env,
+        binary,
+        link,
+        daemon_running: tokio::net::UnixStream::connect(&config.socket).await.is_ok(),
+        tailnet: crate::tailnet::self_node(&tailscale).await,
+    };
+    match action {
+        SetupAction::Check { .. } => {
+            let report = crate::setup::check(&host);
+            match json {
+                true => println!("{}", serde_json::to_string(&report).unwrap_or_default()),
+                false => print!("{report}"),
+            }
+            let all_ok = report
+                .steps
+                .iter()
+                .all(|step| matches!(step.status, crate::setup::Status::Ok { .. }));
+            if all_ok { ExitCode::SUCCESS } else { ExitCode::from(3) }
+        }
+        SetupAction::Apply { step, .. } => match crate::setup::apply(&host, &step) {
+            Ok(report) => {
+                match json {
+                    true => println!("{}", serde_json::to_string(&report).unwrap_or_default()),
+                    false => print!("{report}"),
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                match json {
+                    true => println!(
+                        "{}",
+                        serde_json::json!({"format": crate::setup::FORMAT, "error": e.to_string()})
+                    ),
+                    false => eprintln!("piton: {e}"),
+                }
+                ExitCode::from(1)
+            }
+        },
     }
 }
 

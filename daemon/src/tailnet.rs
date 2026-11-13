@@ -17,6 +17,8 @@ pub struct SelfNode {
     pub user: u64,
     pub node: String,
     pub addresses: Vec<IpAddr>,
+    /// This Mac's MagicDNS name (`my-mac.example.ts.net`, without the trailing dot), when MagicDNS gives it one.
+    pub dns_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +146,8 @@ struct StatusSelf {
     user_id: u64,
     #[serde(rename = "TailscaleIPs", default)]
     tailscale_ips: Vec<IpAddr>,
+    #[serde(rename = "DNSName", default)]
+    dns_name: String,
 }
 
 fn parse_status(bytes: &[u8]) -> Result<SelfNode, TailnetError> {
@@ -155,6 +159,7 @@ fn parse_status(bytes: &[u8]) -> Result<SelfNode, TailnetError> {
         user: status.me.user_id,
         node: status.me.id,
         addresses: status.me.tailscale_ips,
+        dns_name: Some(status.me.dns_name.trim_end_matches('.').to_string()).filter(|name| !name.is_empty()),
     })
 }
 
@@ -205,7 +210,7 @@ mod tests {
 
     // Shaped like `tailscale status --json` and `tailscale whois --json` output, trimmed; the values are made up.
     const STATUS: &str = r#"{"BackendState":"Running","Self":{"ID":"nMyMac1CNTRL","UserID":123456789,
-        "TailscaleIPs":["100.64.0.1","fd7a:115c:a1e0::1"],"HostName":"My Mac"}}"#;
+        "TailscaleIPs":["100.64.0.1","fd7a:115c:a1e0::1"],"HostName":"My Mac","DNSName":"my-mac.example.ts.net."}}"#;
     const WHOIS_SELF: &str = r#"{"Node":{"ID":1,"StableID":"nMyMac1CNTRL",
         "Name":"my-mac.example.ts.net.","User":123456789},
         "UserProfile":{"ID":123456789,"LoginName":"me@example.com","DisplayName":"Me"}}"#;
@@ -223,6 +228,7 @@ mod tests {
         let me = parse_status(STATUS.as_bytes()).unwrap();
         assert_eq!(me.user, 123456789);
         assert_eq!(me.addresses.len(), 2);
+        assert_eq!(me.dns_name.as_deref(), Some("my-mac.example.ts.net"));
         let own = |node: &str| parse_whois(&whois(node, me.user, "me@example.com", "[]", "")).unwrap();
 
         assert_eq!(check(&me, &own("iphone")), Ok(()));

@@ -84,6 +84,16 @@ The app registers both through `SMAppService` and offers a "Start at login" togg
 daemon. Quitting the app leaves the daemon and sessions running. `piton service install|uninstall` writes the same
 LaunchAgent for development without the app. The CLI is symlinked onto `PATH`.
 
+**Onboarding.** On first launch the Mac app asks what this Mac does: host (runs the daemon; the app connects to its
+socket) or client (connects to another host over the tailnet, like the phone). The choice is kept on the Mac and can
+be changed in Settings > Connection. A host's onboarding lists the steps from `piton setup check --json`, run with
+the bundled binary: tools (pi, mise, nono, tailscale), the global configuration, the CLI link
+(`~/.local/bin/piton` to the bundled `piton`), start at login, the state database, and remote access (this host's
+tailnet name and port). Each is ok, missing with its fix, or failed: `piton setup apply <step>` does the steps
+piton can (create the global folder, link the CLI, create the database), the app registers the daemon, and the rest
+are instructions. A development build has no bundled binary and uses the linked CLI; its daemon comes from `piton
+service install`. DMG packaging, signing, and notarization are tracked separately.
+
 ### Launching pi
 
 For every pi it starts, piton:
@@ -825,10 +835,22 @@ Upstream pi has been building multi-client support: a "server mode" (badlogic in
 `main`). None of it is in pi 1.5.2. Keep piton's pi-facing side behind one adapter so a future server mode replaces it
 rather than the daemon.
 
-`pi-durable` (experimental, in the same repository) is not an alternative: it's a library for building your own agent
-harness in your own process, with its own storage, and it doesn't use the pi coding agent's sessions, settings,
-extensions, or RPC. Using it would mean replacing pi. It is only a design reference: its `watch()` (windowed snapshot
-plus changes) has the session view's shape.
+`pi-durable` (experimental, in the same repository) is a library for building your own agent harness in your own
+process, with its own storage; it doesn't use the pi coding agent's sessions, settings, extensions, or RPC. piton
+stays on the pi coding agent for now (2026-11-13), but a later switch to a pi-durable runner is a real option: it
+would bring restart-durable runs, piton-owned provider login, and a piton-owned Neovim client. So piton's interfaces
+are designed for the runtime to be replaced:
+
+- **Clients never see pi.** The `view` protocol, `settings.set`, and `daemon.state` speak piton's own model
+  (sessions, items, dialogs, settings); no pi RPC record, pi setting name, or pi file path crosses to a client.
+  `piton attach` (pi.nvim's raw RPC) is the one pi-shaped surface, and it's kept separate.
+- **One runtime boundary in the daemon.** Launching, the session task's pi I/O, and the RPC-to-view translation
+  stay together behind one adapter; nothing else in the daemon reads pi records.
+- **Configuration is piton's.** The resolver's parts (permissions, MCP, rules, skills, policies, workflows,
+  settings) are runtime-neutral; only their delivery is pi-specific (a pi extension today, hooks and sections in a
+  pi-durable runner). New settings go into piton's files, never into pi's `settings.json`.
+- **pi-specific pieces are named as such:** the protected `.pi/` folder, skill discovery through
+  `resources_discover`, `PI_CODING_AGENT_DIR`, and pi's session files. They're the parts a switch removes.
 
 ## Open questions
 

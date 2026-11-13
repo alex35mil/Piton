@@ -13,6 +13,8 @@ daemon/target/debug/piton stop --session <pi session id | session file | piton k
 mise run daemon:install                         # stable binary in ~/.cargo/bin + launchd agent (host only)
 piton service status | piton service uninstall
 piton --version                                 # package version and the git commit it was built from
+piton setup check                               # what this host needs, each step with its fix (--json: the Mac app's)
+piton setup apply cli                           # do a step piton can: configuration, cli, or state
 tail -f ~/.local/state/piton/logs/daemon/current.log  # bounded daemon log
 ```
 

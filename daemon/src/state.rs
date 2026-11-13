@@ -209,36 +209,48 @@ impl State {
 /// Writes a consistent copy of the database at `from` to `to`, which must not exist. Opens it read-only and never
 /// migrates: a running daemon may hold it, at a version this binary would migrate.
 pub fn export(from: &Path, to: &Path) -> Result<(), StateError> {
-    use rusqlite::OpenFlags;
     if to.symlink_metadata().is_ok() {
         return Err(StateError::Exists { path: to.to_path_buf() });
     }
-    if !from.is_file() {
+    let conn = open_existing(from)?;
+    conn.execute("VACUUM INTO ?1", params![to.to_string_lossy()])
+        .map_err(|source| sqlite(from, source))?;
+    set_owner_only(to)
+}
+
+/// Whether the database at `path` is one this binary can use: it exists, is a state database, and isn't newer.
+/// Read-only; never migrates.
+pub fn check(path: &Path) -> Result<(), StateError> {
+    open_existing(path).map(drop)
+}
+
+/// Opens an existing database read-only after checking its version.
+fn open_existing(path: &Path) -> Result<Connection, StateError> {
+    use rusqlite::OpenFlags;
+    if !path.is_file() {
         return Err(StateError::Missing {
-            path: from.to_path_buf(),
+            path: path.to_path_buf(),
         });
     }
-    let conn = Connection::open_with_flags(from, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .map_err(|source| sqlite(from, source))?;
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .map_err(|source| sqlite(path, source))?;
     let found: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|source| sqlite(from, source))?;
+        .map_err(|source| sqlite(path, source))?;
     let supported = MIGRATIONS.len() as i64;
     if found > supported {
         return Err(StateError::Newer {
-            path: from.to_path_buf(),
+            path: path.to_path_buf(),
             found,
             supported,
         });
     }
     if found == 0 {
         return Err(StateError::NotAState {
-            path: from.to_path_buf(),
+            path: path.to_path_buf(),
         });
     }
-    conn.execute("VACUUM INTO ?1", params![to.to_string_lossy()])
-        .map_err(|source| sqlite(from, source))?;
-    set_owner_only(to)
+    Ok(conn)
 }
 
 /// Replaces the database at `to` with the export at `from` (migrated to this version), keeping its `host_id`. Refuses

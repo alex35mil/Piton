@@ -173,6 +173,26 @@ private let decoder = JSONDecoder()
     #expect(model.items.count == snapshot.items.count, "known items aren't duplicated")
 }
 
+@Test func decodesSetupReport() throws {
+    let report = try decoder.decode(SetupReport.self, from: fixture("setup.json"))
+    #expect(report.format == SetupReport.format)
+    #expect(report.steps.map(\.step) == [.prerequisites, .cli, .daemon, .remoteAccess, .state])
+    #expect(report.steps[0].status == .ok(detail: "pi: /opt/bin/pi"))
+    guard case .missing(let problems, .apply) = report.steps[1].status else {
+        Issue.record("cli isn't missing with an apply fix")
+        return
+    }
+    #expect(problems.count == 1)
+    #expect(
+        report.steps[2].status
+            == .missing(problems: ["the daemon isn't running"], fix: .app(summary: "Start piton at login")))
+    #expect(
+        report.steps[3].status
+            == .missing(problems: ["tailscale isn't running"], fix: .manual(instructions: ["Start Tailscale"])))
+    #expect(report.steps[4].status == .failed(message: "disk full"))
+    #expect(!report.isComplete)
+}
+
 @Test func decodesDaemonState() throws {
     guard case .daemon(let state) = try decoder.decode(Incoming.self, from: fixture("daemon.json")) else {
         Issue.record("not a daemon line")

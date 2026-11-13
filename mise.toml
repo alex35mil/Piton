@@ -53,6 +53,7 @@ node tests/e2e/worker.mjs
 node tests/e2e/view.mjs
 node tests/e2e/websocket.mjs
 node tests/e2e/logging.mjs
+node tests/e2e/setup.mjs
 '''
 
 [tasks."daemon:lint"]

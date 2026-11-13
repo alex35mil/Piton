@@ -157,6 +157,23 @@ pub fn load(config_home: Option<&Path>) -> Result<Config, ConfigError> {
     Ok(Config::from_files(resolved.daemon?, resolved.settings?, paths))
 }
 
+/// The global tier as far as it can be read: each part that resolves, defaults for the rest. For `piton setup`, whose
+/// job is to report a broken configuration rather than refuse to start over it.
+pub fn load_lenient(config_home: Option<&Path>) -> Config {
+    let mut paths = Paths::current();
+    if let Some(dir) = config_home {
+        paths.global = dir.to_path_buf();
+    }
+    let (daemon, settings) = match crate::settings::resolve_global(&paths) {
+        Ok(resolved) => (
+            resolved.daemon.unwrap_or_default(),
+            resolved.settings.unwrap_or_default(),
+        ),
+        Err(_) => (DaemonFile::default(), SettingsFile::default()),
+    };
+    Config::from_files(daemon, settings, paths)
+}
+
 impl Config {
     /// The daemon's state folder: next to its socket, outside every sandbox.
     pub fn state_dir(&self) -> PathBuf {
