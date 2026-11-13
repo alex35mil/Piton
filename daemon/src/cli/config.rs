@@ -45,7 +45,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
             global: true,
         } => {
             let _ = (workspace, runtime);
-            match crate::config::read::resolve::resolve_global(&Paths::current()) {
+            match crate::config::resolve_global(&Paths::current()) {
                 Ok(resolved) => {
                     let output = Output {
                         format: RESOLVE_FORMAT,
@@ -129,7 +129,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                     println!("  {:?}  {}", file.level, file.path.display());
                 }
                 // Portability: warnings only, the files still work here.
-                for warning in crate::config::check::portability::warnings(&resolved.files, &resolved.home) {
+                for warning in crate::config::portability_warnings(&resolved.files, &resolved.home) {
                     eprintln!("piton: warning: {warning}");
                 }
                 if errors.is_empty() {
@@ -254,13 +254,11 @@ struct Planned {
 /// `piton config set`: one key of a level's `config.toml` or `config.local.toml`, written with its comments and layout
 /// kept, and refused when the file would no longer be valid.
 fn set(request: &SetRequest) -> ExitCode {
-    use crate::config::Sharing;
-    use crate::config::write::edit::{Change, item_from_json};
-    use crate::config::write::target::{File, Level};
+    use crate::config::{ConfigFile, KeyChange, Sharing, WriteLevel};
     let invalid = |message: String| print_error(ErrorBody::Invalid { message });
     let paths = Paths::current();
     let level = if request.global {
-        Level::Global
+        WriteLevel::Global
     } else {
         let path = request
             .workspace
@@ -268,17 +266,16 @@ fn set(request: &SetRequest) -> ExitCode {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         match crate::launch::resolve_workspace(&path) {
-            Ok(workspace) => Level::Repository {
+            Ok(workspace) => WriteLevel::Repository {
                 source: workspace.source().to_path_buf(),
             },
             Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
         }
     };
     let sharing = if request.local { Sharing::Local } else { Sharing::Shared };
-    let target = File { level, sharing };
-    let file = target.path(&paths);
+    let target = ConfigFile { level, sharing };
     // Each change: a dotted key, and its JSON value (`None`: remove it).
-    let requested: Vec<(String, Option<serde_json::Value>)> = match (request.changes, request.unset, request.value) {
+    let changes: Vec<KeyChange> = match (request.changes, request.unset, request.value) {
         (true, false, None) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(request.key) {
             Ok(map) => map
                 .into_iter()
@@ -291,44 +288,25 @@ fn set(request: &SetRequest) -> ExitCode {
                         | serde_json::Value::Array(_)
                         | serde_json::Value::Object(_)) => Some(other),
                     };
-                    (key, value)
+                    KeyChange { key, value }
                 })
                 .collect(),
             Err(e) => return invalid(format!("--changes: a JSON object of keys and values: {e}")),
         },
-        (false, true, None) => vec![(request.key.to_string(), None)],
+        (false, true, None) => vec![KeyChange {
+            key: request.key.to_string(),
+            value: None,
+        }],
         // JSON, or a bare string.
-        (false, false, Some(text)) => vec![(
-            request.key.to_string(),
-            Some(serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))),
-        )],
+        (false, false, Some(text)) => vec![KeyChange {
+            key: request.key.to_string(),
+            value: Some(serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))),
+        }],
         (true, _, _) | (false, true, Some(_)) | (false, false, None) => {
             eprintln!("piton: give KEY VALUE, KEY --unset, or a JSON object with --changes");
             return ExitCode::from(1);
         }
     };
-    let mut parsed: Vec<(Vec<&str>, Option<toml_edit::Item>)> = Vec::new();
-    for (key, value) in &requested {
-        let parts: Vec<&str> = key.split('.').collect();
-        if parts.iter().any(|part| part.is_empty()) {
-            return invalid(format!("invalid key {key:?}"));
-        }
-        let item = match value {
-            Some(value) => match item_from_json(&parts, value, &file) {
-                Ok(item) => Some(item),
-                Err(e) => return invalid(e.to_string()),
-            },
-            None => None,
-        };
-        parsed.push((parts, item));
-    }
-    let changes: Vec<Change> = parsed
-        .iter()
-        .map(|(key, item)| Change {
-            key,
-            value: item.as_ref(),
-        })
-        .collect();
     if request.dry_run {
         let content = match target.plan(&paths, &changes) {
             Ok(content) => content,
@@ -336,7 +314,7 @@ fn set(request: &SetRequest) -> ExitCode {
         };
         let planned = Planned {
             format: RESOLVE_FORMAT,
-            path: file,
+            path: target.path(&paths),
             content,
         };
         println!("{}", serde_json::to_string(&planned).unwrap_or_default());

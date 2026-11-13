@@ -6,14 +6,20 @@ use super::paths::{Paths, expand_home};
 use super::tables::{ClientTable, HostTable, RunTable, SandboxTable, WorkersTable};
 use crate::wire::LaunchMode;
 
-/// The global tier's tables the daemon and the apps read, merged (`config.local.toml` over `config.toml`), as written:
-/// absent keys stay absent.
+/// The global tables the daemon runs with, merged (`config.local.toml` over `config.toml`), as written: absent keys
+/// stay absent. Only these three can stop the daemon from starting.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct GlobalConfig {
+pub struct DaemonTables {
     pub run: RunTable,
     pub sandbox: SandboxTable,
-    pub workers: WorkersTable,
     pub host: HostTable,
+}
+
+/// Every global table the apps' settings list shows: the daemon's, plus `[workers]` and `[client]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GlobalConfig {
+    pub daemon: DaemonTables,
+    pub workers: WorkersTable,
     pub client: ClientTable,
 }
 
@@ -94,9 +100,9 @@ pub struct StopConfig {
 
 impl DaemonConfig {
     /// The defaults, overridden by the global tables.
-    pub fn new(global: &GlobalConfig, paths: Paths) -> Self {
+    pub fn new(tables: &DaemonTables, paths: Paths) -> Self {
         let home = paths.home.clone();
-        let GlobalConfig { run, sandbox, host, .. } = global.clone();
+        let DaemonTables { run, sandbox, host } = tables.clone();
         Self {
             socket: run
                 .socket
@@ -141,7 +147,7 @@ impl DaemonConfig {
 
     /// Only defaults: no global file sets anything.
     pub fn defaults(paths: Paths) -> Self {
-        Self::new(&GlobalConfig::default(), paths)
+        Self::new(&DaemonTables::default(), paths)
     }
 
     /// Only defaults, for this user's home and its default global tier.

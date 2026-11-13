@@ -7,10 +7,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use toml_edit::Value as Toml;
 
-use crate::config::write::edit::{EditError, Placements, Target};
-use crate::config::{DaemonConfig, GlobalConfig, Paths, Sharing};
+use crate::config::{DaemonConfig, DaemonTables, GlobalConfig, Paths, Sharing};
+use crate::config::{EditError, KeyChange, Placement, Placements};
 
 /// Where a value lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,25 +197,16 @@ pub struct Snapshot {
     pub error: Option<String>,
 }
 
-/// The outcome of rereading the global files.
-#[derive(Debug)]
-pub enum Read {
-    /// The new configuration.
-    Good(Box<DaemonConfig>),
-    /// Invalid: the previous configuration stays in effect, and the snapshot's `error` says why.
-    Kept,
-}
-
 impl Snapshot {
-    /// Reads the global files for a daemon that runs with `config`.
-    pub fn new(config: &DaemonConfig) -> Self {
+    /// Reads the global files as the daemon starts.
+    pub fn new(paths: &Paths) -> Self {
         let mut snapshot = Self {
             values: BTreeMap::new(),
             placements: BTreeMap::new(),
             started: BTreeMap::new(),
             error: None,
         };
-        let _ = snapshot.reload(config.paths.clone());
+        snapshot.reload(paths);
         snapshot.started = snapshot.restart_values();
         snapshot
     }
@@ -229,26 +219,21 @@ impl Snapshot {
             .collect()
     }
 
-    /// Rereads the global files: on success the new configuration (`socket` stays the running one), else the error is
-    /// kept for the apps and the previous values stay.
-    pub fn reload(&mut self, paths: Paths) -> Read {
+    /// Rereads the global files: the values in effect and where each is set, or, when the files can't be used, the
+    /// error for the apps (the previous values stay).
+    pub fn reload(&mut self, paths: &Paths) {
         let read = || -> Result<_, String> {
-            let global = crate::config::global(&paths).map_err(|e| e.to_string())?;
+            let global = crate::config::global(paths).map_err(|e| e.to_string())?;
             let placements = paths.global_files().read().map_err(|e| e.to_string())?;
             Ok((global, placements))
         };
         match read() {
             Ok((global, placements)) => {
-                let config = DaemonConfig::new(&global, paths.clone());
-                self.values = values(&global, &paths);
+                self.values = values(&global, paths);
                 self.placements = placement_map(&placements);
                 self.error = None;
-                Read::Good(Box::new(config))
             }
-            Err(error) => {
-                self.error = Some(error);
-                Read::Kept
-            }
+            Err(error) => self.error = Some(error),
         }
     }
 
@@ -288,10 +273,8 @@ impl Snapshot {
 fn values(global: &GlobalConfig, paths: &Paths) -> BTreeMap<&'static str, Value> {
     // The file's shape: the run keys at the top, each table under its name.
     let GlobalConfig {
-        run,
-        sandbox,
+        daemon: DaemonTables { run, sandbox, host },
         workers,
-        host,
         client,
     } = global;
     let mut merged = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
@@ -327,13 +310,9 @@ fn placement_map(placements: &Placements) -> BTreeMap<&'static str, Option<Shari
         .iter()
         .filter_map(|entry| match entry.kind {
             Kind::State(_) => None,
-            Kind::Config => Some((entry.key, placements.placement(&path(entry.key)))),
+            Kind::Config => Some((entry.key, placements.of(entry.key))),
         })
         .collect()
-}
-
-fn path(key: &str) -> Vec<&str> {
-    key.split('.').collect()
 }
 
 fn lookup<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
@@ -362,11 +341,7 @@ pub enum Change {
     /// A state value (`None`: back to the default).
     State(crate::state::Setting, Option<bool>),
     /// A configuration key, written to the global file pair.
-    Config {
-        key: &'static str,
-        value: Option<Toml>,
-        target: Target,
-    },
+    Config { change: KeyChange, placement: Placement },
 }
 
 /// Checks a change from the apps: the key exists and may change, the value has its type (`null` resets it), and
@@ -379,7 +354,8 @@ pub fn validate(key: &str, value: &Value, local: Option<bool>) -> Result<Change,
     let value = match value {
         Value::Null => None,
         Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) | Value::Object(_) => {
-            Some(toml(entry, value)?)
+            check_type(entry, value)?;
+            Some(value.clone())
         }
     };
     match entry.kind {
@@ -396,55 +372,58 @@ pub fn validate(key: &str, value: &Value, local: Option<bool>) -> Result<Change,
             Ok(Change::State(setting, value.transpose()?))
         }
         Kind::Config => Ok(Change::Config {
-            key: entry.key,
-            value,
-            target: match local {
-                None => Target::Current,
-                Some(true) => Target::Move(Sharing::Local),
-                Some(false) => Target::Move(Sharing::Shared),
+            change: KeyChange {
+                key: entry.key.to_string(),
+                value,
+            },
+            placement: match local {
+                None => Placement::Current,
+                Some(true) => Placement::Move(Sharing::Local),
+                Some(false) => Placement::Move(Sharing::Shared),
             },
         }),
     }
 }
 
-fn toml(entry: &Entry, value: &Value) -> Result<Toml, SetError> {
-    let wrong = |expected| SetError::WrongType {
-        key: entry.key,
-        expected,
+/// The value has the entry's type, so the apps' controls and the file agree.
+fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
+    let integer = |value: &Value| value.as_i64().is_some_and(|n| n >= 0);
+    let (ok, expected) = match entry.value_type {
+        Bool => (value.is_boolean(), "true or false"),
+        Text => (value.is_string(), "a string"),
+        TextList => (
+            value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
+            "a list of strings",
+        ),
+        Integer => (integer(value), "a whole number"),
+        IntegerList => (
+            value.as_array().is_some_and(|items| items.iter().all(integer)),
+            "a list of whole numbers",
+        ),
+        ValueType::Choice { options } => (
+            value.as_str().is_some_and(|choice| options.contains(&choice)),
+            "one of the listed choices",
+        ),
+        ValueType::NetworkProfile => (
+            match value {
+                Value::String(_) | Value::Bool(false) => true,
+                Value::Null | Value::Bool(true) | Value::Number(_) | Value::Array(_) | Value::Object(_) => false,
+            },
+            "a profile name, or false",
+        ),
     };
-    let integer = |value: &Value| value.as_i64().filter(|n| *n >= 0);
-    match entry.value_type {
-        Bool => value.as_bool().map(Toml::from).ok_or(wrong("true or false")),
-        Text => value.as_str().map(Toml::from).ok_or(wrong("a string")),
-        TextList => value
-            .as_array()
-            .and_then(|items| items.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
-            .map(|items| Toml::Array(items.into_iter().collect()))
-            .ok_or(wrong("a list of strings")),
-        Integer => integer(value).map(Toml::from).ok_or(wrong("a whole number")),
-        IntegerList => value
-            .as_array()
-            .and_then(|items| items.iter().map(integer).collect::<Option<Vec<_>>>())
-            .map(|items| Toml::Array(items.into_iter().collect()))
-            .ok_or(wrong("a list of whole numbers")),
-        ValueType::Choice { options } => value
-            .as_str()
-            .filter(|choice| options.contains(choice))
-            .map(Toml::from)
-            .ok_or(wrong("one of the listed choices")),
-        ValueType::NetworkProfile => match value {
-            Value::String(name) => Ok(Toml::from(name.as_str())),
-            Value::Bool(false) => Ok(Toml::from(false)),
-            Value::Null | Value::Bool(true) | Value::Number(_) | Value::Array(_) | Value::Object(_) => {
-                Err(wrong("a profile name, or false"))
-            }
-        },
+    match ok {
+        true => Ok(()),
+        false => Err(SetError::WrongType {
+            key: entry.key,
+            expected,
+        }),
     }
 }
 
 /// Writes a configuration change to the global pair.
-pub fn write(paths: &Paths, key: &str, value: Option<Toml>, target: Target) -> Result<(), SetError> {
-    crate::config::write::target::set_global(paths, &path(key), value.map(toml_edit::Item::Value), target)?;
+pub fn write(paths: &Paths, change: &KeyChange, placement: Placement) -> Result<(), SetError> {
+    crate::config::set_global(paths, change, placement)?;
     Ok(())
 }
 
@@ -498,13 +477,17 @@ mod tests {
                     )
                 }
             };
-            // `toml` is what `validate` uses; calling it directly covers the non-editable `socket` too.
-            let value = toml(entry, &sample).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
+            // `check_type` is what `validate` uses; calling it directly covers the non-editable `socket` too.
+            check_type(entry, &sample).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
             let pair = paths.global_files();
             let _ = std::fs::remove_file(&pair.shared);
-            write(&paths, entry.key, Some(value), Target::Current).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
-            let mut snapshot = Snapshot::new(&defaults);
-            assert!(matches!(snapshot.reload(paths.clone()), Read::Good(_)), "{}", entry.key);
+            let change = KeyChange {
+                key: entry.key.into(),
+                value: Some(sample.clone()),
+            };
+            write(&paths, &change, Placement::Current).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
+            let snapshot = Snapshot::new(&paths);
+            assert_eq!(snapshot.error, None, "{}", entry.key);
             assert_eq!(info(&snapshot.info(true), entry.key).value, sample, "{}", entry.key);
         }
     }
@@ -515,7 +498,7 @@ mod tests {
         let paths = paths(dir.path());
         std::fs::create_dir_all(&paths.global).unwrap();
         std::fs::write(paths.global.join("config.toml"), "[host]\nroots = [\"~/a\"]\n").unwrap();
-        let mut snapshot = Snapshot::new(&config(&paths));
+        let mut snapshot = Snapshot::new(&paths);
 
         assert!(matches!(
             validate("nope", &json!(1), None),
@@ -542,18 +525,16 @@ mod tests {
             Ok(Change::State(crate::state::Setting::KeepAwake, Some(false)))
         ));
 
-        let Change::Config { key, value, target } = validate("host.roots", &json!(["~/b"]), Some(true)).unwrap() else {
+        let Change::Config { change, placement } = validate("host.roots", &json!(["~/b"]), Some(true)).unwrap() else {
             unreachable!()
         };
-        write(&paths, key, value, target).unwrap();
-        let Change::Config { key, value, target } = validate("tailnet.port", &json!(9000), None).unwrap() else {
+        write(&paths, &change, placement).unwrap();
+        let Change::Config { change, placement } = validate("tailnet.port", &json!(9000), None).unwrap() else {
             unreachable!()
         };
-        write(&paths, key, value, target).unwrap();
-        let Read::Good(new) = snapshot.reload(paths.clone()) else {
-            panic!("{:?}", snapshot.error)
-        };
-        assert_eq!(new.roots, ["~/b"]);
+        write(&paths, &change, placement).unwrap();
+        snapshot.reload(&paths);
+        assert_eq!(snapshot.error, None);
 
         let list = snapshot.info(true);
         let roots = info(&list, "host.roots");
@@ -577,10 +558,10 @@ mod tests {
         assert_eq!(info(&list, "keep_awake").kind, KindInfo::State);
 
         // A value the schema refuses never reaches the file.
-        let Change::Config { key, value, target } = validate("tailnet.port", &json!(70000), None).unwrap() else {
+        let Change::Config { change, placement } = validate("tailnet.port", &json!(70000), None).unwrap() else {
             unreachable!()
         };
-        assert!(write(&paths, key, value, target).is_err());
+        assert!(write(&paths, &change, placement).is_err());
         assert_eq!(
             std::fs::read_to_string(paths.global.join("config.toml")).unwrap(),
             "[tailnet]\nport = 9000\n"
@@ -588,7 +569,7 @@ mod tests {
 
         // A broken hand edit keeps the last good values and says why.
         std::fs::write(paths.global.join("config.toml"), "[host\n").unwrap();
-        assert!(matches!(snapshot.reload(paths.clone()), Read::Kept));
+        snapshot.reload(&paths);
         assert!(snapshot.error.is_some());
         assert_eq!(info(&snapshot.info(true), "host.roots").value, json!(["~/b"]));
     }

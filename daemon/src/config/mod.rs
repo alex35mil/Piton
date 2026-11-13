@@ -10,17 +10,21 @@
 //! Each `.piton/` level and the global tier has one `config.toml` and its `config.local.toml` (this machine's values,
 //! never shared), read in that order; `mcp[.local].json` and `policies.md` stay separate files.
 
-pub mod check;
-pub mod model;
-pub mod read;
-pub mod write;
+mod check;
+mod model;
+mod read;
+mod write;
 
 use std::path::PathBuf;
 
-pub use model::daemon::{DaemonConfig, GlobalConfig};
+pub use check::portability::warnings as portability_warnings;
+pub use model::daemon::{DaemonConfig, DaemonTables, GlobalConfig, TailnetConfig};
 pub use model::paths::{LOCAL_DIR, PITON_DIR, Paths, Sharing, expand_home, home};
-pub use read::global::{daemon, daemon_lenient, global};
-pub use read::resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_launch};
+pub use model::tables::{NetworkProfile, SandboxTable};
+pub use read::global::{daemon, daemon_lenient, daemon_tables, global};
+pub use read::resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_global, resolve_launch};
+pub use write::edit::{EditError, Placement, Placements};
+pub use write::file::{ConfigFile, KeyChange, WriteLevel, set_global};
 
 /// Why configuration can't be used.
 #[derive(Debug, thiserror::Error)]

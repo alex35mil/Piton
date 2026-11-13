@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::config::model::tables::SandboxTable;
+use crate::config::SandboxTable;
 use crate::config::{LOCAL_DIR, LaunchConfig, expand_home};
 use crate::launch::Env;
 
@@ -161,7 +161,7 @@ fn link_targets(resolved: &LaunchConfig) -> Vec<PathBuf> {
 }
 
 fn network(table: &SandboxTable) -> Option<Value> {
-    use crate::config::model::tables::NetworkProfile;
+    use crate::config::NetworkProfile;
     let mut network = serde_json::Map::new();
     if !table.network.open_port.is_empty() {
         network.insert("open_port".into(), json!(table.network.open_port));

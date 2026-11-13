@@ -141,7 +141,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         program: launch::resolve_program("mise", &base_env),
         env: base_env.clone(),
     });
-    let app_settings = crate::app_settings::Snapshot::new(&config);
+    let app_settings = crate::app_settings::Snapshot::new(&config.paths);
     let daemon = Arc::new(Daemon {
         config: std::sync::RwLock::new(Arc::new(config)),
         app_settings: Mutex::new(app_settings),
@@ -325,9 +325,10 @@ impl Daemon {
     /// writer or the watcher, and an older read never replaces a newer configuration.
     fn reload_locked(&self, snapshot: &mut crate::app_settings::Snapshot) {
         let current = self.config();
-        match snapshot.reload(current.paths.clone()) {
-            crate::app_settings::Read::Good(new) => {
-                let mut new = *new;
+        // The daemon's options from its own tables: a broken `[client]` stops only the apps' list.
+        match crate::config::daemon_tables(&current.paths) {
+            Ok(tables) => {
+                let mut new = crate::config::DaemonConfig::new(&tables, current.paths.clone());
                 // What needs a restart keeps the values the daemon started with; the apps see them as pending.
                 new.socket = current.socket.clone();
                 new.log = current.log.clone();
@@ -341,12 +342,13 @@ impl Daemon {
                     crate::diagnostics::set(state);
                     self.logging_changed.notify_one();
                 }
-                crate::log!("settings: reloaded the global files");
+                crate::log!("config: reloaded the global files");
             }
-            crate::app_settings::Read::Kept => {
-                crate::log!("settings: the global files can't be used; keeping the last good values");
+            Err(e) => {
+                crate::log!("config: the global files can't be used ({e}); keeping the last good values");
             }
         }
+        snapshot.reload(&current.paths);
         let _ = self.list_changed.send(());
     }
 
@@ -356,10 +358,10 @@ impl Daemon {
             crate::app_settings::Change::State(crate::state::Setting::KeepAwake, value) => {
                 self.set_keep_awake(value.unwrap_or(true))?;
             }
-            crate::app_settings::Change::Config { key, value, target } => {
+            crate::app_settings::Change::Config { change, placement } => {
                 let mut snapshot = lock(&self.app_settings);
-                crate::app_settings::write(&self.config().paths, key, value, target)?;
-                crate::log!("settings: {key} changed from the apps");
+                crate::app_settings::write(&self.config().paths, &change, placement)?;
+                crate::log!("config: {} changed from the apps", change.key);
                 self.reload_locked(&mut snapshot);
             }
         }
@@ -393,7 +395,7 @@ impl Daemon {
         mode: LaunchMode,
         session: SessionArg,
         mut env: Env,
-        settings: crate::config::LaunchConfig,
+        launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
         // How this pi reaches the daemon for protected writes; set after the workspace's environment, so a
@@ -409,7 +411,7 @@ impl Daemon {
         );
         let profile = match mode {
             LaunchMode::Sandbox => Some(
-                launch::write_profile(&self.config(), &settings, &self.base_env, key)
+                launch::write_profile(&self.config(), &launch_config, &self.base_env, key)
                     .inspect_err(|e| crate::log!("launch refused: {e}"))?,
             ),
             LaunchMode::Host => None,
@@ -432,8 +434,8 @@ impl Daemon {
         };
         let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let protected = crate::protected::Roots {
-            source: canonical(&settings.source),
-            checkout: canonical(&settings.checkout),
+            source: canonical(&launch_config.source),
+            checkout: canonical(&launch_config.checkout),
         };
         let spec = LaunchSpec {
             key,
@@ -475,12 +477,12 @@ impl Daemon {
     ) -> Result<SessionHandle, LaunchError> {
         let workspace = launch::resolve_workspace(workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let config = self.config();
-        let settings =
+        let launch_config =
             launch::resolve_config(&config, &workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let env = launch::workspace_env(&config, &self.base_env, &workspace.path, mode)
             .await
             .inspect_err(|e| crate::log!("launch refused: {e}"))?;
-        self.launch(workspace, mode, session, env, settings)
+        self.launch(workspace, mode, session, env, launch_config)
     }
 
     /// The live session that has `file` open, other than `except`.

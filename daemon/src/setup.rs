@@ -265,7 +265,7 @@ fn configuration(config: &DaemonConfig) -> Status {
         };
     }
     let mut problems = Vec::new();
-    match crate::config::read::resolve::resolve_global(paths) {
+    match crate::config::resolve_global(paths) {
         Ok(resolved) => {
             for (part, error) in resolved.errors() {
                 problems.push(format!("{part}: {error}"));

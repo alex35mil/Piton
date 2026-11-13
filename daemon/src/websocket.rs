@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::config::model::daemon::TailnetConfig;
+use crate::config::TailnetConfig;
 use crate::daemon::Daemon;
 use crate::session::lock;
 use crate::tailnet::{self, SelfNode};
