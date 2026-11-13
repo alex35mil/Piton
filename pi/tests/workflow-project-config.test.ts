@@ -1,4 +1,4 @@
-import { resetGlobalSettings, TEST_CONFIG_HOME } from "./host-runtime.ts"
+import { resetGlobalSettings, writeConfig as writeSettings } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -11,6 +11,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
 import { compile } from "../extensions/__lib/schema.ts"
 import { clearSettingsCache } from "../extensions/__lib/settings.ts"
+import { inspectPersistentPermissions } from "../extensions/permissions/index.ts"
 
 import { inspectProjectMcp, registeredCredentialEnvironment } from "../workflows/extensions/integrations/mcp.ts"
 import { configureProjectMcp } from "../workflows/extensions/project-setup/mcp.ts"
@@ -18,12 +19,14 @@ import { configureProjectPermissions } from "../workflows/extensions/project-set
 import {
     assertArtifactPersistencePrepared,
     assertSandboxArtifactsLinked,
+    detectInstallation,
     loadProjectConfig,
     loadSessionAnalysis,
     LOCAL_SETTINGS_EXCLUDE,
     prepareArtifactPersistence,
     PROJECT_LOCAL_IGNORE,
     resolveWorkflowProject,
+    setInstallationForTests,
 } from "../workflows/extensions/__lib/project-config.ts"
 import registerProjectSetup, { inspectProjectSetup } from "../workflows/extensions/project-setup/index.ts"
 
@@ -38,27 +41,12 @@ function repository(): string {
     return root
 }
 
-function writeConfig(root: string, input: unknown): void {
-    writeJson(path.join(root, ".piton", "workflows.json"), input)
+/** `[branches]` of the repository's config.toml. */
+function writeConfig(root: string, input: { branches: { format?: string } }): void {
+    writeSettings(root, { branches: input.branches })
 }
 
-function writeWorkflowSettings(filePath: string, username: string): void {
-    writeJson(filePath, { branches: { username } })
-}
-
-function writeJson(filePath: string, value: unknown): void {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true })
-    fs.writeFileSync(filePath, JSON.stringify(value))
-    clearSettingsCache()
-}
-
-/** The test's global `workflows.json`, emptied first. */
-function globalWorkflows(): string {
-    resetGlobalSettings()
-    return path.join(TEST_CONFIG_HOME, "workflows.json")
-}
-
-function config(branches: unknown = { format: "identifier-title" }) {
+function config(branches: { format?: string } = { format: "identifier-title" }) {
     return { branches }
 }
 
@@ -67,117 +55,62 @@ function git(root: string, args: string[]): string {
 }
 
 describe("workflow project configuration", () => {
-    it("resolves a private global workflow source while preserving branch settings", () => {
+    it("reads a personal username only from a config.local.toml, the repository's over the global one", () => {
         const root = repository()
-        const globalSettingsPath = globalWorkflows()
-        const localSettingsPath = path.join(root, ".piton/workflows.local.json")
+        resetGlobalSettings()
         try {
             writeConfig(root, config({ format: "username/identifier-title" }))
-            assert.throws(
-                () => resolveWorkflowProject(root),
-                (error: Error) =>
-                    error.message.includes("Set workflowProject") && error.message.includes(globalSettingsPath),
-            )
-            writeWorkflowSettings(globalSettingsPath, "global-user")
-            assert.equal(loadProjectConfig(root).branches.username, "global-user")
-            assert.throws(() => resolveWorkflowProject(root), /Set workflowProject/)
-
-            writeJson(globalSettingsPath, { workflowProject: root })
-            assert.equal(resolveWorkflowProject(root), fs.realpathSync(root))
             assert.throws(() => loadProjectConfig(root), /username is required/)
-            writeWorkflowSettings(localSettingsPath, "local-user")
-            assert.equal(loadProjectConfig(root).branches.username, "local-user")
-
-            writeJson(globalSettingsPath, { workflowProject: root, branches: { username: "global-user" } })
-            assert.equal(loadProjectConfig(root).branches.username, "local-user")
-            fs.rmSync(localSettingsPath)
-            clearSettingsCache()
+            writeSettings("global", { "branches.username": "global-user" }, true)
             assert.equal(loadProjectConfig(root).branches.username, "global-user")
-
-            // Personal keys belong to the global tier; a repository file can't set them.
-            writeJson(localSettingsPath, { workflowProject: root, branches: { username: "local-user" } })
-            assert.throws(() => loadProjectConfig(root), /workflowProject.*global tier/)
-            // The source comes from the global tier alone, so a broken consuming project doesn't block reporting.
-            fs.writeFileSync(localSettingsPath, "{ broken")
-            assert.equal(resolveWorkflowProject(root), fs.realpathSync(root))
+            writeSettings(root, { "branches.username": "local-user" }, true)
+            assert.equal(loadProjectConfig(root).branches.username, "local-user")
+            // A shared file can't hold it.
+            assert.throws(() => writeSettings(root, { "branches.username": "x" }), /personal/)
         } finally {
             resetGlobalSettings()
             fs.rmSync(root, { recursive: true, force: true })
         }
     })
 
-    it("reads session analysis only from the global settings, disabled by default", () => {
-        const root = repository()
-        const globalSettingsPath = globalWorkflows()
+    it("detects a development install from the package's own checkout", () => {
+        const root = fs.realpathSync(repository())
         try {
-            assert.equal(loadSessionAnalysis(root), "disabled")
-            writeJson(globalSettingsPath, { workflowProject: root })
-            assert.equal(loadSessionAnalysis(root), "disabled")
-            writeJson(globalSettingsPath, { sessionAnalysis: false })
-            assert.equal(loadSessionAnalysis(root), "disabled")
-            writeJson(globalSettingsPath, { sessionAnalysis: true })
+            // This test runs from piton's checkout: the package is its `pi/`.
+            const checkout = fs.realpathSync(path.resolve(import.meta.dirname, "../.."))
+            assert.deepEqual(detectInstallation(path.join(checkout, "pi")), { kind: "development", checkout })
+            // Another repository's folder, or no repository at all, is an app install.
+            fs.mkdirSync(path.join(root, "pi"))
+            assert.deepEqual(detectInstallation(path.join(root, "pi")), { kind: "app" })
+            const outside = fs.mkdtempSync(path.join(os.tmpdir(), "piton-app-"))
+            assert.deepEqual(detectInstallation(outside), { kind: "app" })
+            fs.rmSync(outside, { recursive: true, force: true })
+
+            setInstallationForTests({ kind: "development", checkout: root })
+            assert.equal(resolveWorkflowProject(root), root)
+            setInstallationForTests({ kind: "app" })
+            assert.throws(() => resolveWorkflowProject(root), /github\.com\/alex35mil\/piton\/issues\/new/)
+        } finally {
+            setInstallationForTests(undefined)
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it("runs session analysis in a development install unless the global setting turns it off", () => {
+        const root = repository()
+        resetGlobalSettings()
+        try {
+            setInstallationForTests({ kind: "development", checkout: root })
             assert.equal(loadSessionAnalysis(root), "enabled")
-            writeJson(globalSettingsPath, { sessionAnalysis: "true" })
-            assert.throws(
-                () => loadSessionAnalysis(root),
-                (error: Error) => error.message.includes(globalSettingsPath),
-            )
-
-            // Only the global tier counts: a repository's file is never read for it.
-            writeJson(globalSettingsPath, { sessionAnalysis: false })
-            writeJson(path.join(root, ".piton", "workflows.local.json"), { sessionAnalysis: true })
+            writeSettings("global", { "development.session_analysis": false })
+            assert.equal(loadSessionAnalysis(root), "disabled")
+            // Only the global tier may set it.
+            assert.throws(() => writeSettings(root, { "development.session_analysis": true }), /global tier/)
+            setInstallationForTests({ kind: "app" })
+            writeSettings("global", { "development.session_analysis": true })
             assert.equal(loadSessionAnalysis(root), "disabled")
         } finally {
-            resetGlobalSettings()
-            fs.rmSync(root, { recursive: true, force: true })
-        }
-    })
-
-    it("rejects invalid source settings and roots without writing configuration", () => {
-        const root = repository()
-        const globalSettingsPath = globalWorkflows()
-        const writeRaw = (content: string) => {
-            fs.writeFileSync(globalSettingsPath, content)
-            clearSettingsCache()
-        }
-        try {
-            for (const content of [
-                "not JSON",
-                "{}",
-                '{"extra":true}',
-                '{"workflowProject":7}',
-                '{"workflowProject":""}',
-            ]) {
-                writeRaw(content)
-                assert.throws(
-                    () => resolveWorkflowProject(root),
-                    (error: Error) => error.message.includes(globalSettingsPath),
-                )
-                assert.equal(fs.readFileSync(globalSettingsPath, "utf-8"), content)
-            }
-            const nested = path.join(root, "nested")
-            fs.mkdirSync(nested)
-            for (const workflowProject of [
-                "relative/path",
-                path.join(root, "missing"),
-                path.join(root, "README.md"),
-                nested,
-            ]) {
-                const content = JSON.stringify({ workflowProject })
-                writeRaw(content)
-                assert.throws(
-                    () => resolveWorkflowProject(root),
-                    (error: Error) => error.message.includes(globalSettingsPath),
-                )
-                assert.equal(fs.readFileSync(globalSettingsPath, "utf-8"), content)
-            }
-            writeRaw(JSON.stringify({ workflowProject: path.join(root, "README.md") }))
-            assert.throws(() => resolveWorkflowProject(root), /path is not a directory/)
-            const alias = path.join(root, "alias")
-            fs.symlinkSync(root, alias, "dir")
-            writeRaw(JSON.stringify({ workflowProject: alias }))
-            assert.equal(resolveWorkflowProject(root), fs.realpathSync(root))
-        } finally {
+            setInstallationForTests(undefined)
             resetGlobalSettings()
             fs.rmSync(root, { recursive: true, force: true })
         }
@@ -240,10 +173,9 @@ describe("workflow project configuration", () => {
             assert.match(sent, /Configure workflows/)
             assert.match(sent, /Use the project-setup skill/)
             assert.match(sent, /"repositoryRoot":/)
-            assert.match(sent, /"path": "\.piton\/workflows\.json"/)
-            assert.match(sent, /"path": "\.piton\/workflows\.local\.json"/)
-            assert.match(sent, /"globalWorkflowSettings":/)
-            assert.match(sent, /"path": "\.piton\/permissions\.local\.json"/)
+            assert.match(sent, /"path": "\.piton\/config\.toml"/)
+            assert.match(sent, /"path": "\.piton\/config\.local\.toml"/)
+            assert.match(sent, /"globalConfig":/)
             assert.match(sent, /"name": "existing"/)
             assert.match(sent, /"boundEntityTrackers": \[\]/)
             assert.match(sent, /"projectPathsInGit": \[\]/)
@@ -302,11 +234,12 @@ describe("workflow project configuration", () => {
         }
     })
 
+    // `project`: the repository's config.toml, as text.
     for (const scenario of [
-        { name: "missing", project: undefined, integrations: undefined },
-        { name: "existing", project: JSON.stringify(config()), integrations: undefined },
-        { name: "incompatible", project: '{"unsupported":true}', integrations: '{"tracker":{"provider":"github"}}' },
-        { name: "malformed", project: "{ not JSON", integrations: "{ broken" },
+        { name: "missing", project: undefined },
+        { name: "existing", project: '[branches]\nformat = "identifier-title"\n' },
+        { name: "incompatible", project: '[branches]\nunsupported = true\n\n[tracker]\nprovider = "github"\n' },
+        { name: "malformed", project: "[branches\n" },
     ]) {
         it(`shares a read-only command/tool snapshot with ${scenario.name} setup`, async () => {
             const root = repository()
@@ -361,10 +294,8 @@ describe("workflow project configuration", () => {
                     }),
                 )
                 if (scenario.project !== undefined) {
-                    fs.writeFileSync(path.join(root, ".piton/workflows.json"), scenario.project)
+                    fs.writeFileSync(path.join(root, ".piton/config.toml"), scenario.project)
                 }
-                if (scenario.integrations !== undefined)
-                    fs.writeFileSync(path.join(root, ".piton/integrations.json"), scenario.integrations)
                 if (scenario.name === "existing") {
                     fs.mkdirSync(path.join(root, ".piton/.local/gigs/example"), { recursive: true })
                     fs.writeFileSync(
@@ -373,15 +304,14 @@ describe("workflow project configuration", () => {
                             tracker: { provider: "github", external: { issueNumber: 2 } },
                         }),
                     )
-                    git(root, ["add", ".piton/workflows.json"])
+                    git(root, ["add", ".piton/config.toml"])
                 }
                 const observedPaths = [
                     ".git/index",
                     ".git/info/exclude",
                     ".piton/mcp.json",
                     ".piton/mcp.local.json",
-                    ".piton/workflows.json",
-                    ".piton/integrations.json",
+                    ".piton/config.toml",
                 ]
                 const fileContents = () =>
                     observedPaths.map((file) =>
@@ -405,12 +335,10 @@ describe("workflow project configuration", () => {
                 const text = inspected.content.map((block) => (block.type === "text" ? block.text : "")).join("\n")
                 assert.deepEqual(JSON.parse(text), snapshot)
                 assert.equal(snapshot.repositoryRoot, fs.realpathSync(root))
-                const projectFile = snapshot.files.find((file) => file.path === ".piton/workflows.json")
-                const integrationFile = snapshot.files.find((file) => file.path === ".piton/integrations.json")
+                const projectFile = snapshot.files.find((file) => file.path === ".piton/config.toml")
                 assert.equal(projectFile?.exists ? projectFile.content : undefined, scenario.project)
-                assert.equal(integrationFile?.exists ? integrationFile.content : undefined, scenario.integrations)
-                // A broken workflows.json or integrations.json fails only those parts: MCP still resolves, and setup
-                // sees which parts are broken.
+                // A broken table fails only its part, and a broken file every part it holds: MCP still resolves, and
+                // setup sees which parts are broken.
                 assert.equal(
                     snapshot.mcp.effectiveServers.find((server) => server.name === "setup-github")?.credentialEnv,
                     "LOCAL_SETUP_GITHUB_TOKEN",
@@ -423,8 +351,8 @@ describe("workflow project configuration", () => {
                 const expected = {
                     missing: [],
                     existing: [],
-                    incompatible: ["workflows"],
-                    malformed: ["workflows", "integrations"],
+                    incompatible: ["branches"],
+                    malformed: ["permissions", "web_search", "branches", "integrations"],
                 }
                 assert.deepEqual(
                     broken.map((error) => error.part),
@@ -441,8 +369,8 @@ describe("workflow project configuration", () => {
                             reference: "#2",
                         },
                     ])
-                    assert.ok(snapshot.projectPathsInGit.includes(".piton/workflows.json"))
-                    assert.ok(snapshot.stagedProjectPaths.includes(".piton/workflows.json"))
+                    assert.ok(snapshot.projectPathsInGit.includes(".piton/config.toml"))
+                    assert.ok(snapshot.stagedProjectPaths.includes(".piton/config.toml"))
                 }
                 await setup.handler("Inspect existing setup", { cwd: root, isProjectTrusted: () => true })
                 const prefix = "Read-only setup context:\n"
@@ -598,19 +526,10 @@ describe("workflow project configuration", () => {
     it("adds approved permission gates without replacing settings or changing the Git index", async () => {
         const root = repository()
         try {
-            const settingsPath = path.join(root, ".piton", "permissions.local.json")
-            fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
-            fs.writeFileSync(
-                settingsPath,
-                `${JSON.stringify(
-                    {
-                        defaultMode: "deny",
-                        allow: ["read"],
-                        ask: ["write(existing.md)"],
-                    },
-                    null,
-                    4,
-                )}\n`,
+            const settingsPath = writeSettings(
+                root,
+                { permissions: { default_mode: "deny", allow: ["read"], ask: ["write(existing.md)"] } },
+                true,
             )
             const indexBefore = git(root, ["ls-files", "--stage"])
             const rules = ["write(.piton/*/plan.md)", "edit(.piton/*/plan.md)"]
@@ -625,7 +544,7 @@ describe("workflow project configuration", () => {
             assert.equal(configured.changed, true)
             assert.equal(configured.localExclusionChanged, true)
             assert.equal(git(root, ["ls-files", "--stage"]), indexBefore)
-            assert.doesNotThrow(() => git(root, ["check-ignore", "-q", ".piton/permissions.local.json"]))
+            assert.doesNotThrow(() => git(root, ["check-ignore", "-q", ".piton/config.local.toml"]))
             assert.ok(
                 fs
                     .readFileSync(path.join(root, ".git", "info", "exclude"), "utf-8")
@@ -633,16 +552,19 @@ describe("workflow project configuration", () => {
                     .includes(LOCAL_SETTINGS_EXCLUDE),
             )
 
-            const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"))
-            assert.equal(settings.defaultMode, "deny")
-            assert.deepEqual(settings.allow, ["read"])
-            assert.deepEqual(settings.ask, ["write(existing.md)", ...rules])
+            // Only the changed list is rewritten; the rest of the table stays as it was.
+            const text = fs.readFileSync(settingsPath, "utf-8")
+            assert.match(text, /default_mode = "deny"/)
+            assert.match(text, /allow = \["read"\]/)
+            clearSettingsCache()
+            const local = inspectPersistentPermissions(root, "host").sources.find((source) => source.local)!.settings
+            assert.deepEqual(local.ask, ["write(existing.md)", ...rules])
 
             assert.deepEqual(
                 await configureProjectPermissions(root, { target: "local", allow: [], ask: rules }, new Map()),
                 {
                     target: "local",
-                    file: ".piton/permissions.local.json",
+                    file: ".piton/config.local.toml",
                     added: { allow: [], ask: [] },
                     skipped: { allow: [], ask: rules },
                     inspection: [],
@@ -668,16 +590,22 @@ describe("workflow project configuration", () => {
         const root = repository()
         try {
             assert.throws(() => loadProjectConfig(root), /missing branches\.format/)
-            writeConfig(root, { ...config(), extra: true })
-            assert.throws(() => loadProjectConfig(root), /workflows\.json: unknown field `extra`/)
-            writeConfig(root, config({ format: "feature/identifier" }))
-            assert.throws(() => loadProjectConfig(root), /workflows\.json: unknown variant `feature\/identifier`/)
-            writeConfig(root, config({ format: { epic: "identifier", deliverable: "tracker" } }))
-            assert.throws(() => loadProjectConfig(root), /workflows\.json/)
+            const file = path.join(root, ".piton", "config.toml")
+            const raw = (text: string) => {
+                fs.mkdirSync(path.dirname(file), { recursive: true })
+                fs.writeFileSync(file, text)
+                clearSettingsCache()
+            }
+            raw('[branches]\nformat = "identifier-title"\nextra = true\n')
+            assert.throws(() => loadProjectConfig(root), /config\.toml: unknown field `extra`/)
+            raw('[branches]\nformat = "feature/identifier"\n')
+            assert.throws(() => loadProjectConfig(root), /config\.toml: unknown variant `feature\/identifier`/)
+            raw('[branches.format]\nepic = "identifier"\n')
+            assert.throws(() => loadProjectConfig(root), /config\.toml/)
 
-            // The removed blocked-review setting is an unknown field like any other.
-            writeConfig(root, { ...config(), reviews: { userConfirmationAfter: 3 } })
-            assert.throws(() => loadProjectConfig(root), /unknown field `reviews`/)
+            // The removed blocked-review setting is an unknown key like any other.
+            raw("[reviews]\nuser_confirmation_after = 3\n")
+            assert.throws(() => loadProjectConfig(root), /unknown key `reviews`/)
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }
@@ -685,8 +613,7 @@ describe("workflow project configuration", () => {
 
     it("resolves branch username from strict local and global settings", () => {
         const root = repository()
-        const globalSettingsPath = globalWorkflows()
-        const localSettingsPath = path.join(root, ".piton", "workflows.local.json")
+        resetGlobalSettings()
         try {
             writeConfig(root, config({ format: "tracker" }))
             assert.equal(loadProjectConfig(root).branches.username, undefined)
@@ -694,10 +621,10 @@ describe("workflow project configuration", () => {
             writeConfig(root, config({ format: "username/identifier-title" }))
             assert.throws(() => loadProjectConfig(root), /username is required/)
 
-            writeWorkflowSettings(globalSettingsPath, "global-user")
+            writeSettings("global", { "branches.username": "global-user" }, true)
             assert.equal(loadProjectConfig(root).branches.username, "global-user")
 
-            writeWorkflowSettings(localSettingsPath, "alex")
+            const localSettingsPath = writeSettings(root, { "branches.username": "alex" }, true)
             const configured = loadProjectConfig(root)
             assert.equal(configured.branches.format, "username/identifier-title")
             assert.equal(configured.branches.username, "alex")
@@ -710,9 +637,10 @@ describe("workflow project configuration", () => {
                     .split(/\r?\n/)
                     .includes(LOCAL_SETTINGS_EXCLUDE),
             )
-            assert.doesNotMatch(fs.readFileSync(path.join(root, ".piton", "workflows.json"), "utf-8"), /alex/)
+            assert.doesNotMatch(fs.readFileSync(path.join(root, ".piton", "config.toml"), "utf-8"), /alex/)
 
-            writeJson(localSettingsPath, { branches: { username: "alex" }, extra: true })
+            fs.writeFileSync(localSettingsPath, '[branches]\nusername = "alex"\nextra = true\n')
+            clearSettingsCache()
             assert.throws(() => loadProjectConfig(root), /unknown field `extra`/)
         } finally {
             resetGlobalSettings()
@@ -891,7 +819,7 @@ describe("workflow project configuration", () => {
             git(root, ["add", ".gitignore", ".piton"])
             assert.deepEqual(git(root, ["diff", "--cached", "--name-only"]).split("\n"), [
                 ".gitignore",
-                ".piton/workflows.json",
+                ".piton/config.toml",
             ])
             assertArtifactPersistencePrepared(root)
         } finally {
@@ -904,7 +832,7 @@ describe("workflow project configuration", () => {
         try {
             writeConfig(root, config({ format: "username/identifier-title" }))
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
-            writeWorkflowSettings(path.join(root, ".piton", "workflows.local.json"), "alex")
+            writeSettings(root, { "branches.username": "alex" }, true)
             const exclude = path.join(root, ".git", "info", "exclude")
             const before = fs.readFileSync(exclude, "utf-8")
             assert.throws(() => assertArtifactPersistencePrepared(root), /not prepared/)

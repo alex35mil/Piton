@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -41,42 +42,35 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
     fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     git("add", ".gitignore")
     git("commit", "-m", "initial")
-    fs.mkdirSync(path.join(root, ".piton"))
-    fs.writeFileSync(
-        path.join(root, ".piton/workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(
-        path.join(root, ".piton/integrations.json"),
-        JSON.stringify({
-            tracker: {
-                provider: "github",
-                mcpServer: "github",
-                repository,
-                project: { owner: "example", ownerType: "user", number: 1 },
-                labels: kindLabels(),
-                fields: {
-                    status: {
-                        field: "Status",
-                        values: {
-                            backlog: "Backlog",
-                            todo: "Todo",
-                            inProgress: "In Progress",
-                            inReview: "In Review",
-                            done: "Done",
-                            canceled: "Canceled",
-                        },
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker: {
+            provider: "github",
+            mcpServer: "github",
+            repository,
+            project: { owner: "example", ownerType: "user", number: 1 },
+            labels: kindLabels(),
+            fields: {
+                status: {
+                    field: "Status",
+                    values: {
+                        backlog: "Backlog",
+                        todo: "Todo",
+                        inProgress: "In Progress",
+                        inReview: "In Review",
+                        done: "Done",
+                        canceled: "Canceled",
                     },
-                    phase: {
-                        field: "Phase",
-                        values: { planning: "Planning", execution: "Execution", selfReview: "Self-Review" },
-                    },
-                    priority: { scope: "project", field: "Priority", values: ["High"] },
                 },
+                phase: {
+                    field: "Phase",
+                    values: { planning: "Planning", execution: "Execution", selfReview: "Self-Review" },
+                },
+                priority: { scope: "project", field: "Priority", values: ["High"] },
             },
-            forge: { provider: "github", mcpServer: "github", repository },
-        }),
-    )
+        },
+        forge: { provider: "github", mcpServer: "github", repository },
+    })
     prepareArtifactPersistence(root)
     // A new and an adopted issue initialize the same way; only the selected object differs.
     const object = (issueNumber: number) => ({

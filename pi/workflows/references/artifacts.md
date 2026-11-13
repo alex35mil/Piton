@@ -83,7 +83,7 @@ Use concise lowercase kebab-case, with a soft cap around 48 characters; shorten 
 - The `identifier-title` branch format uses that name in lowercase; `username/identifier-title` prefixes it with `<username>/`. Only initialized entities get directories and branches.
 - Epic and Gig start from and target the repository default branch. It's resolved, in order, from `origin/HEAD`, an existing workflow contract, the current attached local branch, or the sole local branch. A remote is optional.
 - A Task copies its parent Epic's current target. The Task skill owns its prerequisites and parent relation.
-- The initialization tool renders the one configured `branches.format` for every entity. Formats starting with `username` read `branches.username` from `.piton/workflows.local.json` or global `workflows.json`; never infer it. The Linear `tracker` format uses exact issue branch names for Task and Gig, and the slug for an Epic (see [Linear tracker](./integrations/tracker/linear.md)). When configuring formats, read [setup](./setup.md#project-configuration).
+- The initialization tool renders the one configured `branches.format` for every entity. Formats starting with `username` read the username from `.piton/config.local.toml` or the global `config.local.toml`; never infer it. The Linear `tracker` format uses exact issue branch names for Task and Gig, and the slug for an Epic (see [Linear tracker](./integrations/tracker/linear.md)). When configuring formats, read [setup](./setup.md#project-configuration).
 - Approved repository operations remain lifecycle gates.
 
 ## Brief and local working state
@@ -105,10 +105,9 @@ Entity files sit directly in the entity directory.
 
 ```text
 .piton/
-  workflows.json       # Required: branch format; committed.
-  workflows.local.json # Optional username for static username formats; always local.
+  config.toml          # Required: branch format, tracker, and forge, non-secret; committed; never entity state.
+  config.local.toml    # Optional personal values, such as the username; always local.
   policies.md          # Optional repository-specific workflow additions or overrides; committed.
-  integrations.json    # Required tracker and forge configuration, non-secret; committed; never entity state.
   .local/              # All workflow work; never committed.
     epics/             # Initialized Epics and their Tasks.
     gigs/              # Initialized standalone Gigs.
@@ -200,9 +199,9 @@ Each `reviews/<phase>-NNN/` directory holds:
 
 ## Persistence and authority
 
-The shared guard validates `.piton/workflows.json` and persistence safety, reusing a successful check while the relevant local inputs are unchanged. `prepare_artifacts` forces a full check during setup or repair, adds only the permitted exclusions below, and creates an empty `.piton/.local` when it's missing. Neither changes the Git index.
+The shared guard validates the branch configuration and persistence safety, reusing a successful check while the relevant local inputs are unchanged. `prepare_artifacts` forces a full check during setup or repair, adds only the permitted exclusions below, and creates an empty `.piton/.local` when it's missing. Neither changes the Git index.
 
-- **In Git:** only `.piton/workflows.json`, `policies.md`, and non-secret `integrations.json`.
+- **In Git:** only `.piton/config.toml`, `mcp.json`, and `policies.md`.
 - **Kept out by:** the `/.piton/.local` rule in `.gitignore`, which setup writes, and `/.piton/*.local.*` in `.git/info/exclude`. Without a trailing slash, the rule also covers a worker's `.piton/.local` symlink to its source checkout.
 - **Preparation stops when** the committed `.gitignore` doesn't ignore `.piton/.local`, or any path under `.piton/.local/` or any `.piton/*.local.*` file is in Git or staged.
 - **In a sandboxed worker** (`PITON_RUNTIME=sandbox`), starting or resuming an entity, and recording incoming-PR evidence, stop unless `.piton/.local` is a symlink to the source checkout's folder; otherwise the artifacts would be lost with the worker. Run setup in the source checkout and recreate the worker. Project inspection and queue intake create no artifacts, so they aren't guarded, including against the workflow source project.
@@ -213,7 +212,7 @@ The shared guard validates `.piton/workflows.json` and persistence safety, reusi
 
 - Artifacts, tracker identity, relationships, branch contracts, Phase, and review rounds are authoritative. Every entity stores `phase` in `metadata.json`. When changing Phase, read [Phase](./phase.md).
 - Lifecycle and Priority are native tracker Status and Priority, read fresh; nothing local stores them.
-- Keep machine data valid and transient context in `notes.md`. Never store credentials in `.piton/integrations.json`.
+- Keep machine data valid and transient context in `notes.md`. Never store credentials in `.piton/config.toml`.
 
 **Ownership:**
 

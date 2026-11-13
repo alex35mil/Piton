@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { type ProjectConfigFixture, writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -103,10 +104,7 @@ const target = {
 function project(integrations?: unknown): string {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "label-setup-"))
     cp.execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root })
-    if (integrations) {
-        fs.mkdirSync(path.join(root, ".piton"))
-        fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify(integrations))
-    }
+    if (integrations) writeProjectConfig(root, integrations as ProjectConfigFixture)
     return root
 }
 

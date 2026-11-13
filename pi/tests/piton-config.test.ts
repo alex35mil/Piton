@@ -46,11 +46,13 @@ function resolved(watch: string[]) {
         mcp: { ok: { servers: [] } },
         mcp_global: { ok: { servers: [] } },
         web_search: { ok: {} },
-        workflows: { error: { message: "invalid /w/.piton/workflows.json" } },
-        integrations: { ok: null },
+        branches: { error: { message: "invalid /w/.piton/config.toml" } },
+        integrations: { ok: { tracker: null, forge: null } },
+        development: { ok: {} },
         policies: { ok: [] },
         instructions: { ok: { rules: [], skills: [] } },
         artifacts: "/w/.piton/.local",
+        config_files: [],
         files: [],
         watch,
     }
@@ -65,7 +67,7 @@ describe("piton config resolve client", () => {
             const cwd = s.dir
             // A broken part fails only its readers.
             assert.deepEqual(section(resolveSettings(cwd, "host").permissions).merged.allow, ["read"])
-            assert.throws(() => section(resolveSettings(cwd, "host").workflows), /workflows\.json/)
+            assert.throws(() => section(resolveSettings(cwd, "host").branches), /config\.toml/)
             resolveSettings(cwd, "host")
             assert.equal(s.calls().length, 1)
             assert.match(s.calls()[0], /config resolve --workspace .* --runtime host/)

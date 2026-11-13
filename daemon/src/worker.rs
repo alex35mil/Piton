@@ -530,7 +530,7 @@ mod tests {
         std::fs::write(source.join(".gitignore"), "/apps/.build\n/.piton/.local\n").unwrap();
         std::fs::create_dir_all(source.join(".piton")).unwrap();
         std::fs::write(
-            source.join(".piton/daemon.toml"),
+            source.join(".piton/config.toml"),
             "[workers]\nskip = [\"apps/.build/index-build\"]\n",
         )
         .unwrap();

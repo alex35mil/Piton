@@ -7,7 +7,7 @@ export const WORKFLOW_CONTEXT_SECTION = "workflows"
 export const WORKFLOW_CONTEXT =
     "This repository uses workflows. Every repository change happens inside a workflow entity: a Gig (`/gig`) for standalone work, or a Task (`/task`) for work planned in an Epic. Before implementing anything, start or resume one, and follow its lifecycle through planning, review, delivery, and shipping. Never edit, commit, or ship repository changes outside it unless the user explicitly approves. Questions and design discussion need no entity until you decide to implement."
 
-// In a workflow-configured repository (an integrations.json anywhere in piton's configuration chain), every agent run
+// In a workflow-configured repository (a [tracker] or [forge] anywhere in piton's configuration chain), every agent run
 // gets the workflow rule in its system prompt. Checked per run, so adding or removing the configuration takes effect
 // on the next run. When the configuration can't be read, the rule stays, with the reason, so a broken file never
 // silently drops it.

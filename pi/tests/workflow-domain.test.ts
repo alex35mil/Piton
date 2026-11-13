@@ -1,4 +1,7 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
+import { resolveSettings, section } from "../extensions/__lib/settings.ts"
+import { integrationsFromFile } from "../workflows/extensions/integrations/config.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -47,40 +50,37 @@ function temporaryRepository(tracker: "github" | "linear" = "github", format = "
     git(directory, ["add", "README.md", ".gitignore"])
     git(directory, ["commit", "-m", "initial"])
     fs.mkdirSync(path.join(directory, ".piton"), { recursive: true })
-    fs.writeFileSync(path.join(directory, ".piton", "workflows.json"), JSON.stringify({ branches: { format } }))
-    fs.writeFileSync(
-        path.join(directory, ".piton", "integrations.json"),
-        JSON.stringify({
-            tracker:
-                tracker === "github"
-                    ? {
-                          provider: "github",
-                          mcpServer: "github",
-                          repository,
-                          project: { owner: "example", ownerType: "user", number: 3 },
-                          fields: {
-                              status: { field: "Status", values: statuses },
-                              phase: { field: "Phase", values: { ...phaseValues } },
-                              priority: {
-                                  scope: "project",
-                                  field: "Priority",
-                                  values: ["High", "Low"],
-                              },
-                          },
-                      }
-                    : {
-                          provider: "linear",
-                          mcpServer: "linear",
-                          team: "Engineering",
-                          phase: linearPhases(),
-                          statuses: {
-                              issues: statuses,
-                              projects: { ...statuses, done: "Completed" },
+    writeProjectConfig(directory, {
+        branchFormat: format,
+        tracker:
+            tracker === "github"
+                ? {
+                      provider: "github",
+                      mcpServer: "github",
+                      repository,
+                      project: { owner: "example", ownerType: "user", number: 3 },
+                      fields: {
+                          status: { field: "Status", values: statuses },
+                          phase: { field: "Phase", values: { ...phaseValues } },
+                          priority: {
+                              scope: "project",
+                              field: "Priority",
+                              values: ["High", "Low"],
                           },
                       },
-            forge,
-        }),
-    )
+                  }
+                : {
+                      provider: "linear",
+                      mcpServer: "linear",
+                      team: "Engineering",
+                      phase: linearPhases(),
+                      statuses: {
+                          issues: statuses,
+                          projects: { ...statuses, done: "Completed" },
+                      },
+                  },
+        forge,
+    })
     prepareArtifactPersistence(directory)
     return directory
 }
@@ -490,15 +490,15 @@ describe("workflow domain", () => {
     it("returns the labels to create new work with, from its Kind and selection", () => {
         const cwd = temporaryRepository()
         try {
-            const integrationsPath = path.join(cwd, ".piton/integrations.json")
-            const integrations = JSON.parse(fs.readFileSync(integrationsPath, "utf-8"))
+            const tracker = integrationsFromFile(section(resolveSettings(cwd).integrations).tracker!.value) as {
+                labels?: unknown
+            }
             const area = {
                 appliesTo: ["epic", "deliverable"],
                 cardinality: "zeroOrMore",
                 values: { fe: { name: "Area: FE", color: "#1D76DB", description: "" } },
             }
-            integrations.tracker.labels = { groups: { ...kindLabels().groups, area } }
-            fs.writeFileSync(integrationsPath, JSON.stringify(integrations))
+            writeProjectConfig(cwd, { tracker: { ...tracker, labels: { groups: { ...kindLabels().groups, area } } } })
             const base = { title: "Work", slug: "work", request: "Work" }
             assert.deepEqual(
                 preflightEntity({ ...base, entity: "gig", kind: "chore", labels: { area: ["fe"] } }, { cwd }).labels,

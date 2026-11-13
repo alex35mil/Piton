@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -45,27 +46,21 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
         done: "Done",
         canceled: "Canceled",
     }
-    fs.writeFileSync(
-        path.join(root, ".piton/workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(
-        path.join(root, ".piton/integrations.json"),
-        JSON.stringify({
-            tracker: {
-                provider: "linear",
-                mcpServer: "linear",
-                team: "Engineering",
-                phase: linearPhases(),
-                statuses: { issues: statuses, projects: statuses },
-            },
-            forge: {
-                provider: "github",
-                mcpServer: "github",
-                repository: { owner: "example", repo: "project" },
-            },
-        }),
-    )
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker: {
+            provider: "linear",
+            mcpServer: "linear",
+            team: "Engineering",
+            phase: linearPhases(),
+            statuses: { issues: statuses, projects: statuses },
+        },
+        forge: {
+            provider: "github",
+            mcpServer: "github",
+            repository: { owner: "example", repo: "project" },
+        },
+    })
     prepareArtifactPersistence(root)
     const common = { title: "Work", slug: "work", request: "Original request." }
     const issue = {

@@ -11,7 +11,7 @@ allowed-tools:
 Todo is work we've committed to and can pick up next. Use destination `todo`.
 
 - Ordinary intake uses `target: "current"`.
-- An explicit request such as "Report this workflow issue" uses `target: "workflow"` and the report preparation and privacy rules in [queue](../../references/queue.md#prepare-a-workflow-report). Suggesting a report doesn't authorize sending one.
+- An explicit request such as "Report this workflow issue" follows [report a workflow problem](../../references/queue.md#report-a-workflow-problem) and its privacy rules. Suggesting a report doesn't authorize sending one.
 
 ## Read first
 

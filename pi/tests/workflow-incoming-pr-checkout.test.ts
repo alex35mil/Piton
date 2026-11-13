@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -57,12 +58,8 @@ function fixture(diverged = false) {
     git(root, "add", ".")
     git(root, "commit", "-m", "parent")
     fs.mkdirSync(path.join(root, ".piton"))
-    fs.writeFileSync(
-        path.join(root, ".piton/workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
     const forge = { provider: "github", mcpServer: "fixture", repository: { owner: "upstream", repo: "app" } }
-    fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify({ tracker: minimalTracker(), forge }))
+    writeProjectConfig(root, { branchFormat: "identifier-title", tracker: minimalTracker(), forge })
     prepareArtifactPersistence(root)
     fs.writeFileSync(path.join(root, "README.md"), "parent staged\n")
     git(root, "add", "README.md")

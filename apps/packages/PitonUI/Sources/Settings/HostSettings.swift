@@ -2,7 +2,7 @@ import PitonKit
 import SwiftUI
 
 /// Every setting of the host this app is connected to, as the daemon reports them: each with its value, where it
-/// lives (the host's state, or `settings.toml`/`daemon.toml` and whether shared or Local), whether it waits for a
+/// lives (the host's state, or its global `config.toml` and whether shared or Local), whether it waits for a
 /// restart, and a control when the apps may change it. Client preferences (fonts) are in Appearance, which also
 /// handles their per-device Local choice.
 public struct HostSettings: View {
@@ -87,7 +87,7 @@ struct HostSettingRow: View {
                 }
                 Spacer()
                 // Local moves a value between the files; a key no file sets has nothing to move yet.
-                if case .config(_, .some) = setting.kind, setting.editable {
+                if case .config(.some) = setting.kind, setting.editable {
                     Toggle("Local", isOn: local).font(.caption)
                         #if os(macOS)
                             .toggleStyle(.checkbox)
@@ -127,9 +127,9 @@ struct HostSettingRow: View {
     private var origin: String {
         switch setting.kind {
         case .state: "This host's state"
-        case .config(let file, .some(.local)): "\(file.rawValue).local.toml"
-        case .config(let file, .some(.shared)): "\(file.rawValue).toml"
-        case .config(let file, nil): "Default (\(file.rawValue).toml)"
+        case .config(.some(.local)): "config.local.toml"
+        case .config(.some(.shared)): "config.toml"
+        case .config(nil): "Default"
         }
     }
 
@@ -137,8 +137,8 @@ struct HostSettingRow: View {
         Binding(
             get: {
                 switch setting.kind {
-                case .config(_, .some(.local)): true
-                case .config(_, .some(.shared)), .config(_, nil), .state: false
+                case .config(.some(.local)): true
+                case .config(.some(.shared)), .config(nil), .state: false
                 }
             },
             set: { isLocal in

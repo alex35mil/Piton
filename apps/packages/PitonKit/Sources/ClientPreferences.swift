@@ -1,6 +1,6 @@
 import Foundation
 
-/// A client preference: shared (kept by the host in its `settings.toml` `[client]`, the same for every client) or local
+/// A client preference: shared (kept by the host in its `config.toml` `[client]`, the same for every client) or local
 /// (this app's own value, kept on this device). The Local checkbox moves a preference between the two.
 public enum ClientPreference: String, CaseIterable, Sendable {
     case textFont = "client.text_font"

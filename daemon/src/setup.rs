@@ -632,7 +632,7 @@ mod tests {
         std::os::unix::fs::symlink("/elsewhere/piton", &host.link).unwrap();
         // An invalid global file.
         std::fs::create_dir_all(&f.config.paths.global).unwrap();
-        std::fs::write(f.config.paths.global.join("settings.toml"), "[host\n").unwrap();
+        std::fs::write(f.config.paths.global.join("config.toml"), "[host\n").unwrap();
         host.tailnet = Ok(crate::tailnet::SelfNode {
             user: 1,
             node: "n".into(),
@@ -692,11 +692,11 @@ mod tests {
             )
         };
         git(&["init", "-q"]);
-        std::fs::write(global.join("settings.local.toml"), "").unwrap();
+        std::fs::write(global.join("config.local.toml"), "").unwrap();
         let Status::Missing { problems, .. } = configuration(&f.config) else {
             panic!()
         };
-        assert!(problems[0].contains("settings.local.toml"), "{problems:?}");
+        assert!(problems[0].contains("config.local.toml"), "{problems:?}");
         std::fs::write(global.join(".gitignore"), "*.local.*\n").unwrap();
         assert!(matches!(configuration(&f.config), Status::Ok { .. }));
     }

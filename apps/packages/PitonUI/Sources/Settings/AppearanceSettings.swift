@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// The Appearance settings section: the text and code fonts. Each is shared through the host (the same on every
-/// device, kept in the host's settings.toml `[client]`) unless its Local box is checked, which keeps a value on this
+/// device, kept in the host's config.toml `[client]`) unless its Local box is checked, which keeps a value on this
 /// device only. A shared change needs the connection; a local one doesn't.
 public struct AppearanceSettings: View {
     /// The host connection, for shared values; nil while there's none (the phone before setup).

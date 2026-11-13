@@ -65,13 +65,13 @@ None of these call providers or turn identity, lifecycle, or merge facts into ca
 
 ## Setup, review, and delivery
 
-- **Setup:** `inspect_project_setup`, `prepare_artifacts`, `configure_mcp`, `inspect_permissions`, `configure_permissions`, `inspect_linear_workspace`, `render_incoming_pr_intake`.
+- **Setup:** `inspect_project_setup`, `prepare_artifacts`, `configure_mcp`, `configure_project`, `inspect_permissions`, `configure_permissions`, `inspect_linear_workspace`, `render_incoming_pr_intake`.
 - **GitHub provisioning:** `inspect_github_repository_setup`, `inspect_github_project_setup`, `inspect_github_project`, `preview_github_project_setup`, `apply_github_project_setup`. Preview and apply keep the full specification, approval hash, and credential isolation.
 - **Linear statuses:** `preview_linear_status_setup`, `apply_linear_status_setup`. Apply takes the approved `planHash` and only creates statuses.
 - **Label catalog:** `inspect_label_setup`, `preview_label_setup`, `apply_label_setup`, for both trackers.
 - **Reviews:** `review_epic`, `review_task`, `review_gig`, and `record_review_response`. The review tool chooses between a review and a verification pass ([review](./review.md)). The reviewer uses an explicit model override or the configured startup default, not the current session's model, and loads only the selected Claude Code extension with rules and permissions.
   - Task and Gig reviews also have `conflict-plan` and `conflict-merge` categories for [conflict resolution](./deliverable/conflicts.md).
-  - Epic, Task, and Gig reviewers read files with `read`, `grep`, `find`, and `ls`, and Git with the read-only `git_read`. They run headless under your permission settings, so with `defaultMode: "ask"` those tools must be allowed. Incoming-PR reviewers get file reads only.
+  - Epic, Task, and Gig reviewers read files with `read`, `grep`, `find`, and `ls`, and Git with the read-only `git_read`. They run headless under your permission settings, so with `default_mode = "ask"` those tools must be allowed. Incoming-PR reviewers get file reads only.
 - **Delivery cleanup:** `cleanup_delivery_branch` takes the merged PR read as `evidence`. It doesn't establish Done or authorize cleanup outside the shipping gates.
 - **Conflict resolution comment:** `prepare_merge_resolution_comment` returns the PR comment call that records a pushed conflict resolution.
 

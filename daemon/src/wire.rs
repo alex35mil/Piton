@@ -63,7 +63,7 @@ pub enum ViewRequest {
         #[serde(default)]
         local: Option<bool>,
     },
-    /// Switch host logging until the policy expires or the daemon restarts (`[host] logging` in `settings.toml` is the
+    /// Switch host logging until the policy expires or the daemon restarts (`[host] logging` in `config.toml` is the
     /// default).
     #[serde(rename = "daemon.logging")]
     DaemonLogging { policy: crate::diagnostics::Policy },

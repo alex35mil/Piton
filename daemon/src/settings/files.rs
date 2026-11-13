@@ -1,7 +1,12 @@
-//! The configuration files' schemas, how each is read, and which keys a level may set.
+//! The configuration file's schema, how it's read, and which keys a level may set.
 //!
-//! Every file is strict: unknown keys are refused. Values are optional so a nearer file can leave a key to a farther
-//! one; defaults belong to the code that uses a value.
+//! Each level has one `config.toml` and its `config.local.toml` (this machine's values, never shared). The file's
+//! top-level keys belong to parts ([`Table`]), each parsed on its own, so a broken `[tracker]` never stops permission
+//! checks; a syntax error or an unknown top-level key fails the whole file. Every table is strict: unknown keys are
+//! refused. Values are optional so a nearer file can leave a key to a farther one; defaults belong to the code that uses
+//! a value.
+//!
+//! MCP servers stay in `mcp[.local].json`, the format other harnesses read.
 
 use std::path::{Path, PathBuf};
 
@@ -10,7 +15,12 @@ use serde::{Deserialize, Serialize};
 use super::{LevelKind, Origin, SettingsError};
 use crate::project::validate_relative;
 
-/// `daemon[.local].toml`: how the daemon runs (global tier only) and per-project `[sandbox]` and `[workers]`.
+/// The configuration file of a level.
+pub const CONFIG_FILE: &str = "config.toml";
+/// Its companion with this machine's values.
+pub const CONFIG_LOCAL_FILE: &str = "config.local.toml";
+
+/// How the daemon runs (global tier only) and per-project `[sandbox]` and `[workers]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonFile {
@@ -135,8 +145,7 @@ pub struct WorkersTable {
     pub skip: Vec<String>,
 }
 
-/// `settings[.local].toml`, global tier only: preferences the apps can change. `settings.local.toml` keeps this
-/// host's values; a key set there wins over `settings.toml`.
+/// `[host]` and `[client]`, global tier only: preferences the apps can change.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsFile {
@@ -173,20 +182,62 @@ pub struct ClientPrefs {
     pub code_font: Option<String>,
 }
 
-/// `permissions[.<runtime>][.local].json`.
+/// `[development]`, global tier only: switches that apply only to a development install (the pi package running from a
+/// git checkout of piton). Documented in docs/development.md.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevelopmentFile {
+    #[serde(default, skip_serializing_if = "DevelopmentTable::is_empty")]
+    pub development: DevelopmentTable,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DevelopmentTable {
+    /// A shipped Deliverable ends with an analysis of the session for workflow problems. Absent: on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_analysis: Option<bool>,
+}
+
+/// `[permissions]`: pi's tool rules, and `[permissions.host]` / `[permissions.sandbox]` for one launch mode.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermissionsFile {
-    #[serde(rename = "defaultMode", default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "PermissionsTable::is_empty")]
+    pub permissions: PermissionsTable,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionsTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<PermissionMode>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ask: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
     #[serde(default, skip_serializing_if = "Keybindings::is_empty")]
     pub keybindings: Keybindings,
+    #[serde(default, skip_serializing_if = "PermissionRules::is_empty")]
+    pub host: PermissionRules,
+    #[serde(default, skip_serializing_if = "PermissionRules::is_empty")]
+    pub sandbox: PermissionRules,
+}
+
+/// Rules for one launch mode.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionRules {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<PermissionMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ask: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -200,7 +251,7 @@ pub enum PermissionMode {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Keybindings {
-    #[serde(rename = "autoAcceptEdits", default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_accept_edits: Option<String>,
 }
 
@@ -215,24 +266,27 @@ pub struct McpFile {
     pub auto_enable_codemode: Option<bool>,
 }
 
-/// `web-search[.local].json`.
+/// `[web_search]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchFile {
-    #[serde(rename = "apiKey", default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "WebSearchTable::is_empty")]
+    pub web_search: WebSearchTable,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
 
-/// `workflows[.local].json`.
+/// `[branches]`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowsFile {
+pub struct BranchesFile {
     #[serde(default, skip_serializing_if = "Branches::is_empty")]
     pub branches: Branches,
-    #[serde(rename = "workflowProject", default, skip_serializing_if = "Option::is_none")]
-    pub workflow_project: Option<String>,
-    #[serde(rename = "sessionAnalysis", default, skip_serializing_if = "Option::is_none")]
-    pub session_analysis: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -240,6 +294,7 @@ pub struct WorkflowsFile {
 pub struct Branches {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<BranchFormat>,
+    /// Personal: `config.local.toml` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
 }
@@ -252,6 +307,17 @@ pub enum BranchFormat {
     UsernameIdentifierTitle,
     #[serde(rename = "tracker")]
     Tracker,
+}
+
+/// `[tracker]` and `[forge]`, unchanged: the pi package validates them. A nearer level's table replaces a farther one's
+/// whole.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrationsFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<toml::Table>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge: Option<toml::Table>,
 }
 
 macro_rules! is_empty {
@@ -273,81 +339,237 @@ is_empty!(
     WorkersTable,
     HostPrefs,
     ClientPrefs,
+    DevelopmentTable,
+    PermissionsTable,
+    PermissionRules,
     Keybindings,
+    WebSearchTable,
     Branches
 );
 
-/// Keys a file at a non-global level must not set.
+/// The parts of `config.toml`, by the top-level keys each owns. Each part is parsed on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    Daemon,
+    Settings,
+    Development,
+    Permissions,
+    Branches,
+    Integrations,
+    WebSearch,
+}
+
+impl Table {
+    pub const ALL: [Table; 7] = [
+        Table::Daemon,
+        Table::Settings,
+        Table::Development,
+        Table::Permissions,
+        Table::Branches,
+        Table::Integrations,
+        Table::WebSearch,
+    ];
+
+    /// The top-level keys this part owns.
+    pub fn keys(self) -> &'static [&'static str] {
+        match self {
+            Table::Daemon => &["socket", "log", "pi", "env", "stop", "tailnet", "sandbox", "workers"],
+            Table::Settings => &["host", "client"],
+            Table::Development => &["development"],
+            Table::Permissions => &["permissions"],
+            Table::Branches => &["branches"],
+            Table::Integrations => &["tracker", "forge"],
+            Table::WebSearch => &["web_search"],
+        }
+    }
+
+    fn of(key: &str) -> Option<Table> {
+        Table::ALL.into_iter().find(|table| table.keys().contains(&key))
+    }
+}
+
+/// Top-level keys that hold a value, not a table.
+const SCALAR_KEYS: &[&str] = &["socket", "log"];
+
+/// Where a key may be set.
 pub trait Scoped {
-    fn global_only_keys(&self) -> Vec<&'static str>;
+    /// Keys a non-global level must not set.
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+    /// Personal keys a shared `config.toml` must not set.
+    fn local_only_keys(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+}
+
+fn present(keys: &[(&'static str, bool)]) -> Vec<&'static str> {
+    keys.iter().filter(|(_, set)| *set).map(|(key, _)| *key).collect()
 }
 
 impl Scoped for DaemonFile {
     fn global_only_keys(&self) -> Vec<&'static str> {
-        let mut keys = Vec::new();
-        let set = |key, present: bool, keys: &mut Vec<&'static str>| {
-            if present {
-                keys.push(key);
-            }
-        };
-        set("socket", self.socket.is_some(), &mut keys);
-        set("log", self.log.is_some(), &mut keys);
-        set("pi", !self.pi.is_empty(), &mut keys);
-        set("env", !self.env.is_empty(), &mut keys);
-        set("stop", !self.stop.is_empty(), &mut keys);
-        set("tailnet", !self.tailnet.is_empty(), &mut keys);
-        set("sandbox.command", self.sandbox.command.is_some(), &mut keys);
-        set("sandbox.base", self.sandbox.base.is_some(), &mut keys);
-        set("sandbox.groups", !self.sandbox.groups.is_empty(), &mut keys);
-        set("sandbox.bypass", !self.sandbox.bypass.is_empty(), &mut keys);
-        set(
-            "sandbox.network.profile",
-            self.sandbox.network.profile.is_some(),
-            &mut keys,
-        );
-        keys
+        present(&[
+            ("socket", self.socket.is_some()),
+            ("log", self.log.is_some()),
+            ("pi", !self.pi.is_empty()),
+            ("env", !self.env.is_empty()),
+            ("stop", !self.stop.is_empty()),
+            ("tailnet", !self.tailnet.is_empty()),
+            ("sandbox.command", self.sandbox.command.is_some()),
+            ("sandbox.base", self.sandbox.base.is_some()),
+            ("sandbox.groups", !self.sandbox.groups.is_empty()),
+            ("sandbox.bypass", !self.sandbox.bypass.is_empty()),
+            ("sandbox.network.profile", self.sandbox.network.profile.is_some()),
+        ])
+    }
+}
+
+impl Scoped for SettingsFile {
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        present(&[("host", !self.host.is_empty()), ("client", !self.client.is_empty())])
+    }
+}
+
+impl Scoped for DevelopmentFile {
+    fn global_only_keys(&self) -> Vec<&'static str> {
+        present(&[("development", !self.development.is_empty())])
     }
 }
 
 impl Scoped for PermissionsFile {
     fn global_only_keys(&self) -> Vec<&'static str> {
-        if self.keybindings.is_empty() {
-            Vec::new()
-        } else {
-            vec!["keybindings"]
-        }
+        present(&[("permissions.keybindings", !self.permissions.keybindings.is_empty())])
     }
 }
 
-impl Scoped for WorkflowsFile {
-    fn global_only_keys(&self) -> Vec<&'static str> {
-        let mut keys = Vec::new();
-        if self.workflow_project.is_some() {
-            keys.push("workflowProject");
-        }
-        if self.session_analysis.is_some() {
-            keys.push("sessionAnalysis");
-        }
-        keys
+impl Scoped for BranchesFile {
+    fn local_only_keys(&self) -> Vec<&'static str> {
+        present(&[("branches.username", self.branches.username.is_some())])
     }
 }
 
-macro_rules! unscoped {
-    ($($ty:ty),*) => {$(
-        impl Scoped for $ty {
-            fn global_only_keys(&self) -> Vec<&'static str> {
-                Vec::new()
-            }
-        }
-    )*};
-}
-unscoped!(McpFile, WebSearchFile, SettingsFile);
+impl Scoped for IntegrationsFile {}
+impl Scoped for WebSearchFile {}
+impl Scoped for McpFile {}
 
 /// A file that was read, with where it came from.
 #[derive(Debug, Clone)]
 pub struct Loaded<T> {
     pub value: T,
     pub origin: Origin,
+}
+
+/// Which file of a level's pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sharing {
+    /// `config.toml`: committed, or shared through dotfiles.
+    Shared,
+    /// `config.local.toml`: this machine's values.
+    Local,
+}
+
+impl Sharing {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Sharing::Shared => CONFIG_FILE,
+            Sharing::Local => CONFIG_LOCAL_FILE,
+        }
+    }
+}
+
+/// One `config[.local].toml`, syntax-checked, its top-level keys known, ready to read part by part.
+#[derive(Debug, Clone)]
+pub struct ConfigDoc {
+    pub origin: Origin,
+    pub sharing: Sharing,
+    table: toml::Table,
+}
+
+impl ConfigDoc {
+    /// Parses `text` as the file at `path`: TOML, and only top-level keys a part owns.
+    pub fn parse(text: &str, path: &Path, level: LevelKind, sharing: Sharing) -> Result<Self, SettingsError> {
+        let invalid = |reason: String| SettingsError::Invalid {
+            path: path.to_path_buf(),
+            reason,
+        };
+        let table: toml::Table = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
+        if let Some(key) = table.keys().find(|key| Table::of(key).is_none()) {
+            return Err(invalid(format!("unknown key `{key}`")));
+        }
+        Ok(Self {
+            origin: Origin {
+                path: path.to_path_buf(),
+                level,
+            },
+            sharing,
+            table,
+        })
+    }
+
+    /// Whether the file sets any key of `table`.
+    pub fn has(&self, table: Table) -> bool {
+        table.keys().iter().any(|key| self.table.contains_key(*key))
+    }
+
+    /// One part of the file, strictly, with the level's and the file's scope checked.
+    pub fn part<T>(&self, table: Table) -> Result<T, SettingsError>
+    where
+        T: serde::de::DeserializeOwned + Scoped,
+    {
+        let path = &self.origin.path;
+        let subset: toml::Table = self
+            .table
+            .iter()
+            .filter(|(key, _)| table.keys().contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        // serde reads an empty array as an empty struct: a key that names a table must hold one.
+        if let Some((key, _)) = subset
+            .iter()
+            .find(|(key, value)| !SCALAR_KEYS.contains(&key.as_str()) && !value.is_table())
+        {
+            return Err(SettingsError::Invalid {
+                path: path.clone(),
+                reason: format!("`{key}` must be a table"),
+            });
+        }
+        let value: T = toml::Value::Table(subset)
+            .try_into()
+            .map_err(|e: toml::de::Error| SettingsError::Invalid {
+                path: path.clone(),
+                reason: e.to_string(),
+            })?;
+        if self.origin.level != LevelKind::Global
+            && let Some(key) = value.global_only_keys().first()
+        {
+            return Err(SettingsError::GlobalOnly {
+                path: path.clone(),
+                key: (*key).to_string(),
+                global: super::global_tier(),
+            });
+        }
+        match self.sharing {
+            Sharing::Local => {}
+            Sharing::Shared => {
+                if let Some(key) = value.local_only_keys().first() {
+                    return Err(SettingsError::LocalOnly {
+                        path: path.clone(),
+                        key: (*key).to_string(),
+                    });
+                }
+            }
+        }
+        Ok(value)
+    }
+}
+
+/// Reads one level's file; `None` when it doesn't exist.
+pub fn read_config(path: &Path, level: LevelKind, sharing: Sharing) -> Result<Option<ConfigDoc>, SettingsError> {
+    let Some(text) = read_text(path)? else {
+        return Ok(None);
+    };
+    ConfigDoc::parse(&text, path, level, sharing).map(Some)
 }
 
 /// A file's text, or `None` when it doesn't exist. A folder or an unreadable file is an error.
@@ -366,27 +588,21 @@ pub fn read_text(path: &Path) -> Result<Option<String>, SettingsError> {
     }
 }
 
-/// Keys that moved out of `daemon.toml`, with where they live now.
-const MOVED_DAEMON_KEYS: &[(&str, &str)] = &[
-    ("roots", "settings.toml [host] roots"),
-    ("attach_mode", "settings.toml [host] attach_mode"),
-    ("empty_grace_ms", "settings.toml [host] empty_grace_ms"),
-    ("logging", "settings.toml [host] logging"),
-    (
-        "keep_awake",
-        "the host's state database: it's state, not configuration; toggle it in the apps",
-    ),
-];
-
-/// Reads one file at one level: parses it strictly and checks the level may set its keys.
-pub fn load<T>(path: &Path, level: LevelKind, format: Format) -> Result<Option<Loaded<T>>, SettingsError>
-where
-    T: serde::de::DeserializeOwned + Scoped,
-{
+/// Reads `mcp[.local].json` at one level.
+pub fn load_mcp(path: &Path, level: LevelKind) -> Result<Option<Loaded<McpFile>>, SettingsError> {
     let Some(text) = read_text(path)? else {
         return Ok(None);
     };
-    let value = parse(&text, path, level, format)?;
+    let invalid = |reason: String| SettingsError::Invalid {
+        path: path.to_path_buf(),
+        reason,
+    };
+    // serde reads a JSON array into a struct too; the file must be an object.
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?;
+    if !value.is_object() {
+        return Err(invalid("must be a JSON object".into()));
+    }
+    let value = serde_json::from_value(value).map_err(|e| invalid(e.to_string()))?;
     Ok(Some(Loaded {
         value,
         origin: Origin {
@@ -394,68 +610,6 @@ where
             level,
         },
     }))
-}
-
-/// Parses one file's text strictly, as `path` at `level`: moved keys, unknown keys, and keys the level may not set are
-/// refused.
-pub fn parse<T>(text: &str, path: &Path, level: LevelKind, format: Format) -> Result<T, SettingsError>
-where
-    T: serde::de::DeserializeOwned + Scoped,
-{
-    let invalid = |reason: String| SettingsError::Invalid {
-        path: path.to_path_buf(),
-        reason,
-    };
-    let value: T = match format {
-        Format::Toml => {
-            let table: toml::Table = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
-            if let Some((key, now)) = MOVED_DAEMON_KEYS.iter().find(|(key, _)| table.contains_key(*key))
-                && is_daemon_file(path)
-            {
-                return Err(invalid(format!("`{key}` moved to {now}")));
-            }
-            if is_daemon_file(path)
-                && let Some(toml::Value::Table(sandbox)) = table.get("sandbox")
-                && sandbox.contains_key("profile")
-            {
-                return Err(invalid(
-                    "`sandbox.profile` is now `sandbox.base`, and its grants go in [sandbox]".into(),
-                ));
-            }
-            toml::from_str(text).map_err(|e| invalid(e.to_string()))?
-        }
-        Format::Json => {
-            // serde reads a JSON array into a struct too; a settings file must be an object.
-            let value: serde_json::Value = serde_json::from_str(text).map_err(|e| invalid(e.to_string()))?;
-            if !value.is_object() {
-                return Err(invalid("must be a JSON object".into()));
-            }
-            serde_json::from_value(value).map_err(|e| invalid(e.to_string()))?
-        }
-    };
-    if level != LevelKind::Global
-        && let Some(key) = value.global_only_keys().first()
-    {
-        return Err(SettingsError::GlobalOnly {
-            path: path.to_path_buf(),
-            key: (*key).to_string(),
-            global: super::global_tier(),
-        });
-    }
-    Ok(value)
-}
-
-fn is_daemon_file(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|n| n.to_str()),
-        Some("daemon.toml" | "daemon.local.toml")
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Format {
-    Toml,
-    Json,
 }
 
 /// Checks values that the schema alone can't: non-empty commands, relative skip paths, absolute grant paths, and the
@@ -500,6 +654,22 @@ pub fn validate_daemon(file: &DaemonFile, path: &Path) -> Result<(), SettingsErr
     Ok(())
 }
 
+/// Every part of a file, checked: for a write that must leave a file every reader accepts.
+pub fn validate_config(doc: &ConfigDoc) -> Result<(), SettingsError> {
+    for table in Table::ALL {
+        match table {
+            Table::Daemon => validate_daemon(&doc.part::<DaemonFile>(table)?, &doc.origin.path)?,
+            Table::Settings => doc.part::<SettingsFile>(table).map(|_| ())?,
+            Table::Development => doc.part::<DevelopmentFile>(table).map(|_| ())?,
+            Table::Permissions => doc.part::<PermissionsFile>(table).map(|_| ())?,
+            Table::Branches => doc.part::<BranchesFile>(table).map(|_| ())?,
+            Table::Integrations => doc.part::<IntegrationsFile>(table).map(|_| ())?,
+            Table::WebSearch => doc.part::<WebSearchFile>(table).map(|_| ())?,
+        }
+    }
+    Ok(())
+}
+
 fn is_grant_path(path: &str) -> bool {
     path.starts_with('/') || path.starts_with("~/") || path == "~" || path.starts_with('$')
 }
@@ -520,76 +690,116 @@ pub fn expand_home(path: &str, home: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn write(dir: &Path, name: &str, text: &str) -> PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, text).unwrap();
-        path
+    fn doc(text: &str, level: LevelKind, sharing: Sharing) -> Result<ConfigDoc, SettingsError> {
+        ConfigDoc::parse(text, Path::new("config.toml"), level, sharing)
     }
 
     #[test]
     fn unknown_keys_are_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "daemon.toml", "[sandbox]\nallw = []\n");
-        let err = load::<DaemonFile>(&path, LevelKind::Repository, Format::Toml).unwrap_err();
+        let err = doc("[permisions]\nallow = []\n", LevelKind::Repository, Sharing::Shared).unwrap_err();
+        assert!(err.to_string().contains("permisions"), "{err}");
+        let d = doc("[sandbox]\nallw = []\n", LevelKind::Repository, Sharing::Shared).unwrap();
+        let err = d.part::<DaemonFile>(Table::Daemon).unwrap_err();
         assert!(err.to_string().contains("allw"), "{err}");
-        let path = write(dir.path(), "permissions.json", r#"{"alow": []}"#);
-        assert!(load::<PermissionsFile>(&path, LevelKind::Repository, Format::Json).is_err());
-        for text in ["[]", "null", "1"] {
-            let path = write(dir.path(), "permissions.json", text);
-            assert!(
-                load::<PermissionsFile>(&path, LevelKind::Repository, Format::Json).is_err(),
-                "{text}"
-            );
+        let d = doc(
+            "[permissions.host]\nkeybindings = {}\n",
+            LevelKind::Global,
+            Sharing::Shared,
+        )
+        .unwrap();
+        assert!(d.part::<PermissionsFile>(Table::Permissions).is_err());
+        // A table key holding anything else, even an empty list (which serde reads as an empty table), is refused.
+        for (text, table) in [("permissions = []\n", Table::Permissions), ("tracker = 1\n", Table::Integrations)] {
+            let d = doc(text, LevelKind::Repository, Sharing::Shared).unwrap();
+            let refused = match table {
+                Table::Permissions => d.part::<PermissionsFile>(table).is_err(),
+                Table::Integrations => d.part::<IntegrationsFile>(table).is_err(),
+                Table::Daemon | Table::Settings | Table::Development | Table::Branches | Table::WebSearch => false,
+            };
+            assert!(refused, "{text}");
         }
     }
 
+    /// A broken table fails only its part.
     #[test]
-    fn global_only_keys_are_refused_elsewhere() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "daemon.toml", "[sandbox]\nbase = \"default\"\n");
-        let err = load::<DaemonFile>(&path, LevelKind::Parent, Format::Toml).unwrap_err();
-        assert!(matches!(err, SettingsError::GlobalOnly { ref key, .. } if key == "sandbox.base"));
-        assert!(load::<DaemonFile>(&path, LevelKind::Global, Format::Toml).is_ok());
-
-        let path = write(dir.path(), "workflows.json", r#"{"sessionAnalysis": true}"#);
-        assert!(matches!(
-            load::<WorkflowsFile>(&path, LevelKind::Repository, Format::Json),
-            Err(SettingsError::GlobalOnly { .. })
-        ));
-        let path = write(
-            dir.path(),
-            "permissions.json",
-            r#"{"keybindings": {"autoAcceptEdits": "ctrl+a"}}"#,
+    fn parts_are_parsed_on_their_own() {
+        let d = doc(
+            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n",
+            LevelKind::Repository,
+            Sharing::Shared,
+        )
+        .unwrap();
+        assert!(d.part::<BranchesFile>(Table::Branches).is_err());
+        assert_eq!(
+            d.part::<PermissionsFile>(Table::Permissions).unwrap().permissions.allow,
+            ["read"]
         );
-        assert!(load::<PermissionsFile>(&path, LevelKind::Repository, Format::Json).is_err());
+        assert!(
+            d.part::<IntegrationsFile>(Table::Integrations)
+                .unwrap()
+                .tracker
+                .is_some()
+        );
     }
 
     #[test]
-    fn moved_keys_say_where_they_went() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write(dir.path(), "daemon.toml", "roots = [\"~/p\"]\n");
-        let err = load::<DaemonFile>(&path, LevelKind::Global, Format::Toml).unwrap_err();
-        assert!(err.to_string().contains("settings.toml"), "{err}");
-        let path = write(dir.path(), "daemon.toml", "[sandbox]\nprofile = \"piton\"\n");
-        let err = load::<DaemonFile>(&path, LevelKind::Global, Format::Toml).unwrap_err();
-        assert!(err.to_string().contains("sandbox.base"), "{err}");
+    fn global_only_and_local_only_keys() {
+        let d = doc("[sandbox]\nbase = \"default\"\n", LevelKind::Parent, Sharing::Shared).unwrap();
+        let err = d.part::<DaemonFile>(Table::Daemon).unwrap_err();
+        assert!(matches!(err, SettingsError::GlobalOnly { ref key, .. } if key == "sandbox.base"));
+        for text in [
+            "[host]\nroots = []\n",
+            "[development]\nsession_analysis = true\n",
+            "[permissions.keybindings]\nauto_accept_edits = \"ctrl+a\"\n",
+        ] {
+            let d = doc(text, LevelKind::Repository, Sharing::Local).unwrap();
+            let refused = match Table::ALL.into_iter().find(|t| d.has(*t)).unwrap() {
+                Table::Settings => d.part::<SettingsFile>(Table::Settings).is_err(),
+                Table::Development => d.part::<DevelopmentFile>(Table::Development).is_err(),
+                Table::Permissions => d.part::<PermissionsFile>(Table::Permissions).is_err(),
+                Table::Daemon | Table::Branches | Table::Integrations | Table::WebSearch => false,
+            };
+            assert!(refused, "{text}");
+            assert!(validate_config(&doc(text, LevelKind::Global, Sharing::Shared).unwrap()).is_ok());
+        }
+
+        let text = "[branches]\nusername = \"me\"\n";
+        let err = doc(text, LevelKind::Global, Sharing::Shared)
+            .unwrap()
+            .part::<BranchesFile>(Table::Branches)
+            .unwrap_err();
+        assert!(matches!(err, SettingsError::LocalOnly { .. }), "{err}");
+        assert!(
+            doc(text, LevelKind::Repository, Sharing::Local)
+                .unwrap()
+                .part::<BranchesFile>(Table::Branches)
+                .is_ok()
+        );
     }
 
     #[test]
     fn missing_files_are_none_and_folders_are_errors() {
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
         assert!(
-            load::<McpFile>(&dir.path().join("mcp.json"), LevelKind::Global, Format::Json)
+            read_config(&path, LevelKind::Global, Sharing::Shared)
                 .unwrap()
                 .is_none()
         );
-        std::fs::create_dir(dir.path().join("mcp.json")).unwrap();
-        assert!(load::<McpFile>(&dir.path().join("mcp.json"), LevelKind::Global, Format::Json).is_err());
+        std::fs::create_dir(&path).unwrap();
+        assert!(read_config(&path, LevelKind::Global, Sharing::Shared).is_err());
+        assert!(
+            load_mcp(&dir.path().join("mcp.json"), LevelKind::Global)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(dir.path().join("mcp.json"), "[]").unwrap();
+        assert!(load_mcp(&dir.path().join("mcp.json"), LevelKind::Global).is_err());
     }
 
     #[test]
     fn daemon_values_are_validated() {
-        let p = Path::new("daemon.toml");
+        let p = Path::new("config.toml");
         let mut file = DaemonFile::default();
         file.sandbox.allow = vec!["relative/path".into()];
         assert!(validate_daemon(&file, p).is_err());

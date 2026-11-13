@@ -1,4 +1,6 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
+import { writeConfig } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -99,11 +101,7 @@ function fixture() {
     git("add", ".gitignore", "README.md")
     git("commit", "-m", "fixture")
     fs.mkdirSync(path.join(root, ".piton"))
-    fs.writeFileSync(
-        path.join(root, ".piton/workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify({ tracker: minimalTracker(), forge }))
+    writeProjectConfig(root, { branchFormat: "identifier-title", tracker: minimalTracker(), forge })
     prepareArtifactPersistence(root)
     return { root, git, close: () => fs.rmSync(root, { recursive: true, force: true }) }
 }
@@ -271,9 +269,9 @@ describe("incoming PR identity and context", () => {
                 }),
                 false,
             )
-            fs.writeFileSync(path.join(f.root, ".piton/integrations.json"), "{}")
+            writeConfig(f.root, { tracker: {} })
             assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools))
-            fs.rmSync(path.join(f.root, ".piton/integrations.json"))
+            writeConfig(f.root, { tracker: null, forge: null })
             assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools), /missing required/)
         } finally {
             f.close()

@@ -1,18 +1,18 @@
 /**
  * Permissions Extension
  *
- * Controls tool execution via permissions[.<runtime>][.local].json in piton's configuration chain (the global tier,
- * parent folders, the repository's .piton/), resolved by `piton config resolve`. Within a level: the base file, its
- * runtime file (e.g. `permissions.sandbox.json`), then their `.local` files.
+ * Controls tool execution via `[permissions]` and `[permissions.<runtime>]` of `config.toml` (and `config.local.toml`)
+ * in piton's configuration chain (the global tier, parent folders, the repository's .piton/), resolved by
+ * `piton config resolve`. Within a file: `[permissions]`, then the runtime's table.
  * PITON_RUNTIME selects the runtime: unset = host, `sandbox` = sandboxed worker; other values are invalid.
  *
  * Schema:
- * {
- *   "defaultMode": "ask" | "allow" | "deny",
- *   "allow": ["toolPattern", "tool(argPattern)", ...],
- *   "deny":  ["toolPattern", "tool(argPattern)", ...],
- *   "ask":   ["toolPattern", "tool(argPattern)", ...]
- * }
+ *   [permissions]
+ *   default_mode = "ask" | "allow" | "deny"
+ *   allow = ["toolPattern", "tool(argPattern)", ...]
+ *   deny  = ["toolPattern", "tool(argPattern)", ...]
+ *   ask   = ["toolPattern", "tool(argPattern)", ...]
+ *   [permissions.sandbox]   # the same keys, for one launch mode
  *
  * Trusted local skills (global + project) may also contribute runtime allow rules
  * via SKILL frontmatter: allowed_tools / allowed-tools.
@@ -46,7 +46,7 @@ import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@ear
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
 import { requireRuntime, type Runtime } from "../__lib/runtime.js"
 import { PROTECTED_HINT } from "../__lib/protected.js"
-import { type LevelKind, resolveSettings, section } from "../__lib/settings.js"
+import { camelKeys, type LevelKind, resolveSettings, section } from "../__lib/settings.js"
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
@@ -376,9 +376,9 @@ export function inspectPersistentPermissions(cwd: string, runtime: Runtime = req
         scope: source.scope,
         local: source.local,
         path: source.path,
-        settings: validatePermissionSettings(source.settings),
+        settings: validatePermissionSettings(camelKeys(source.settings) as PermissionSettings),
     }))
-    return { runtime, sources, settings: validatePermissionSettings(resolved.merged) }
+    return { runtime, sources, settings: validatePermissionSettings(camelKeys(resolved.merged) as PermissionSettings) }
 }
 
 function loadSettings(cwd: string): ResolvedPermissions {
@@ -840,9 +840,9 @@ export function denyReason(toolName: string, cause: DenyCause): string {
         case "session":
             return `${STATUS_REJECTED} Denied by session permission mode for \`${toolName}\``
         case "default":
-            return `${STATUS_REJECTED} Denied by defaultMode \`deny\` (no allow rule matched)`
+            return `${STATUS_REJECTED} Denied by default_mode \`deny\` (no allow rule matched)`
         case "bashDefault":
-            return `${STATUS_REJECTED} Denied by defaultMode \`deny\`: no allow rule matched command \`${cause.command}\``
+            return `${STATUS_REJECTED} Denied by default_mode \`deny\`: no allow rule matched command \`${cause.command}\``
         case "unparsedBash":
             return `${STATUS_REJECTED} Denied: the shell command could not be parsed`
         case "mcpMetadata":

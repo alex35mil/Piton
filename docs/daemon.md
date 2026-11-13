@@ -28,7 +28,7 @@ piton worker ls
 piton worker delete ../<repo>--fix-login [--force]
 ```
 
-Per-project settings live in `.piton/daemon.toml` in the source checkout (read only from there, never from a worker):
+Per-project settings live in `.piton/config.toml` in the source checkout (read only from there, never from a worker):
 `[workers] skip` lists paths not copied into new workers, `[sandbox]` adds grants for sandboxed pis.
 
 ## pi.nvim
@@ -46,17 +46,18 @@ ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a sessio
 
 ## Configuration
 
-Optional, in the global configuration folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`; `--config-home`
-or `PITON_CONFIG_HOME` for tests); every key has the default shown. Unknown keys are refused, so a typo stops the
-daemon from starting. The daemon watches the files: a change applies to the next session at once, and the apps show
+Optional, in `config.toml` (and `config.local.toml`, this Mac's values) of the global configuration folder
+`$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`; `--config-home` or `PITON_CONFIG_HOME` for tests); every key
+has the default shown. Unknown keys are refused, so a typo stops the daemon from starting. The daemon watches the files: a change applies to the next session at once, and the apps show
 `log`, `[env]`, and `[tailnet]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
 the last good values and the apps say why. The apps change every key except `socket`, keeping your comments and
 order, writing through a symlink into a dotfiles repository, and moving a key to the `.local` file when you check
 Local. The
-whole layout, including repository and parent-folder levels, is in "Configuration and state" in
-[design.md](design.md); `piton config check` validates a workspace's configuration and lists the files it reads.
+whole layout, including repository and parent-folder levels and the tables the pi package reads, is in
+"Configuration and state" in [design.md](design.md); `piton config check` validates a workspace's configuration and
+lists the files it reads; `piton config set KEY VALUE [--global] [--local]` changes one key the same way the apps do.
 
-`daemon.toml` (and `daemon.local.toml`, this Mac's overrides), how the daemon runs:
+How the daemon runs:
 
 ```toml
 socket = "~/.local/state/piton/piton.sock"  # for tests and development only: the Mac app always uses this default
@@ -93,7 +94,7 @@ grace_ms = 15000          # after closing stdin, before SIGTERM
 term_grace_ms = 3000      # after SIGTERM, before SIGKILL
 ```
 
-`settings.toml` (and `settings.local.toml`, this Mac's values), the preferences the apps change:
+The preferences the apps change, in the same file:
 
 ```toml
 [host]
@@ -121,27 +122,29 @@ than the binary refuses to start; an older one is migrated after a `.v<N>.bak` c
 - `piton state import <file> [--force]` replaces the database on a replacement Mac, keeping `host_id` so clients
   see the same host. Stop the daemon first. It refuses over a database that holds state unless forced.
 
-### Moving from the old layout
+### Moving from earlier layouts
 
-Every tool refuses the files of the layout before `.piton/` (`.project/`, `.agents/{permissions,mcp,web-search}*.json`,
-`.nono*.json`, `.piton.toml`, the global `config.toml`, and the files in pi's agent folder), naming each file and
-its new place; only the parts that read a file refuse it.
+Every tool refuses the files of earlier layouts (`.project/`, `.agents/{permissions,mcp,web-search}*.json`,
+`.nono*.json`, `.piton.toml`, the separate files of a `.piton/` folder such as `daemon.toml`, `settings.toml`,
+`workflows.json`, `integrations.json`, `permissions*.json`, and the files in pi's agent folder), naming each file;
+only the parts that read a file refuse it.
 
-- `piton migrate [path] [--dry-run]`, on the host, in a source checkout: moves `.project/` to `.piton/`
-  (`config[.local].json` becomes `workflows[.local].json`), `.agents/` settings files to `.piton/`, and converts
-  `.nono.json` and `.piton.toml` into `.piton/daemon.toml` (`.nono.local.json` into `daemon.local.toml`). Committed
-  files move with Git, staged for you to commit. It rewrites the ignore rules to `/.piton/.local` and
-  `/.piton/*.local.*`, and relinks every worker's `.piton/.local`. It plans everything first and refuses before
-  changing anything: on a file already in the way, or a nono key `[sandbox]` doesn't model (named in the message).
-- `piton config check` prints the global tier's conversion for your dotfiles: `config.toml` split into `daemon.toml`
-  and `settings.toml`, the base nono profile as `[sandbox]` (refused by key name when it uses one `[sandbox]` doesn't
-  model), and the files and `rules/` to move out of pi's agent folder. It writes nothing.
+- `piton migrate [path] [--dry-run]`, on the host, in a source checkout: converts every setting into
+  `.piton/config.toml`, and personal ones (`branches.username`, `.local` files) into `.piton/config.local.toml`, with
+  JSON's camelCase keys in snake_case. It moves `.project/` artifacts and `policies.md` to `.piton/`, and `mcp.json`
+  out of `.agents/`. Committed files are replaced with Git, staged for you to commit. It rewrites the ignore rules to
+  `/.piton/.local` and `/.piton/*.local.*`, and relinks every worker's `.piton/.local`; a worker's own copies of old
+  files stay on its branch, unread, until it picks up the source's commit. It plans everything first and refuses
+  before changing anything: on a file already in the way, or a key it doesn't model (named in the message). Keys that
+  no longer exist (`workflowProject`, `reviews`) are dropped with a note.
+- `piton migrate --global` prints the global folder's new `config.toml` and `config.local.toml`, the files they
+  replace, and what to move out of pi's agent folder, for you to apply in your dotfiles. It writes nothing.
 
 ## Logging
 
 `piton logging status`, `piton logging debug [--until-disabled]`, and `piton logging info` switch host logging through
 the daemon without restarting sessions, until the switch expires or the daemon restarts. `[host] logging` in
-`settings.toml` is the default; debug expires after one hour unless kept on. The independent phone collector is installed with
+`config.toml` is the default; debug expires after one hour unless kept on. The independent phone collector is installed with
 `mise run logs:install` (host only) and removed with `piton logging uninstall`. App settings, collection, paths, and limits: [logging.md](logging.md).
 
 ## Tests

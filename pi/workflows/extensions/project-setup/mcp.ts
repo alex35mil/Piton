@@ -6,12 +6,7 @@ import { Type } from "typebox"
 
 import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { mcpServerKey, readMcpSettings, validateMcpName } from "../../../extensions/__lib/mcp.js"
-import {
-    clearSettingsCache,
-    projectSettingsPath,
-    resolveSettings,
-    section,
-} from "../../../extensions/__lib/settings.js"
+import { clearSettingsCache, projectMcpPath, resolveSettings, section } from "../../../extensions/__lib/settings.js"
 import { writeProtected } from "../../../extensions/__lib/protected.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
 import { setupRoot } from "./root.js"
@@ -71,7 +66,7 @@ export async function configureProjectMcp(cwd: string, input: unknown) {
     const parsed = parse(ProjectMcpConfigurationValidator, input)
     const root = setupRoot(cwd)
     const resolved = resolveSettings(cwd)
-    const targetPath = projectSettingsPath(resolved, "mcp", parsed.target === "local")
+    const targetPath = projectMcpPath(resolved, parsed.target === "local")
     const target = readMcpSettings(targetPath)
     const names = new Set<string>()
     const additions: Array<{ registration: Registration; config: Record<string, unknown> }> = []

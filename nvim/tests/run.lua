@@ -245,8 +245,10 @@ test("queue reads its tracker and credential through piton config get", function
         integrations = {
             code = 0,
             stdout = vim.json.encode({
-                path = source .. "/.piton/integrations.json",
-                value = { tracker = { provider = "other", mcpServer = "linear" } },
+                tracker = {
+                    path = source .. "/.piton/config.toml",
+                    value = { provider = "other", mcp_server = "linear" },
+                },
             }),
         },
         mcp = {
@@ -265,10 +267,10 @@ test("queue reads its tracker and credential through piton config get", function
         return responses[cmd[4]]
     end)
     equal("LINEAR_KEY", queue.credential(source, "linear"))
-    fails("Unsupported tracker provider in " .. source .. "/.piton/integrations.json", function() queue.load(source) end)
+    fails("Unsupported tracker provider in " .. source .. "/.piton/config.toml", function() queue.load(source) end)
     equal({ "mcp", "integrations", "mcp" }, calls)
 
-    responses.integrations = { code = 0, stdout = "null" }
+    responses.integrations = { code = 0, stdout = vim.json.encode({ tracker = vim.NIL, forge = vim.NIL }) }
     fails("No tracker configured", function() queue.load(source) end)
     -- A broken or old-layout file: the resolver's message, unchanged.
     responses.integrations = {

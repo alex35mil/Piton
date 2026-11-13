@@ -1,13 +1,18 @@
-import * as fs from "node:fs"
 import * as path from "node:path"
 
 import { Type } from "typebox"
 
 import { compile, parse } from "../../../extensions/__lib/schema.js"
 import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
-import { clearSettingsCache, projectSettingsPath, resolveSettings } from "../../../extensions/__lib/settings.js"
 import {
-    EXTENSION as PERMISSIONS_EXTENSION,
+    CONFIG_LOCAL_FILE,
+    clearSettingsCache,
+    PITON_DIR,
+    plannedConfigEdit,
+    projectConfigPath,
+    resolveSettings,
+} from "../../../extensions/__lib/settings.js"
+import {
     inspectMcpAllowRules,
     inspectPersistentPermissions,
     validatePermissionSettings,
@@ -16,7 +21,7 @@ import { writeProtected } from "../../../extensions/__lib/protected.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
 import { setupRoot } from "./root.js"
 
-const LOCAL_PERMISSIONS_SETTINGS_FILE = `.piton/${PERMISSIONS_EXTENSION}.local.json`
+const LOCAL_CONFIG_FILE = `${PITON_DIR}/${CONFIG_LOCAL_FILE}`
 
 const SettingsTargetSchema = Type.Enum(["project", "local"], { type: "string" })
 const PermissionRuleSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
@@ -50,11 +55,13 @@ export async function configureProjectPermissions(cwd: string, input: unknown, c
     const root = setupRoot(cwd)
     const resolved = resolveSettings(cwd)
     const { sources } = inspectPersistentPermissions(cwd)
-    // Setup writes only the source checkout's shared file (or its .local); runtime files are maintained by hand.
-    const settingsPath = projectSettingsPath(resolved, PERMISSIONS_EXTENSION, parsed.target === "local")
-    // The target takes part in the inspection below, so rules added earlier in this request cover later ones. A file
+    // Setup writes only `[permissions]` of the source checkout's config.toml (or its .local); runtime tables are
+    // maintained by hand.
+    const local = parsed.target === "local"
+    const settingsPath = projectConfigPath(resolved, local)
+    // The target takes part in the inspection below, so rules added earlier in this request cover later ones. A table
     // that doesn't exist yet joins the sources as the nearest one.
-    let target = sources.find((source) => source.path === settingsPath)
+    let target = sources.find((source) => source.path === settingsPath && source.scope === "shared")
     if (!target) {
         target = {
             level: "repository",
@@ -80,18 +87,20 @@ export async function configureProjectPermissions(cwd: string, input: unknown, c
         target.settings = { ...target.settings, allow: [...(target.settings.allow ?? []), rule] }
     }
     const changed = added.allow.length + added.ask.length > 0
-    const settings = validatePermissionSettings({
-        ...existing,
+    const lists = validatePermissionSettings({
         ...(added.allow.length > 0 ? { allow: [...(existing.allow ?? []), ...added.allow] } : {}),
         ...(added.ask.length > 0 ? { ask: [...(existing.ask ?? []), ...added.ask] } : {}),
     })
-    const exclusion =
-        changed && parsed.target === "local"
-            ? ensureLocalSettingsExclusion(root, LOCAL_PERMISSIONS_SETTINGS_FILE)
-            : undefined
+    const exclusion = changed && local ? ensureLocalSettingsExclusion(root, LOCAL_CONFIG_FILE) : undefined
     if (changed) {
+        // Only the changed lists, so the rest of the file keeps its comments and layout.
+        const edit = plannedConfigEdit(
+            cwd,
+            Object.fromEntries(Object.entries(lists).map(([list, rules]) => [`permissions.${list}`, rules])),
+            local,
+        )
         // A protected file: under the daemon, the user sees the diff and approves it.
-        await writeProtected(settingsPath, `${JSON.stringify(settings, null, 4)}\n`)
+        if (edit.content !== null) await writeProtected(edit.path, edit.content)
         clearSettingsCache()
     }
     return {

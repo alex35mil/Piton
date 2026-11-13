@@ -1,6 +1,6 @@
 # GitHub Project setup
 
-Read this when provisioning, adopting, or resuming a GitHub Project for a GitHub tracker. The tools are `inspect_github_repository_setup`, `inspect_github_project_setup`, `inspect_github_project`, `preview_github_project_setup`, and `apply_github_project_setup`. Their output's `trackerConfig` is the only source for the tracker block in `.piton/integrations.json` ([setup](../setup.md#github-tracker)).
+Read this when provisioning, adopting, or resuming a GitHub Project for a GitHub tracker. The tools are `inspect_github_repository_setup`, `inspect_github_project_setup`, `inspect_github_project`, `preview_github_project_setup`, and `apply_github_project_setup`. Their output's `trackerConfig` is the only source for the tracker `configure_project` saves ([setup](../setup.md#github-tracker)).
 
 ## Discovery
 

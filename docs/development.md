@@ -144,14 +144,14 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
 - Every sandboxed pi gets `PITON_RUNTIME=sandbox` from the daemon. The Swift tasks then turn off SwiftPM's and the
   compiler's own sandboxes (`--disable-sandbox`, `OTHER_SWIFT_FLAGS=-disable-sandbox`), since macOS doesn't nest
   sandboxes. `mise run --dry-run <task>` shows the command.
-- `.piton/daemon.toml` `[sandbox]` holds this project's grants: read-write `~/Library/Caches/org.swift.swiftpm`,
+- `[sandbox]` in `.piton/config.toml` holds this project's grants: read-write `~/Library/Caches/org.swift.swiftpm`,
   read `~/Library/org.swift.swiftpm/security` and `~/Library/Preferences/com.apple.dt.Xcode.plist`, and read the
   log-only directory `~/.local/state/piton/logs` and the legacy daemon log files (never their parent directory,
   which contains the control socket). It's read from the source checkout, so an agent can't widen its own sandbox.
   The daemon merges it with the global `[sandbox]` and the parent folders' into a profile it generates for each
   launch. Without these grants, `mise run apps:build` fails at package resolution ("ManifestLoading couldn't be
   saved"); `apps:test` still works.
-- `.piton/daemon.local.toml` (ignored through `/.piton/*.local.*`) holds this machine's grants, for example a
+- `.piton/config.local.toml` (ignored through `/.piton/*.local.*`) holds this machine's grants, for example a
   neighbouring checkout to read (`[sandbox]` `read = ["~/Projects/personal/tooling/pi.nvim"]`). Grant lists only
   add across files and levels. Applied to sessions started after a change.
 - The hidden Xcode preference `IDEPackageSupportDisableManifestSandbox` must be set on the host, once per machine:
@@ -159,3 +159,20 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
 - nono can't start inside nono, so the daemon's sandbox launch mode can't be tested from a sandboxed worker; the e2e
   tests use host mode.
 - Installing the daemon and launching apps are host-only.
+
+## Workflow reports and session analysis
+
+The pi package knows it's a development install when it runs from a git checkout of piton (its folder is the
+checkout's `pi/`, next to `daemon/`). Then:
+
+- "Report this workflow issue" files Todo work in this checkout's tracker (`[tracker]` of `.piton/config.toml`)
+  instead of handing the user a pre-filled GitHub issue.
+- Every shipped Task or Gig, completed Epic, and shipped incoming PR ends with an in-chat analysis of the session for
+  workflow problems. It costs tokens; turn it off in the global `config.toml`:
+
+  ```toml
+  [development]
+  session_analysis = false
+  ```
+
+  The setting has no effect in an app install, and only the global folder may set it.

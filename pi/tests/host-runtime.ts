@@ -8,6 +8,7 @@
  * (`mise run pi:test` builds it first) and an empty global tier of their own, never the user's.
  */
 
+import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -38,6 +39,28 @@ export function writeGlobalSetting(name: string, value: unknown): string {
     fs.writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value))
     clearSettingsCache()
     return file
+}
+
+/**
+ * Writes settings to a `config.toml` through the binary, as the pi package does. `changes` has dotted keys as the file
+ * names them (`"permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
+ * repository (its source checkout's `.piton/`), or `"global"` for the test's global tier. `local` writes
+ * `config.local.toml`. Returns the file.
+ */
+export function writeConfig(dir: string, changes: Record<string, unknown>, local = false): string {
+    const args = ["config", "set", JSON.stringify(changes), "--changes"]
+    if (dir === "global") args.push("--global")
+    else args.push("--workspace", dir)
+    if (local) args.push("--local")
+    try {
+        execFileSync(process.env[BIN_ENV]!, args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] })
+    } catch (error) {
+        const failure = error as { stdout?: string; stderr?: string }
+        throw new Error(`writeConfig: ${failure.stdout || failure.stderr}`)
+    }
+    clearSettingsCache()
+    const folder = dir === "global" ? TEST_CONFIG_HOME : path.join(fs.realpathSync(dir), ".piton")
+    return path.join(folder, local ? "config.local.toml" : "config.toml")
 }
 
 /** Removes everything in the global tier. */

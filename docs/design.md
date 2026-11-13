@@ -133,7 +133,7 @@ with `.piton/.local` linked to the source's.
   editing its clone. An agent running in the source checkout itself is held back by the protected-file rules (see
   "Configuration and state"). A workspace inside a checkout (pi started in a subfolder) belongs to that checkout: its
   settings come from the checkout's source, and deleting a worker stops the sessions in its subfolders too.
-- **`[workers] skip`** in `.piton/daemon.toml` lists paths not copied into new workers, such as editor indexes that
+- **`[workers] skip`** in `.piton/config.toml` lists paths not copied into new workers, such as editor indexes that
   break tooling in a clone (`apps/.build/index-build` here). It only removes things from the copy.
 - **`piton worker create <name> [--from <checkout>] [--label] [--issue]`:** the source must be clean on its default
   branch; piton fast-forwards it, clones everything except the skip list and `.piton/.local` (one `clonefile(2)` per
@@ -497,7 +497,7 @@ Attention is derived from the event stream:
   (2026-11-08). The display may still sleep and the screen lock; the daemon and Tailscale keep running.
 - On/off: state in the host's database (default on); the apps toggle it (`settings.set` `keep_awake`, the macOS menu bar
   item and Settings > General on both platforms), and the choice survives restarts. A `keep_awake` key in
-  `daemon.toml` is refused: it's state, not configuration.
+  `config.toml` is refused: it's state, not configuration.
 - Lid closed on battery without an external display sleeps regardless. For that, `piton-sleepd` toggles
   `pmset disablesleep` while agents work: it accepts XPC only from the signed daemon, restores normal sleep when the
   connection drops, and enforces a maximum duration and a low-battery/thermal cutoff.
@@ -507,7 +507,7 @@ Attention is derived from the event stream:
 
 The Info level records essential events; opt-in Debug adds detailed traces and expires after an hour by default unless
 explicitly kept on. The apps retain bounded files alongside Apple's unified logger. Host logging (the
-Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `[host] logging` in `settings.toml`
+Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `[host] logging` in `config.toml`
 is the default, and `daemon.logging` (the Mac app) or `piton logging` switches it until it expires or the daemon restarts.
 The policy is part of the pushed daemon state. The phone's capture setting is a device setting, local
 to the phone, and works offline. No logging control changes pi's settings, uses its RPC channel, or restarts sessions.
@@ -555,7 +555,7 @@ the roomier reading line spacing apply to the session list and conversations, no
 system chrome (bars, alerts, menus): iOS 27 has no opt-out.
 
 Fonts are client preferences (Settings > Appearance): a text font and a code font, each the system font or any family
-available to the app, scaled with Dynamic Type. Each is shared through the host (`[client]` in its `settings.toml`,
+available to the app, scaled with Dynamic Type. Each is shared through the host (`[client]` in its `config.toml`,
 the same on every device, cached for offline start) unless Local keeps a value on this device; a shared font a
 device lacks shows as the system font there. Settings > Host shows every host setting with where it comes from. The Mac lists its installed fonts. On the phone, fonts the user owns
 (a paid one like Berkeley Mono can't be bundled) are imported from .otf/.ttf files: copied into the app's Application
@@ -593,20 +593,30 @@ piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, tru
 
 ```
 $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
-  daemon[.local].toml            # how the daemon runs, and [sandbox] (was config.toml and the base nono profile)
-  settings[.local].toml          # preferences: [host] roots, favorites, logging default...; [client] theme, fonts
-  permissions*.json, mcp.json, web-search.json, workflows.json   # were in pi's agent folder
+  config[.local].toml            # everything below, plus how the daemon runs and the apps' preferences
+  mcp[.local].json               # MCP servers, in the format other harnesses read
+  policies.md
   agents/rules/, agents/skills/  # global agent instructions
 <ancestor>/.piton/, .agents/     # shared by every repository below
 <repo>/
   .piton/
-    daemon[.local].toml          # [sandbox] grants, [workers] skip (was .nono*.json and .piton.toml)
-    workflows[.local].json, integrations.json, policies.md
-    permissions[.<runtime>][.local].json, mcp[.local].json, web-search[.local].json
+    config.toml                  # committed: [sandbox] [workers] [permissions] [branches] [tracker] [forge] [web_search]
+    config.local.toml            # this machine's values: the same tables, plus [branches] username
+    mcp[.local].json, policies.md
     .local/                      # workflow artifacts (gitignored); a worker links its source's
   .agents/rules/, skills/
   AGENTS.md
 ```
+
+One file per level, like mise: each level's settings are tables of `config.toml`, and `config.local.toml` holds the
+same tables with this machine's values (never shared; `/.piton/*.local.*` keeps it out of Git). Keys are snake_case.
+The global file also holds `socket`, `log`, `[pi]`, `[env]`, `[stop]`, `[tailnet]` (how the daemon runs), `[host]`
+and `[client]` (the apps' preferences), and `[development]` (switches for a development install, in
+[development.md](development.md)).
+
+The file's top-level keys belong to parts, each parsed on its own, so a bad value in `[tracker]` never stops permission
+checks. A syntax error, or an unknown top-level key, fails every part read from that file: that's the cost of one
+file per level, and the message names the line.
 
 - **Chains.** `.piton/` is read from the source checkout (a worker's source; the checkout around a subfolder), then
   each ancestor strictly below the home folder, then the global tier. `.agents/` starts from the workspace's own
@@ -616,21 +626,24 @@ $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
 - **Locating the global tier** can't depend on the workspace, whose `mise.toml` can set `HOME` or `XDG_CONFIG_HOME`.
   The daemon resolves it once from its login-shell environment and sets `PITON_CONFIG_HOME` for every pi after the
   mise environment; a pi started outside piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
-- **Scopes.** Mac-wide and personal keys (the daemon's socket, roots, tailnet, pi and sandbox commands;
-  `workflowProject`, `sessionAnalysis`; permission keybindings) are accepted only in the global tier. Elsewhere they
-  refuse the file.
-- **Merging,** farthest to nearest; within a level the base file, its runtime file, then their `.local` files.
-  `.local` files are allowed at every level.
-  - `daemon.toml` `[sandbox]`: grant lists (`allow`, `read`, `read_file`, `allow_file`, `deny`, `unix_socket`) only
-    add. `sandbox.base` (the backend's base profile) and `bypass` are global-only. The daemon's `sandbox` module, the
-    only code that knows the backend, translates the merged table and the protected-file rules into a nono profile
-    for each launch.
-  - `permissions*.json`: rules union, deny and ask beat allow; `defaultMode` from the nearest file that sets it.
+- **Scopes.** Mac-wide keys (the daemon's socket, tailnet, pi and sandbox commands, `[host]`, `[client]`,
+  `[development]`, permission keybindings) are accepted only in the global tier; elsewhere they fail their part.
+  `branches.username` is personal: accepted only in a `config.local.toml`.
+- **Merging,** farthest to nearest; within a level `config.toml`, then `config.local.toml`.
+  - `[sandbox]`: grant lists (`allow`, `read`, `read_file`, `allow_file`, `deny`, `unix_socket`) only add.
+    `sandbox.base` (the backend's base profile) and `bypass` are global-only. The daemon's `sandbox` module, the only
+    code that knows the backend, translates the merged table and the protected-file rules into a nono profile for
+    each launch.
+  - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
+    and ask beat allow; `default_mode` from the nearest table that sets it.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
-  - other `daemon.toml` keys, `workflows.json`, `web-search.json`: the nearer value per key.
-  - `settings.toml`: global only; `settings.local.toml` wins per key.
-  - `integrations.json`: the nearest file wins as a whole.
+  - `[branches]`, `[web_search]`, the daemon's other keys: the nearer value per key.
+  - `[host]`, `[client]`: global only; `config.local.toml` wins per key.
+  - `[tracker]` and `[forge]`: each the nearest table, whole.
   - `policies.md` and rules: combined, farthest first.
+- **Writes.** The apps and `piton config set` change one key with `toml_edit`, keeping comments and layout. The pi
+  package writes through `piton config set --dry-run`, which returns the file's new text; a protected file then goes
+  through the daemon's confirmation. Nothing else writes these files.
 - Paths in every file accept `~` and `$HOME`.
 - **When read.** The global files at daemon start and on every change (watched; keys that need a restart are
   reported as pending); the project chain at every launch and `worker create`; the
@@ -640,22 +653,22 @@ $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
   `piton config resolve` / `piton config get`, which read files and don't need the daemon running. The daemon passes
   the binary's path in `PITON_BIN` after the mise environment; the pi package caches the result and calls again only
   when a watched file changed. The result is per part (permissions, MCP, the global tier's MCP alone, web search,
-  workflows, integrations, policies, rule and skill folders), each its value or its error, so a broken or old-layout
-  file fails only the tools that read it: a malformed `integrations.json` stops workflows, never permission checks.
-  `--global` resolves the global tier alone, for personal settings (`workflowProject`, `sessionAnalysis`) that a
-  consuming project's files mustn't block.
+  branches, integrations, development, policies, rule and skill folders), each its value or its error, so a broken
+  table or an old-layout file fails only the tools that read it: a malformed `[tracker]` stops workflows, never
+  permission checks. `--global` resolves the global tier alone, for `[development]`, which a consuming project's files
+  mustn't block.
 
 #### Config and state together
 
 - **Config or state.** Config is what you decide: roots, favorites, appearance, the logging default, sandbox grants,
   permissions. State is what happened on this host: sessions, drafts, recent projects, keep-awake. Each value is one
   or the other; a config key for a state value is refused with a message saying where it's set.
-- **Shared unless Local.** Each preference has one Local checkbox. Unchecked, it lives in `settings.toml`: host
+- **Shared unless Local.** Each preference has one Local checkbox. Unchecked, it lives in `config.toml`: host
   preferences apply on every host through dotfiles, client preferences are served by the host to every client (which
-  caches them for offline start). Checked, it moves to `settings.local.toml` (this host) or into the app (this
+  caches them for offline start). Checked, it moves to `config.local.toml` (this host) or into the app (this
   client). A shared client choice a client can't honor (a font it lacks) falls back there only.
 - **The apps change both.** `settings.set {key, value, local?}` goes to the database for state and to the global
-  `settings` or `daemon` file for config. The daemon edits with `toml_edit`, keeping comments and order, writes
+  `config.toml` pair for config. The daemon edits with `toml_edit`, keeping comments and order, writes
   through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. Every global key is editable
   except `socket`, a test and development override the apps don't show. The apps never write repository or
   parent-folder files. A change is checked against the schema before it's written. The daemon watches the global
@@ -709,8 +722,8 @@ asking, or run code outside the sandbox: the source checkout's `.piton/` (except
 folders (settings, MCP servers, extensions, skills, system prompts), which pi reads from the working folder; and
 `.agents/skills/` (their `allowed-tools` become allow rules). The last two are protected at any depth in the
 workspace's checkout, since a session can start in a subfolder. `AGENTS.md` and rules aren't protected: they change what the
-agent is told, not what it may do. Without protection, a sandboxed agent in the source checkout could add `{"allow": ["bash(*)"]}` to
-`.piton/permissions.host.json`, and a host session in the same checkout would run any command without asking from its
+agent is told, not what it may do. Without protection, a sandboxed agent in the source checkout could add `allow = ["bash(*)"]` to
+`[permissions.host]` in `.piton/config.toml`, and a host session in the same checkout would run any command without asking from its
 next tool call. Changes are gated where they're written:
 
 1. **OS sandbox.** The daemon adds raw Seatbelt rules to each sandboxed launch: `(deny file-write* ...)` with regexes
@@ -747,11 +760,11 @@ security work with no upstream sharing it.
 
 #### Old layout
 
-No compatibility period. `piton migrate` (run on the host; a sandboxed agent can't write `.piton/`) moves a
-repository's files (`git mv` for committed ones), converts `.nono*.json` into `[sandbox]` tables, and updates the
-ignore rules. Every consumer refuses the old paths with a message naming each one and its new place, in the parts that read
-them: the daemon at start and launch, the pi package in the tools that need them, the Neovim plugin for its queue. Global-tier
-files are the user's dotfiles: `piton config check` lists what to move.
+No compatibility period. `piton migrate` (run on the host; a sandboxed agent can't write `.piton/`) converts a
+repository's earlier files into `config.toml` and `config.local.toml` (`git rm` and `git add` for committed ones),
+moves the rest, and updates the ignore rules. Every consumer refuses the old paths with a message naming each one, in
+the parts that read them: the daemon at start and launch, the pi package in the tools that need them, the Neovim
+plugin for its queue. Global-tier files are the user's dotfiles: `piton migrate --global` prints their conversion.
 
 ### Deploying from a sandbox
 

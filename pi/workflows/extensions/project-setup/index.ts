@@ -7,12 +7,17 @@ import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { workflowTools } from "../__lib/tools.js"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
-import { projectSettingsPath, resolveSettings, settingsErrors } from "../../../extensions/__lib/settings.js"
-import { EXTENSION as PERMISSIONS_EXTENSION } from "../../../extensions/permissions/index.js"
+import {
+    CONFIG_FILE,
+    CONFIG_LOCAL_FILE,
+    projectConfigPath,
+    resolveSettings,
+    settingsErrors,
+} from "../../../extensions/__lib/settings.js"
 import { EPIC_ROOT, GIG_ROOT, PROJECT_ROOT } from "../__lib/domain.js"
 import * as Git from "../__lib/git.js"
 import {
-    globalWorkflowSettingsPath,
+    globalConfigPaths,
     LOCAL_SETTINGS_EXCLUDE,
     prepareArtifactPersistence,
     PROJECT_LOCAL_IGNORE,
@@ -39,6 +44,7 @@ import {
     previewLinearStatusSetup,
 } from "./linear-statuses.js"
 import { configureProjectMcp, ProjectMcpConfigurationSchema } from "./mcp.js"
+import { configureProject, ProjectConfigurationSchema } from "./configuration.js"
 import { INCOMING_PR_WORKFLOW_PATH, IncomingPrIntakeSchema, renderIncomingPrIntake } from "./incoming-pr-intake.js"
 import {
     configureProjectPermissions,
@@ -134,6 +140,21 @@ export default function (pi: ExtensionAPI): void {
     })
 
     tools.registerTool({
+        name: "configure_project",
+        label: "configure_project",
+        description:
+            "Write the approved branch format, tracker, and forge to .piton/config.toml, and a username to .piton/config.local.toml (kept outside Git). Pass the tracker and forge objects exactly as the setup tools returned them. Keeps the files' other settings, comments, and layout.",
+        parameters: ProjectConfigurationSchema,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const configured = await configureProject(ctx.cwd, params)
+            return {
+                content: [{ type: "text" as const, text: JSON.stringify(configured, null, 2) }],
+                details: configured,
+            }
+        },
+    })
+
+    tools.registerTool({
         name: "inspect_permissions",
         label: "inspect_permissions",
         description:
@@ -156,7 +177,7 @@ export default function (pi: ExtensionAPI): void {
         parameters: ProjectPermissionConfigurationSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const parsed = parse(ProjectPermissionConfigurationValidator, params)
-            const file = projectSettingsPath(resolveSettings(ctx.cwd), PERMISSIONS_EXTENSION, parsed.target === "local")
+            const file = projectConfigPath(resolveSettings(ctx.cwd), parsed.target === "local")
             const configured = await withFileMutationQueue(file, async () =>
                 configureProjectPermissions(ctx.cwd, parsed, mcpCatalog),
             )
@@ -302,13 +323,10 @@ export default function (pi: ExtensionAPI): void {
 }
 
 const PROJECT_SETUP_FILES = [
-    `${PROJECT_ROOT}/workflows.json`,
-    `${PROJECT_ROOT}/workflows.local.json`,
-    `${PROJECT_ROOT}/integrations.json`,
+    `${PROJECT_ROOT}/${CONFIG_FILE}`,
+    `${PROJECT_ROOT}/${CONFIG_LOCAL_FILE}`,
     `${PROJECT_ROOT}/policies.md`,
     ".gitignore",
-    `${PROJECT_ROOT}/${PERMISSIONS_EXTENSION}.json`,
-    `${PROJECT_ROOT}/${PERMISSIONS_EXTENSION}.local.json`,
     INCOMING_PR_WORKFLOW_PATH,
 ] as const
 
@@ -323,7 +341,10 @@ export function inspectProjectSetup(cwd: string, projectTrusted: boolean) {
         // Where parent folders' and the global tier's configuration comes from, or why it can't be read (for
         // example the old layout, which `piton migrate` converts).
         configuration,
-        globalWorkflowSettings: snapshotAbsoluteFile(root, globalWorkflowSettingsPath(cwd)),
+        // Where a global username can come from (`[branches] username` in the global config.local.toml).
+        globalConfig: Object.fromEntries(
+            Object.entries(globalConfigPaths(cwd)).map(([name, file]) => [name, snapshotAbsoluteFile(root, file)]),
+        ),
         localExclude: snapshotAbsoluteFile(root, excludePath),
         localSettingsExclusion: LOCAL_SETTINGS_EXCLUDE,
         mcp: inspectProjectMcp(cwd, projectTrusted),

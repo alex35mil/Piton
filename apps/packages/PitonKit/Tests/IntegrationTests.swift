@@ -61,13 +61,11 @@ private final class Daemon: @unchecked Sendable {
         [tailnet]
         port = 0
         cli = "\(tailscale)"
-        """.write(to: config.appendingPathComponent("daemon.toml"), atomically: true, encoding: .utf8)
-        try """
         [host]
         attach_mode = "host"
         empty_grace_ms = 60000
         roots = ["\(root.path)"]
-        """.write(to: config.appendingPathComponent("settings.toml"), atomically: true, encoding: .utf8)
+        """.write(to: config.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
         // Keep-awake is state in the daemon's database (next to its socket): start with it off, so no caffeinate runs.
         let seed = Process()
         seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")

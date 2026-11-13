@@ -1,18 +1,25 @@
 import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { fileURLToPath } from "node:url"
 
 import { requireRuntime } from "../../../extensions/__lib/runtime.js"
-import { resolveGlobalSettings, resolveSettings, section } from "../../../extensions/__lib/settings.js"
+import {
+    CONFIG_FILE,
+    CONFIG_LOCAL_FILE,
+    resolveGlobalSettings,
+    resolveSettings,
+    section,
+} from "../../../extensions/__lib/settings.js"
 import { type BranchFormat, BranchFormatSchema, PROJECT_LOCAL_ROOT, PROJECT_ROOT } from "./domain.js"
 import * as Git from "./git.js"
 
 export { BranchFormatSchema }
 export type { BranchFormat }
 
-/** The workflow settings file of a repository; `.local` for this machine's values (outside Git). */
-export const WORKFLOW_SETTINGS_PATH = `${PROJECT_ROOT}/workflows.json`
-export const LOCAL_WORKFLOW_SETTINGS_PATH = `${PROJECT_ROOT}/workflows.local.json`
+/** The repository's configuration file; `.local` for this machine's values (outside Git). */
+export const WORKFLOW_SETTINGS_PATH = `${PROJECT_ROOT}/${CONFIG_FILE}`
+export const LOCAL_WORKFLOW_SETTINGS_PATH = `${PROJECT_ROOT}/${CONFIG_LOCAL_FILE}`
 /** Every `.local` file in `.piton/` stays out of Git; setup adds this to `.git/info/exclude`. */
 export const LOCAL_SETTINGS_EXCLUDE = `/${PROJECT_ROOT}/*.local.*`
 // The single repository rule that keeps every workflow entity and private evidence out of Git.
@@ -27,59 +34,104 @@ export interface ProjectConfig {
 export type SessionAnalysis = "enabled" | "disabled"
 
 /**
- * The workflow configuration for `cwd`, from piton's resolved chain (`workflows[.local].json` in the global tier,
+ * The workflow configuration for `cwd`, from piton's resolved chain (`[branches]` of `config.toml` in the global tier,
  * parent folders, and the source checkout's `.piton/`). Workflows need a branch format; formats starting with
- * `username` need `branches.username` (personal: the global tier or a `.local` file).
+ * `username` need `branches.username`, which is personal: only a `config.local.toml` sets it.
  */
 export function loadProjectConfig(cwd: string): ProjectConfig {
-    const workflows = section(resolveSettings(cwd).workflows)
-    const format = workflows.branches?.format
+    const branches = section(resolveSettings(cwd).branches)
+    const format = branches.format
     if (!format) {
         throw new Error(
             `missing branches.format: set it in ${WORKFLOW_SETTINGS_PATH} (project setup writes it) or a parent folder's`,
         )
     }
     if (!formatUsesUsername(format)) return { branches: { format } }
-    const username = workflows.branches?.username
+    const username = branches.username
     if (!username) {
         throw new Error(
-            `invalid branch configuration: branches.username is required in ${LOCAL_WORKFLOW_SETTINGS_PATH} or the global workflows.json`,
+            `invalid branch configuration: branches.username is required in ${LOCAL_WORKFLOW_SETTINGS_PATH} or the global ${CONFIG_LOCAL_FILE}`,
         )
     }
     return { branches: { format, username } }
 }
 
-/** The global workflow settings file, for setup's snapshot. */
-export function globalWorkflowSettingsPath(cwd: string): string {
-    return path.join(resolveSettings(cwd).global, "workflows.json")
-}
-
-/** Reads the opt-in; it's personal, so only the global tier can set it. Absent means disabled. */
-export function loadSessionAnalysis(_cwd: string): SessionAnalysis {
-    return section(resolveGlobalSettings().workflows).sessionAnalysis === true ? "enabled" : "disabled"
+/** The global tier's files that can hold a username, for setup's snapshot. */
+export function globalConfigPaths(cwd: string): { shared: string; local: string } {
+    const global = resolveSettings(cwd).global
+    return { shared: path.join(global, CONFIG_FILE), local: path.join(global, CONFIG_LOCAL_FILE) }
 }
 
 /**
- * The workflow source project: `workflowProject` in the global tier. Read from the global tier alone (resolved from the
- * global folder itself), so a broken configuration in the consuming project never blocks reporting to the source.
+ * How the pi package is installed: from a git checkout of piton (a development install, whose workflow problems are
+ * filed in that checkout's tracker and analyzed after shipping), or as part of the app (problems go to piton's GitHub
+ * issues through the user).
+ */
+export type Installation = { kind: "development"; checkout: string } | { kind: "app" }
+
+/** The pi package's own folder: `pi/` of the checkout or the app bundle. */
+const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
+
+let installation: { packageDir: string; value: Installation } | undefined
+
+/** Where the pi package runs from, detected once: a git checkout whose root holds this package as `pi/` and the daemon. */
+export function detectInstallation(packageDir: string = PACKAGE_DIR): Installation {
+    if (installation?.packageDir === packageDir) return installation.value
+    let value: Installation = { kind: "app" }
+    try {
+        const root = fs.realpathSync(Git.run(packageDir, ["rev-parse", "--show-toplevel"]))
+        const isPiton =
+            fs.realpathSync(packageDir) === path.join(root, "pi") &&
+            fs.existsSync(path.join(root, "daemon", "Cargo.toml"))
+        if (isPiton) value = { kind: "development", checkout: root }
+    } catch {
+        // Not in a git checkout: an app install.
+    }
+    installation = { packageDir, value }
+    return value
+}
+
+let installationOverride: Installation | undefined
+
+/** For tests: run as `value` (`undefined`: detect it). */
+export function setInstallationForTests(value: Installation | undefined): void {
+    installationOverride = value
+}
+
+function currentInstallation(): Installation {
+    return installationOverride ?? detectInstallation()
+}
+
+/**
+ * Whether a finished workflow ends with session analysis: only in a development install, where it's on unless the
+ * global `[development] session_analysis = false` turns it off.
+ */
+export function loadSessionAnalysis(_cwd: string): SessionAnalysis {
+    const install = currentInstallation()
+    switch (install.kind) {
+        case "app":
+            return "disabled"
+        case "development":
+            return section(resolveGlobalSettings().development).session_analysis === false ? "disabled" : "enabled"
+    }
+}
+
+/** Where users report piton problems in an app install: a new issue on GitHub, opened by the user. */
+export const PITON_NEW_ISSUE_URL = "https://github.com/alex35mil/piton/issues/new"
+
+/**
+ * The workflow source project: in a development install, the checkout the pi package runs from, whose tracker takes
+ * workflow reports. An app install has no source project; reports go through the user ({@link PITON_NEW_ISSUE_URL}).
  */
 export function resolveWorkflowProject(_cwd: string): string {
-    const settings = resolveGlobalSettings()
-    const configured = section(settings.workflows).workflowProject
-    const settingsPath = path.join(settings.global, "workflows.json")
-    const instruction = `Set workflowProject to the absolute workflow source repository root in ${settingsPath}.`
-    if (!configured) throw new Error(instruction)
-    const expanded = configured.startsWith("~/") ? path.join(settings.home, configured.slice(2)) : configured
-    if (!path.isAbsolute(expanded)) throw new Error(instruction)
-    try {
-        const root = fs.realpathSync(expanded)
-        if (!fs.statSync(root).isDirectory()) throw new Error("path is not a directory")
-        const repositoryRoot = fs.realpathSync(Git.run(root, ["rev-parse", "--show-toplevel"]))
-        if (root !== repositoryRoot) throw new Error("path is not the repository root")
-        return root
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`Invalid workflowProject ${JSON.stringify(configured)}: ${message}. ${instruction}`)
+    const install = currentInstallation()
+    switch (install.kind) {
+        case "development":
+            return install.checkout
+        case "app":
+            throw new Error(
+                `The workflow source is only available in a development install (the pi package running from a git checkout of piton). Report piton problems as a pre-filled GitHub issue for the user to open: ${PITON_NEW_ISSUE_URL}`,
+            )
     }
 }
 

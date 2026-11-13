@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -67,10 +68,6 @@ function fixture() {
     git(["init", "-q"])
     fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     fs.mkdirSync(path.join(root, ".piton"))
-    fs.writeFileSync(
-        path.join(root, ".piton/workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
     const statuses = {
         backlog: "Backlog",
         todo: "Todo",
@@ -79,23 +76,21 @@ function fixture() {
         done: "Done",
         canceled: "Canceled",
     }
-    fs.writeFileSync(
-        path.join(root, ".piton/integrations.json"),
-        JSON.stringify({
-            tracker: {
-                provider: "github",
-                mcpServer: "github",
-                repository: repo,
-                project: itemScope.project,
-                fields: {
-                    status: { field: "Status", values: statuses },
-                    phase: { field: "Phase", values: { ...phaseValues } },
-                    priority: { scope: "project", field: "Priority", values: ["High"] },
-                },
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker: {
+            provider: "github",
+            mcpServer: "github",
+            repository: repo,
+            project: itemScope.project,
+            fields: {
+                status: { field: "Status", values: statuses },
+                phase: { field: "Phase", values: { ...phaseValues } },
+                priority: { scope: "project", field: "Priority", values: ["High"] },
             },
-            forge: { provider: "github", mcpServer: "github", repository: repo },
-        }),
-    )
+        },
+        forge: { provider: "github", mcpServer: "github", repository: repo },
+    })
     prepareArtifactPersistence(root)
     const directory = path.join(root, ".piton/.local/gigs", common.entity)
     fs.mkdirSync(directory, { recursive: true })

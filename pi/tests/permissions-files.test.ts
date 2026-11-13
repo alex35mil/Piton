@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -41,11 +42,12 @@ function fixture(
 ) {
     const h = nativeMcpFixture({ servers: [] })
     const file = path.join(h.root, "target.txt")
-    fs.mkdirSync(path.join(h.root, ".piton"))
-    fs.writeFileSync(
-        path.join(h.root, ".piton/permissions.json"),
-        JSON.stringify({ defaultMode: mode, ...rules, allow: ["codemode", "later", ...(rules.allow ?? [])] }),
-    )
+    writePermissions(h.root, {
+        defaultMode: mode,
+        ask: [...(rules.ask ?? [])],
+        deny: [...(rules.deny ?? [])],
+        allow: ["codemode", "later", ...(rules.allow ?? [])],
+    })
     fs.writeFileSync(file, "before")
     registerPermission(h.pi)
     let choice: string | undefined = "Accept"
@@ -418,7 +420,7 @@ describe("native file permission execution", () => {
     it("blocks invalid permission settings without asking or writing", async () => {
         const h = fixture()
         try {
-            fs.writeFileSync(path.join(h.root, ".piton/permissions.json"), '{"allow":[7]}')
+            fs.writeFileSync(path.join(h.root, ".piton/config.toml"), "[permissions]\nallow = [7]\n")
             const outcome = await h.run("write", args("write"))
             assert.equal(outcome.isError, true)
             assert.equal(h.prompts(), 0)
@@ -432,8 +434,8 @@ describe("native file permission execution", () => {
     it("keeps checking tools when an unrelated configuration file is broken", async () => {
         const h = fixture("allow")
         try {
-            fs.writeFileSync(path.join(h.root, ".piton/integrations.json"), "{ broken")
-            fs.writeFileSync(path.join(h.root, ".piton/workflows.json"), '{"unknown":1}')
+            const file = path.join(h.root, ".piton/config.toml")
+            fs.writeFileSync(file, `tracker = 1\n${fs.readFileSync(file, "utf8")}[branches]\nunknown = 1\n`)
             const outcome = await h.run("write", args("write"))
             assert.equal(outcome.isError, false)
             assert.equal(h.writes(), 1)
@@ -484,8 +486,8 @@ function fakeDaemon(outcomes: unknown[]) {
 describe("protected files", () => {
     const protectedArgs = (kind: "edit" | "write"): JsonObject =>
         kind === "edit"
-            ? { path: ".piton/permissions.json", edits: [{ oldText: '"codemode"', newText: '"codemode","read"' }] }
-            : { path: ".piton/permissions.json", content: "{}" }
+            ? { path: ".piton/config.toml", edits: [{ oldText: '"codemode"', newText: '"codemode", "read"' }] }
+            : { path: ".piton/config.toml", content: "" }
 
     for (const kind of ["edit", "write"] as const) {
         it(`${kind} goes through the daemon under piton, even when edits are allowed`, async () => {
@@ -493,23 +495,17 @@ describe("protected files", () => {
             const daemon = fakeDaemon([{ outcome: "approved", modified: false, content: "x", notes: [] }])
             await daemon.start()
             try {
-                const before = fs.readFileSync(path.join(h.root, ".piton/permissions.json"), "utf-8")
+                const before = fs.readFileSync(path.join(h.root, ".piton/config.toml"), "utf-8")
                 const outcome = await h.run(kind, protectedArgs(kind))
                 assert.equal(outcome.isError, false, textOf(outcome))
                 assert.equal(daemon.requests.length, 1)
                 const request = daemon.requests[0]!
                 assert.equal(request.token, "t0ken")
                 // The daemon canonicalizes the path itself; the pi sends it as the tool resolved it.
-                assert.equal(
-                    fs.realpathSync(request.path),
-                    path.join(fs.realpathSync(h.root), ".piton/permissions.json"),
-                )
-                assert.equal(
-                    request.content,
-                    kind === "edit" ? before.replace('"codemode"', '"codemode","read"') : "{}",
-                )
+                assert.equal(fs.realpathSync(request.path), path.join(fs.realpathSync(h.root), ".piton/config.toml"))
+                assert.equal(request.content, kind === "edit" ? before.replace('"codemode"', '"codemode", "read"') : "")
                 // The daemon writes; the pi never does.
-                assert.equal(fs.readFileSync(path.join(h.root, ".piton/permissions.json"), "utf-8"), before)
+                assert.equal(fs.readFileSync(path.join(h.root, ".piton/config.toml"), "utf-8"), before)
                 assert.equal(h.prompts(), 0)
             } finally {
                 await daemon.stop()

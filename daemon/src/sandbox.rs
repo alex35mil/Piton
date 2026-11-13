@@ -217,7 +217,7 @@ mod tests {
         std::fs::create_dir_all(&global).unwrap();
         std::fs::create_dir_all(repo.join(".piton/.local")).unwrap();
         std::fs::write(
-            global.join("daemon.toml"),
+            global.join("config.toml"),
             r#"
 [sandbox]
 base = "mise-dev"
@@ -235,7 +235,7 @@ profile = false
         )
         .unwrap();
         std::fs::write(
-            repo.join(".piton/daemon.toml"),
+            repo.join(".piton/config.toml"),
             "[sandbox]\nallow = [\"~/Library/Caches/org.swift.swiftpm\"]\n",
         )
         .unwrap();
@@ -329,8 +329,8 @@ profile = false
         for d in [&global, &dotfiles, &repo] {
             std::fs::create_dir_all(d).unwrap();
         }
-        std::fs::write(dotfiles.join("permissions.json"), "{}").unwrap();
-        std::os::unix::fs::symlink(dotfiles.join("permissions.json"), global.join("permissions.json")).unwrap();
+        std::fs::write(dotfiles.join("config.toml"), "").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("config.toml"), global.join("config.toml")).unwrap();
         // A linked rules folder needs a recursive grant.
         std::fs::create_dir_all(dotfiles.join("rules")).unwrap();
         std::fs::create_dir_all(global.join("agents")).unwrap();
@@ -338,7 +338,7 @@ profile = false
         let p = profile(&resolved(&home, &repo), &home, &Env::new(), Path::new("/s/agent.sock")).unwrap();
         assert_eq!(
             p["filesystem"]["read_file"],
-            json!([dotfiles.join("permissions.json").to_string_lossy()])
+            json!([dotfiles.join("config.toml").to_string_lossy()])
         );
         assert!(
             p["filesystem"]["read"]

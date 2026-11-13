@@ -38,7 +38,6 @@
         ],
         "kind": {
           "kind": "config",
-          "file": "settings",
           "placement": "local"
         },
         "value_type": {
@@ -54,7 +53,6 @@
         "value": "info",
         "kind": {
           "kind": "config",
-          "file": "settings",
           "placement": null
         },
         "value_type": {
@@ -74,7 +72,6 @@
         "value": 9000,
         "kind": {
           "kind": "config",
-          "file": "daemon",
           "placement": "shared"
         },
         "value_type": {
@@ -91,7 +88,6 @@
         "value": "/Users/me/.local/state/piton/piton.sock",
         "kind": {
           "kind": "config",
-          "file": "daemon",
           "placement": null
         },
         "value_type": {

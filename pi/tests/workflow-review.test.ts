@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -161,10 +162,7 @@ describe("workflow reviewer isolation", () => {
                 }
                 fs.mkdirSync(directory, { recursive: true })
                 fs.writeFileSync(path.join(repository, ".gitignore"), "/.piton/.local\n")
-                fs.writeFileSync(
-                    path.join(repository, ".piton/workflows.json"),
-                    JSON.stringify({ branches: { format: "identifier-title" } }),
-                )
+                writeProjectConfig(repository, { branchFormat: "identifier-title" })
                 prepareArtifactPersistence(repository)
                 const metadata = {
                     title: "Example",
@@ -323,10 +321,7 @@ describe("workflow reviewer isolation", () => {
             cp.execFileSync("git", ["init", "-q", repository])
             fs.mkdirSync(path.join(repository, ".piton"), { recursive: true })
             fs.writeFileSync(path.join(repository, ".gitignore"), "/.piton/.local\n")
-            fs.writeFileSync(
-                path.join(repository, ".piton/workflows.json"),
-                JSON.stringify({ branches: { format: "identifier-title" } }),
-            )
+            writeProjectConfig(repository, { branchFormat: "identifier-title" })
             prepareArtifactPersistence(repository)
             const tools: Parameters<ExtensionAPI["registerTool"]>[0][] = []
             registerReviewTools({
@@ -1020,10 +1015,7 @@ describe("workflow reviewer isolation", () => {
             const targetSha = changeTarget("a\ntarget\nc\n")
 
             fs.mkdirSync(path.join(root, ".piton"))
-            fs.writeFileSync(
-                path.join(root, ".piton/workflows.json"),
-                JSON.stringify({ branches: { format: "identifier-title" } }),
-            )
+            writeProjectConfig(root, { branchFormat: "identifier-title" })
             prepareArtifactPersistence(root)
             const entityDir = ".piton/.local/gigs/7-example"
             const directory = path.join(root, entityDir)

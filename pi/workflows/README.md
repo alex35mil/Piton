@@ -51,22 +51,9 @@ See the [configuration reference](references/setup.md) for exact schemas, exampl
 
 ## Report a workflow problem
 
-Say **“Report this workflow issue.”** The Todo skill prepares a minimal sanitized report and, after you approve the exact content, destination, and intake choices, creates ordinary Todo work in the workflow project's tracker. Maintainers pick it up through the existing workflows.
+Say **“Report this workflow issue.”** The Todo skill prepares a minimal sanitized report. After you approve it, the agent gives you a link to a pre-filled GitHub issue on piton; you open it and submit. Nothing is sent without you, and unsafe project details stay local. See [report preparation](references/queue.md#report-a-workflow-problem).
 
-Set the source reference once in private global `workflows.json` in piton's global tier (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`):
-
-```json
-{ "workflowProject": "/absolute/path/to/piton" }
-```
-
-- The agent reads that source checkout's `.piton/integrations.json` and `.piton/workflows.json`, not the consuming project's tracker or policy.
-- Missing or invalid configuration gives a short error naming what to fix and where; you fix it separately.
-- The source tracker's MCP tools must be registered in the current session.
-- Nothing is sent without your approval, and unsafe project details stay local.
-
- See [source configuration](references/setup/reporting-source.md) and [report preparation](references/queue.md#prepare-a-workflow-report).
-
-To catch problems agents recover from quietly, add `"sessionAnalysis": true` to the same global `workflows.json`. After a Task or Gig ships, an Epic completes, or an incoming PR ships, the agent reviews the session in chat, searches the workflow tracker for findings that are already reported, and lists the rest of the workflow errors and friction worth reporting; you choose which to report. It needs `workflowProject`. It's off by default because it costs tokens. See [session analysis](references/session-analysis.md).
+In a development install (the pi package running from a git checkout of piton), reports go to that checkout's tracker as Todo work instead, and every shipped Task or Gig, completed Epic, and shipped incoming PR ends with an analysis of the session for workflow problems. See [docs/development.md](../../docs/development.md#workflow-reports-and-session-analysis).
 
 ## Working lifecycle
 

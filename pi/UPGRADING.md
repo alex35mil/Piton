@@ -1,14 +1,16 @@
 # Upgrading
 
-## Configuration moves to `.piton/` and piton's global tier
+## Configuration moves to one `config.toml` per folder
 
-The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside piton, `piton` must be on `PATH`). Every extension refuses the old layout with a message naming each old file and its new place, so nothing loads until it's moved. `piton migrate` moves the files.
+The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside piton, `piton` must be on `PATH`). Every extension refuses earlier layouts with a message naming each old file, so nothing loads until it's converted.
 
-- **Global settings** (`permissions*.json`, `mcp.json`, `web-search.json`, `workflows.json`) move from pi's agent folder to `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`); global rules and skills to its `agents/rules/` and `agents/skills/`.
-- **Project settings** move from `.agents/{permissions,mcp,web-search}*.json` to `.piton/`, and `.project/` becomes `.piton/`: `.project/config[.local].json` is `.piton/workflows[.local].json`, and artifacts live in `.piton/.local/`.
+- **Run `piton migrate`** in each source checkout. It converts every earlier layout (`.project/`, `.agents/*.json`, `.nono.json`, `.piton.toml`, and `.piton/`'s separate JSON files) into `.piton/config.toml` and `.piton/config.local.toml`, moves `mcp.json`, `policies.md`, and the artifacts, stages the committed changes, and relinks every worker.
+- **Run `piton migrate --global`** and apply what it prints in your dotfiles: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`) gets one `config.toml` and `config.local.toml`, and files piton kept in pi's agent folder move there.
+- **Keys are snake_case:** `default_mode`, `mcp_server`, `owner_type`, `in_progress`, `self_review`, `api_key`. Label keys you chose, like `pi-workflows`, stay as written.
+- **Personal keys:** `branches.username` is accepted only in `config.local.toml`; `keybindings` and `[development]` only in the global folder.
+- **Removed:** `workflowProject` and `sessionAnalysis`. Workflow reports open a pre-filled GitHub issue for you to submit; a development install (the package running from a git checkout of piton) files them in that checkout's tracker and runs session analysis.
 - **Parent folders** strictly below home can hold their own `.piton/` and `.agents/`, shared by every repository below them.
-- **Files are strict:** unknown keys are errors. `keybindings`, `workflowProject`, and `sessionAnalysis` are accepted only in the global tier.
-- **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line for every local settings file. Run project setup again to write them.
+- **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line. `piton migrate` writes them.
 
 ## Simpler workflows: fewer gates, bounded reviews
 

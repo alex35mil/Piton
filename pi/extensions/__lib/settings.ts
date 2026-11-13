@@ -1,10 +1,14 @@
 /**
- * piton's resolved configuration for a workspace, from `piton config resolve`.
+ * piton's resolved configuration for a workspace, from `piton config resolve`, and changes to it through
+ * `piton config set`.
  *
  * The Rust resolver in the daemon's binary is the only implementation of the chains and merge rules: the global tier
- * (`$XDG_CONFIG_HOME/piton/`), parent folders, and the repository's `.piton/` and `.agents/`. This client runs it,
- * caches the result, and runs it again only when a file or folder it depends on changed, so per-tool-call loads cost
- * a few `stat` calls.
+ * (`$XDG_CONFIG_HOME/piton/`), parent folders, and the repository's `.piton/` and `.agents/`, each level's settings in
+ * one `config.toml` (and `config.local.toml`). This client runs it, caches the result, and runs it again only when a
+ * file or folder it depends on changed, so per-tool-call loads cost a few `stat` calls.
+ *
+ * The file's keys are snake_case (`default_mode`, `mcp_server`); the pi package's own types are camelCase.
+ * {@link camelKeys} and {@link snakeKeys} translate at this boundary, so the rest of the package keeps its names.
  *
  * The binary is `PITON_BIN` when set (the daemon sets it after the workspace's mise environment, so a repository can't
  * swap it), else `piton` on PATH.
@@ -18,17 +22,18 @@ import { requireRuntime, type Runtime } from "./runtime.js"
 
 export const BIN_ENV = "PITON_BIN"
 /** The `piton config resolve` output version this client understands. */
-export const RESOLVE_FORMAT = 1
+export const RESOLVE_FORMAT = 2
 
 export type PermissionMode = "allow" | "ask" | "deny"
 export type LevelKind = "global" | "parent" | "repository"
 
+/** Permission rules as the file has them. */
 export interface ResolvedPermissions {
-    defaultMode?: PermissionMode
+    default_mode?: PermissionMode
     allow: string[]
     ask: string[]
     deny: string[]
-    keybindings?: { autoAcceptEdits?: string }
+    keybindings?: { auto_accept_edits?: string }
 }
 
 export interface ResolvedMcpServer {
@@ -46,17 +51,19 @@ export interface ResolvedMcp {
 
 export type PermissionScope = "shared" | Runtime
 
+/** One permission table that sets something: `[permissions]` (`shared`) or `[permissions.<runtime>]`. */
 export interface ResolvedPermissionSource {
     path: string
     level: LevelKind
     scope: PermissionScope
+    /** From `config.local.toml`. */
     local: boolean
     settings: ResolvedPermissions
 }
 
 /**
- * One part of the configuration: its merged value, or why its files can't be used (invalid, or the old layout). Each
- * consumer fails only on the parts it reads, so a broken `integrations.json` never stops permission checks.
+ * One part of the configuration: its merged value, or why its files can't be used (invalid, or an earlier layout).
+ * Each consumer fails only on the parts it reads, so a broken `[tracker]` never stops permission checks.
  */
 export type Section<T> = { ok: T } | { error: { message: string } }
 
@@ -71,7 +78,7 @@ const PARTS = [
     "mcp",
     "mcp_global",
     "web_search",
-    "workflows",
+    "branches",
     "integrations",
     "policies",
     "instructions",
@@ -85,15 +92,28 @@ export function settingsErrors(settings: ResolvedSettings): { part: (typeof PART
     })
 }
 
-export interface ResolvedWorkflows {
-    branches?: { format?: "identifier-title" | "username/identifier-title" | "tracker"; username?: string }
-    workflowProject?: string
-    sessionAnalysis?: boolean
+export interface ResolvedBranches {
+    format?: "identifier-title" | "username/identifier-title" | "tracker"
+    /** Personal: only `config.local.toml` may set it. */
+    username?: string
 }
 
 export interface FileValue<T> {
     path: string
     value: T
+}
+
+/** The nearest `[tracker]` and `[forge]`, each whole, as the file has them (snake_case keys), unvalidated. */
+export interface ResolvedIntegrations {
+    tracker: FileValue<unknown> | null
+    forge: FileValue<unknown> | null
+}
+
+/** One level's configuration files, existing or not. */
+export interface LevelFiles {
+    level: LevelKind
+    shared: string
+    local: string
 }
 
 export interface ResolvedSettings {
@@ -107,16 +127,17 @@ export interface ResolvedSettings {
     /** The user's home folder (from the user database), for `~` in path values. */
     home: string
     runtime: Runtime
-    /** The merged rules, and each permission file of the runtime that exists, in merge order, with its contents. */
+    /** The merged rules, and each permission table of the runtime that sets something, in merge order. */
     permissions: Section<{ merged: ResolvedPermissions; sources: ResolvedPermissionSource[] }>
     /** Every level's servers. */
     mcp: Section<ResolvedMcp>
     /** The global tier's servers alone: what pi loads in a project it doesn't trust. */
     mcp_global: Section<ResolvedMcp>
-    web_search: Section<{ apiKey?: string }>
-    workflows: Section<ResolvedWorkflows>
-    /** The nearest `integrations.json`, unvalidated. */
-    integrations: Section<FileValue<unknown> | null>
+    web_search: Section<{ api_key?: string }>
+    branches: Section<ResolvedBranches>
+    integrations: Section<ResolvedIntegrations>
+    /** `[development]`, global tier only: switches for a development install. */
+    development: Section<{ session_analysis?: boolean }>
     /** Every `policies.md`, farthest first. */
     policies: Section<FileValue<string>[]>
     instructions: Section<{
@@ -127,6 +148,8 @@ export interface ResolvedSettings {
     }>
     /** Workflow artifacts: the source's `.piton/.local`. */
     artifacts: string
+    /** Each level's `config.toml` and `config.local.toml`, farthest first. */
+    config_files: LevelFiles[]
     files: { path: string; level: LevelKind }[]
     watch: string[]
 }
@@ -164,7 +187,7 @@ export function resolveSettings(cwd: string, runtime: Runtime = requireRuntime()
     return settings
 }
 
-/** Only the global tier: personal settings that never depend on the current project. */
+/** Only the global tier: settings that never depend on the current project (`[development]`). */
 export function resolveGlobalSettings(): ResolvedSettings {
     const key = "global"
     const cached = cache.get(key)
@@ -179,20 +202,85 @@ export function clearSettingsCache(): void {
     cache.clear()
 }
 
-/** The file a project-level setting is written to: `<source>/.piton/<name>.json` or its `.local` variant. */
-export function projectSettingsPath(settings: ResolvedSettings, name: string, local: boolean): string {
-    return path.join(settings.source, PITON_DIR, local ? `${name}.local.json` : `${name}.json`)
-}
-
-/** The global tier's `<name>.json`. */
-export function globalSettingsPath(settings: ResolvedSettings, name: string): string {
-    return path.join(settings.global, `${name}.json`)
-}
-
 /** The folder piton's tools read in a repository or parent folder. */
 export const PITON_DIR = ".piton"
+export const CONFIG_FILE = "config.toml"
+export const CONFIG_LOCAL_FILE = "config.local.toml"
+
+/** The repository's `config.toml`, or `config.local.toml` for this machine's values: where setup writes settings. */
+export function projectConfigPath(settings: ResolvedSettings, local: boolean): string {
+    return path.join(settings.source, PITON_DIR, local ? CONFIG_LOCAL_FILE : CONFIG_FILE)
+}
+
+/** The repository's `mcp.json`, or `mcp.local.json`: MCP servers stay JSON, the format other harnesses read. */
+export function projectMcpPath(settings: ResolvedSettings, local: boolean): string {
+    return path.join(settings.source, PITON_DIR, local ? "mcp.local.json" : "mcp.json")
+}
+
+/**
+ * The repository's configuration file with `changes` applied (dotted keys as in the file; `null` removes a key; an
+ * object becomes a table), without writing it: `piton config set --dry-run`, which keeps the file's comments and layout
+ * and refuses a result the resolver wouldn't accept. `content` is `null` when nothing changes. The caller writes the
+ * file (a protected one goes through the daemon).
+ */
+export function plannedConfigEdit(
+    cwd: string,
+    changes: Record<string, unknown>,
+    local: boolean,
+): { path: string; content: string | null } {
+    const args = ["config", "set", JSON.stringify(changes), "--changes", "--dry-run", "--workspace", path.resolve(cwd)]
+    if (local) args.push("--local")
+    const output = runPiton(args, "piton config set") as { path?: unknown; content?: unknown }
+    if (typeof output.path !== "string" || (typeof output.content !== "string" && output.content !== null)) {
+        throw new Error("piton config set printed an unexpected result")
+    }
+    return { path: output.path, content: output.content }
+}
+
+/** `mcp_server` -> `mcpServer`. */
+function camel(name: string): string {
+    return name.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase())
+}
+
+/** `mcpServer` -> `mcp_server`. */
+function snake(name: string): string {
+    return name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)
+}
+
+/**
+ * Whether the keys of the map at `at` (camelCase names from the root, `*` for a data key) are data, copied as they are:
+ * label keys like `pi-workflows` are names, not schema.
+ */
+export type DataKeys = (at: readonly string[]) => boolean
+
+/** A value from the file with its schema keys in camelCase. */
+export function camelKeys(value: unknown, data: DataKeys = () => false): unknown {
+    return translate(value, camel, data, [])
+}
+
+/** A value with its schema keys in snake_case, for the file. */
+export function snakeKeys(value: unknown, data: DataKeys = () => false): unknown {
+    return translate(value, snake, data, [])
+}
+
+function translate(value: unknown, rename: (name: string) => string, data: DataKeys, at: string[]): unknown {
+    if (Array.isArray(value)) return value.map((item) => translate(item, rename, data, at))
+    if (!value || typeof value !== "object") return value
+    const keys = data(at)
+    return Object.fromEntries(
+        Object.entries(value).map(([key, inner]) => [
+            keys ? key : rename(key),
+            translate(inner, rename, data, [...at, keys ? "*" : camel(key)]),
+        ]),
+    )
+}
 
 function runResolve(args: string[]): ResolvedSettings {
+    return runPiton(args, "piton config resolve") as ResolvedSettings
+}
+
+/** Runs the binary for one JSON result; throws its error (an `{error}` result, or a failure to run it). */
+function runPiton(args: string[], command: string): unknown {
     const bin = pitonBinary()
     let stdout: string
     try {
@@ -209,22 +297,22 @@ function runResolve(args: string[]): ResolvedSettings {
             )
         }
         if (typeof failure.stdout === "string" && failure.stdout.trim().length > 0) stdout = failure.stdout
-        else throw new Error(`piton config resolve failed: ${failure.stderr?.trim() || failure.message}`)
+        else throw new Error(`${command} failed: ${failure.stderr?.trim() || failure.message}`)
     }
     let parsed: unknown
     try {
         parsed = JSON.parse(stdout)
     } catch {
-        throw new Error("piton config resolve printed invalid JSON")
+        throw new Error(`${command} printed invalid JSON`)
     }
-    const output = parsed as Partial<ResolvedSettings> & Partial<ResolveError>
+    const output = parsed as { format?: unknown } & Partial<ResolveError>
     if (output.format !== RESOLVE_FORMAT) {
         throw new Error(
-            `piton config resolve printed format ${JSON.stringify(output.format)}; this pi package understands ${RESOLVE_FORMAT} (update piton and the pi package together)`,
+            `${command} printed format ${JSON.stringify(output.format)}; this pi package understands ${RESOLVE_FORMAT} (update piton and the pi package together)`,
         )
     }
     if (output.error) throw new Error(output.error.message)
-    return output as ResolvedSettings
+    return output
 }
 
 /** Existence, size, and modification time of every watched path. */

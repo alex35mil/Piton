@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -255,11 +256,7 @@ describe("workflow operations", () => {
             git("init", "-q")
             fs.mkdirSync(path.join(root, ".piton"))
             fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
-            fs.writeFileSync(
-                path.join(root, ".piton/workflows.json"),
-                JSON.stringify({ branches: { format: "identifier-title" } }),
-            )
-            fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify({ tracker: github, forge }))
+            writeProjectConfig(root, { branchFormat: "identifier-title", tracker: github, forge })
             prepareArtifactPersistence(root)
             const directory = path.join(root, ".piton/.local/gigs/11-example")
             fs.mkdirSync(directory, { recursive: true })

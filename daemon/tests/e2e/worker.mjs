@@ -31,7 +31,7 @@ function setup() {
     writeFileSync(join(source, ".gitignore"), "/apps/.build\n/.piton/.local\n");
     mkdirSync(join(source, ".piton"));
     writeFileSync(
-        join(source, ".piton/daemon.toml"),
+        join(source, ".piton/config.toml"),
         '[workers]\nskip = ["apps/.build/index-build"]\n[sandbox]\nread = ["/source-grant"]\n',
     );
     git(source, "add", ".");
@@ -101,7 +101,7 @@ const tests = {
         assert.ok(lstatSync(join(worker, ".piton/.local")).isSymbolicLink());
         assert.ok(!existsSync(join(worker, "apps/.build/index-build")), "skip list honored");
         // An agent edits its worker's grants to widen its sandbox: ignored.
-        writeFileSync(join(worker, ".piton/daemon.toml"), '[sandbox]\nallow = ["/"]\n');
+        writeFileSync(join(worker, ".piton/config.toml"), '[sandbox]\nallow = ["/"]\n');
 
         // Start a sandboxed session and check the argv nono actually received (not sensitive persistent logging).
         const started = await cli(ctx, ["start", worker, "--prompt", "hello"]);
@@ -134,7 +134,7 @@ const tests = {
         // The session says which project it belongs to, for the apps' grouping.
         assert.deepEqual(listed.json.workers[0].sessions[0].checkout, { kind: "worker", source: ctx.source, name: "fix-x" });
 
-        // Leftovers (the worker's own daemon.toml edit) refuse a delete; --force deletes and stops the session.
+        // Leftovers (the worker's own config.toml edit) refuse a delete; --force deletes and stops the session.
         const refused = await cli(ctx, ["worker", "delete", worker, "--json"]);
         assert.equal(refused.code, 4);
         assert.equal(refused.json.refusal.kind, "leftovers");

@@ -1,9 +1,10 @@
-//! How each file kind merges across levels, farthest first: `merge(base, nearer)`.
+//! How each part merges across levels, farthest first: `merge(base, nearer)`.
 
 use super::files::{
-    Branches, ClientPrefs, DaemonFile, EnvTable, HostPrefs, Keybindings, NetworkTable, PermissionsFile, PiTable,
-    SandboxTable, SettingsFile, StopTable, TailnetTable, WebSearchFile, WorkersTable, WorkflowsFile,
+    Branches, ClientPrefs, DaemonFile, DevelopmentTable, EnvTable, HostPrefs, Keybindings, NetworkTable, PiTable,
+    SandboxTable, SettingsFile, StopTable, TailnetTable, WebSearchTable, WorkersTable,
 };
+use super::resolve::PermissionSettings;
 
 /// Lists that only add: the base's entries, then the nearer's new ones.
 fn union(base: &mut Vec<String>, nearer: Vec<String>) {
@@ -82,7 +83,7 @@ fn workers(base: &mut WorkersTable, n: WorkersTable) {
     union(&mut base.skip, n.skip);
 }
 
-/// `settings.toml`, then `settings.local.toml`: the local value wins per key.
+/// `[host]` and `[client]`: the local file's value wins per key.
 pub fn settings(base: &mut SettingsFile, n: SettingsFile) {
     host(&mut base.host, n.host);
     client(&mut base.client, n.client);
@@ -101,9 +102,13 @@ fn client(base: &mut ClientPrefs, n: ClientPrefs) {
     nearer(&mut base.code_font, n.code_font);
 }
 
-/// Rule lists combine (deny and ask beat allow when evaluated); `defaultMode` and keybindings: the nearest file that
+pub fn development(base: &mut DevelopmentTable, n: DevelopmentTable) {
+    nearer(&mut base.session_analysis, n.session_analysis);
+}
+
+/// Rule lists combine (deny and ask beat allow when evaluated); `default_mode` and keybindings: the nearest table that
 /// sets them.
-pub fn permissions(base: &mut PermissionsFile, n: PermissionsFile) {
+pub fn permissions(base: &mut PermissionSettings, n: PermissionSettings) {
     nearer(&mut base.default_mode, n.default_mode);
     base.allow.extend(n.allow);
     base.ask.extend(n.ask);
@@ -115,17 +120,12 @@ fn keybindings(base: &mut Keybindings, n: Keybindings) {
     nearer(&mut base.auto_accept_edits, n.auto_accept_edits);
 }
 
-pub fn web_search(base: &mut WebSearchFile, n: WebSearchFile) {
+pub fn web_search(base: &mut WebSearchTable, n: WebSearchTable) {
     nearer(&mut base.api_key, n.api_key);
 }
 
-pub fn workflows(base: &mut WorkflowsFile, n: WorkflowsFile) {
-    branches(&mut base.branches, n.branches);
-    nearer(&mut base.workflow_project, n.workflow_project);
-    nearer(&mut base.session_analysis, n.session_analysis);
-}
-
-fn branches(base: &mut Branches, n: Branches) {
+/// Per key: a level can set the format and leave the username to `config.local.toml`.
+pub fn branches(base: &mut Branches, n: Branches) {
     nearer(&mut base.format, n.format);
     nearer(&mut base.username, n.username);
 }
@@ -153,21 +153,29 @@ mod tests {
 
     #[test]
     fn permissions_combine_lists_and_take_the_nearest_default() {
-        let mut base: PermissionsFile =
-            serde_json::from_str(r#"{"defaultMode":"ask","deny":["bash(rm *)"],"allow":["read"]}"#).unwrap();
+        let mut base = PermissionSettings {
+            default_mode: Some(PermissionMode::Ask),
+            deny: vec!["bash(rm *)".into()],
+            allow: vec!["read".into()],
+            ..PermissionSettings::default()
+        };
         permissions(
             &mut base,
-            serde_json::from_str(r#"{"defaultMode":"allow","ask":["write"]}"#).unwrap(),
+            PermissionSettings {
+                default_mode: Some(PermissionMode::Allow),
+                ask: vec!["write".into()],
+                ..PermissionSettings::default()
+            },
         );
         assert_eq!(base.default_mode, Some(PermissionMode::Allow));
         assert_eq!(base.deny, ["bash(rm *)"]);
         assert_eq!(base.ask, ["write"]);
         assert_eq!(base.allow, ["read"]);
-        permissions(&mut base, PermissionsFile::default());
+        permissions(&mut base, PermissionSettings::default());
         assert_eq!(
             base.default_mode,
             Some(PermissionMode::Allow),
-            "a file without defaultMode keeps it"
+            "a table without default_mode keeps it"
         );
     }
 

@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -46,38 +47,32 @@ function repo(tracker: "github" | "linear", labels?: unknown) {
     git(root, "add", ".")
     git(root, "commit", "-qm", "base")
     fs.mkdirSync(path.join(root, ".piton"))
-    fs.writeFileSync(
-        path.join(root, ".piton/workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(
-        path.join(root, ".piton/integrations.json"),
-        JSON.stringify({
-            tracker:
-                tracker === "github"
-                    ? {
-                          provider: "github",
-                          mcpServer: "github",
-                          repository,
-                          project: { owner: "example", ownerType: "user", number: 3 },
-                          labels: labels ?? kindLabels(),
-                          fields: {
-                              status: { field: "Status", values: statuses },
-                              phase: { field: "Phase", values: { ...phaseValues } },
-                              priority: { scope: "project", field: "Priority", values: ["High", "Low"] },
-                          },
-                      }
-                    : {
-                          provider: "linear",
-                          mcpServer: "linear",
-                          team: "Engineering",
-                          phase: linearPhases(),
-                          ...(labels ? { labels } : {}),
-                          statuses: { issues: statuses, projects: statuses },
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker:
+            tracker === "github"
+                ? {
+                      provider: "github",
+                      mcpServer: "github",
+                      repository,
+                      project: { owner: "example", ownerType: "user", number: 3 },
+                      labels: labels ?? kindLabels(),
+                      fields: {
+                          status: { field: "Status", values: statuses },
+                          phase: { field: "Phase", values: { ...phaseValues } },
+                          priority: { scope: "project", field: "Priority", values: ["High", "Low"] },
                       },
-            forge: { provider: "github", mcpServer: "github", repository },
-        }),
-    )
+                  }
+                : {
+                      provider: "linear",
+                      mcpServer: "linear",
+                      team: "Engineering",
+                      phase: linearPhases(),
+                      ...(labels ? { labels } : {}),
+                      statuses: { issues: statuses, projects: statuses },
+                  },
+        forge: { provider: "github", mcpServer: "github", repository },
+    })
     prepareArtifactPersistence(root)
     const epic = initializeEntity(
         {

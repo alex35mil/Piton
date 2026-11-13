@@ -1,4 +1,6 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
+import { writeConfig } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -17,8 +19,7 @@ const body = "Scoped fixture rule: name the contract before replacing its implem
 const untouched = "This unrelated scoped rule must stay out of initial context."
 function setup(root: string) {
     fs.mkdirSync(path.join(root, ".agents/rules"), { recursive: true })
-    fs.mkdirSync(path.join(root, ".piton"), { recursive: true })
-    fs.writeFileSync(path.join(root, ".piton/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+    writePermissions(root, { defaultMode: "allow" })
     fs.writeFileSync(path.join(root, ".agents/rules/always.md"), "Always-on fixture instruction.")
     scope(root, body)
     fs.writeFileSync(path.join(root, ".agents/rules/untouched.md"), `---\npaths: ["unrelated/**"]\n---\n${untouched}\n`)
@@ -73,12 +74,11 @@ describe("native rules model delivery", () => {
                 extensions: [...extensions, registerIntegrations],
                 setup(root) {
                     setup(root)
-                    if (integrations !== "absent") {
-                        fs.mkdirSync(path.join(root, ".piton"), { recursive: true })
-                        fs.writeFileSync(
-                            path.join(root, ".piton/integrations.json"),
-                            integrations === "configured" ? "{}" : "{ broken",
-                        )
+                    if (integrations === "configured") writeConfig(root, { tracker: {} })
+                    // A tracker that isn't a table fails only the integrations part (top-level, before any table).
+                    if (integrations === "unreadable") {
+                        const file = path.join(root, ".piton/config.toml")
+                        fs.writeFileSync(file, `tracker = 1\n${fs.readFileSync(file, "utf8")}`)
                     }
                 },
                 tools: ["read", "codemode"],
@@ -101,7 +101,7 @@ describe("native rules model delivery", () => {
                         case "unreadable":
                             // A broken file never silently drops the rule; the reason comes with it.
                             assert.ok(text.includes(`<workflows>\n${WORKFLOW_CONTEXT}`))
-                            assert.match(text, /integrations\.json/)
+                            assert.match(text, /config\.toml/)
                             break
                         case "absent":
                             assert.doesNotMatch(text, /<workflows>/)
@@ -348,10 +348,7 @@ for (const result of ["Accepted", "AcceptModified", "Rejected"] as const) {
             extensions: [registerPermission],
             setup(root) {
                 fs.mkdirSync(path.join(root, ".piton"))
-                fs.writeFileSync(
-                    path.join(root, ".piton/permissions.json"),
-                    JSON.stringify({ defaultMode: "ask", allow: ["codemode"] }),
-                )
+                writePermissions(root, { defaultMode: "ask", allow: ["codemode"] })
                 fs.writeFileSync(path.join(root, "target.txt"), "before")
             },
             async review(root) {

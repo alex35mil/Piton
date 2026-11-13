@@ -1,4 +1,5 @@
-import { resetGlobalSettings, TEST_CONFIG_HOME, writeGlobalSetting } from "./host-runtime.ts"
+import { resetGlobalSettings, TEST_CONFIG_HOME, writeConfig, writeGlobalSetting } from "./host-runtime.ts"
+import { permissionsTable } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
@@ -64,7 +65,7 @@ describe("shared settings contract", () => {
             assert.equal(resolved.artifacts, path.join(h.piton, ".local"))
             // A missing level is watched as a folder; an existing one also by its candidate files.
             assert.ok(resolved.watch.includes(h.piton))
-            assert.ok(resolved.watch.includes(path.join(TEST_CONFIG_HOME, "permissions.json")))
+            assert.ok(resolved.watch.includes(path.join(TEST_CONFIG_HOME, "config.toml")))
             fs.mkdirSync(h.piton)
             assert.ok(resolveSettings(h.nested, "host").watch.includes(path.join(h.piton, "mcp.local.json")))
         } finally {
@@ -134,14 +135,16 @@ describe("shared settings contract", () => {
         }
     })
 
-    it("merges permission files level by level, each base file before its runtime and .local files", async () => {
+    it("merges permission tables level by level, each file's shared table before its runtime table", async () => {
         const h = fixture()
         try {
-            writeGlobalSetting("permissions.json", { defaultMode: "ask", allow: ["read"] })
-            writeGlobalSetting("permissions.sandbox.json", { defaultMode: "allow", allow: ["bash(npm *)"] })
-            writeGlobalSetting("permissions.host.json", { deny: ["bash(host-only *)"] })
-            write(path.join(h.piton, "permissions.json"), { defaultMode: "deny" })
-            write(path.join(h.piton, "permissions.sandbox.local.json"), { ask: ["bash(git push *)"] })
+            writeConfig("global", {
+                permissions: permissionsTable({ defaultMode: "ask", allow: ["read"] }),
+                "permissions.sandbox": permissionsTable({ defaultMode: "allow", allow: ["bash(npm *)"] }),
+                "permissions.host": permissionsTable({ deny: ["bash(host-only *)"] }),
+            })
+            writeConfig(h.repositoryRoot, { permissions: permissionsTable({ defaultMode: "deny" }) })
+            writeConfig(h.repositoryRoot, { "permissions.sandbox.ask": ["bash(git push *)"] }, true)
 
             const sandbox = inspectPersistentPermissions(h.nested, "sandbox")
             assert.equal(sandbox.runtime, "sandbox")
@@ -184,9 +187,9 @@ describe("shared settings contract", () => {
         const fetch = globalThis.fetch
         const apiKey = process.env.BRAVE_SEARCH_API_KEY
         try {
-            writeGlobalSetting("web-search.json", { apiKey: "global-fixture" })
-            write(path.join(h.piton, "web-search.json"), { apiKey: "project-fixture" })
-            write(path.join(h.piton, "web-search.local.json"), { apiKey: "local-fixture" })
+            writeConfig("global", { "web_search.api_key": "global-fixture" })
+            writeConfig(h.repositoryRoot, { "web_search.api_key": "project-fixture" })
+            writeConfig(h.repositoryRoot, { "web_search.api_key": "local-fixture" }, true)
             delete process.env.BRAVE_SEARCH_API_KEY
             process.chdir(h.nested)
             let calls = 0

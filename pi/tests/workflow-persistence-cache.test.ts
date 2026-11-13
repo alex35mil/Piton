@@ -1,4 +1,6 @@
 import "./host-runtime.ts"
+import { writeConfig } from "./host-runtime.ts"
+import { clearSettingsCache } from "../extensions/__lib/settings.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -28,8 +30,7 @@ function fixture() {
     git("add", ".gitignore")
     git("commit", "-m", "initial")
     fs.mkdirSync(path.join(root, ".piton"))
-    const config = path.join(root, ".piton/workflows.json")
-    fs.writeFileSync(config, JSON.stringify({ branches: { format: "identifier-title" } }))
+    const config = writeConfig(root, { "branches.format": "identifier-title" })
     const trace = path.join(root, "git.trace")
     process.env.GIT_TRACE = trace
     prepareArtifactPersistence(root)
@@ -116,25 +117,20 @@ describe("artifact persistence revalidation", () => {
             assert.throws(() => assertArtifactPersistencePrepared(f.root), /in \.gitignore/)
             fs.writeFileSync(path.join(f.root, ".gitignore"), "/.piton/.local\n")
             assertArtifactPersistencePrepared(f.root)
-            fs.writeFileSync(
-                path.join(f.root, ".piton/workflows.local.json"),
-                JSON.stringify({ branches: { username: "alex" } }),
-            )
+            writeConfig(f.root, { "branches.username": "alex" }, true)
             assert.throws(() => assertArtifactPersistencePrepared(f.root), /not prepared/)
             prepareArtifactPersistence(f.root)
             fs.writeFileSync(f.exclude, "")
             assert.throws(() => assertArtifactPersistencePrepared(f.root), /not prepared/)
             prepareArtifactPersistence(f.root)
             const before = f.scans()
-            fs.writeFileSync(f.config, JSON.stringify({ branches: { format: "username/identifier-title" } }))
+            writeConfig(f.root, { "branches.format": "username/identifier-title" })
             assert.equal(assertArtifactPersistencePrepared(f.root).branches.username, "alex")
             assert.ok(f.scans() > before)
-            fs.writeFileSync(
-                path.join(f.root, ".piton/workflows.local.json"),
-                JSON.stringify({ branches: { username: "sam" } }),
-            )
+            writeConfig(f.root, { "branches.username": "sam" }, true)
             assert.equal(assertArtifactPersistencePrepared(f.root).branches.username, "sam")
             fs.writeFileSync(f.config, "invalid")
+            clearSettingsCache()
             assert.throws(() => assertArtifactPersistencePrepared(f.root), /invalid/)
         } finally {
             f.cleanup()
@@ -146,11 +142,11 @@ describe("artifact persistence revalidation", () => {
         try {
             process.env.GIT_INDEX_FILE = path.join(f.root, "alternate-index")
             f.git("read-tree", "HEAD")
-            fs.writeFileSync(path.join(f.root, ".piton/workflows.local.json"), "{}")
-            f.git("add", "-f", ".piton/workflows.local.json")
+            fs.writeFileSync(path.join(f.root, ".piton/config.local.toml"), "")
+            f.git("add", "-f", ".piton/config.local.toml")
             assert.throws(
                 () => assertArtifactPersistencePrepared(f.root),
-                /workflows\.local\.json must remain outside Git/,
+                /config\.local\.toml must remain outside Git/,
             )
             delete process.env.GIT_INDEX_FILE
             prepareArtifactPersistence(f.root)
@@ -164,7 +160,7 @@ describe("artifact persistence revalidation", () => {
         const f = fixture()
         const worker = `${f.root}-worker`
         try {
-            f.git("add", ".piton/workflows.json")
+            f.git("add", ".piton/config.toml")
             f.git("commit", "-m", "workflow configuration")
             f.git("worktree", "add", "-b", "worker", worker)
             prepareArtifactPersistence(worker)

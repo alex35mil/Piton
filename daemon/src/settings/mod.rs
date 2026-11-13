@@ -8,9 +8,11 @@
 //! - `.agents/`: the workspace's own checkout (a worker reads its own copy, so instructions apply where they're
 //!   edited), then the same ancestors, then the global tier's `agents/`.
 //!
-//! Within one level the order is: the base file, its runtime file (`permissions.sandbox.json`), then their `.local`
-//! files. Each file kind has one merge rule (see the per-kind modules). This module is the only implementation: the pi
-//! package and the Neovim plugin read the result through `piton config resolve` / `piton config get`.
+//! Each `.piton/` level (and the global tier) has one `config.toml` and its `config.local.toml` (this machine's values,
+//! never shared), read in that order; `mcp[.local].json` and `policies.md` stay separate files. Each table of the file
+//! is a part with one merge rule (see `merge.rs`). This module is the only implementation: the pi package and the
+//! Neovim plugin read the result through `piton config resolve` / `piton config get`, and change it through
+//! `piton config set`.
 
 mod chain;
 pub mod convert;
@@ -20,8 +22,9 @@ mod merge;
 mod resolve;
 
 pub use chain::{LevelKind, global_tier, home};
-pub use files::{DaemonFile, Format, NetworkProfile, SandboxTable, SettingsFile, expand_home, parse, validate_daemon};
-pub use merge::sandbox as merge_sandbox;
+pub use files::{
+    ConfigDoc, DaemonFile, NetworkProfile, SandboxTable, SettingsFile, Sharing, expand_home, validate_config,
+};
 pub use resolve::{DaemonSettings, Part, Paths, Resolved, Runtime, Section, resolve, resolve_daemon, resolve_global};
 
 use std::path::PathBuf;
@@ -52,6 +55,8 @@ pub enum SettingsError {
         key: String,
         global: PathBuf,
     },
+    #[error("{path}: `{key}` is personal; set it in config.local.toml")]
+    LocalOnly { path: PathBuf, key: String },
     #[error("{path}: `{key}` {reason}")]
     Conflict { path: PathBuf, key: String, reason: String },
     #[error("{}", old_layout_message(.0))]

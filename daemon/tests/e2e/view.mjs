@@ -151,7 +151,7 @@ const tests = {
         assert.equal(socket, join(ctx.dir, "agent.sock"));
         assert.match(token, /^[0-9a-f]{64}$/);
 
-        const target = join(ctx.ws, ".piton", "permissions.json");
+        const target = join(ctx.ws, ".piton", "config.toml");
         // Not this session's, or not protected, or not a session at all: refused without asking.
         assert.equal((await agentRequest(socket, { type: "protected_write", token: "guess", path: target, content: "{}" })).type, "error");
         const plain = await agentRequest(socket, { type: "protected_write", token, path: join(ctx.ws, "src.rs"), content: "x" });
@@ -165,7 +165,7 @@ const tests = {
         assert.match(dialog.id, /^piton:write:/);
         const title = JSON.parse(dialog.title);
         assert.equal(title.toolName, "write");
-        assert.equal(title.toolInput.path, realpathSync(ctx.ws) + "/.piton/permissions.json");
+        assert.equal(title.toolInput.path, realpathSync(ctx.ws) + "/.piton/config.toml");
         // The current content, so a client that can't read the file shows a diff (null: the file is new).
         assert.equal(title.current, null);
         // One at a time.
@@ -502,16 +502,16 @@ const tests = {
         await c.req("sessions.subscribe");
         const setting = (state, key) => state.settings.find((s) => s.key === key);
         const daemonLine = (pred) => c.waitNew((m) => m.type === "daemon" && pred(m.state));
-        const settingsFile = join(ctx.config, "settings.toml");
-        const localFile = join(ctx.config, "settings.local.toml");
+        const settingsFile = join(ctx.config, "config.toml");
+        const localFile = join(ctx.config, "config.local.toml");
 
         // A preference moves to this host's file and stays commented and ordered in the shared one.
         writeFileSync(settingsFile, readFileSync(settingsFile, "utf8").replace("[host]", "# mine\n[host]"));
         const roots = [ctx.root];
         const set = await c.req("settings.set", { key: "host.favorites", value: [ctx.ws], local: true });
-        assert.deepEqual(setting(set.state, "host.favorites").kind, { kind: "config", file: "settings", placement: "local" });
+        assert.deepEqual(setting(set.state, "host.favorites").kind, { kind: "config", placement: "local" });
         assert.equal(readFileSync(localFile, "utf8"), `[host]\nfavorites = ${JSON.stringify([ctx.ws])}\n`);
-        assert.match(readFileSync(settingsFile, "utf8"), /^# mine\n\[host\]/);
+        assert.match(readFileSync(settingsFile, "utf8"), /\n# mine\n\[host\]/);
         assert.deepEqual(setting(set.state, "host.roots").value, roots);
 
         // A key that needs a restart is written, and waits.
@@ -547,7 +547,7 @@ const tests = {
         // the link.
         const dotfiles = join(ctx.dir, "dotfiles");
         mkdirSync(dotfiles);
-        const linked = join(dotfiles, "settings.local.toml");
+        const linked = join(dotfiles, "config.local.toml");
         writeFileSync(linked, "");
         rmSync(localFile);
         symlinkSync(linked, localFile);

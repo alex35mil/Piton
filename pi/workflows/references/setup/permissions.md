@@ -87,7 +87,7 @@ Results reflect persistent settings only; session overrides and skill-derived al
 
 **Targets:**
 
-- The target is committed `.piton/permissions.json` (`project`) or local `.piton/permissions.local.json` (`local`).
+- The target is `[permissions]` of committed `.piton/config.toml` (`project`) or local `.piton/config.local.toml` (`local`).
 - Before changing local settings, the tool checks the file is outside Git and ensures `/.piton/*.local.*` in `.git/info/exclude`. It never changes the index, and a no-op adds no exclusion.
 
 Workflow skills allow routine `.piton/` bookkeeping, including `epic.md`, `plan.md`, `result.md`, and `report.md`. Setup offers no `ask` gate for those files; the workflow stops for the user where it needs to.
@@ -97,5 +97,5 @@ Workflow skills allow routine `.piton/` bookkeeping, including `epic.md`, `plan.
 Workflow reviewers run headless under the user's permission settings. An `ask` result there blocks the call, because there's no UI to answer it.
 
 - Epic, Task, and Gig reviewers use `read`, `grep`, `find`, `ls`, and the read-only `git_read`. Incoming-PR reviewers use the first four.
-- When the effective `defaultMode` is `ask`, tell the user to allow those tools by name in their own settings, or reviewers can't inspect the repository.
+- When the effective `default_mode` is `ask`, tell the user to allow those tools by name in their own settings, or reviewers can't inspect the repository.
 - `configure_permissions` accepts only MCP selectors, so the user edits these rules by hand. Never add them without approval.

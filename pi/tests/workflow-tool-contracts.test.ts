@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writePermissions, writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -239,7 +240,7 @@ describe("workflow model-facing contracts", () => {
             extensions: [...codingFactories, memoryMcp("memory", ["echo"]), ...workflowFactories],
             tools: ["+codemode"],
             setup(root) {
-                fs.writeFileSync(path.join(root, "config/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+                writePermissions("global", { defaultMode: "allow" })
                 fs.writeFileSync(
                     path.join(root, "config/mcp.json"),
                     JSON.stringify({
@@ -279,11 +280,8 @@ describe("workflow model-facing contracts", () => {
         const h = await nativeSessionFixture({
             extensions: [...codingFactories, ...workflowFactories],
             tools: ["+codemode"],
-            setup(root) {
-                fs.writeFileSync(
-                    path.join(root, "config/permissions.json"),
-                    JSON.stringify({ defaultMode: "deny", allow: ["codemode"], deny: ["preflight_gig"] }),
-                )
+            setup() {
+                writePermissions("global", { defaultMode: "deny", allow: ["codemode"], deny: ["preflight_gig"] })
             },
         })
         try {
@@ -367,15 +365,7 @@ describe("workflow model-facing contracts", () => {
                     fs.writeFileSync(path.join(root, "seed.txt"), "fixture")
                     git(root, "add", "seed.txt")
                     git(root, "commit", "-qm", "Initial fixture")
-                    fs.writeFileSync(
-                        path.join(root, "config/permissions.json"),
-                        JSON.stringify({ defaultMode: "allow" }),
-                    )
-                    fs.mkdirSync(path.join(root, ".piton"))
-                    fs.writeFileSync(
-                        path.join(root, ".piton/workflows.json"),
-                        JSON.stringify({ branches: { format: "identifier-title" } }),
-                    )
+                    writePermissions("global", { defaultMode: "allow" })
                     const repository = { owner: "fixture", repo: "app" }
                     const statuses = {
                         backlog: "Backlog",
@@ -385,30 +375,28 @@ describe("workflow model-facing contracts", () => {
                         done: "Done",
                         canceled: "Canceled",
                     }
-                    fs.writeFileSync(
-                        path.join(root, ".piton/integrations.json"),
-                        JSON.stringify({
-                            tracker: {
-                                provider: "github",
-                                mcpServer: "github",
-                                repository,
-                                project: { owner: "fixture", ownerType: "user", number: 1 },
-                                fields: {
-                                    status: { field: "Status", values: statuses },
-                                    phase: {
-                                        field: "Phase",
-                                        values: {
-                                            planning: "Planning",
-                                            execution: "Execution",
-                                            selfReview: "Self-Review",
-                                        },
+                    writeProjectConfig(root, {
+                        branchFormat: "identifier-title",
+                        tracker: {
+                            provider: "github",
+                            mcpServer: "github",
+                            repository,
+                            project: { owner: "fixture", ownerType: "user", number: 1 },
+                            fields: {
+                                status: { field: "Status", values: statuses },
+                                phase: {
+                                    field: "Phase",
+                                    values: {
+                                        planning: "Planning",
+                                        execution: "Execution",
+                                        selfReview: "Self-Review",
                                     },
-                                    priority: { scope: "project", field: "Priority", values: ["High"] },
                                 },
+                                priority: { scope: "project", field: "Priority", values: ["High"] },
                             },
-                            forge: { provider: "github", mcpServer: "github", repository },
-                        }),
-                    )
+                        },
+                        forge: { provider: "github", mcpServer: "github", repository },
+                    })
                     fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
                     if (layout === "linked") fs.symlinkSync(source, path.join(root, ".piton/.local"))
                 },

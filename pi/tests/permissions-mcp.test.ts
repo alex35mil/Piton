@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { type PermissionsFixture, writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -24,7 +25,7 @@ import { fixtureToolName } from "./mcp-catalog-fixture.ts"
 const noOverrides = new Map<string, Mode>()
 
 function source(settings: PermissionSettings, level: PermissionSource["level"] = "global"): PermissionSource {
-    return { level, scope: "shared", local: false, path: `/${level}/permissions.json`, settings }
+    return { level, scope: "shared", local: false, path: `/${level}/config.toml`, settings }
 }
 
 function catalog(...tools: McpToolMetadata[]): McpToolCatalog {
@@ -231,10 +232,18 @@ function createContext(cwd: string, approval = true) {
     return { ctx, notifications, widgets, aborts: () => aborts }
 }
 
+/** A project whose `[permissions]` holds `content` (the extension's JSON); text that isn't JSON is written as a broken
+ * config.toml. */
 function createProjectSettings(content: string) {
     const cwd = mkdtempSync(join(tmpdir(), "permission-mcp-"))
-    mkdirSync(join(cwd, ".piton"))
-    writeFileSync(join(cwd, ".piton", "permissions.json"), content)
+    let rules: PermissionsFixture | undefined
+    try {
+        rules = JSON.parse(content) as PermissionsFixture
+    } catch {
+        mkdirSync(join(cwd, ".piton"))
+        writeFileSync(join(cwd, ".piton", "config.toml"), "[permissions\n")
+    }
+    if (rules) writePermissions(cwd, rules)
     return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) }
 }
 
@@ -405,7 +414,7 @@ describe("MCP permission lifecycle", () => {
 
     it("keeps the turn on configured denial and aborts on user rejection", async () => {
         for (const testCase of [
-            { settings: { defaultMode: "deny" }, approval: true, reason: /Denied by defaultMode `deny`/, aborts: 0 },
+            { settings: { defaultMode: "deny" }, approval: true, reason: /Denied by default_mode `deny`/, aborts: 0 },
             {
                 settings: { deny: ["mcp(github, issue_write)"] },
                 approval: true,
@@ -539,7 +548,7 @@ describe("MCP permission lifecycle", () => {
                 assert.match(blocked.reason, /Invalid permission settings/)
                 assert.equal(context.aborts(), 1)
 
-                writeFileSync(join(project.cwd, ".piton", "permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+                writePermissions(project.cwd, { defaultMode: "allow" })
                 assert.deepEqual(await harness.handler("input")({ text: "continue working" }, context.ctx), {
                     action: "continue",
                 })
@@ -671,7 +680,7 @@ describe("MCP permission lifecycle", () => {
                 const context = createContext(project.cwd)
 
                 await harness.handler("session_start")({ reason: "reload" }, context.ctx)
-                assert.match(context.notifications[0].message, /permissions\.json/)
+                assert.match(context.notifications[0].message, /config\.toml/)
 
                 const blocked = (await harness.handler("tool_call")(
                     { toolName: "read", toolCallId: "call-1", input: { path: "README.md" } },

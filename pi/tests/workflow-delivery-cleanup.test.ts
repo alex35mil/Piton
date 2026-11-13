@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -52,27 +53,21 @@ function repository(withOrigin = true) {
         git(root, ["push", "-u", "origin", "main"])
     }
     fs.mkdirSync(path.join(root, ".piton"), { recursive: true })
-    fs.writeFileSync(
-        path.join(root, ".piton", "workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(
-        path.join(root, ".piton", "integrations.json"),
-        JSON.stringify({
-            tracker: {
-                provider: "github",
-                mcpServer: "github",
-                repository: repo,
-                project: { owner: "example", ownerType: "user", number: 3 },
-                fields: {
-                    status: { field: "Status", values: statuses },
-                    phase: { field: "Phase", values: phaseValues },
-                    priority: { scope: "project", field: "Priority", values: ["High"] },
-                },
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker: {
+            provider: "github",
+            mcpServer: "github",
+            repository: repo,
+            project: { owner: "example", ownerType: "user", number: 3 },
+            fields: {
+                status: { field: "Status", values: statuses },
+                phase: { field: "Phase", values: phaseValues },
+                priority: { scope: "project", field: "Priority", values: ["High"] },
             },
-            forge: { provider: "github", mcpServer: "github", repository: repo },
-        }),
-    )
+        },
+        forge: { provider: "github", mcpServer: "github", repository: repo },
+    })
     prepareArtifactPersistence(root)
     return { parent, root, origin }
 }

@@ -17,7 +17,7 @@ omitted. The collector makes **no device calls** at Info.
 back to Info preserves existing files.
 
 **Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `[host] logging` in piton's
-`settings.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
+`config.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
 app or the CLI is **temporary**: it lasts until it expires or the daemon restarts, which returns to the config. Nothing
 else stores it. The daemon pushes the policy to the apps (including when a timed switch expires), the Mac app's own
 capture follows it, and the collector asks the daemon before every poll and transfer.
@@ -39,7 +39,7 @@ disconnected. There, the expiration persists across app restarts; an expired or 
 
   These go through the daemon's control socket and fail when the daemon isn't running. No sessions are restarted. A
   transfer already in flight may finish (at most 15 seconds), but switching back or expiry prevents it from replacing
-  the published snapshot. To make debug the default, set it in `settings.toml` (or `settings.local.toml` for this Mac
+  the published snapshot. To make debug the default, set it in `config.toml` (or `config.local.toml` for this Mac
   only) and restart the daemon:
 
   ```toml
@@ -70,14 +70,14 @@ The phone stores its file ring and local `settings.json` at `Library/Logs/Piton/
 under `iphone/snapshot/`; status timestamps describe **collection time**, not when the last event occurred. Always
 check both the collector status and event timestamps before treating a capture as current.
 
-`daemon.toml`'s `log` setting overrides the daemon's file path. Its default moved from
+The `log` key of the global `config.toml` overrides the daemon's file path. Its default moved from
 `~/.local/state/piton/piton.log` to `logs/daemon/current.log`. Old files are not migrated or deleted. New LaunchAgents
 use the bounded file writers instead of appending a duplicate unbounded `launchd.log`. A foreground daemon's info
 records still go to stderr. Early configuration failures leave a sanitized startup marker in the default daemon log.
 
 The sandbox should grant **read-only access to the logs directory**, not its parent (which contains the control
-socket). This project's `.piton/daemon.toml` grants it. For agents in other projects, add it to the global
-`daemon.toml` (`~/.config/piton/`) in the dotfiles:
+socket). This project's `.piton/config.toml` grants it. For agents in other projects, add it to the global
+`config.toml` (`~/.config/piton/`) in the dotfiles:
 
 ```toml
 [sandbox]

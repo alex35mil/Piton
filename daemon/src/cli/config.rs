@@ -1,5 +1,5 @@
-//! `piton config resolve|get|check`: the resolved configuration for a workspace, for the pi package, the Neovim plugin,
-//! and the user. Reads files only; the daemon needn't run.
+//! `piton config resolve|get|set|check`: the resolved configuration for a workspace, for the pi package, the Neovim
+//! plugin, and the user, and changes to it. Reads and writes files only; the daemon needn't run.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -10,7 +10,7 @@ use super::ConfigAction;
 use crate::settings::{Paths, Resolved, Runtime, SettingsError};
 
 /// Version of `piton config resolve --json`. Clients refuse a version they don't know.
-pub const RESOLVE_FORMAT: u32 = 1;
+pub const RESOLVE_FORMAT: u32 = 2;
 
 /// Exit code for invalid or old-layout configuration, so callers can tell it from a failure to run.
 const EXIT_INVALID: u8 = 3;
@@ -84,20 +84,39 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 Err(body) => print_error(body),
             }
         }
-        ConfigAction::Get { file, workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
-            Ok(resolved) => match get(&resolved, file) {
+        ConfigAction::Get { part, workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
+            Ok(resolved) => match get(&resolved, part) {
                 Some(Ok(value)) => {
                     println!("{}", serde_json::to_string(&value).unwrap_or_default());
                     ExitCode::SUCCESS
                 }
                 Some(Err(message)) => print_error(ErrorBody::Invalid { message }),
                 None => {
-                    eprintln!("piton: unknown configuration {file:?}");
+                    eprintln!("piton: unknown configuration part {part:?}");
                     ExitCode::from(1)
                 }
             },
             Err(body) => print_error(body),
         },
+        ConfigAction::Set {
+            key,
+            value,
+            changes,
+            workspace,
+            global,
+            local,
+            unset,
+            dry_run,
+        } => set(&SetRequest {
+            key,
+            value: value.as_deref(),
+            changes: *changes,
+            workspace: workspace.as_deref(),
+            global: *global,
+            local: *local,
+            unset: *unset,
+            dry_run: *dry_run,
+        }),
         ConfigAction::Check { workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
             Ok(resolved) => {
                 let errors = resolved.errors();
@@ -108,17 +127,6 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 println!("global tier: {}", resolved.global.display());
                 for file in &resolved.files {
                     println!("  {:?}  {}", file.level, file.path.display());
-                }
-                // The global tier is the user's dotfiles: describe its conversion, never write it.
-                match crate::migrate::global(&Paths::current()) {
-                    Ok(moves) if moves.is_empty() => {}
-                    Ok(moves) => {
-                        println!("\nglobal files to move (the old layout):");
-                        for line in moves {
-                            println!("{line}");
-                        }
-                    }
-                    Err(e) => eprintln!("piton: the global tier can't be converted: {e}"),
                 }
                 if errors.is_empty() {
                     ExitCode::SUCCESS
@@ -202,12 +210,17 @@ pub fn migrate(path: Option<&Path>, dry_run: bool) -> ExitCode {
     for step in &plan.steps {
         println!("  {}", step.to_string().replace(&prefix, ""));
     }
+    for note in &plan.notes {
+        println!("note: {}", note.replace(&prefix, ""));
+    }
     if dry_run {
         return ExitCode::SUCCESS;
     }
     match crate::migrate::apply(&plan) {
         Ok(()) => {
-            println!("\ndone: review and commit the staged moves; `piton config check` lists global files to move");
+            println!(
+                "\ndone: review and commit the staged changes; `piton migrate --global` prints the global folder's conversion"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -215,6 +228,39 @@ pub fn migrate(path: Option<&Path>, dry_run: bool) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// `piton migrate --global`: prints the global folder's new files and what to remove, for the user's dotfiles.
+pub fn migrate_global() -> ExitCode {
+    let paths = Paths::current();
+    let plan = match crate::migrate::global(&paths) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("piton: {e}");
+            return ExitCode::from(EXIT_INVALID);
+        }
+    };
+    if plan.files.is_empty() && plan.moves.is_empty() {
+        println!("{} already uses the current layout", paths.global.display());
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "The global folder ({}) is yours to change (usually through your dotfiles):",
+        paths.global.display()
+    );
+    for (path, text) in &plan.files {
+        println!("\ncreate {}:\n\n{text}", path.display());
+    }
+    for path in &plan.remove {
+        println!("remove {} (its settings are in the file above)", path.display());
+    }
+    for (from, to) in &plan.moves {
+        println!("move {} -> {}", from.display(), to.display());
+    }
+    for note in &plan.notes {
+        println!("note: {note}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn runtime_from_env() -> Result<Runtime, String> {
@@ -243,6 +289,7 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         SettingsError::Read { .. }
         | SettingsError::Invalid { .. }
         | SettingsError::GlobalOnly { .. }
+        | SettingsError::LocalOnly { .. }
         | SettingsError::Conflict { .. }
         | SettingsError::OldLayout(_) => ErrorBody::Invalid { message: e.to_string() },
     })
@@ -250,22 +297,157 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
 
 /// One resolved part, for tools that need only that (the Neovim plugin's tracker queue): its value, or why its files
 /// can't be used. `None` for an unknown name.
-fn get(resolved: &Resolved, file: &str) -> Option<Result<serde_json::Value, String>> {
+fn get(resolved: &Resolved, part: &str) -> Option<Result<serde_json::Value, String>> {
     fn value<T: Serialize>(section: &crate::settings::Section<T>) -> Result<serde_json::Value, String> {
         match section {
             Ok(value) => serde_json::to_value(value).map_err(|e| e.to_string()),
             Err(error) => Err(error.to_string()),
         }
     }
-    Some(match file {
+    Some(match part {
         "integrations" => value(&resolved.integrations),
-        "workflows" => value(&resolved.workflows),
+        "branches" => value(&resolved.branches),
         "permissions" => value(&resolved.permissions),
         "mcp" => value(&resolved.mcp),
+        "web_search" => value(&resolved.web_search),
         "daemon" => value(&resolved.daemon),
         "settings" => value(&resolved.settings),
+        "development" => value(&resolved.development),
         _ => return None,
     })
+}
+
+struct SetRequest<'a> {
+    key: &'a str,
+    value: Option<&'a str>,
+    changes: bool,
+    workspace: Option<&'a Path>,
+    global: bool,
+    local: bool,
+    unset: bool,
+    dry_run: bool,
+}
+
+/// What `set --dry-run` prints: the file to write and its new content (`null` content: no change).
+#[derive(Serialize)]
+struct Planned {
+    format: u32,
+    path: PathBuf,
+    content: Option<String>,
+}
+
+/// `piton config set`: one key of a level's `config.toml` or `config.local.toml`, written with its comments and layout
+/// kept, and refused when the file would no longer be valid.
+fn set(request: &SetRequest) -> ExitCode {
+    use crate::settings::edit::{Change, edited, item_from_json, write_changes};
+    let invalid = |message: String| print_error(ErrorBody::Invalid { message });
+    let paths = Paths::current();
+    let (dir, level) = if request.global {
+        (paths.global.clone(), crate::settings::LevelKind::Global)
+    } else {
+        let path = request
+            .workspace
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        match crate::launch::resolve_workspace(&path) {
+            // The source: a worker's own copy is never read.
+            Ok(workspace) => (
+                workspace.source().join(crate::settings::PITON_DIR),
+                crate::settings::LevelKind::Repository,
+            ),
+            Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
+        }
+    };
+    let (sharing, placement) = if request.local {
+        (crate::settings::Sharing::Local, crate::settings::edit::Placement::Local)
+    } else {
+        (
+            crate::settings::Sharing::Shared,
+            crate::settings::edit::Placement::Shared,
+        )
+    };
+    let file = dir.join(sharing.file_name());
+    // Each change: a dotted key, and its JSON value (`None`: remove it).
+    let requested: Vec<(String, Option<serde_json::Value>)> = match (request.changes, request.unset, request.value) {
+        (true, false, None) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(request.key) {
+            Ok(map) => map
+                .into_iter()
+                .map(|(key, value)| {
+                    let value = match value {
+                        serde_json::Value::Null => None,
+                        other @ (serde_json::Value::Bool(_)
+                        | serde_json::Value::Number(_)
+                        | serde_json::Value::String(_)
+                        | serde_json::Value::Array(_)
+                        | serde_json::Value::Object(_)) => Some(other),
+                    };
+                    (key, value)
+                })
+                .collect(),
+            Err(e) => return invalid(format!("--changes: a JSON object of keys and values: {e}")),
+        },
+        (false, true, None) => vec![(request.key.to_string(), None)],
+        // JSON, or a bare string.
+        (false, false, Some(text)) => vec![(
+            request.key.to_string(),
+            Some(serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))),
+        )],
+        (true, _, _) | (false, true, Some(_)) | (false, false, None) => {
+            eprintln!("piton: give KEY VALUE, KEY --unset, or a JSON object with --changes");
+            return ExitCode::from(1);
+        }
+    };
+    let mut parsed: Vec<(Vec<&str>, Option<toml_edit::Item>)> = Vec::new();
+    for (key, value) in &requested {
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.iter().any(|part| part.is_empty()) {
+            return invalid(format!("invalid key {key:?}"));
+        }
+        let item = match value {
+            Some(value) => match item_from_json(&parts, value, &file) {
+                Ok(item) => Some(item),
+                Err(e) => return invalid(e.to_string()),
+            },
+            None => None,
+        };
+        parsed.push((parts, item));
+    }
+    let changes: Vec<Change> = parsed
+        .iter()
+        .map(|(key, item)| Change {
+            key,
+            value: item.as_ref(),
+        })
+        .collect();
+    let validate = |text: &str, path: &Path| crate::preferences::validate_text(text, path, level, placement);
+    if request.dry_run {
+        let current = match std::fs::read_to_string(&file) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return invalid(format!("{}: {e}", file.display())),
+        };
+        let content = match edited(current.as_deref(), &changes, &file) {
+            Ok(content) => content,
+            Err(e) => return invalid(e.to_string()),
+        };
+        if let Some(text) = &content
+            && let Err(e) = validate(text, &file)
+        {
+            return invalid(e.to_string());
+        }
+        let planned = Planned {
+            format: RESOLVE_FORMAT,
+            path: file,
+            content,
+        };
+        println!("{}", serde_json::to_string(&planned).unwrap_or_default());
+        return ExitCode::SUCCESS;
+    }
+    match write_changes(&file, &changes, &validate) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => invalid(e.to_string()),
+    }
 }
 
 fn print_error(body: ErrorBody) -> ExitCode {
@@ -289,8 +471,11 @@ mod tests {
         let home = std::fs::canonicalize(dir.path()).unwrap();
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".piton")).unwrap();
-        std::fs::write(repo.join(".piton/permissions.json"), r#"{"allow":["read"]}"#).unwrap();
-        std::fs::write(repo.join(".piton/workflows.json"), "{ broken").unwrap();
+        std::fs::write(
+            repo.join(".piton/config.toml"),
+            "[permissions]\nallow = [\"read\"]\n[branches]\nformat = 1\n",
+        )
+        .unwrap();
         let paths = Paths {
             home: home.clone(),
             global: home.join(".config/piton"),
@@ -311,16 +496,16 @@ mod tests {
         assert_eq!(json["runtime"], "sandbox");
         // Each part is `{ok}` or `{error: {message}}`.
         assert_eq!(json["permissions"]["ok"]["merged"]["allow"][0], "read");
-        assert!(json["integrations"]["ok"].is_null());
+        assert!(json["integrations"]["ok"]["tracker"].is_null());
         assert!(
-            json["workflows"]["error"]["message"]
+            json["branches"]["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("workflows.json")
+                .contains("config.toml")
         );
-        assert!(json["workflows"].get("ok").is_none());
+        assert!(json["branches"].get("ok").is_none());
         assert_eq!(json["artifacts"], repo.join(".piton/.local").to_string_lossy().as_ref());
-        assert!(json["watch"].as_array().unwrap().len() > 10);
+        assert!(json["watch"].as_array().unwrap().len() > 5);
 
         let error = serde_json::to_value(ErrorOutput {
             format: RESOLVE_FORMAT,

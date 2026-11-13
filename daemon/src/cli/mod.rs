@@ -89,6 +89,10 @@ enum Cmd {
         /// Print the plan without changing anything.
         #[usage(long)]
         dry_run: bool,
+        /// Print the global folder's conversion (its new config.toml and what to remove) for you to apply in your
+        /// dotfiles; writes nothing.
+        #[usage(long)]
+        global: bool,
     },
     /// Check what this host needs (the Mac app's onboarding runs this), and do the steps piton can do itself.
     Setup {
@@ -184,11 +188,34 @@ enum ConfigAction {
         #[usage(long)]
         global: bool,
     },
-    /// Print one resolved file as JSON: integrations, workflows, permissions, mcp, daemon, settings.
+    /// Print one resolved part as JSON: integrations, branches, permissions, mcp, web_search, daemon, settings,
+    /// development.
     Get {
-        file: String,
+        part: String,
         #[usage(long)]
         workspace: Option<PathBuf>,
+    },
+    /// Set KEY (dotted, like `branches.format`) in the repository's `.piton/config.toml`, or the global tier's with
+    /// --global; `config.local.toml` with --local. VALUE is JSON (an object becomes a table); text that isn't JSON is a
+    /// string. With --changes, KEY is instead a JSON object of keys and values written together (`null` removes a
+    /// key). With --dry-run, prints the file's new content as JSON and writes nothing (the pi package writes
+    /// protected files through the daemon).
+    Set {
+        key: String,
+        value: Option<String>,
+        #[usage(long)]
+        changes: bool,
+        #[usage(long)]
+        workspace: Option<PathBuf>,
+        #[usage(long)]
+        global: bool,
+        #[usage(long)]
+        local: bool,
+        /// Remove KEY instead.
+        #[usage(long)]
+        unset: bool,
+        #[usage(long)]
+        dry_run: bool,
     },
     /// Validate the workspace's configuration and list the files it reads.
     Check {
@@ -251,7 +278,16 @@ pub fn main() -> ExitCode {
     match &cli.command {
         Cmd::Service { action } => return service(action, cli.config_home.as_deref()),
         Cmd::Config { action } => return config::run(action),
-        Cmd::Migrate { path, dry_run } => return config::migrate(path.as_deref(), *dry_run),
+        Cmd::Migrate {
+            global: true,
+            path: _,
+            dry_run: _,
+        } => return config::migrate_global(),
+        Cmd::Migrate {
+            path,
+            dry_run,
+            global: false,
+        } => return config::migrate(path.as_deref(), *dry_run),
         Cmd::Completion { shell } => {
             let shell = match shell.as_str() {
                 "bash" => usage_rs::complete::Shell::Bash,

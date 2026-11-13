@@ -1,7 +1,8 @@
--- The source's queued (Todo and Backlog) tracker work, read from the tracker
--- configured in the nearest `integrations.json` of piton's configuration chain,
--- with the credential the tracker's MCP registration names. Both come from
--- `piton config get`; the plugin reads no configuration file itself.
+-- The source's queued (Todo and Backlog) tracker work, read from the nearest
+-- `[tracker]` of piton's configuration chain (`config.toml`), with the
+-- credential the tracker's MCP registration names. Both come from
+-- `piton config get`; the plugin reads no configuration file itself. Keys are
+-- as the file has them (snake_case: `mcp_server`, `owner_type`).
 
 ---@class QueueParent
 ---@field mention string How a workflow command names the Epic.
@@ -30,7 +31,7 @@
 
 ---@class QueueTracker
 ---@field source string
----@field config table The `tracker` object of `integrations.json`.
+---@field config table The `[tracker]` table of `config.toml`.
 ---@field credential string Name of the environment variable holding the token.
 
 local util = require("piton.util")
@@ -44,18 +45,18 @@ local M = {}
 ---@return QueueItem[]
 function M.load(source)
     local integrations = cli.config("integrations", source)
-    if type(integrations) ~= "table" then
-        util.refuse("No tracker configured: no integrations.json in " .. source .. "/.piton or its parent folders")
+    local found = type(integrations) == "table" and integrations.tracker or nil
+    if type(found) ~= "table" then
+        util.refuse("No tracker configured: no [tracker] in " .. source .. "/.piton/config.toml or its parent folders")
     end
-    local file = tostring(integrations.path)
-    local config = integrations.value
-    local tracker = type(config) == "table" and config.tracker or nil
-    if type(tracker) ~= "table" or type(tracker.mcpServer) ~= "string" then
+    local file = tostring(found.path)
+    local tracker = found.value
+    if type(tracker) ~= "table" or type(tracker.mcp_server) ~= "string" then
         util.refuse("No tracker configured in " .. file)
     end
 
     ---@type QueueTracker
-    local queue_tracker = { source = source, config = tracker, credential = M.credential(source, tracker.mcpServer) }
+    local queue_tracker = { source = source, config = tracker, credential = M.credential(source, tracker.mcp_server) }
     if tracker.provider == "github" then
         return require("piton.queue.github").load(queue_tracker)
     elseif tracker.provider == "linear" then

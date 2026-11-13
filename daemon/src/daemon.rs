@@ -356,14 +356,9 @@ impl Daemon {
             crate::preferences::Change::State(crate::state::Setting::KeepAwake, value) => {
                 self.set_keep_awake(value.unwrap_or(true))?;
             }
-            crate::preferences::Change::Config {
-                file,
-                key,
-                value,
-                target,
-            } => {
+            crate::preferences::Change::Config { key, value, target } => {
                 let mut snapshot = lock(&self.preferences);
-                crate::preferences::write(&self.config().paths, file, key, value, target)?;
+                crate::preferences::write(&self.config().paths, key, value, target)?;
                 crate::log!("settings: {key} changed from the apps");
                 self.reload_locked(&mut snapshot);
             }

@@ -1,11 +1,11 @@
-//! Writing one key of a global file pair (`settings.toml` / `settings.local.toml`, `daemon.toml` /
-//! `daemon.local.toml`) the way a person would: `toml_edit` keeps comments, order, and formatting; the write goes to a
-//! symlink's target (a dotfiles repository keeps its link); and each write rereads the file right before replacing it,
-//! so a hand edit made meanwhile is kept, not overwritten.
+//! Writing one key of a `config.toml` / `config.local.toml` pair the way a person would: `toml_edit` keeps comments,
+//! order, and formatting; the write goes to a symlink's target (a dotfiles repository keeps its link); and each write
+//! rereads the file right before replacing it, so a hand edit made meanwhile is kept, not overwritten. [`edited`] is
+//! the same change as text only, for a caller that writes the file another way (a protected file, through the daemon).
 
 use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Item, Table, Value};
+use toml_edit::{DocumentMut, Item, Table};
 
 /// A global file and its `.local` companion (this host's values, never shared).
 #[derive(Debug, Clone)]
@@ -41,6 +41,8 @@ pub enum EditError {
     Invalid(#[from] super::SettingsError),
     #[error("{path} kept changing while piton wrote it; try again")]
     Busy { path: PathBuf },
+    #[error("{path}: {reason}")]
+    Value { path: PathBuf, reason: String },
 }
 
 impl FilePair {
@@ -74,9 +76,9 @@ impl FilePair {
     pub fn set(
         &self,
         key: &[&str],
-        value: Option<Value>,
+        value: Option<Item>,
         target: Target,
-        validate: &dyn Fn(&str, &Path) -> Result<(), super::SettingsError>,
+        validate: &dyn Fn(&str, &Path, Placement) -> Result<(), super::SettingsError>,
     ) -> Result<Placement, EditError> {
         let placement = match target {
             Target::Current => self.placement(key)?.unwrap_or(Placement::Shared),
@@ -90,9 +92,11 @@ impl FilePair {
         // the destination goes back to what it was, so a failed move changes nothing.
         let destination = self.path(placement);
         let previous = read(&link_target(destination)?)?;
-        write_key(destination, key, value, validate)?;
+        write_key(destination, key, value.as_ref(), &|text, path| {
+            validate(text, path, placement)
+        })?;
         if matches!(target, Target::Move(_))
-            && let Err(e) = write_key(self.path(other), key, None, validate)
+            && let Err(e) = write_key(self.path(other), key, None, &|text, path| validate(text, path, other))
         {
             let target = link_target(destination)?;
             match previous {
@@ -129,41 +133,115 @@ impl Placements {
 }
 
 /// Read-modify-write of one key, retried when the file changes underneath.
-fn write_key(
+pub fn write_key(
     path: &Path,
     key: &[&str],
-    value: Option<Value>,
+    value: Option<&Item>,
     validate: &dyn Fn(&str, &Path) -> Result<(), super::SettingsError>,
 ) -> Result<(), EditError> {
-    write_key_with(path, key, value, validate, &mut || {})
+    write_changes(path, &[Change { key, value }], validate)
+}
+
+/// One key of a file set to a value, or removed (`None`).
+#[derive(Debug, Clone, Copy)]
+pub struct Change<'a> {
+    pub key: &'a [&'a str],
+    pub value: Option<&'a Item>,
+}
+
+/// Several changes to one file, written together: one read-modify-write, checked as a whole.
+pub fn write_changes(
+    path: &Path,
+    changes: &[Change],
+    validate: &dyn Fn(&str, &Path) -> Result<(), super::SettingsError>,
+) -> Result<(), EditError> {
+    write_key_with(path, changes, validate, &mut || {})
+}
+
+/// The file's text with the changes applied in order, or `None` when that changes nothing. `text` is the file's
+/// current text, `None` when it doesn't exist.
+pub fn edited(text: Option<&str>, changes: &[Change], path: &Path) -> Result<Option<String>, EditError> {
+    let sets = changes.iter().any(|change| change.value.is_some());
+    let Some(text) = text.or(sets.then_some("")) else {
+        // Only removals from a file that doesn't exist: nothing to do.
+        return Ok(None);
+    };
+    let mut doc = document(text, path)?;
+    let mut changed = false;
+    for change in changes {
+        changed |= match change.value {
+            Some(value) => {
+                insert(&mut doc, change.key, value.clone(), path)?;
+                true
+            }
+            None => remove(&mut doc, change.key),
+        };
+    }
+    // A table added to an empty file brings the blank line that separates tables; the file doesn't start with one.
+    let new = changed.then(|| doc.to_string().trim_start_matches('\n').to_string());
+    Ok(new.filter(|new| new != text))
+}
+
+/// A JSON value as the TOML item a person would write for `key`: objects as `[tables]` (lists of objects as
+/// `[[tables]]`), other values inline. `null` has no TOML form and is refused.
+pub fn item_from_json(key: &[&str], value: &serde_json::Value, path: &Path) -> Result<Item, EditError> {
+    let Some((last, _)) = key.split_last() else {
+        return Err(EditError::Value {
+            path: path.to_path_buf(),
+            reason: "an empty key".into(),
+        });
+    };
+    let wrapped = serde_json::json!({ *last: value });
+    let text = toml::to_string(&wrapped).map_err(|e| EditError::Value {
+        path: path.to_path_buf(),
+        reason: format!("{}: {e}", key.join(".")),
+    })?;
+    let mut doc = document(&text, path)?;
+    let mut item = doc.as_table_mut().remove(last).unwrap_or(Item::None);
+    // Positions from the scratch document would reorder the file the item goes into; without them, tables follow the
+    // table they're inserted after.
+    place(&mut item, None);
+    if let Item::Table(table) = &mut item {
+        table.set_implicit(false);
+        // A blank line before a new table, as the file's own tables have.
+        table.decor_mut().set_prefix("\n");
+    }
+    Ok(item)
+}
+
+/// Sets the document position of `item`'s tables (nested ones too).
+fn place(item: &mut Item, position: Option<isize>) {
+    match item {
+        Item::Table(table) => {
+            table.set_position(position);
+            for (_, child) in table.iter_mut() {
+                place(child, position);
+            }
+        }
+        Item::ArrayOfTables(array) => {
+            for table in array.iter_mut() {
+                table.set_position(position);
+                for (_, child) in table.iter_mut() {
+                    place(child, position);
+                }
+            }
+        }
+        Item::None | Item::Value(_) => {}
+    }
 }
 
 fn write_key_with(
     path: &Path,
-    key: &[&str],
-    value: Option<Value>,
+    changes: &[Change],
     validate: &dyn Fn(&str, &Path) -> Result<(), super::SettingsError>,
     before_commit: &mut dyn FnMut(),
 ) -> Result<(), EditError> {
     let target = link_target(path)?;
     for _ in 0..5 {
         let before = read(&target)?;
-        let Some(text) = before.as_deref().or(value.as_ref().map(|_| "")) else {
-            // Removing a key from a file that doesn't exist: nothing to do.
+        let Some(new) = edited(before.as_deref(), changes, path)? else {
             return Ok(());
         };
-        let mut doc = document(text, path)?;
-        let changed = match &value {
-            Some(value) => {
-                insert(&mut doc, key, value.clone(), path)?;
-                true
-            }
-            None => remove(&mut doc, key),
-        };
-        if !changed {
-            return Ok(());
-        }
-        let new = doc.to_string();
         validate(&new, path)?;
         before_commit();
         // A hand edit since the read: do it again on the new text.
@@ -248,7 +326,7 @@ fn get<'a>(doc: &'a DocumentMut, key: &[&str]) -> Option<&'a Item> {
     (!item.is_none()).then_some(item)
 }
 
-fn insert(doc: &mut DocumentMut, key: &[&str], value: Value, path: &Path) -> Result<(), EditError> {
+fn insert(doc: &mut DocumentMut, key: &[&str], value: Item, path: &Path) -> Result<(), EditError> {
     let Some((last, tables)) = key.split_last() else {
         return Ok(());
     };
@@ -264,15 +342,26 @@ fn insert(doc: &mut DocumentMut, key: &[&str], value: Value, path: &Path) -> Res
             key: key.join("."),
         })?;
     }
-    match table.get_mut(last).and_then(Item::as_value_mut) {
+    match (table.get_mut(last), value) {
         // Keep the comment and spacing around an existing value.
-        Some(existing) => {
+        (Some(Item::Value(existing)), Item::Value(value)) => {
             let decor = existing.decor().clone();
             *existing = value;
             *existing.decor_mut() = decor;
         }
-        None => {
-            table.insert(last, Item::Value(value));
+        // A replaced table keeps its place in the file and the comment above it.
+        (Some(Item::Table(existing)), Item::Table(value)) => {
+            let position = existing.position();
+            let decor = existing.decor().clone();
+            let mut value = Item::Table(value);
+            place(&mut value, position);
+            if let Item::Table(value) = value {
+                *existing = value;
+                *existing.decor_mut() = decor;
+            }
+        }
+        (_, value) => {
+            table.insert(last, value);
         }
     }
     Ok(())
@@ -302,20 +391,77 @@ fn remove(doc: &mut DocumentMut, key: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toml_edit::Value;
 
     fn pair(dir: &Path) -> FilePair {
         FilePair {
-            shared: dir.join("settings.toml"),
-            local: dir.join("settings.local.toml"),
+            shared: dir.join("config.toml"),
+            local: dir.join("config.local.toml"),
         }
     }
 
-    fn ok(_: &str, _: &Path) -> Result<(), crate::settings::SettingsError> {
+    fn ok(_: &str, _: &Path, _: Placement) -> Result<(), crate::settings::SettingsError> {
         Ok(())
     }
 
-    fn strings(values: &[&str]) -> Value {
-        Value::Array(values.iter().copied().collect())
+    fn strings(values: &[&str]) -> Item {
+        Item::Value(Value::Array(values.iter().copied().collect()))
+    }
+
+    /// A JSON object becomes a `[table]` a person would write; setting it again replaces the table, keeping what's
+    /// around it.
+    #[test]
+    fn writes_a_table_from_json() {
+        let path = Path::new("config.toml");
+        let value = serde_json::json!({"provider": "github", "repository": {"owner": "o", "repo": "r"}});
+        let item = item_from_json(&["forge"], &value, path).unwrap();
+        let text = "# mine\n[branches]\nformat = \"tracker\"\n";
+        let set = |item| {
+            [Change {
+                key: &["forge"],
+                value: Some(item),
+            }]
+        };
+        let new = edited(Some(text), &set(&item), path).unwrap().unwrap();
+        assert_eq!(
+            new,
+            "# mine\n[branches]\nformat = \"tracker\"\n\n[forge]\nprovider = \"github\"\n\n[forge.repository]\nowner = \"o\"\nrepo = \"r\"\n"
+        );
+        let again = item_from_json(&["forge"], &serde_json::json!({"provider": "github"}), path).unwrap();
+        let replaced = edited(Some(&new), &set(&again), path).unwrap().unwrap();
+        assert_eq!(
+            replaced,
+            "# mine\n[branches]\nformat = \"tracker\"\n\n[forge]\nprovider = \"github\"\n"
+        );
+        assert_eq!(edited(Some(&replaced), &set(&again), path).unwrap(), None);
+        assert!(item_from_json(&["x"], &serde_json::Value::Null, path).is_err());
+
+        // Several changes in one edit: a key removed, two set.
+        let format = item_from_json(&["branches", "format"], &serde_json::json!("identifier-title"), path).unwrap();
+        let many = edited(
+            Some(&replaced),
+            &[
+                Change {
+                    key: &["forge"],
+                    value: None,
+                },
+                Change {
+                    key: &["branches", "format"],
+                    value: Some(&format),
+                },
+                Change {
+                    key: &["tracker"],
+                    value: Some(&again),
+                },
+            ],
+            path,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            many,
+            "# mine\n[branches]\nformat = \"identifier-title\"\n\n[tracker]\nprovider = \"github\"\n"
+        );
     }
 
     #[test]
@@ -353,22 +499,22 @@ mod tests {
         let global = dir.path().join("global");
         std::fs::create_dir_all(&dotfiles).unwrap();
         std::fs::create_dir_all(&global).unwrap();
-        std::fs::write(dotfiles.join("settings.toml"), "[host]\nroots = []\n").unwrap();
-        std::os::unix::fs::symlink(dotfiles.join("settings.toml"), global.join("settings.toml")).unwrap();
+        std::fs::write(dotfiles.join("config.toml"), "[host]\nroots = []\n").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("config.toml"), global.join("config.toml")).unwrap();
         let files = pair(&global);
         files
             .set(&["host", "roots"], Some(strings(&["~/p"])), Target::Current, &ok)
             .unwrap();
         assert!(
             global
-                .join("settings.toml")
+                .join("config.toml")
                 .symlink_metadata()
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
         assert_eq!(
-            std::fs::read_to_string(dotfiles.join("settings.toml")).unwrap(),
+            std::fs::read_to_string(dotfiles.join("config.toml")).unwrap(),
             "[host]\nroots = [\"~/p\"]\n"
         );
     }
@@ -380,11 +526,14 @@ mod tests {
         std::fs::write(&files.shared, "[host]\nroots = []\n").unwrap();
         let mut edited = false;
         let shared = files.shared.clone();
+        let debug = Item::Value(Value::from("debug"));
         write_key_with(
             &files.shared,
-            &["host", "logging"],
-            Some(Value::from("debug")),
-            &ok,
+            &[Change {
+                key: &["host", "logging"],
+                value: Some(&debug),
+            }],
+            &|_, _| Ok(()),
             &mut || {
                 if !edited {
                     edited = true;
@@ -404,14 +553,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = pair(dir.path());
         std::fs::write(&files.shared, "[host]\nroots = []\n").unwrap();
-        let refuse = |_: &str, path: &Path| {
+        let refuse = |_: &str, path: &Path, _: Placement| {
             Err(crate::settings::SettingsError::Invalid {
                 path: path.to_path_buf(),
                 reason: "no".into(),
             })
         };
         assert!(matches!(
-            files.set(&["host", "x"], Some(Value::from(1)), Target::Current, &refuse),
+            files.set(
+                &["host", "x"],
+                Some(Item::Value(Value::from(1))),
+                Target::Current,
+                &refuse
+            ),
             Err(EditError::Invalid(_))
         ));
         assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "[host]\nroots = []\n");
@@ -433,7 +587,7 @@ mod tests {
         std::fs::write(&files.local, "[host]\nroots = [\"~/here\"]\n").unwrap();
         // Removing the key from the local file is refused (validation of the local file's new text).
         let local = files.local.clone();
-        let refuse_local = move |_: &str, path: &Path| {
+        let refuse_local = move |_: &str, path: &Path, _: Placement| {
             if path == local {
                 Err(crate::settings::SettingsError::Invalid {
                     path: path.to_path_buf(),

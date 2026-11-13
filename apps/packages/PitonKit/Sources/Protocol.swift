@@ -507,7 +507,7 @@ public struct DaemonState: Codable, Sendable, Hashable {
     }
 }
 
-/// One setting of the host: configuration in a global file (`settings.toml` or `daemon.toml`), or state the host keeps.
+/// One setting of the host: configuration in its global `config.toml` (or `config.local.toml`), or state the host keeps.
 public struct Setting: Codable, Sendable, Hashable, Identifiable {
     public let key: String
     /// The value in effect: the file's (or the host's state), else the default.
@@ -526,32 +526,26 @@ public struct Setting: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
-public enum SettingFile: String, Codable, Sendable {
-    case settings
-    case daemon
-}
-
-/// Which file of a pair sets a key: the shared one (every host through dotfiles) or the `.local` one (this host).
+/// Which file of the host's global pair sets a key: `config.toml` (every host through dotfiles) or
+/// `config.local.toml` (this host).
 public enum SettingPlacement: String, Codable, Sendable {
     case shared
     case local
 }
 
 public enum SettingKind: Codable, Sendable, Hashable {
-    /// Configuration in `file`; `placement` is nil when neither file sets it (the default applies).
-    case config(file: SettingFile, placement: SettingPlacement?)
+    /// Configuration; `placement` is nil when neither file sets it (the default applies).
+    case config(placement: SettingPlacement?)
     /// The host's state, kept in its database; it has no Local choice.
     case state
 
-    enum CodingKeys: String, CodingKey { case kind, file, placement }
+    enum CodingKeys: String, CodingKey { case kind, placement }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         switch try c.decode(String.self, forKey: .kind) {
         case "config":
-            self = .config(
-                file: try c.decode(SettingFile.self, forKey: .file),
-                placement: try c.decodeIfPresent(SettingPlacement.self, forKey: .placement))
+            self = .config(placement: try c.decodeIfPresent(SettingPlacement.self, forKey: .placement))
         case "state": self = .state
         case let other:
             throw DecodingError.dataCorruptedError(
@@ -562,9 +556,8 @@ public enum SettingKind: Codable, Sendable, Hashable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .config(let file, let placement):
+        case .config(let placement):
             try c.encode("config", forKey: .kind)
-            try c.encode(file, forKey: .file)
             try c.encode(placement, forKey: .placement)
         case .state:
             try c.encode("state", forKey: .kind)

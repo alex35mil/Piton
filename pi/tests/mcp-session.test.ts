@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -49,8 +50,7 @@ for (const exposure of ["direct", "deferred", "codemode"] as const) {
             ],
             tools: [exposure === "codemode" ? "codemode" : "tool_search", "mcp__*"],
             setup(root) {
-                fs.mkdirSync(path.join(root, ".piton"))
-                fs.writeFileSync(path.join(root, ".piton/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+                writePermissions(root, { defaultMode: "allow" })
                 fs.writeFileSync(
                     path.join(root, ".piton/mcp.json"),
                     JSON.stringify({

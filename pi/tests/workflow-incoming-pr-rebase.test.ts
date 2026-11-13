@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -52,11 +53,7 @@ function fixture(kind: Kind = "clean") {
     git(root, "commit", "-m", "parent")
     fs.mkdirSync(path.join(root, ".piton"))
     const forge = { provider: "github", mcpServer: "fixture", repository: { owner: "upstream", repo: "app" } }
-    fs.writeFileSync(
-        path.join(root, ".piton/workflows.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify({ tracker: minimalTracker(), forge }))
+    writeProjectConfig(root, { branchFormat: "identifier-title", tracker: minimalTracker(), forge })
     prepareArtifactPersistence(root)
     fs.writeFileSync(path.join(root, "README.md"), "parent staged\n")
     git(root, "add", "README.md")
@@ -1159,8 +1156,6 @@ process.exit(result.status ?? 1);
     it("requires exact configured Project Done proof before removing a merged checkout", async () => {
         const f = fixture()
         try {
-            const configFile = path.join(f.root, ".piton/integrations.json")
-            const config = JSON.parse(fs.readFileSync(configFile, "utf8"))
             const values = {
                 backlog: "Backlog",
                 todo: "Todo",
@@ -1169,7 +1164,7 @@ process.exit(result.status ?? 1);
                 done: "Done",
                 canceled: "Canceled",
             }
-            config.tracker = {
+            const tracker = {
                 provider: "github",
                 mcpServer: "board",
                 repository: { owner: "upstream", repo: "app" },
@@ -1184,7 +1179,7 @@ process.exit(result.status ?? 1);
                     priority: { scope: "project", field: "Priority", values: ["High"] },
                 },
             }
-            fs.writeFileSync(configFile, JSON.stringify(config))
+            writeProjectConfig(f.root, { tracker })
             await f.ready()
             f.evidence.response.state = "closed"
             f.evidence.response.merged = true

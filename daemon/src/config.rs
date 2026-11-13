@@ -213,16 +213,11 @@ mod tests {
         let global = dir.path().join("piton");
         std::fs::create_dir_all(&global).unwrap();
         std::fs::write(
-            global.join("daemon.toml"),
-            "socket = \"/tmp/s.sock\"\n[stop]\ngrace_ms = 5\n[sandbox]\ncommand = [\"/bin/nono\"]\n",
+            global.join("config.toml"),
+            "socket = \"/tmp/s.sock\"\n[stop]\ngrace_ms = 5\n[sandbox]\ncommand = [\"/bin/nono\"]\n[host]\nroots = [\"~/p\"]\nattach_mode = \"host\"\nlogging = \"debug\"\n",
         )
         .unwrap();
-        std::fs::write(global.join("daemon.local.toml"), "[stop]\nterm_grace_ms = 7\n").unwrap();
-        std::fs::write(
-            global.join("settings.toml"),
-            "[host]\nroots = [\"~/p\"]\nattach_mode = \"host\"\nlogging = \"debug\"\n",
-        )
-        .unwrap();
+        std::fs::write(global.join("config.local.toml"), "[stop]\nterm_grace_ms = 7\n").unwrap();
         let mut paths = Paths::current();
         paths.global = global;
         paths.pi_agent_dir = dir.path().join("agent");

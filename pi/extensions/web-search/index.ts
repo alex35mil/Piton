@@ -6,13 +6,12 @@
  *
  * Auth: BRAVE_SEARCH_API_KEY from env var or settings.
  *
- * Settings: web-search[.local].json in piton's configuration chain (the global tier, parent folders, the
- * repository's .piton/), resolved by `piton config resolve`; the nearest apiKey wins.
+ * Settings: `[web_search]` of config.toml in piton's configuration chain (the global folder, parent folders, the
+ * repository's .piton/), resolved by `piton config resolve`; the nearest api_key wins.
  *
  * Schema:
- * {
- *   "apiKey": "..."
- * }
+ *   [web_search]
+ *   api_key = "..."
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
@@ -25,7 +24,7 @@ const EXTENSION = "web-search"
 /** The configured key, or why the configuration couldn't be read. */
 function configuredKey(cwd: string): { apiKey?: string } | { error: string } {
     try {
-        return { apiKey: section(resolveSettings(cwd).web_search).apiKey }
+        return { apiKey: section(resolveSettings(cwd).web_search).api_key }
     } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) }
     }
@@ -68,7 +67,7 @@ export default async function (pi: ExtensionAPI) {
                     content: [
                         {
                             type: "text" as const,
-                            text: "Web search is not configured. Set BRAVE_SEARCH_API_KEY as an environment variable, or add apiKey to web-search.json.",
+                            text: "Web search is not configured. Set BRAVE_SEARCH_API_KEY as an environment variable, or set api_key in [web_search] of piton's config.toml.",
                         },
                     ],
                 }

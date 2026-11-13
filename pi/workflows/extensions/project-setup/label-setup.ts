@@ -1,11 +1,8 @@
-import * as fs from "node:fs"
-import * as path from "node:path"
-
 import { type Static, type TSchema, Type } from "typebox"
 
 import { compile, describeErrors } from "../../../extensions/__lib/schema.js"
-import * as project from "../../../extensions/__lib/project.js"
-import { INTEGRATION_CONFIG_PATH, type IntegrationConfig, IntegrationConfigValidator } from "../integrations/config.js"
+import { resolveSettings, section } from "../../../extensions/__lib/settings.js"
+import { type IntegrationConfig, integrationsFromFile, TrackerConfigValidator } from "../integrations/config.js"
 import {
     assertGitHubLabels,
     assertLinearLabels,
@@ -338,21 +335,20 @@ function desiredFor(input: DesiredInput) {
 }
 
 /**
- * The managed set setup last applied: the working-tree configuration, committed or not, when it
- * validates and describes the same tracker target. Anything else, such as an older shape or
- * another repository or team, means there's none.
+ * The managed set setup last applied: the nearest `[tracker]`, committed or not, when it validates and describes the
+ * same tracker target. Anything else, such as an older shape or another repository or team, means there's none.
  */
 async function readPrevious(cwd: string, adapter: ProviderAdapter) {
-    const file = path.join(project.resolveRootDir(cwd), INTEGRATION_CONFIG_PATH)
-    if (!fs.existsSync(file)) return null
     let value: unknown
     try {
-        value = JSON.parse(fs.readFileSync(file, "utf-8"))
+        const found = section(resolveSettings(cwd).integrations).tracker
+        if (!found) return null
+        value = integrationsFromFile(found.value)
     } catch {
         return null
     }
-    if (!IntegrationConfigValidator.check(value)) return null
-    const tracker = value.tracker
+    if (!TrackerConfigValidator.check(value)) return null
+    const tracker: IntegrationConfig["tracker"] = value
     if (!(await adapter.sameTarget(tracker))) return null
     return tracker.provider === "github"
         ? { labels: tracker.labels ?? {}, phase: undefined, entries: githubManagedEntries(tracker.labels) }

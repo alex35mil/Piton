@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -115,8 +116,8 @@ describe("workflow tool discovery", () => {
         const h = await nativeSessionFixture({
             extensions: [permissions, initialize],
             tools: ["+read"],
-            setup(root) {
-                fs.writeFileSync(path.join(root, "config/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+            setup() {
+                writePermissions("global", { defaultMode: "allow" })
             },
         })
         try {
