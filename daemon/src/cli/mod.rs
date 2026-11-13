@@ -205,14 +205,16 @@ enum ConfigAction {
         #[usage(long)]
         dry_run: bool,
     },
-    /// Validate the workspace's configuration and list the files it reads.
+    /// Validate the workspace's configuration, list the files it reads, and warn about a path under another user's home
+    /// or a secret in a file Git tracks.
     Check {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
-    /// Whether PATH is a protected file of the workspace (JSON): `configuration`, `pi`, `skill`, or null. The pi
-    /// package asks before writing. With --seatbelt-rules, prints the sandbox rules a launch in the workspace gets
-    /// instead (one per line; the host check daemon/tests/probe/protected.sh uses them).
+    /// Whether PATH is a protected file of the workspace, as JSON with `protected: true|false`. Every write to one asks
+    /// the user: through the daemon in sessions it launched, in pi itself outside piton. With --seatbelt-rules, prints
+    /// the sandbox rules a launch in the workspace gets instead (one per line; the host check
+    /// daemon/tests/probe/protected.sh uses them).
     Protected {
         path: Option<PathBuf>,
         #[usage(long)]
