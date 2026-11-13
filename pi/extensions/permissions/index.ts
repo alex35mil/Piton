@@ -45,7 +45,7 @@ import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@ear
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
 import { requireRuntime, type Runtime } from "../__lib/runtime.js"
-import { PROTECTED_HINT } from "../__lib/protected.js"
+import { PROTECTED_HINT, protectedKind } from "../__lib/protected.js"
 import { camelKeys, type LevelKind, resolveSettings, section } from "../__lib/settings.js"
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
@@ -336,24 +336,30 @@ export default function (pi: ExtensionAPI) {
         }
     })
     // The sandbox denies shell writes to protected files with a bare "Operation not permitted": say why, and what works.
-    pi.on("tool_result", async (event) => {
+    pi.on("tool_result", async (event, ctx) => {
         if (event.toolName !== "bash" || process.env.PITON_RUNTIME !== "sandbox") return undefined
         const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
-        if (!deniedProtectedWrite(text)) return undefined
+        if (!deniedProtectedWrite(text, (file) => protectedKind(ctx.cwd, file) !== undefined)) return undefined
         return { content: [...event.content, { type: "text" as const, text: PROTECTED_HINT }] }
     })
     return registerReviewCodemode(pi)
 }
 
-/** A shell output that reports a denied write under a protected folder. */
-export function deniedProtectedWrite(output: string): boolean {
-    return output
-        .split("\n")
-        .some(
-            (line) =>
-                /Operation not permitted|unable to unlink/.test(line) &&
-                /(^|[/\s'"])(\.piton(?!\/\.local)|\.pi|\.agents\/skills)(\/|['"\s:]|$)/.test(line),
-        )
+/**
+ * A shell output that reports a denied write to one of this workspace's protected files. The workspace's protected
+ * files are always readable, so "Operation not permitted" on one of them is a denied write; the same message about
+ * another checkout's folder is a read the sandbox doesn't grant, and gets no hint. `isProtected` asks the resolver
+ * (`piton config protected`, cached) about a path from the message; names that can't be protected aren't asked.
+ */
+export function deniedProtectedWrite(output: string, isProtected: (file: string) => boolean): boolean {
+    const name = /(^|\/)(\.piton(?!\/\.local)|\.pi|\.agents\/skills)(\/|$)/i
+    return output.split("\n").some((line) => {
+        if (!/Operation not permitted|unable to unlink/.test(line)) return false
+        // The paths a message names: quoted ('x'), or between `: ` separators (`rm: x: Operation not permitted`).
+        const quoted = [...line.matchAll(/'([^']+)'/g)].map((match) => match[1]!)
+        const fields = line.split(": ").map((field) => field.trim())
+        return [...quoted, ...fields].some((file) => name.test(file) && isProtected(file))
+    })
 }
 
 // A level's shared file applies everywhere; its runtime file applies only in that runtime.

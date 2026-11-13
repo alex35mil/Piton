@@ -542,23 +542,35 @@ describe("protected files", () => {
         }
     })
 
-    it("recognizes a shell write the sandbox denied on a protected file", () => {
+    it("recognizes a shell write the sandbox denied on a protected file of this workspace", () => {
+        // This workspace's protected files, as the resolver answers.
+        const asked: string[] = []
+        const isProtected = (file: string) => {
+            asked.push(file)
+            return !file.startsWith("/other/")
+        }
         for (const output of [
-            "sh: .piton/permissions.json: Operation not permitted",
+            "sh: .piton/config.toml: Operation not permitted",
             "rm: /u/repo/.pi/settings.json: Operation not permitted",
             "mkdir: apps/.agents/skills/x: Operation not permitted",
-            "error: unable to unlink old '.piton/workflows.json': Operation not permitted",
+            "error: unable to unlink old '.piton/config.toml': Operation not permitted",
+            "sh: .PITON/config.toml: Operation not permitted",
         ]) {
-            assert.equal(deniedProtectedWrite(output), true, output)
+            assert.equal(deniedProtectedWrite(output, isProtected), true, output)
         }
+        asked.length = 0
         for (const output of [
             "sh: /etc/hosts: Operation not permitted",
-            "cat .piton/permissions.json",
+            "cat .piton/config.toml",
             "touch .piton/.local/x: Operation not permitted",
             "sh: apps/.pix/f: Operation not permitted",
+            // Another checkout's folder the sandbox can't read: not a protected write here.
+            "ls: /other/repo/.piton: Operation not permitted",
         ]) {
-            assert.equal(deniedProtectedWrite(output), false, output)
+            assert.equal(deniedProtectedWrite(output, isProtected), false, output)
         }
+        // Only names that could be protected are asked about.
+        assert.deepEqual(asked, ["/other/repo/.piton"])
     })
 
     it("asks on the host even when edits are allowed, and leaves other files alone", async () => {
