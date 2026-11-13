@@ -230,15 +230,11 @@ pub fn plan(path: &Path, workers: &[PathBuf]) -> Result<Plan, MigrateError> {
         }
         if !from.is_empty() {
             claim(&to)?;
-            let text = toml::to_string(&daemon).map_err(|e| MigrateError::Io {
+            let text = daemon_toml(&daemon).map_err(|e| MigrateError::Io {
                 path: to.clone(),
                 source: std::io::Error::other(e),
             })?;
-            steps.push(Step::Convert {
-                from,
-                to,
-                text: format!("# Converted by `piton migrate`.\n{text}"),
-            });
+            steps.push(Step::Convert { from, to, text });
         }
     }
 
@@ -420,7 +416,7 @@ pub fn global(paths: &Paths) -> Result<Vec<String>, MigrateError> {
         ));
     }
     if let Some(file) = daemon {
-        out.push(format!("daemon.toml:\n{}", toml::to_string(&file).unwrap_or_default()));
+        out.push(format!("daemon.toml:\n{}", daemon_toml(&file).unwrap_or_default()));
     }
     let pi_dir = &paths.pi_agent_dir;
     for name in [
@@ -445,6 +441,27 @@ pub fn global(paths: &Paths) -> Result<Vec<String>, MigrateError> {
         ));
     }
     Ok(out)
+}
+
+/// A `daemon.toml` as a person would write it: `[sandbox]` grant lists one path per line, other values inline.
+fn daemon_toml(file: &DaemonFile) -> Result<String, toml::ser::Error> {
+    let text = toml::to_string(file)?;
+    let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return Ok(text);
+    };
+    if let Some(sandbox) = doc.get_mut("sandbox").and_then(toml_edit::Item::as_table_mut) {
+        for (_, item) in sandbox.iter_mut() {
+            if let Some(array) = item.as_value_mut().and_then(toml_edit::Value::as_array_mut) {
+                for value in array.iter_mut() {
+                    value.decor_mut().set_prefix("\n    ");
+                    value.decor_mut().set_suffix("");
+                }
+                array.set_trailing("\n");
+                array.set_trailing_comma(false);
+            }
+        }
+    }
+    Ok(doc.to_string())
 }
 
 /// Where nono keeps the user's profiles.
@@ -671,8 +688,13 @@ mod tests {
             assert!(!root.join(old).exists(), "{old}");
         }
 
-        // The converted files resolve to the old grants and skip list.
-        let daemon: DaemonFile = toml::from_str(&std::fs::read_to_string(piton.join("daemon.toml")).unwrap()).unwrap();
+        // The converted files resolve to the old grants and skip list, written as a person would.
+        let text = std::fs::read_to_string(piton.join("daemon.toml")).unwrap();
+        assert_eq!(
+            text,
+            "[sandbox]\nallow = [\n    \"$HOME/cache\"\n]\nread_file = [\n    \"$HOME/f\"\n]\n\n[workers]\nskip = [\"apps/.build\"]\n"
+        );
+        let daemon: DaemonFile = toml::from_str(&text).unwrap();
         assert_eq!(daemon.sandbox.allow, ["$HOME/cache"]);
         assert_eq!(daemon.sandbox.read_file, ["$HOME/f"]);
         assert_eq!(daemon.workers.skip, ["apps/.build"]);
@@ -754,7 +776,7 @@ mod tests {
         let lines = global(&paths).unwrap().join("\n");
         assert!(lines.contains("roots = [\"~/p\"]"), "{lines}");
         assert!(lines.contains("base = \"mise-dev\""), "{lines}");
-        assert!(lines.contains("allow = [\"$HOME/a\"]"), "{lines}");
+        assert!(lines.contains("allow = [\n    \"$HOME/a\"\n]"), "{lines}");
         assert!(lines.contains("agents/rules"), "{lines}");
         assert!(lines.contains(".config/piton/permissions.json"), "{lines}");
     }
