@@ -53,7 +53,7 @@ pub enum ViewRequest {
     /// Daemon-wide state (keep-awake). Also pushed as `daemon` lines after `sessions.subscribe`, on change.
     #[serde(rename = "daemon.state")]
     DaemonState,
-    /// Turn keep-awake on or off until the daemon restarts (the config's `keep_awake` is the default).
+    /// Turn keep-awake on or off; kept across restarts.
     #[serde(rename = "daemon.keep_awake")]
     DaemonKeepAwake { on: bool },
     /// Switch host logging until the policy expires or the daemon restarts (the config's `[logging] mode` is the
@@ -250,7 +250,9 @@ pub struct WorkerEntry {
 pub struct DaemonState {
     /// `<package version> (<git commit>[-dirty])` of the running daemon.
     pub version: String,
-    /// Keep-awake is enabled: the Mac is held awake while sessions are live.
+    /// This host's identity, stable across restarts and kept by `piton state export|import`.
+    pub host_id: String,
+    /// Keep-awake is enabled: the Mac is held awake while sessions are live. Kept across restarts.
     pub keep_awake: bool,
     /// The assertion is held right now (enabled and at least one live session).
     pub awake: bool,

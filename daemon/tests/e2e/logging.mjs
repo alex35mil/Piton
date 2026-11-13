@@ -22,7 +22,6 @@ function writeConfig(mode) {
         daemon: {
             socket,
             log: join(dir, "piton.log"),
-            keep_awake: false,
             tailnet: { enabled: false },
             env: { login_shell: false, mise: false },
         },

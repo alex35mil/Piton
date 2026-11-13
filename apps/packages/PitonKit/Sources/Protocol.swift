@@ -480,8 +480,10 @@ public enum Reply: Sendable, Hashable {
 public struct DaemonState: Codable, Sendable, Hashable {
     /// `<package version> (<git commit>[-dirty])` of the running daemon.
     public let version: String
+    /// This host's identity: stable across restarts and kept when the host's state moves to a replacement Mac.
+    public let hostID: String
     /// Keep-awake is enabled: the Mac is held awake while sessions are live (idle ones too), so the phone can reach
-    /// them. Toggled at runtime; a daemon restart goes back to the config.
+    /// them. Toggled from the apps and kept across restarts.
     public let keepAwake: Bool
     /// The Mac is being held awake right now (enabled and at least one live session).
     public let awake: Bool
@@ -491,6 +493,7 @@ public struct DaemonState: Codable, Sendable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case version, awake, sessions, logging
+        case hostID = "host_id"
         case keepAwake = "keep_awake"
     }
 }

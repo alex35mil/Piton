@@ -15,6 +15,7 @@ mod sandbox;
 mod service;
 mod session;
 mod settings;
+mod state;
 mod tailnet;
 mod view;
 mod viewconn;

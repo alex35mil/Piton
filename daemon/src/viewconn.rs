@@ -109,8 +109,11 @@ fn handle(
         ViewRequest::DaemonState => Ok(json!({"state": daemon.state()})).into(),
         ViewRequest::DaemonKeepAwake { on } => {
             crate::log!("view client {watcher}: keep-awake {}", if on { "on" } else { "off" });
-            daemon.set_keep_awake(on);
-            Ok(json!({"state": daemon.state()})).into()
+            daemon
+                .set_keep_awake(on)
+                .map(|()| json!({"state": daemon.state()}))
+                .map_err(|e| format!("can't save keep-awake: {e}"))
+                .into()
         }
         ViewRequest::DaemonLogging { policy } => {
             crate::log!("view client {watcher}: logging change");

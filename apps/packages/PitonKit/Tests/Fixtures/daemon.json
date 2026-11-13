@@ -2,6 +2,7 @@
   "type": "daemon",
   "state": {
     "version": "0.1.0 (abc1234567)",
+    "host_id": "0123456789abcdef0123456789abcdef",
     "keep_awake": true,
     "awake": true,
     "sessions": 2,

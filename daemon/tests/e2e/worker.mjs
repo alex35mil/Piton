@@ -57,7 +57,6 @@ function setup() {
         daemon: {
             socket,
             log,
-            keep_awake: false,
             tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             sandbox: { command: [join(bin, "nono")], base: "mise-dev", allow: ["/global-grant"] },

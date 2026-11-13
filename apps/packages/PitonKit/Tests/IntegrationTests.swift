@@ -50,7 +50,6 @@ private final class Daemon: @unchecked Sendable {
         try """
         socket = "\(socket)"
         log = "\(log.path)"
-        keep_awake = false
         [pi]
         args = ["-e", "\(ext)", "--model", "faux/faux-1"]
         [env]
@@ -69,6 +68,21 @@ private final class Daemon: @unchecked Sendable {
         empty_grace_ms = 60000
         roots = ["\(root.path)"]
         """.write(to: config.appendingPathComponent("settings.toml"), atomically: true, encoding: .utf8)
+        // Keep-awake is state in the daemon's database (next to its socket): start with it off, so no caffeinate runs.
+        let seed = Process()
+        seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        seed.arguments = [
+            dir.appendingPathComponent("piton.db").path,
+            """
+            CREATE TABLE host (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL);
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO host VALUES (1, 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0');
+            INSERT INTO settings VALUES ('keep_awake', 'false');
+            PRAGMA user_version = 1;
+            """,
+        ]
+        try seed.run()
+        seed.waitUntilExit()
         var env = ProcessInfo.processInfo.environment
         env["PITON_CONFIG_HOME"] = config.path
         env["PI_CODING_AGENT_DIR"] = agent.path
@@ -459,7 +473,7 @@ struct IntegrationTests {
             mac.stop()
             phone.stop()
         }
-        // The test daemon's config has keep-awake off.
+        // The test daemon's state database has keep-awake off.
         try await eventually { mac.daemon?.keepAwake == false && phone.daemon?.keepAwake == false }
         #expect(await mac.setKeepAwake(true))
         try await eventually { phone.daemon?.keepAwake == true && phone.daemon?.awake == false }

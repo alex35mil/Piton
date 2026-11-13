@@ -45,9 +45,7 @@ public struct GeneralSettings: View {
     public var body: some View {
         Form {
             Section {
-                KeepAwakeToggle(
-                    store: store,
-                    note: "A switch lasts until the daemon restarts; the default is keep_awake in piton's config.toml.")
+                KeepAwakeToggle(store: store)
             }
             Section("piton") {
                 LabeledContent("Connection", value: connection)

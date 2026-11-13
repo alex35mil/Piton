@@ -34,9 +34,12 @@ pub struct Daemon {
     status_changed: Arc<Notify>,
     /// Fires whenever the session list (membership, status, clients, identity, title) may have changed.
     list_changed: tokio::sync::broadcast::Sender<()>,
-    /// Whether keep-awake is enabled (config default, toggled at runtime by the apps). Not persisted: a daemon
-    /// restart goes back to the config.
+    /// Whether keep-awake is enabled: state, kept in the database, so it survives restarts. On by default.
     keep_awake: std::sync::atomic::AtomicBool,
+    /// The host's state database. Writes are rare and small, so one connection behind a lock.
+    state: Mutex<crate::state::State>,
+    /// This host's identity, from the database.
+    host_id: String,
     /// Fires when host logging changes, so the expiry task re-arms.
     logging_changed: Arc<Notify>,
 }
@@ -47,6 +50,8 @@ pub enum DaemonError {
     AlreadyRunning(PathBuf),
     #[error("socket {path}: {source}")]
     Socket { path: PathBuf, source: std::io::Error },
+    #[error("state database: {0}")]
+    State(#[from] crate::state::StateError),
 }
 
 pub async fn run(config: Config) -> Result<(), DaemonError> {
@@ -117,7 +122,10 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
         found.join(", ")
     );
 
-    let config_keep_awake = config.keep_awake;
+    let state = crate::state::State::open(&config.state_db())?;
+    let host_id = state.host_id()?;
+    let keep_awake = state.bool(crate::state::Setting::KeepAwake)?.unwrap_or(true);
+    crate::log!("state: {} (host {host_id})", config.state_db().display());
     let mise = config.env.mise.then(|| crate::worker::Mise {
         program: launch::resolve_program("mise", &base_env),
         env: base_env.clone(),
@@ -131,7 +139,9 @@ pub async fn run(config: Config) -> Result<(), DaemonError> {
         next_client: AtomicU64::new(1),
         status_changed: Arc::new(Notify::new()),
         list_changed: tokio::sync::broadcast::channel(64).0,
-        keep_awake: std::sync::atomic::AtomicBool::new(config_keep_awake),
+        keep_awake: std::sync::atomic::AtomicBool::new(keep_awake),
+        state: Mutex::new(state),
+        host_id,
         logging_changed: Arc::new(Notify::new()),
     });
     tokio::spawn(crate::awake::run(daemon.clone()));
@@ -224,14 +234,16 @@ impl Daemon {
         self.keep_awake.load(Ordering::Relaxed)
     }
 
-    /// Turns keep-awake on or off until the daemon restarts.
-    pub fn set_keep_awake(&self, on: bool) {
+    /// Turns keep-awake on or off, and keeps the choice across restarts.
+    pub fn set_keep_awake(&self, on: bool) -> Result<(), crate::state::StateError> {
+        lock(&self.state).set_bool(crate::state::Setting::KeepAwake, on)?;
         let was = self.keep_awake.swap(on, Ordering::Relaxed);
         if was != on {
             crate::log!("keep-awake turned {}", if on { "on" } else { "off" });
             self.status_changed.notify_one();
             let _ = self.list_changed.send(());
         }
+        Ok(())
     }
 
     /// Switches host logging until the policy expires or the daemon restarts. Clients see the change in the pushed
@@ -252,6 +264,7 @@ impl Daemon {
         let keep_awake = self.keep_awake();
         crate::wire::DaemonState {
             version: crate::VERSION.to_string(),
+            host_id: self.host_id.clone(),
             keep_awake,
             awake: keep_awake && sessions > 0,
             sessions,

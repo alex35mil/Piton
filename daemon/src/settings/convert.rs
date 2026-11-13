@@ -173,9 +173,18 @@ pub fn project_toml(text: &str, path: &Path) -> Result<WorkersTable, ConvertErro
     Ok(workers)
 }
 
+/// The old global `config.toml`, converted.
+#[derive(Debug)]
+pub struct OldConfig {
+    pub daemon: DaemonFile,
+    pub settings: SettingsFile,
+    /// `keep_awake`, now state in the host's database: the user sets it in the apps.
+    pub keep_awake: Option<bool>,
+}
+
 /// The global `config.toml` split into `daemon.toml` (how the daemon runs) and `settings.toml` (`[host]`
 /// preferences). Only keys the old file set are carried over, so the current defaults still apply to the rest.
-pub fn old_config(text: &str, path: &Path) -> Result<(DaemonFile, SettingsFile), ConvertError> {
+pub fn old_config(text: &str, path: &Path) -> Result<OldConfig, ConvertError> {
     let invalid = |reason: String| ConvertError::Invalid {
         path: path.to_path_buf(),
         reason,
@@ -187,11 +196,13 @@ pub fn old_config(text: &str, path: &Path) -> Result<(DaemonFile, SettingsFile),
     let table: toml::Table = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
     let mut daemon = toml::Table::new();
     let mut host = HostPrefs::default();
+    let mut keep_awake = None;
     for (key, value) in table {
         match key.as_str() {
-            "socket" | "log" | "keep_awake" | "pi" | "env" | "stop" | "tailnet" => {
+            "socket" | "log" | "pi" | "env" | "stop" | "tailnet" => {
                 daemon.insert(key, value);
             }
+            "keep_awake" => keep_awake = Some(field(value, "keep_awake").map_err(invalid)?),
             "sandbox" => {
                 let toml::Value::Table(sandbox) = value else {
                     return Err(invalid("sandbox must be a table".into()));
@@ -230,13 +241,14 @@ pub fn old_config(text: &str, path: &Path) -> Result<(DaemonFile, SettingsFile),
     let daemon: DaemonFile = toml::Value::Table(daemon)
         .try_into()
         .map_err(|e: toml::de::Error| invalid(e.to_string()))?;
-    Ok((
+    Ok(OldConfig {
         daemon,
-        SettingsFile {
+        settings: SettingsFile {
             host,
             ..SettingsFile::default()
         },
-    ))
+        keep_awake,
+    })
 }
 
 fn field<T: serde::de::DeserializeOwned>(value: toml::Value, key: &str) -> Result<T, String> {
@@ -399,12 +411,16 @@ mod tests {
             Err(ConvertError::Unmodeled { .. })
         ));
 
-        let (daemon, settings) = old_config(
+        let OldConfig {
+            daemon,
+            settings,
+            keep_awake,
+        } = old_config(
             "roots = [\"~/Projects\"]\nkeep_awake = false\nattach_mode = \"host\"\n[sandbox]\nprofile = \"mine\"\ncommand = [\"/bin/nono\"]\n[logging]\nmode = \"debug\"\n[stop]\ngrace_ms = 5\n",
             Path::new("config.toml"),
         )
         .unwrap();
-        assert_eq!(daemon.keep_awake, Some(false));
+        assert_eq!(keep_awake, Some(false));
         assert_eq!(daemon.sandbox.base.as_deref(), Some("mine"));
         assert_eq!(daemon.sandbox.command.as_deref(), Some(&["/bin/nono".to_string()][..]));
         assert_eq!(daemon.stop.grace_ms, Some(5));

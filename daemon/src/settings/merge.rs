@@ -23,7 +23,6 @@ fn nearer<T>(base: &mut Option<T>, nearer: Option<T>) {
 pub fn daemon(base: &mut DaemonFile, n: DaemonFile) {
     nearer(&mut base.socket, n.socket);
     nearer(&mut base.log, n.log);
-    nearer(&mut base.keep_awake, n.keep_awake);
     pi(&mut base.pi, n.pi);
     env(&mut base.env, n.env);
     stop(&mut base.stop, n.stop);

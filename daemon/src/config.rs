@@ -22,9 +22,6 @@ pub struct Config {
     pub stop: StopConfig,
     /// How long a pi with no messages, no run, and no pending dialog may stay without clients.
     pub empty_grace_ms: u64,
-    /// Hold a prevent-idle-sleep assertion (`caffeinate -i`) while any session is live, idle ones included, so the
-    /// owner's other devices can reach the Mac.
-    pub keep_awake: bool,
     pub tailnet: TailnetConfig,
     pub logging: LoggingConfig,
     /// Folders whose workspaces the native apps may browse and start sessions in. None by default: the apps can't
@@ -117,7 +114,6 @@ impl Config {
                 term_grace_ms: daemon.stop.term_grace_ms.unwrap_or(3_000),
             },
             empty_grace_ms: host.empty_grace_ms.unwrap_or(10_000),
-            keep_awake: daemon.keep_awake.unwrap_or(true),
             tailnet: TailnetConfig {
                 enabled: daemon.tailnet.enabled.unwrap_or(true),
                 port: daemon.tailnet.port.unwrap_or(7357),
@@ -159,6 +155,21 @@ pub fn load(config_home: Option<&Path>) -> Result<Config, ConfigError> {
     }
     let resolved = crate::settings::resolve_global(&paths)?;
     Ok(Config::from_files(resolved.daemon?, resolved.settings?, paths))
+}
+
+impl Config {
+    /// The daemon's state folder: next to its socket, outside every sandbox.
+    pub fn state_dir(&self) -> PathBuf {
+        self.socket
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.paths.home.join(".local/state/piton"))
+    }
+
+    /// The host's state database.
+    pub fn state_db(&self) -> PathBuf {
+        self.state_dir().join(crate::state::FILE)
+    }
 }
 
 /// The user's home folder, from the user database (see settings::home).

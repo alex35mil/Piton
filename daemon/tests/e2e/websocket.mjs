@@ -38,7 +38,6 @@ function setup() {
         daemon: {
             socket: join(dir, "piton.sock"),
             log,
-            keep_awake: false,
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false, mise: false },
             tailnet: { port: 0, heartbeat_ms: 300, retry_ms: 200, cli: fakeTailscale },

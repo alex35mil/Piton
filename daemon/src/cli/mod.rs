@@ -90,10 +90,29 @@ enum Cmd {
         #[usage(long)]
         dry_run: bool,
     },
+    /// Move this host's state database (host identity, keep-awake, ...) to a replacement Mac.
+    State {
+        #[usage(subcommand)]
+        action: StateAction,
+    },
     /// Print a shell completion script.
     Completion {
         #[usage(long, choices("bash", "zsh", "fish"))]
         shell: String,
+    },
+}
+
+#[derive(Subcommands)]
+enum StateAction {
+    /// Write a copy of the state database to FILE (which must not exist). Safe while the daemon runs.
+    Export { file: PathBuf },
+    /// Replace the state database with FILE, keeping its host identity. Stop the daemon first
+    /// (`piton service uninstall`), then install it again.
+    Import {
+        file: PathBuf,
+        /// Replace a database that already holds state.
+        #[usage(long)]
+        force: bool,
     },
 }
 
@@ -209,6 +228,7 @@ pub fn main() -> ExitCode {
         | Cmd::Start { .. }
         | Cmd::Stop { .. }
         | Cmd::Worker { .. }
+        | Cmd::State { .. }
         | Cmd::Logging { .. } => {}
     }
     let config = match crate::config::load(cli.config_home.as_deref()) {
@@ -261,6 +281,38 @@ async fn run(command: Cmd, config: crate::config::Config) -> ExitCode {
         Cmd::Stop { session } => sessions::stop(&config, session).await,
         Cmd::Worker { action, json } => worker::run(&config, action, json).await,
         Cmd::Logging { action } => logging::run(action, &config).await,
+        Cmd::State { action } => state(action, &config).await,
+    }
+}
+
+async fn state(action: StateAction, config: &crate::config::Config) -> ExitCode {
+    let db = config.state_db();
+    let result = match action {
+        StateAction::Export { file } => {
+            crate::state::export(&db, &file).map(|()| format!("exported {} to {}", db.display(), file.display()))
+        }
+        StateAction::Import { file, force } => {
+            // The daemon holds the database open; replacing it under a running daemon would lose the swap.
+            if tokio::net::UnixStream::connect(&config.socket).await.is_ok() {
+                eprintln!(
+                    "piton: the daemon is running on {}; stop it first (`piton service uninstall`)",
+                    config.socket.display()
+                );
+                return ExitCode::from(1);
+            }
+            crate::state::import(&file, &db, force)
+                .map(|()| format!("imported {} into {}", file.display(), db.display()))
+        }
+    };
+    match result {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("piton: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 

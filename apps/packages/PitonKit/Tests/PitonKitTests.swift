@@ -179,6 +179,7 @@ private let decoder = JSONDecoder()
         return
     }
     #expect(state.version == "0.1.0 (abc1234567)")
+    #expect(state.hostID == "0123456789abcdef0123456789abcdef")
     #expect(state.keepAwake && state.awake && state.sessions == 2)
     #expect(
         state.logging

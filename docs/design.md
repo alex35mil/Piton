@@ -362,8 +362,8 @@ arrive out of request order.
 | --- | --- |
 | `sessions.list` | `{sessions}`: live sessions (key, id, file, workspace, checkout, mode, status, clients, pid, title) |
 | `sessions.subscribe` | `{}`; then pushes `sessions` and `daemon {state}` lines on change |
-| `daemon.state` | `{state}`: `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`) |
-| `daemon.keep_awake {on}` | `{state}`; until the daemon restarts |
+| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`) |
+| `daemon.keep_awake {on}` | `{state}`; kept in the state database across restarts |
 | `daemon.logging {policy}` | `{state}`; until it expires or the daemon restarts |
 | `workspaces.browse {path?}` | `{entries}`; see "Workspace roots" |
 | `session.start {workspace, mode?, prompt?}` | `{session}`; mode defaults to `sandbox`; `workspace` must be a checkout under a root |
@@ -485,9 +485,9 @@ Attention is derived from the event stream:
   assertion (`caffeinate -i`), so the phone can reach sessions it might want to steer; released when the last
   session ends. Idle sessions count: a Mac that slept with only idle sessions made the phone lose access
   (2026-11-08). The display may still sleep and the screen lock; the daemon and Tailscale keep running.
-- On/off: config `keep_awake` (default on) is the default; the apps toggle it at runtime (`daemon.keep_awake`,
-  the macOS menu bar item and Settings > General on both platforms). Not persisted: a daemon restart goes back to
-  the config.
+- On/off: state in the host's database (default on); the apps toggle it (`daemon.keep_awake`, the macOS menu bar
+  item and Settings > General on both platforms), and the choice survives restarts. A `keep_awake` key in
+  `daemon.toml` is refused: it's state, not configuration.
 - Lid closed on battery without an external display sleeps regardless. For that, `piton-sleepd` toggles
   `pmset disablesleep` while agents work: it accepts XPC only from the signed daemon, restores normal sleep when the
   connection drops, and enforces a maximum duration and a low-battery/thermal cutoff.
@@ -563,7 +563,7 @@ Status: settled in #206, being implemented. Sections above that name `.piton.tom
 **Hosts and clients.** A host runs the daemon: it runs pi, holds the projects, and owns the state database. A client
 is an app connected to a host (the Mac app, the iPhone and iPad apps). A Mac can be a host, a client of another host,
 or both; the Mac app asks on first launch and installs the daemon and the sleep helper only on a host. Each host has
-a generated `host_id`, sent in the hello reply and `daemon.state`.
+a generated `host_id`, sent in `daemon.state` (pushed to every subscribed client).
 
 Four stores, each with one job; every value has exactly one home.
 

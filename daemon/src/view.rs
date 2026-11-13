@@ -1461,6 +1461,7 @@ mod tests {
                 json!({"type": "daemon", "state": crate::wire::DaemonState {
                     // Fixed: the real one changes with every commit.
                     version: "0.1.0 (abc1234567)".into(),
+                    host_id: "0123456789abcdef0123456789abcdef".into(),
                     keep_awake: true,
                     awake: true,
                     sessions: 2,

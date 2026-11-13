@@ -206,11 +206,7 @@ pub fn write_profile(
 
 /// Where generated profiles are written: next to the daemon's socket (its state folder), outside every sandbox.
 fn profiles_dir(config: &Config) -> PathBuf {
-    config
-        .socket
-        .parent()
-        .map(|dir| dir.join("profiles"))
-        .unwrap_or_else(|| config.paths.home.join(".local/state/piton/profiles"))
+    config.state_dir().join("profiles")
 }
 
 /// A launch's generated sandbox profile; removed when dropped.

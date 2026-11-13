@@ -1,6 +1,6 @@
 // End-to-end tests of the `view` protocol (native clients) against real pi with the faux extension.
 // Usage (in daemon/): cargo build && node tests/e2e/view.mjs, or `mise run daemon:test`.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -29,7 +29,6 @@ function setup(options = {}) {
         daemon: {
             socket,
             log: join(dir, "piton.log"),
-            keep_awake: false,
             tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false, mise: false },
@@ -355,7 +354,7 @@ const tests = {
         const c = viewClient(ctx, "mac");
         await c.req("sessions.subscribe");
         const daemonLine = (pred) => c.wait((m) => m.type === "daemon" && pred(m.state));
-        // The test config turns keep-awake off.
+        // The test's state database has keep-awake off.
         await daemonLine((s) => s.keep_awake === false && s.awake === false && s.sessions === 0);
         await c.req("daemon.keep_awake", { on: true });
         await daemonLine((s) => s.keep_awake === true && s.awake === false);
@@ -373,12 +372,16 @@ const tests = {
         const { version, ...rest } = state.state;
         assert.match(version, /^\d+\.\d+\.\d+ \([0-9a-f]{10}(-dirty)?\)$/, "version with the git commit");
         assert.deepEqual(rest, {
+            host_id: "e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0",
             keep_awake: true,
             awake: false,
             sessions: 0,
             logging: { policy: { mode: "info" }, default: "info" },
         });
         c.close();
+        // The choice is state: it's in the database for the next start.
+        const saved = execFileSync("sqlite3", [join(ctx.dir, "piton.db"), "SELECT value FROM settings WHERE key = 'keep_awake'"]);
+        assert.equal(saved.toString().trim(), "true");
     },
 
     async "workspaces: browse the roots; start only inside them"(ctx) {

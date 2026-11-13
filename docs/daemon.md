@@ -55,7 +55,6 @@ whole layout, including repository and parent-folder levels, is in "Configuratio
 ```toml
 socket = "~/.local/state/piton/piton.sock"  # for tests and development only: the Mac app always uses this default
 log = "~/.local/state/piton/logs/daemon/current.log" # five files, 2 MiB each
-keep_awake = true         # caffeinate -i while sessions are live (idle too); toggle in the apps
 
 [tailnet]
 enabled = true            # the apps' WebSocket on this Mac's Tailscale addresses
@@ -104,6 +103,17 @@ Every sandboxed launch gets a nono profile the daemon generates in its state fol
 merged `[sandbox]` grants of every level, read access to the configuration chain, the source's `.piton/.local`, and
 the protected-file rules. A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after
 the workspace's mise environment.
+
+### State
+
+What happened on this host, as opposed to what you decide, is in the daemon's SQLite database next to its socket
+(`~/.local/state/piton/piton.db`): this host's identity (`host_id`) and keep-awake (on by default; toggled in the
+apps and kept across restarts). Deleting it resets this host's state; configuration is unaffected. A database newer
+than the binary refuses to start; an older one is migrated after a `.v<N>.bak` copy.
+
+- `piton state export <file>` writes a copy (safe while the daemon runs).
+- `piton state import <file> [--force]` replaces the database on a replacement Mac, keeping `host_id` so clients
+  see the same host. Stop the daemon first. It refuses over a database that holds state unless forced.
 
 ### Moving from the old layout
 

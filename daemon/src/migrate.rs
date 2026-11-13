@@ -380,7 +380,11 @@ pub fn global(paths: &Paths) -> Result<Vec<String>, MigrateError> {
     let mut base = String::from(crate::sandbox::DEFAULT_BASE);
     let mut daemon = None;
     if config.is_file() {
-        let (file, settings) = convert::old_config(&read(&config)?, &config)?;
+        let convert::OldConfig {
+            daemon: file,
+            settings,
+            keep_awake,
+        } = convert::old_config(&read(&config)?, &config)?;
         if let Some(name) = &file.sandbox.base {
             base = name.clone();
         }
@@ -395,6 +399,11 @@ pub fn global(paths: &Paths) -> Result<Vec<String>, MigrateError> {
             "settings.toml:\n{}",
             toml::to_string(&settings).unwrap_or_default()
         ));
+        if let Some(on) = keep_awake {
+            out.push(format!(
+                "keep_awake = {on}: now state, not configuration; set it once in the apps (it then survives restarts)"
+            ));
+        }
     }
     // The base nono profile, when it's a file of the user's (a built-in name has none): its grants become [sandbox].
     let profile = nono_profiles_dir(paths).join(format!("{base}.json"));

@@ -18,9 +18,6 @@ pub struct DaemonFile {
     pub socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
-    /// Hold a prevent-idle-sleep assertion while sessions are live.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_awake: Option<bool>,
     #[serde(default, skip_serializing_if = "PiTable::is_empty")]
     pub pi: PiTable,
     #[serde(default, skip_serializing_if = "EnvTable::is_empty")]
@@ -295,7 +292,6 @@ impl Scoped for DaemonFile {
         };
         set("socket", self.socket.is_some(), &mut keys);
         set("log", self.log.is_some(), &mut keys);
-        set("keep_awake", self.keep_awake.is_some(), &mut keys);
         set("pi", !self.pi.is_empty(), &mut keys);
         set("env", !self.env.is_empty(), &mut keys);
         set("stop", !self.stop.is_empty(), &mut keys);
@@ -376,6 +372,10 @@ const MOVED_DAEMON_KEYS: &[(&str, &str)] = &[
     ("attach_mode", "settings.toml [host] attach_mode"),
     ("empty_grace_ms", "settings.toml [host] empty_grace_ms"),
     ("logging", "settings.toml [host] logging"),
+    (
+        "keep_awake",
+        "the host's state database: it's state, not configuration; toggle it in the apps",
+    ),
 ];
 
 /// Reads one file at one level: parses it strictly and checks the level may set its keys.
