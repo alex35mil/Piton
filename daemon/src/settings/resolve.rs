@@ -636,13 +636,12 @@ fn add_mcp_server(
     Ok(())
 }
 
-/// Files of the layout before `.piton/` in the chain's folders.
+/// Files of the layout before `.piton/` in the folders whose files are read: the source checkout and its parent
+/// folders. A worker's own copies are never read (its settings come from its source), so a worker cloned before its
+/// source was migrated doesn't block anything.
 fn old_layout(chain: &Chain, paths: &Paths) -> Vec<OldPath> {
     let mut found = old_global(paths);
     let mut dirs: Vec<&Path> = vec![&chain.source];
-    if chain.checkout != chain.source {
-        dirs.push(&chain.checkout);
-    }
     for level in &chain.piton {
         if level.kind == LevelKind::Parent
             && let Some(parent) = level.dir.parent()
@@ -1038,7 +1037,14 @@ mod tests {
                 name: "w".into(),
             },
         };
+        // A worker cloned before its source was migrated still has the old files; they're never read.
+        write(&worker.join(".nono.json"), "{}");
+        write(&worker.join(".piton.toml"), "[workers]\n");
+        write(&worker.join(".project/config.json"), "{}");
+        write(&worker.join(".agents/permissions.json"), "{}");
+        assert!(resolve_daemon(&ws, &t.paths).is_ok());
         let r = run(&t, &ws, Runtime::Sandbox).unwrap();
+        assert!(r.errors().is_empty(), "{:?}", r.errors());
         let permissions = &r.permissions.as_ref().unwrap().merged;
         assert_eq!(permissions.deny, ["bash(*)"]);
         assert!(permissions.allow.is_empty());
