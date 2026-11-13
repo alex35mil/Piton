@@ -569,9 +569,8 @@ directory, never the control socket or device tooling. See [logging.md](logging.
 
 ### Configuration and state
 
-Status: implemented in #206, except the protected files (being implemented after host checks). The layout before
-this one (`.piton.toml`, `.nono*.json`, `.project/`, `~/.config/piton/config.toml`, piton's files in pi's agent
-folder) is refused with where each file goes; `piton migrate` moves a repository.
+Status: implemented in #206. Earlier layouts were converted once with a migration command that has since been
+removed; files they left behind are simply not read.
 
 **Hosts and clients.** A host runs the daemon: it runs pi, holds the projects, and owns the state database. A client
 is an app connected to a host (the Mac app, the iPhone and iPad apps). A Mac can be a host, a client of another host,
@@ -757,14 +756,6 @@ so the daemon would carry and sync about 120 path entries itself. That's the ste
 distributed (#224). A typed write-deny with nested re-allow, which would replace the raw rules, is requested upstream
 ([nono#2310](https://github.com/nolabs-ai/nono/issues/2310)). A custom Seatbelt launcher is rejected: keeping system and credential path lists correct across macOS releases is
 security work with no upstream sharing it.
-
-#### Old layout
-
-No compatibility period. `piton migrate` (run on the host; a sandboxed agent can't write `.piton/`) converts a
-repository's earlier files into `config.toml` and `config.local.toml` (`git rm` and `git add` for committed ones),
-moves the rest, and updates the ignore rules. Every consumer refuses the old paths with a message naming each one, in
-the parts that read them: the daemon at start and launch, the pi package in the tools that need them, the Neovim
-plugin for its queue. Global-tier files are the user's dotfiles: `piton migrate --global` prints their conversion.
 
 ### Deploying from a sandbox
 

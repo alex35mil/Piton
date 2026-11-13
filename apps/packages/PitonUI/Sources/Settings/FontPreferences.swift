@@ -12,7 +12,6 @@ final class FontPreferences {
     @ObservationIgnored private var observer: NSObjectProtocol?
 
     init() {
-        ClientPreferences().adoptDeviceFonts()
         reload()
         observer = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main

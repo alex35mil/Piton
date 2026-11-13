@@ -31,7 +31,7 @@ struct ErrorOutput {
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ErrorBody {
-    /// The configuration is invalid or uses the old layout: fix it, then try again.
+    /// The configuration is invalid: fix it, then try again.
     Invalid { message: String },
     /// The workspace isn't a folder, or a worker's layout is wrong.
     Workspace { message: String },
@@ -180,89 +180,6 @@ pub fn run(action: &ConfigAction) -> ExitCode {
     }
 }
 
-/// `piton migrate`: plans the source checkout's migration (and its workers' relinks), prints it, and applies it unless
-/// `dry_run`.
-pub fn migrate(path: Option<&Path>, dry_run: bool) -> ExitCode {
-    let path = path
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let workers: Vec<PathBuf> = match crate::worker::list(&path) {
-        Ok(workers) => workers.into_iter().map(|worker| worker.path).collect(),
-        Err(e) => {
-            eprintln!("piton: {e}");
-            return ExitCode::from(EXIT_INVALID);
-        }
-    };
-    let plan = match crate::migrate::plan(&path, &workers) {
-        Ok(plan) => plan,
-        Err(e) => {
-            eprintln!("piton: {e}");
-            return ExitCode::from(EXIT_INVALID);
-        }
-    };
-    if plan.steps.is_empty() {
-        println!("{} already uses the current layout", plan.root.display());
-        return ExitCode::SUCCESS;
-    }
-    println!("in {}:", plan.root.display());
-    let prefix = format!("{}/", plan.root.display());
-    for step in &plan.steps {
-        println!("  {}", step.to_string().replace(&prefix, ""));
-    }
-    for note in &plan.notes {
-        println!("note: {}", note.replace(&prefix, ""));
-    }
-    if dry_run {
-        return ExitCode::SUCCESS;
-    }
-    match crate::migrate::apply(&plan) {
-        Ok(()) => {
-            println!(
-                "\ndone: review and commit the staged changes; `piton migrate --global` prints the global folder's conversion"
-            );
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("piton: {e} (the steps above it were applied)");
-            ExitCode::from(1)
-        }
-    }
-}
-
-/// `piton migrate --global`: prints the global folder's new files and what to remove, for the user's dotfiles.
-pub fn migrate_global() -> ExitCode {
-    let paths = Paths::current();
-    let plan = match crate::migrate::global(&paths) {
-        Ok(plan) => plan,
-        Err(e) => {
-            eprintln!("piton: {e}");
-            return ExitCode::from(EXIT_INVALID);
-        }
-    };
-    if plan.files.is_empty() && plan.moves.is_empty() {
-        println!("{} already uses the current layout", paths.global.display());
-        return ExitCode::SUCCESS;
-    }
-    println!(
-        "The global folder ({}) is yours to change (usually through your dotfiles):",
-        paths.global.display()
-    );
-    for (path, text) in &plan.files {
-        println!("\ncreate {}:\n\n{text}", path.display());
-    }
-    for path in &plan.remove {
-        println!("remove {} (its settings are in the file above)", path.display());
-    }
-    for (from, to) in &plan.moves {
-        println!("move {} -> {}", from.display(), to.display());
-    }
-    for note in &plan.notes {
-        println!("note: {note}");
-    }
-    ExitCode::SUCCESS
-}
-
 fn runtime_from_env() -> Result<Runtime, String> {
     match std::env::var("PITON_RUNTIME").as_deref() {
         Err(_) | Ok("") => Ok(Runtime::Host),
@@ -290,8 +207,7 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         | SettingsError::Invalid { .. }
         | SettingsError::GlobalOnly { .. }
         | SettingsError::LocalOnly { .. }
-        | SettingsError::Conflict { .. }
-        | SettingsError::OldLayout(_) => ErrorBody::Invalid { message: e.to_string() },
+        | SettingsError::Conflict { .. } => ErrorBody::Invalid { message: e.to_string() },
     })
 }
 
@@ -479,7 +395,6 @@ mod tests {
         let paths = Paths {
             home: home.clone(),
             global: home.join(".config/piton"),
-            pi_agent_dir: home.join(".pi/agent"),
         };
         let workspace = Workspace {
             path: repo.clone(),

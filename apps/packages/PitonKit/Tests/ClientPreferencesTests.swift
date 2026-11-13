@@ -45,20 +45,3 @@ private func state(textFont: JSON) throws -> DaemonState {
     preferences.cache(try state(textFont: .null))
     #expect(preferences.source(.textFont) == .shared(nil))
 }
-
-@Test func fontsChosenOnTheDeviceBecomeLocal() throws {
-    let suite = "piton.tests.\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
-    defaults.set("family:Berkeley Mono", forKey: "appearance.font.code")
-    defaults.set("system", forKey: "appearance.font.text")
-    let preferences = ClientPreferences(defaults: defaults)
-    preferences.adoptDeviceFonts()
-    #expect(preferences.source(.codeFont) == .local("Berkeley Mono"))
-    #expect(preferences.source(.textFont) == .local(nil))
-    #expect(defaults.string(forKey: "appearance.font.code") == nil)
-    // Once.
-    preferences.useShared(.codeFont)
-    preferences.adoptDeviceFonts()
-    #expect(preferences.source(.codeFont) == .shared(nil))
-}

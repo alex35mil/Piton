@@ -272,12 +272,12 @@ test("queue reads its tracker and credential through piton config get", function
 
     responses.integrations = { code = 0, stdout = vim.json.encode({ tracker = vim.NIL, forge = vim.NIL }) }
     fails("No tracker configured", function() queue.load(source) end)
-    -- A broken or old-layout file: the resolver's message, unchanged.
+    -- A broken file: the resolver's message, unchanged.
     responses.integrations = {
         code = 3,
-        stdout = vim.json.encode({ format = 1, error = { kind = "invalid", message = "run `piton migrate`" } }),
+        stdout = vim.json.encode({ format = 2, error = { kind = "invalid", message = "invalid config.toml" } }),
     }
-    fails("run `piton migrate`", function() queue.load(source) end)
+    fails("invalid config.toml", function() queue.load(source) end)
 end)
 
 test("close_tab dispatches close or delete through the public API", function()

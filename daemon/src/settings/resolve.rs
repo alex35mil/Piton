@@ -10,7 +10,7 @@ use super::files::{
     PermissionRules, PermissionsFile, Scoped, SettingsFile, Sharing, Table, WebSearchFile, load_mcp, read_config,
     read_text, validate_daemon,
 };
-use super::{AGENTS_DIR, LOCAL_DIR, OldPath, Origin, PITON_DIR, SettingsError, merge};
+use super::{LOCAL_DIR, Origin, SettingsError, merge};
 use crate::project::Workspace;
 
 pub use super::files::{Branches, DevelopmentTable, WebSearchTable};
@@ -27,23 +27,6 @@ pub enum Runtime {
 /// on the parts it reads, so a broken `[tracker]` never stops permission checks. Serialized as `{"ok": value}` or
 /// `{"error": {"message": ...}}`.
 pub type Section<T> = Result<T, SettingsError>;
-
-/// The parts of the configuration, for scoping old-layout refusals to the parts whose files moved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Part {
-    Daemon,
-    Settings,
-    Development,
-    Permissions,
-    Mcp,
-    /// The global tier's MCP servers alone.
-    McpGlobal,
-    WebSearch,
-    Branches,
-    Integrations,
-    Policies,
-    Instructions,
-}
 
 /// Everything resolved for one workspace.
 #[derive(Debug, Serialize)]
@@ -328,7 +311,6 @@ impl Docs {
                             other @ (SettingsError::GlobalOnly { .. }
                             | SettingsError::LocalOnly { .. }
                             | SettingsError::Conflict { .. }
-                            | SettingsError::OldLayout(_)
                             | SettingsError::Project(_)) => FailedRead::Invalid(other.to_string()),
                         };
                         docs.push(Doc::Failed { path, error });
@@ -360,38 +342,29 @@ impl Docs {
 pub struct Paths {
     pub home: PathBuf,
     pub global: PathBuf,
-    /// pi's agent folder, checked for files piton used to keep there.
-    pub pi_agent_dir: PathBuf,
 }
 
 impl Paths {
-    /// From this process: the user database's home, the global tier, and pi's agent folder (`PI_CODING_AGENT_DIR`,
-    /// else `~/.pi/agent`).
+    /// From this process: the user database's home and the global tier.
     pub fn current() -> Self {
-        let home = super::home();
-        let pi_agent_dir = std::env::var_os("PI_CODING_AGENT_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".pi/agent"));
         Self {
             global: super::global_tier(),
-            home,
-            pi_agent_dir,
+            home: super::home(),
         }
     }
 }
 
-/// Resolves a workspace: both chains, each part on its own. An old-layout file fails only the parts that read it.
-/// Fails as a whole only when a level folder exists but can't be listed, since skipping it could drop a deny rule.
+/// Resolves a workspace: both chains, each part on its own. Fails as a whole only when a level folder exists but can't
+/// be listed, since skipping it could drop a deny rule.
 pub fn resolve(workspace: &Workspace, paths: &Paths, runtime: Runtime) -> Result<Resolved, SettingsError> {
     let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
-    let old = old_layout(&chain, paths);
-    read_chain(&chain, &workspace.path, &paths.home, runtime, &old)
+    read_chain(&chain, &workspace.path, &paths.home, runtime)
 }
 
 /// Only the global tier: the daemon's own settings and the apps' preferences, which never depend on a project.
 pub fn resolve_global(paths: &Paths) -> Result<Resolved, SettingsError> {
     let chain = Chain::global_only(&paths.global);
-    read_chain(&chain, &paths.global, &paths.home, Runtime::Host, &old_global(paths))
+    read_chain(&chain, &paths.global, &paths.home, Runtime::Host)
 }
 
 /// The daemon's part of a workspace's configuration.
@@ -408,17 +381,10 @@ pub struct DaemonSettings {
 }
 
 /// The daemon's part of a workspace's configuration: the merged daemon tables of the `.piton/` chain and the chains'
-/// existing folders. Refuses only the old files the daemon itself read; the pi package's parts are checked by
-/// [`resolve`] in the pi package, so they never block a launch or a worker.
+/// existing folders. The pi package's parts are checked by [`resolve`] in the pi package, so they never block a launch
+/// or a worker.
 pub fn resolve_daemon(workspace: &Workspace, paths: &Paths) -> Result<DaemonSettings, SettingsError> {
     let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
-    let old: Vec<OldPath> = old_layout(&chain, paths)
-        .into_iter()
-        .filter(|old| old.parts.contains(&Part::Daemon))
-        .collect();
-    if !old.is_empty() {
-        return Err(SettingsError::OldLayout(old));
-    }
     let mut piton = Vec::new();
     let mut levels = Vec::new();
     for level in &chain.piton {
@@ -450,22 +416,12 @@ fn read_daemon(docs: &Docs) -> Result<DaemonFile, SettingsError> {
     Ok(daemon)
 }
 
-/// One part: refused when old-layout files hold its configuration, else read.
-fn part<T>(old: &[OldPath], part: Part, read: impl FnOnce() -> Result<T, SettingsError>) -> Section<T> {
-    let moved: Vec<OldPath> = old.iter().filter(|old| old.parts.contains(&part)).cloned().collect();
-    if !moved.is_empty() {
-        return Err(SettingsError::OldLayout(moved));
-    }
+/// One part, read on its own: a closure so `?` inside it fails only this part.
+fn section_of<T>(read: impl FnOnce() -> Section<T>) -> Section<T> {
     read()
 }
 
-fn read_chain(
-    chain: &Chain,
-    workspace: &Path,
-    home: &Path,
-    runtime: Runtime,
-    old: &[OldPath],
-) -> Result<Resolved, SettingsError> {
+fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) -> Result<Resolved, SettingsError> {
     let mut watch = Vec::new();
     let mut files = Vec::new();
     let mut piton = Vec::new();
@@ -479,8 +435,7 @@ fn read_chain(
         watch.push(level.dir.clone());
         check_level(level)?;
     }
-    // Every candidate, whether or not its part can be read: fixing a broken or moved file changes the result.
-    watch.extend(old.iter().map(|old| old.path.clone()));
+    // Every candidate, whether or not its part can be read: fixing a broken file changes the result.
     for level in &piton {
         for name in [
             Sharing::Shared.file_name(),
@@ -508,17 +463,17 @@ fn read_chain(
         .collect();
     let docs = Docs::read(&piton, &mut files);
 
-    let daemon = part(old, Part::Daemon, || read_daemon(&docs));
+    let daemon = section_of(|| read_daemon(&docs));
 
     // Global-only parts: a nearer level that sets one is refused by the part's scope check.
-    let settings = part(old, Part::Settings, || {
+    let settings = section_of(|| {
         let mut settings = SettingsFile::default();
         for (file, _) in docs.parts::<SettingsFile>(Table::Settings)? {
             merge::settings(&mut settings, file);
         }
         Ok(settings)
     });
-    let development = part(old, Part::Development, || {
+    let development = section_of(|| {
         let mut development = DevelopmentTable::default();
         for (file, _) in docs.parts::<DevelopmentFile>(Table::Development)? {
             merge::development(&mut development, file.development);
@@ -526,11 +481,11 @@ fn read_chain(
         Ok(development)
     });
 
-    let permissions = part(old, Part::Permissions, || read_permissions(&docs, runtime));
-    let mcp = part(old, Part::Mcp, || read_mcp(&mut files, &piton));
-    let mcp_global = part(old, Part::McpGlobal, || read_mcp(&mut Vec::new(), &global_levels));
+    let permissions = section_of(|| read_permissions(&docs, runtime));
+    let mcp = section_of(|| read_mcp(&mut files, &piton));
+    let mcp_global = section_of(|| read_mcp(&mut Vec::new(), &global_levels));
 
-    let web_search = part(old, Part::WebSearch, || {
+    let web_search = section_of(|| {
         let mut web_search = WebSearchTable::default();
         for (file, _) in docs.parts::<WebSearchFile>(Table::WebSearch)? {
             merge::web_search(&mut web_search, file.web_search);
@@ -538,7 +493,7 @@ fn read_chain(
         Ok(web_search)
     });
 
-    let branches = part(old, Part::Branches, || {
+    let branches = section_of(|| {
         let mut branches = Branches::default();
         for (file, _) in docs.parts::<BranchesFile>(Table::Branches)? {
             merge::branches(&mut branches, file.branches);
@@ -546,7 +501,7 @@ fn read_chain(
         Ok(branches)
     });
 
-    let integrations = part(old, Part::Integrations, || {
+    let integrations = section_of(|| {
         let mut integrations = Integrations::default();
         for (file, doc) in docs.parts::<IntegrationsFile>(Table::Integrations)? {
             let json = |table: toml::Table| -> Result<FileValue<serde_json::Value>, SettingsError> {
@@ -570,7 +525,7 @@ fn read_chain(
         Ok(integrations)
     });
 
-    let policies = part(old, Part::Policies, || {
+    let policies = section_of(|| {
         let mut policies = Vec::new();
         for level in &piton {
             let path = level.dir.join("policies.md");
@@ -586,7 +541,7 @@ fn read_chain(
     });
 
     // Every candidate folder, existing or not: clients watch them, and a missing one simply has no files.
-    let instructions = part(old, Part::Instructions, || {
+    let instructions = section_of(|| {
         Ok(Instructions {
             rules: chain.agents.iter().map(|level| level.dir.join("rules")).collect(),
             skills: chain
@@ -723,139 +678,6 @@ fn add_mcp_server(
     Ok(())
 }
 
-const DAEMON: &[Part] = &[Part::Daemon];
-const SETTINGS: &[Part] = &[Part::Settings];
-const PERMISSIONS: &[Part] = &[Part::Permissions];
-const MCP: &[Part] = &[Part::Mcp];
-const WEB_SEARCH: &[Part] = &[Part::WebSearch];
-const BRANCHES: &[Part] = &[Part::Branches, Part::Development];
-const INTEGRATIONS: &[Part] = &[Part::Integrations];
-
-/// The files of earlier layouts in a `.piton/` folder (the source's, a parent's, or the global tier), now tables of
-/// `config.toml`.
-const PITON_FILES: &[(&str, &[Part])] = &[
-    ("daemon.toml", DAEMON),
-    ("daemon.local.toml", DAEMON),
-    ("settings.toml", SETTINGS),
-    ("settings.local.toml", SETTINGS),
-    ("workflows.json", BRANCHES),
-    ("workflows.local.json", BRANCHES),
-    ("integrations.json", INTEGRATIONS),
-    ("permissions.json", PERMISSIONS),
-    ("permissions.local.json", PERMISSIONS),
-    ("permissions.host.json", PERMISSIONS),
-    ("permissions.sandbox.json", PERMISSIONS),
-    ("permissions.host.local.json", PERMISSIONS),
-    ("permissions.sandbox.local.json", PERMISSIONS),
-    ("web-search.json", WEB_SEARCH),
-    ("web-search.local.json", WEB_SEARCH),
-    ("nono.json", DAEMON),
-    ("nono.local.json", DAEMON),
-];
-
-fn old_in_folder(dir: &Path, found: &mut Vec<OldPath>) {
-    for (name, parts) in PITON_FILES {
-        let path = dir.join(name);
-        if path.exists() {
-            found.push(OldPath {
-                path,
-                now: "config.toml (or config.local.toml) in the same folder",
-                parts,
-            });
-        }
-    }
-}
-
-/// Files of earlier layouts in the folders whose files are read: the source checkout and its parent folders. A
-/// worker's own copies are never read (its settings come from its source), so a worker cloned before its source was
-/// migrated doesn't block anything.
-fn old_layout(chain: &Chain, paths: &Paths) -> Vec<OldPath> {
-    let mut found = old_global(paths);
-    let mut dirs: Vec<&Path> = vec![&chain.source];
-    for level in &chain.piton {
-        if level.kind == LevelKind::Parent
-            && let Some(parent) = level.dir.parent()
-        {
-            dirs.push(parent);
-        }
-    }
-    const PROJECT: &[Part] = &[Part::Branches, Part::Integrations, Part::Policies];
-    for dir in dirs {
-        for (name, now, parts) in [
-            (".piton.toml", ".piton/config.toml [workers]", DAEMON),
-            (".nono.json", ".piton/config.toml [sandbox]", DAEMON),
-            (".nono.local.json", ".piton/config.local.toml [sandbox]", DAEMON),
-            (
-                ".project",
-                ".piton/ (config.toml [branches] [tracker] [forge], policies.md, .local/)",
-                PROJECT,
-            ),
-        ] {
-            let path = dir.join(name);
-            if path.symlink_metadata().is_ok() {
-                found.push(OldPath { path, now, parts });
-            }
-        }
-        for (name, parts) in [
-            ("permissions.json", PERMISSIONS),
-            ("permissions.local.json", PERMISSIONS),
-            ("permissions.host.json", PERMISSIONS),
-            ("permissions.sandbox.json", PERMISSIONS),
-            ("permissions.host.local.json", PERMISSIONS),
-            ("permissions.sandbox.local.json", PERMISSIONS),
-            ("mcp.json", MCP),
-            ("mcp.local.json", MCP),
-            ("web-search.json", WEB_SEARCH),
-            ("web-search.local.json", WEB_SEARCH),
-        ] {
-            let path = dir.join(AGENTS_DIR).join(name);
-            if path.exists() {
-                found.push(OldPath {
-                    path,
-                    now: ".piton/ (mcp.json as is; the rest in config.toml)",
-                    parts,
-                });
-            }
-        }
-        old_in_folder(&dir.join(PITON_DIR), &mut found);
-    }
-    found
-}
-
-/// Global files of earlier layouts: the global tier's separate files and the files piton kept in pi's agent folder.
-fn old_global(paths: &Paths) -> Vec<OldPath> {
-    let mut found = Vec::new();
-    old_in_folder(&paths.global, &mut found);
-    let pi_dir = &paths.pi_agent_dir;
-    let both_mcp: &'static [Part] = &[Part::Mcp, Part::McpGlobal];
-    for (name, parts) in [
-        ("permissions.json", PERMISSIONS),
-        ("permissions.host.json", PERMISSIONS),
-        ("permissions.sandbox.json", PERMISSIONS),
-        ("mcp.json", both_mcp),
-        ("web-search.json", WEB_SEARCH),
-        ("workflows.json", BRANCHES),
-    ] {
-        let path = pi_dir.join(name);
-        if path.exists() {
-            found.push(OldPath {
-                path,
-                now: "the global tier (mcp.json as is; the rest in config.toml)",
-                parts,
-            });
-        }
-    }
-    let rules = pi_dir.join("rules");
-    if rules.is_dir() {
-        found.push(OldPath {
-            path: rules,
-            now: "agents/rules/ in the global tier",
-            parts: &[Part::Instructions],
-        });
-    }
-    found
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,7 +699,6 @@ mod tests {
         let paths = Paths {
             home: home.clone(),
             global: global.clone(),
-            pi_agent_dir: home.join(".pi/agent"),
         };
         Tree {
             _dir: dir,
@@ -1123,65 +944,6 @@ api_key = "k"
         assert!(r.watch.contains(&repo.join(".piton/config.toml")));
     }
 
-    #[test]
-    fn earlier_layouts_are_refused_by_the_parts_that_read_them() {
-        let t = tree();
-        let repo = t.home.join("repo");
-        write(&repo.join(".nono.json"), "{}");
-        write(&repo.join(".project/config.json"), "{}");
-        write(&repo.join(".agents/permissions.json"), "{}");
-        let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        let Err(err) = &r.permissions else {
-            panic!("permissions read the old layout")
-        };
-        let SettingsError::OldLayout(paths) = err else {
-            panic!("{err}")
-        };
-        let names: Vec<_> = paths
-            .iter()
-            .map(|p| p.path.strip_prefix(&repo).unwrap().to_owned())
-            .collect();
-        assert_eq!(names, [PathBuf::from(".agents/permissions.json")]);
-        assert!(err.to_string().contains("piton migrate"));
-        assert!(matches!(r.daemon, Err(SettingsError::OldLayout(_))));
-        assert!(matches!(r.branches, Err(SettingsError::OldLayout(_))));
-        assert!(matches!(r.integrations, Err(SettingsError::OldLayout(_))));
-        assert!(r.mcp.is_ok() && r.web_search.is_ok() && r.instructions.is_ok());
-        assert!(r.watch.contains(&repo.join(".nono.json")));
-        for old in [".nono.json", ".agents/permissions.json"] {
-            std::fs::remove_file(repo.join(old)).unwrap();
-        }
-        std::fs::remove_dir_all(repo.join(".project")).unwrap();
-        // Rules and skills in .agents/ are the current layout.
-        write(&repo.join(".agents/rules/r.md"), "x");
-        assert!(
-            run(&t, &source(repo.clone()), Runtime::Host)
-                .unwrap()
-                .errors()
-                .is_empty()
-        );
-
-        // The separate files of the layout before config.toml.
-        write(&repo.join(".piton/integrations.json"), "{}");
-        let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.integrations, Err(SettingsError::OldLayout(_))));
-        assert!(r.permissions.is_ok());
-        std::fs::remove_file(repo.join(".piton/integrations.json")).unwrap();
-
-        write(&t.global.join("settings.toml"), "[host]\n");
-        let global = resolve_global(&t.paths).unwrap();
-        assert!(matches!(global.settings, Err(SettingsError::OldLayout(_))));
-        assert!(global.daemon.is_ok());
-        std::fs::remove_file(t.global.join("settings.toml")).unwrap();
-        // Files piton kept in pi's agent folder refuse only their own part, never the daemon's.
-        write(&t.paths.pi_agent_dir.join("permissions.json"), "{}");
-        let global = resolve_global(&t.paths).unwrap();
-        assert!(global.daemon.is_ok() && global.settings.is_ok());
-        let r = run(&t, &source(repo), Runtime::Host).unwrap();
-        assert!(matches!(r.permissions, Err(SettingsError::OldLayout(_))));
-        assert!(r.branches.is_ok());
-    }
-
     /// A worker reads `.piton/` from its source, never its own copy.
     #[test]
     fn a_worker_reads_its_sources_settings() {
@@ -1201,12 +963,6 @@ api_key = "k"
                 name: "w".into(),
             },
         };
-        // A worker cloned before its source was migrated still has the old files; they're never read.
-        write(&worker.join(".nono.json"), "{}");
-        write(&worker.join(".piton.toml"), "[workers]\n");
-        write(&worker.join(".project/config.json"), "{}");
-        write(&worker.join(".agents/permissions.json"), "{}");
-        write(&worker.join(".piton/daemon.toml"), "");
         assert!(resolve_daemon(&ws, &t.paths).is_ok());
         let r = run(&t, &ws, Runtime::Sandbox).unwrap();
         assert!(r.errors().is_empty(), "{:?}", r.errors());

@@ -106,7 +106,7 @@ pub enum WorkerRefusal {
     NotAWorker { path: PathBuf },
     #[error("{path} has uncommitted changes or unpushed commits")]
     Leftovers { path: PathBuf, lines: Vec<String> },
-    /// The source's configuration is invalid or uses the old layout: fix it (or run `piton migrate`), then retry.
+    /// The source's configuration is invalid: fix it, then retry.
     #[error("{message}")]
     InvalidConfiguration { message: String },
     #[error("{message}")]
@@ -511,7 +511,6 @@ mod tests {
         crate::settings::Paths {
             home: root.to_path_buf(),
             global: root.join(".config/piton"),
-            pi_agent_dir: root.join(".pi/agent"),
         }
     }
 

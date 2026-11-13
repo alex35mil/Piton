@@ -193,7 +193,6 @@ mod tests {
         let paths = Paths {
             home: home.to_path_buf(),
             global: home.join(".config/piton"),
-            pi_agent_dir: home.join(".pi/agent"),
         };
         let ws = Workspace {
             path: repo.to_path_buf(),

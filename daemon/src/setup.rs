@@ -528,7 +528,6 @@ mod tests {
         let paths = Paths {
             home: root.clone(),
             global: root.join(".config/piton"),
-            pi_agent_dir: root.join(".pi/agent"),
         };
         let mut config = Config::from_files(DaemonFile::default(), SettingsFile::default(), paths);
         config.socket = root.join("state/piton.sock");

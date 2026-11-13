@@ -135,7 +135,6 @@ impl Default for Config {
         let paths = Paths {
             home: home(),
             global: home().join(".config/piton"),
-            pi_agent_dir: home().join(".pi/agent"),
         };
         Self::from_files(DaemonFile::default(), SettingsFile::default(), paths)
     }
@@ -220,7 +219,6 @@ mod tests {
         std::fs::write(global.join("config.local.toml"), "[stop]\nterm_grace_ms = 7\n").unwrap();
         let mut paths = Paths::current();
         paths.global = global;
-        paths.pi_agent_dir = dir.path().join("agent");
         let resolved = crate::settings::resolve_global(&paths).unwrap();
         let config = Config::from_files(resolved.daemon.unwrap(), resolved.settings.unwrap(), paths);
         assert_eq!(config.socket, PathBuf::from("/tmp/s.sock"));

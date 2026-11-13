@@ -122,24 +122,6 @@ than the binary refuses to start; an older one is migrated after a `.v<N>.bak` c
 - `piton state import <file> [--force]` replaces the database on a replacement Mac, keeping `host_id` so clients
   see the same host. Stop the daemon first. It refuses over a database that holds state unless forced.
 
-### Moving from earlier layouts
-
-Every tool refuses the files of earlier layouts (`.project/`, `.agents/{permissions,mcp,web-search}*.json`,
-`.nono*.json`, `.piton.toml`, the separate files of a `.piton/` folder such as `daemon.toml`, `settings.toml`,
-`workflows.json`, `integrations.json`, `permissions*.json`, and the files in pi's agent folder), naming each file;
-only the parts that read a file refuse it.
-
-- `piton migrate [path] [--dry-run]`, on the host, in a source checkout: converts every setting into
-  `.piton/config.toml`, and personal ones (`branches.username`, `.local` files) into `.piton/config.local.toml`, with
-  JSON's camelCase keys in snake_case. It moves `.project/` artifacts and `policies.md` to `.piton/`, and `mcp.json`
-  out of `.agents/`. Committed files are replaced with Git, staged for you to commit. It rewrites the ignore rules to
-  `/.piton/.local` and `/.piton/*.local.*`, and relinks every worker's `.piton/.local`; a worker's own copies of old
-  files stay on its branch, unread, until it picks up the source's commit. It plans everything first and refuses
-  before changing anything: on a file already in the way, or a key it doesn't model (named in the message). Keys that
-  no longer exist (`workflowProject`, `reviews`) are dropped with a note.
-- `piton migrate --global` prints the global folder's new `config.toml` and `config.local.toml`, the files they
-  replace, and what to move out of pi's agent folder, for you to apply in your dotfiles. It writes nothing.
-
 ## Logging
 
 `piton logging status`, `piton logging debug [--until-disabled]`, and `piton logging info` switch host logging through

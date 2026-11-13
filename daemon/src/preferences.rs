@@ -488,7 +488,6 @@ mod tests {
         Paths {
             home: dir.to_path_buf(),
             global: dir.join("piton"),
-            pi_agent_dir: dir.join("agent"),
         }
     }
 

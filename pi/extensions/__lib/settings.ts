@@ -62,7 +62,7 @@ export interface ResolvedPermissionSource {
 }
 
 /**
- * One part of the configuration: its merged value, or why its files can't be used (invalid, or an earlier layout).
+ * One part of the configuration: its merged value, or why its files can't be used.
  * Each consumer fails only on the parts it reads, so a broken `[tracker]` never stops permission checks.
  */
 export type Section<T> = { ok: T } | { error: { message: string } }

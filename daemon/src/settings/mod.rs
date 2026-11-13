@@ -15,7 +15,6 @@
 //! `piton config set`.
 
 mod chain;
-pub mod convert;
 pub mod edit;
 mod files;
 mod merge;
@@ -25,7 +24,7 @@ pub use chain::{LevelKind, global_tier, home};
 pub use files::{
     ConfigDoc, DaemonFile, NetworkProfile, SandboxTable, SettingsFile, Sharing, expand_home, validate_config,
 };
-pub use resolve::{DaemonSettings, Part, Paths, Resolved, Runtime, Section, resolve, resolve_daemon, resolve_global};
+pub use resolve::{DaemonSettings, Paths, Resolved, Runtime, Section, resolve, resolve_daemon, resolve_global};
 
 use std::path::PathBuf;
 
@@ -59,25 +58,6 @@ pub enum SettingsError {
     LocalOnly { path: PathBuf, key: String },
     #[error("{path}: `{key}` {reason}")]
     Conflict { path: PathBuf, key: String, reason: String },
-    #[error("{}", old_layout_message(.0))]
-    OldLayout(Vec<OldPath>),
     #[error(transparent)]
     Project(#[from] crate::project::ProjectError),
-}
-
-/// A file or folder from the layout before `.piton/`, where its contents go now, and the parts of the configuration
-/// it held (only those refuse it).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OldPath {
-    pub path: PathBuf,
-    pub now: &'static str,
-    pub parts: &'static [Part],
-}
-
-fn old_layout_message(paths: &[OldPath]) -> String {
-    let mut text = String::from("this uses piton's old configuration layout; run `piton migrate` (or move by hand):");
-    for old in paths {
-        text.push_str(&format!("\n  {} -> {}", old.path.display(), old.now));
-    }
-    text
 }

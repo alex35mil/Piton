@@ -81,19 +81,6 @@ enum Cmd {
         #[usage(subcommand)]
         action: ConfigAction,
     },
-    /// Move a source checkout from the old layout (.project/, .agents/*.json, .nono*.json, .piton.toml) to .piton/,
-    /// staging the moves of committed files, and relink its workers. Refuses before changing anything.
-    Migrate {
-        /// The source checkout (default: current directory).
-        path: Option<PathBuf>,
-        /// Print the plan without changing anything.
-        #[usage(long)]
-        dry_run: bool,
-        /// Print the global folder's conversion (its new config.toml and what to remove) for you to apply in your
-        /// dotfiles; writes nothing.
-        #[usage(long)]
-        global: bool,
-    },
     /// Check what this host needs (the Mac app's onboarding runs this), and do the steps piton can do itself.
     Setup {
         #[usage(subcommand)]
@@ -278,16 +265,6 @@ pub fn main() -> ExitCode {
     match &cli.command {
         Cmd::Service { action } => return service(action, cli.config_home.as_deref()),
         Cmd::Config { action } => return config::run(action),
-        Cmd::Migrate {
-            global: true,
-            path: _,
-            dry_run: _,
-        } => return config::migrate_global(),
-        Cmd::Migrate {
-            path,
-            dry_run,
-            global: false,
-        } => return config::migrate(path.as_deref(), *dry_run),
         Cmd::Completion { shell } => {
             let shell = match shell.as_str() {
                 "bash" => usage_rs::complete::Shell::Bash,
@@ -320,7 +297,6 @@ pub fn main() -> ExitCode {
         | Cmd::Logging { .. }
         | Cmd::Service { .. }
         | Cmd::Config { .. }
-        | Cmd::Migrate { .. }
         | Cmd::Completion { .. } => crate::config::load(cli.config_home.as_deref()),
     };
     let config = match loaded {
@@ -353,7 +329,7 @@ pub fn main() -> ExitCode {
 
 async fn run(command: Cmd, config: crate::config::Config) -> ExitCode {
     match command {
-        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } | Cmd::Migrate { .. } => {
+        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } => {
             unreachable!("handled before the runtime starts")
         }
         Cmd::Daemon => match crate::daemon::run(config).await {

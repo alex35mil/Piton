@@ -218,7 +218,7 @@ function M.preview_folder(source_path, name)
     return vim.fs.basename(source_path) .. "--" .. normalized
 end
 
--- Exit code of `piton config get` when the part's files are invalid or use the old layout.
+-- Exit code of `piton config get` when the part's files are invalid.
 local EXIT_INVALID_CONFIG = 3
 
 --- One part of the workspace's resolved configuration (`piton config get`):

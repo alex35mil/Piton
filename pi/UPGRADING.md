@@ -2,15 +2,14 @@
 
 ## Configuration moves to one `config.toml` per folder
 
-The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside piton, `piton` must be on `PATH`). Every extension refuses earlier layouts with a message naming each old file, so nothing loads until it's converted.
+The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside piton, `piton` must be on `PATH`). Earlier files (`.project/`, `.agents/*.json`, `.nono.json`, `.piton.toml`, `.piton/`'s separate JSON files, and piton's files in pi's agent folder) are no longer read; move their settings into these tables by hand.
 
-- **Run `piton migrate`** in each source checkout. It converts every earlier layout (`.project/`, `.agents/*.json`, `.nono.json`, `.piton.toml`, and `.piton/`'s separate JSON files) into `.piton/config.toml` and `.piton/config.local.toml`, moves `mcp.json`, `policies.md`, and the artifacts, stages the committed changes, and relinks every worker.
-- **Run `piton migrate --global`** and apply what it prints in your dotfiles: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`) gets one `config.toml` and `config.local.toml`, and files piton kept in pi's agent folder move there.
+- **Each folder** (a repository's `.piton/`, a parent folder's, and the global folder `$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) has one `config.toml` and a `config.local.toml` for this machine's values. `mcp.json` and `policies.md` stay separate.
 - **Keys are snake_case:** `default_mode`, `mcp_server`, `owner_type`, `in_progress`, `self_review`, `api_key`. Label keys you chose, like `pi-workflows`, stay as written.
 - **Personal keys:** `branches.username` is accepted only in `config.local.toml`; `keybindings` and `[development]` only in the global folder.
 - **Removed:** `workflowProject` and `sessionAnalysis`. Workflow reports open a pre-filled GitHub issue for you to submit; a development install (the package running from a git checkout of piton) files them in that checkout's tracker and runs session analysis.
 - **Parent folders** strictly below home can hold their own `.piton/` and `.agents/`, shared by every repository below them.
-- **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line. `piton migrate` writes them.
+- **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line. Project setup writes them.
 
 ## Simpler workflows: fewer gates, bounded reviews
 

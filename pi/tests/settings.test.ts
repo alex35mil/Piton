@@ -168,13 +168,15 @@ describe("shared settings contract", () => {
         }
     })
 
-    it("refuses the old layout with where each file goes now", async () => {
+    it("fails only the part whose table is broken", async () => {
         const h = fixture()
         try {
-            write(path.join(h.repositoryRoot, ".agents/permissions.json"), { allow: ["read"] })
+            writeConfig(h.repositoryRoot, { "permissions.allow": ["read"] })
+            fs.appendFileSync(path.join(h.piton, "config.toml"), "[branches]\nformat = 1\n")
+            clearSettingsCache()
             const resolved = resolveSettings(h.nested, "host")
-            assert.throws(() => section(resolved.permissions), /piton migrate[\s\S]*\.agents\/permissions\.json/)
-            // Only the part whose file moved is refused.
+            assert.throws(() => section(resolved.branches), /config\.toml/)
+            assert.deepEqual(section(resolved.permissions).merged.allow, ["read"])
             assert.doesNotThrow(() => section(resolved.mcp))
         } finally {
             await h.cleanup()

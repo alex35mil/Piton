@@ -85,9 +85,9 @@ describe("piton config resolve client", () => {
     })
 
     it("reports the resolver's error and refuses an unknown format", () => {
-        const invalid = stub({ format: RESOLVE_FORMAT, error: { kind: "invalid", message: "old layout here" } }, 3)
+        const invalid = stub({ format: RESOLVE_FORMAT, error: { kind: "invalid", message: "invalid here" } }, 3)
         try {
-            assert.throws(() => resolveSettings(invalid.dir, "host"), /old layout here/)
+            assert.throws(() => resolveSettings(invalid.dir, "host"), /invalid here/)
         } finally {
             invalid.cleanup()
         }

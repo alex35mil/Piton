@@ -338,8 +338,7 @@ export function inspectProjectSetup(cwd: string, projectTrusted: boolean) {
         repositoryRoot: root,
         repositoryIdentity: inspectRepositoryIdentity(root),
         files: PROJECT_SETUP_FILES.map((file) => snapshotFile(root, file)),
-        // Where parent folders' and the global tier's configuration comes from, or why it can't be read (for
-        // example the old layout, which `piton migrate` converts).
+        // Where parent folders' and the global tier's configuration comes from, or why it can't be read.
         configuration,
         // Where a global username can come from (`[branches] username` in the global config.local.toml).
         globalConfig: Object.fromEntries(

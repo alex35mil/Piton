@@ -36,19 +36,6 @@ public struct ClientPreferences {
         self.defaults = defaults
     }
 
-    /// Fonts chosen before preferences could be shared were this device's own: they become local values, once.
-    /// (`appearance.font.*` held `system` or `family:<name>`.) Remove with the rest of the migration code.
-    public func adoptDeviceFonts() {
-        for (old, preference) in [
-            ("appearance.font.text", ClientPreference.textFont), ("appearance.font.code", .codeFont),
-        ] {
-            guard let raw = defaults.string(forKey: old) else { continue }
-            let family = raw.hasPrefix("family:") ? String(raw.dropFirst("family:".count)) : nil
-            setLocal(preference, family)
-            defaults.removeObject(forKey: old)
-        }
-    }
-
     public func source(_ preference: ClientPreference) -> PreferenceSource {
         switch defaults.bool(forKey: preference.isLocalKey) {
         case true: .local(defaults.string(forKey: preference.localKey))

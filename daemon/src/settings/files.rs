@@ -709,7 +709,10 @@ mod tests {
         .unwrap();
         assert!(d.part::<PermissionsFile>(Table::Permissions).is_err());
         // A table key holding anything else, even an empty list (which serde reads as an empty table), is refused.
-        for (text, table) in [("permissions = []\n", Table::Permissions), ("tracker = 1\n", Table::Integrations)] {
+        for (text, table) in [
+            ("permissions = []\n", Table::Permissions),
+            ("tracker = 1\n", Table::Integrations),
+        ] {
             let d = doc(text, LevelKind::Repository, Sharing::Shared).unwrap();
             let refused = match table {
                 Table::Permissions => d.part::<PermissionsFile>(table).is_err(),
