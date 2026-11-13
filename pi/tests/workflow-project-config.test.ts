@@ -511,7 +511,7 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("adds approved MCP registrations without credentials or index changes", () => {
+    it("adds approved MCP registrations without credentials or index changes", async () => {
         const root = repository()
         const globalSettingsPath = path.join(root, "global-mcp.json")
         try {
@@ -522,7 +522,7 @@ describe("workflow project configuration", () => {
             )
             const indexBefore = git(root, ["ls-files", "--stage"])
 
-            const configured = configureProjectMcp(root, {
+            const configured = await configureProjectMcp(root, {
                 target: "local",
                 registrations: [
                     {
@@ -565,7 +565,7 @@ describe("workflow project configuration", () => {
                 },
             })
 
-            const committed = configureProjectMcp(root, {
+            const committed = await configureProjectMcp(root, {
                 target: "project",
                 registrations: [
                     {
@@ -582,8 +582,8 @@ describe("workflow project configuration", () => {
                 project.mcpServers["github-committed"].headers["X-MCP-Toolsets"],
                 "context,issues,projects,pull_requests",
             )
-            assert.throws(
-                () =>
+            await assert.rejects(
+                async () =>
                     configureProjectMcp(root, {
                         target: "project",
                         registrations: [{ provider: "github", name: "gh-roles", credentialEnv: "T", roles: ["forge"] }],
@@ -595,7 +595,7 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("adds approved permission gates without replacing settings or changing the Git index", () => {
+    it("adds approved permission gates without replacing settings or changing the Git index", async () => {
         const root = repository()
         try {
             const settingsPath = path.join(root, ".piton", "permissions.local.json")
@@ -615,7 +615,11 @@ describe("workflow project configuration", () => {
             const indexBefore = git(root, ["ls-files", "--stage"])
             const rules = ["write(.piton/*/plan.md)", "edit(.piton/*/plan.md)"]
 
-            const configured = configureProjectPermissions(root, { target: "local", allow: [], ask: rules }, new Map())
+            const configured = await configureProjectPermissions(
+                root,
+                { target: "local", allow: [], ask: rules },
+                new Map(),
+            )
 
             assert.deepEqual(configured.added, { allow: [], ask: rules })
             assert.equal(configured.changed, true)
@@ -634,17 +638,20 @@ describe("workflow project configuration", () => {
             assert.deepEqual(settings.allow, ["read"])
             assert.deepEqual(settings.ask, ["write(existing.md)", ...rules])
 
-            assert.deepEqual(configureProjectPermissions(root, { target: "local", allow: [], ask: rules }, new Map()), {
-                target: "local",
-                file: ".piton/permissions.local.json",
-                added: { allow: [], ask: [] },
-                skipped: { allow: [], ask: rules },
-                inspection: [],
-                changed: false,
-                localExclusionChanged: false,
-            })
-            assert.throws(
-                () =>
+            assert.deepEqual(
+                await configureProjectPermissions(root, { target: "local", allow: [], ask: rules }, new Map()),
+                {
+                    target: "local",
+                    file: ".piton/permissions.local.json",
+                    added: { allow: [], ask: [] },
+                    skipped: { allow: [], ask: rules },
+                    inspection: [],
+                    changed: false,
+                    localExclusionChanged: false,
+                },
+            )
+            await assert.rejects(
+                async () =>
                     configureProjectPermissions(
                         root,
                         { target: "project", allow: [], ask: ["mcp__github__issue_read"] },
@@ -843,7 +850,7 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("refuses project setup in a worker clone, whose files piton never reads", () => {
+    it("refuses project setup in a worker clone, whose files piton never reads", async () => {
         const root = repository()
         const worker = `${root}--w`
         try {
@@ -851,12 +858,13 @@ describe("workflow project configuration", () => {
             git(worker, ["config", "--local", "agent.source", root])
             const refusal = /run it in .*workflow-project-config-/
             assert.throws(() => inspectProjectSetup(worker, true), refusal)
-            assert.throws(
-                () => configureProjectPermissions(worker, { target: "local", allow: ["read"], ask: [] }, new Map()),
+            await assert.rejects(
+                async () =>
+                    configureProjectPermissions(worker, { target: "local", allow: ["read"], ask: [] }, new Map()),
                 refusal,
             )
-            assert.throws(
-                () =>
+            await assert.rejects(
+                async () =>
                     configureProjectMcp(worker, {
                         target: "local",
                         registrations: [{ name: "linear", provider: "linear", credentialEnv: "LINEAR_API_KEY" }],

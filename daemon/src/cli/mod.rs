@@ -195,6 +195,13 @@ enum ConfigAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
+    /// Whether PATH is a protected file of the workspace (JSON): `configuration`, `pi`, `skill` with its file kind, or
+    /// null. The pi package asks before writing.
+    Protected {
+        path: PathBuf,
+        #[usage(long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommands)]

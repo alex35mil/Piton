@@ -16,12 +16,14 @@ import { RUNTIME_ENV } from "../extensions/__lib/runtime.ts"
 import { BIN_ENV, clearSettingsCache } from "../extensions/__lib/settings.ts"
 
 delete process.env[RUNTIME_ENV]
+// A session under piton has its own channel to the daemon; tests that need one set up a fake.
+delete process.env.PITON_AGENT_SOCKET
+delete process.env.PITON_SESSION_TOKEN
 
+// Always this checkout's build: a session's PITON_BIN is the installed piton, which may be older than the code tested.
 const built = path.resolve(import.meta.dirname, "../../daemon/target/debug/piton")
-if (!process.env[BIN_ENV]) {
-    if (!fs.existsSync(built)) throw new Error(`build piton first (mise run daemon:build): ${built} is missing`)
-    process.env[BIN_ENV] = built
-}
+if (!fs.existsSync(built)) throw new Error(`build piton first (mise run daemon:build): ${built} is missing`)
+process.env[BIN_ENV] = built
 
 /** The test process's own global tier and pi agent folder. */
 export const TEST_CONFIG_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "piton-test-config-"))

@@ -12,6 +12,7 @@ import {
     inspectPersistentPermissions,
     validatePermissionSettings,
 } from "../../../extensions/permissions/index.js"
+import { writeProtected } from "../../../extensions/__lib/protected.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
 import { setupRoot } from "./root.js"
 
@@ -42,7 +43,7 @@ export function inspectProjectPermissions(cwd: string, input: unknown, catalog: 
     }
 }
 
-export function configureProjectPermissions(cwd: string, input: unknown, catalog: McpToolCatalog) {
+export async function configureProjectPermissions(cwd: string, input: unknown, catalog: McpToolCatalog) {
     const parsed = parse(ProjectPermissionConfigurationValidator, input)
     if (parsed.allow.length + parsed.ask.length === 0) throw new Error("request at least one allow or ask rule")
     validatePermissionSettings({ allow: parsed.allow, ask: parsed.ask })
@@ -89,8 +90,8 @@ export function configureProjectPermissions(cwd: string, input: unknown, catalog
             ? ensureLocalSettingsExclusion(root, LOCAL_PERMISSIONS_SETTINGS_FILE)
             : undefined
     if (changed) {
-        fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
-        fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 4)}\n`)
+        // A protected file: under the daemon, the user sees the diff and approves it.
+        await writeProtected(settingsPath, `${JSON.stringify(settings, null, 4)}\n`)
         clearSettingsCache()
     }
     return {

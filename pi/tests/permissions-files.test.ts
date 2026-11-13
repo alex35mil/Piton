@@ -3,6 +3,8 @@ import "./host-runtime.ts"
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import { syncBuiltinESMExports } from "node:module"
+import * as net from "node:net"
+import * as os from "node:os"
 import * as path from "node:path"
 import { describe, it } from "node:test"
 
@@ -13,7 +15,7 @@ import {
     createWriteToolDefinition,
     type ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
-import registerPermission from "../extensions/permissions/index.ts"
+import registerPermission, { deniedProtectedWrite } from "../extensions/permissions/index.ts"
 import { decorateReviewCodemode, isFileReviewDetails } from "../extensions/permissions/review.ts"
 import registerRules from "../extensions/rules/index.ts"
 import { nativeMcpFixture } from "./native-mcp-fixture.ts"
@@ -436,6 +438,142 @@ describe("native file permission execution", () => {
             assert.equal(outcome.isError, false)
             assert.equal(h.writes(), 1)
             assert.equal(h.aborted(), false)
+        } finally {
+            await h.cleanup()
+        }
+    })
+})
+
+/** A fake daemon on `agent.sock`: records each request and answers with the next outcome. */
+function fakeDaemon(outcomes: unknown[]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piton-agent-"))
+    const socket = path.join(dir, "agent.sock")
+    const requests: { token: string; path: string; content: string }[] = []
+    const server = net.createServer((connection) => {
+        let buf = ""
+        connection.setEncoding("utf-8")
+        connection.on("data", (chunk: string) => {
+            buf += chunk
+            if (!buf.includes("\n")) return
+            requests.push(JSON.parse(buf))
+            connection.end(`${JSON.stringify({ type: "protected_write", ...(outcomes.shift() as object) })}\n`)
+        })
+    })
+    const env = {
+        PITON_AGENT_SOCKET: process.env.PITON_AGENT_SOCKET,
+        PITON_SESSION_TOKEN: process.env.PITON_SESSION_TOKEN,
+    }
+    return {
+        requests,
+        async start() {
+            await new Promise<void>((resolve) => server.listen(socket, resolve))
+            process.env.PITON_AGENT_SOCKET = socket
+            process.env.PITON_SESSION_TOKEN = "t0ken"
+        },
+        async stop() {
+            for (const [key, value] of Object.entries(env)) {
+                if (value === undefined) delete process.env[key]
+                else process.env[key] = value
+            }
+            await new Promise<void>((resolve) => server.close(() => resolve()))
+            fs.rmSync(dir, { recursive: true, force: true })
+        },
+    }
+}
+
+describe("protected files", () => {
+    const protectedArgs = (kind: "edit" | "write"): JsonObject =>
+        kind === "edit"
+            ? { path: ".piton/permissions.json", edits: [{ oldText: '"codemode"', newText: '"codemode","read"' }] }
+            : { path: ".piton/permissions.json", content: "{}" }
+
+    for (const kind of ["edit", "write"] as const) {
+        it(`${kind} goes through the daemon under piton, even when edits are allowed`, async () => {
+            const h = fixture("allow", { allow: ["edit", "write"] })
+            const daemon = fakeDaemon([{ outcome: "approved", modified: false, content: "x", notes: [] }])
+            await daemon.start()
+            try {
+                const before = fs.readFileSync(path.join(h.root, ".piton/permissions.json"), "utf-8")
+                const outcome = await h.run(kind, protectedArgs(kind))
+                assert.equal(outcome.isError, false, textOf(outcome))
+                assert.equal(daemon.requests.length, 1)
+                const request = daemon.requests[0]!
+                assert.equal(request.token, "t0ken")
+                // The daemon canonicalizes the path itself; the pi sends it as the tool resolved it.
+                assert.equal(
+                    fs.realpathSync(request.path),
+                    path.join(fs.realpathSync(h.root), ".piton/permissions.json"),
+                )
+                assert.equal(
+                    request.content,
+                    kind === "edit" ? before.replace('"codemode"', '"codemode","read"') : "{}",
+                )
+                // The daemon writes; the pi never does.
+                assert.equal(fs.readFileSync(path.join(h.root, ".piton/permissions.json"), "utf-8"), before)
+                assert.equal(h.prompts(), 0)
+            } finally {
+                await daemon.stop()
+                await h.cleanup()
+            }
+        })
+    }
+
+    it("returns the user's version, rejection, and refusals as the outcome", async () => {
+        const h = fixture("allow")
+        const daemon = fakeDaemon([
+            { outcome: "approved", modified: true, content: "mine", notes: [note] },
+            { outcome: "rejected", notes: [] },
+            { outcome: "refused", reason: "another protected write is waiting" },
+        ])
+        await daemon.start()
+        try {
+            const modified = await h.run("write", protectedArgs("write"))
+            assert.equal(modified.isError, false)
+            assert.match(textOf(modified), /user's version[\s\S]*mine/)
+            assert.ok(textOf(modified).includes(note.note))
+
+            const rejected = await h.run("write", protectedArgs("write"))
+            assert.equal(rejected.isError, true)
+            assert.match(textOf(rejected), /^\[rejected\]/)
+            assert.equal(h.aborted(), true, "a rejection without notes ends the turn, like the review")
+
+            const refused = await h.run("write", protectedArgs("write"))
+            assert.equal(refused.isError, true)
+            assert.match(textOf(refused), /another protected write/)
+        } finally {
+            await daemon.stop()
+            await h.cleanup()
+        }
+    })
+
+    it("recognizes a shell write the sandbox denied on a protected file", () => {
+        for (const output of [
+            "sh: .piton/permissions.json: Operation not permitted",
+            "rm: /u/repo/.pi/settings.json: Operation not permitted",
+            "mkdir: apps/.agents/skills/x: Operation not permitted",
+            "error: unable to unlink old '.piton/workflows.json': Operation not permitted",
+        ]) {
+            assert.equal(deniedProtectedWrite(output), true, output)
+        }
+        for (const output of [
+            "sh: /etc/hosts: Operation not permitted",
+            "cat .piton/permissions.json",
+            "touch .piton/.local/x: Operation not permitted",
+            "sh: apps/.pix/f: Operation not permitted",
+        ]) {
+            assert.equal(deniedProtectedWrite(output), false, output)
+        }
+    })
+
+    it("asks on the host even when edits are allowed, and leaves other files alone", async () => {
+        const h = fixture("allow", { allow: ["edit", "write"] })
+        try {
+            const plain = await h.run("write", args("write"))
+            assert.equal(plain.isError, false)
+            assert.equal(h.prompts(), 0, "an allowed ordinary file doesn't ask")
+            const reviewed = await h.run("write", protectedArgs("write"))
+            assert.equal(reviewed.isError, false)
+            assert.equal(h.prompts(), 1, "a protected file always asks")
         } finally {
             await h.cleanup()
         }

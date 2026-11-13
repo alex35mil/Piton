@@ -650,7 +650,7 @@ impl SessionTask {
         use crate::protected_write::{Outcome, dialog, same_allowed_tools, write};
         let refuse = |reason: String| Outcome::Refused { reason };
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
-        let path = canonical_target(&request.path);
+        let path = crate::protected::canonical_target(&request.path);
         let Some(kind) = self.protected.classify(&path) else {
             let _ = reply.send(refuse(format!(
                 "{} isn't a protected file of this session; write it with the write or edit tool",
@@ -1246,36 +1246,4 @@ fn command_type(command: &Map<String, Value>) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
-}
-
-/// A path as the file system will resolve it: canonical when it exists; otherwise its nearest existing ancestor made
-/// canonical, with the rest appended (a new file, possibly in new folders). `..` and `.` are resolved first, so a
-/// request can't step out of a protected folder by name.
-fn canonical_target(path: &std::path::Path) -> PathBuf {
-    use std::path::Component;
-    let mut clean = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                clean.pop();
-            }
-            Component::CurDir => {}
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => clean.push(component),
-        }
-    }
-    if let Ok(real) = std::fs::canonicalize(&clean) {
-        return real;
-    }
-    let mut rest = Vec::new();
-    let mut base = clean.as_path();
-    while let Some(parent) = base.parent() {
-        if let Some(name) = base.file_name() {
-            rest.push(name.to_os_string());
-        }
-        base = parent;
-        if let Ok(real) = std::fs::canonicalize(base) {
-            return rest.iter().rev().fold(real, |path, name| path.join(name));
-        }
-    }
-    clean
 }

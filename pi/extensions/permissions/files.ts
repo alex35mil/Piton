@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import type { TSchema } from "typebox"
 
+import { agentChannel, protectedKind, requestProtectedWrite, type ProtectedOutcome } from "../__lib/protected.js"
 import { EditorChoiceValidator, fileReviewResult, isFileReviewDetails, type FileReviewDetails } from "./review.js"
 
 type FileKind = "edit" | "write"
@@ -85,6 +86,80 @@ async function reviewFile(
     )
 }
 
+/**
+ * A write to a protected file, through the daemon: it asks the user (or, for a skill's instructions with unchanged
+ * `allowed-tools`, writes at once) and writes on approval. Returns when written as proposed; otherwise throws the
+ * outcome the agent gets.
+ */
+async function writeThroughDaemon(
+    channel: { socket: string; token: string },
+    file: string,
+    content: string,
+    signal: AbortSignal | undefined,
+    abortTurn: () => void,
+): Promise<void> {
+    const outcome: ProtectedOutcome = await requestProtectedWrite(channel, file, content, signal)
+    switch (outcome.outcome) {
+        case "written":
+            return
+        case "approved": {
+            if (!outcome.modified && outcome.notes.length === 0) return
+            const notes = outcome.notes as FileReviewDetails["review"]["notes"]
+            throw new ReviewedFile(
+                outcome.modified
+                    ? fileReviewResult(
+                          { kind: "piton-file-review", outcome: "modified", path: file, notes },
+                          `[accepted] User approved with modifications. ${file} was updated with user's version, which differs from what you proposed. Current content of ${file}:\n\`\`\`\n${outcome.content}\n\`\`\``,
+                      )
+                    : fileReviewResult(
+                          { kind: "piton-file-review", outcome: "accepted", path: file, notes },
+                          `[accepted] User approved the edit. Changes applied to ${file} as proposed.`,
+                      ),
+                "review",
+            )
+        }
+        case "rejected": {
+            const notes = outcome.notes as FileReviewDetails["review"]["notes"]
+            if (notes.length === 0) abortTurn()
+            throw new ReviewedFile(
+                fileReviewResult(
+                    { kind: "piton-file-review", outcome: "rejected", path: file, notes },
+                    `[rejected] User rejected the edit to ${file}. File unchanged.`,
+                ),
+                notes.length === 0 ? "turn-abort" : "review",
+            )
+        }
+        case "refused":
+            throw new Error(`[rejected] ${outcome.reason}`)
+    }
+}
+
+/** The native tool with its writes sent to the daemon, for a protected file. Reads stay local (they're allowed). */
+function protectedTool(
+    kind: FileKind,
+    cwd: string,
+    write: (file: string, content: string) => Promise<void>,
+): ToolDefinition {
+    switch (kind) {
+        case "edit":
+            return createEditToolDefinition(cwd, {
+                operations: {
+                    access: (file) => fs.promises.access(file, fs.constants.R_OK),
+                    readFile: (file) => fs.promises.readFile(file),
+                    writeFile: write,
+                },
+            }) as unknown as ToolDefinition
+        case "write":
+            return createWriteToolDefinition(cwd, {
+                operations: {
+                    // The daemon creates missing folders; the sandbox can't.
+                    mkdir: async () => {},
+                    writeFile: write,
+                },
+            }) as unknown as ToolDefinition
+    }
+}
+
 function isFileInput(value: unknown): value is Record<string, unknown> & { path: string } {
     return !!value && typeof value === "object" && "path" in value && typeof value.path === "string"
 }
@@ -112,7 +187,23 @@ function wrapFileTool<TParams extends TSchema, TDetails, TRenderState>(
             const permission = await resolvePermission(kind, input, ctx)
             // A deny fails only this call; the turn continues.
             if (permission.mode === "deny") throw new Error(permission.reason)
-            if (permission.mode === "allow") return native.execute(id, input, signal, onUpdate, ctx)
+            // A protected file always goes to the user, whatever the permission mode: through the daemon when this pi
+            // runs under it (the sandbox can't write it), else with the review below.
+            const isProtected = protectedKind(ctx.cwd, input.path) !== undefined
+            const channel = isProtected ? agentChannel() : undefined
+            if (channel) {
+                const tool = protectedTool(kind, ctx.cwd, (file, content) =>
+                    writeThroughDaemon(channel, file, content, signal, () => ctx.abort()),
+                )
+                try {
+                    return (await tool.execute(id, input as never, signal, onUpdate as never, ctx)) as never
+                } catch (error) {
+                    if (!(error instanceof ReviewedFile)) throw error
+                    if (error.completion === "review") signal?.throwIfAborted()
+                    return error.result
+                }
+            }
+            if (permission.mode === "allow" && !isProtected) return native.execute(id, input, signal, onUpdate, ctx)
             if (!ctx.hasUI) throw new Error(`[rejected] Blocked (no UI for confirmation): ${native.name}`)
             const reviewed = makeReviewed(ctx.cwd, () => reviewFile(kind, input, ctx, signal))
             try {

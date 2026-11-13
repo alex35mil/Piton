@@ -45,6 +45,7 @@ import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@ear
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
 import { requireRuntime, type Runtime } from "../__lib/runtime.js"
+import { PROTECTED_HINT } from "../__lib/protected.js"
 import { type LevelKind, resolveSettings, section } from "../__lib/settings.js"
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
@@ -334,7 +335,25 @@ export default function (pi: ExtensionAPI) {
             }
         }
     })
+    // The sandbox denies shell writes to protected files with a bare "Operation not permitted": say why, and what works.
+    pi.on("tool_result", async (event) => {
+        if (event.toolName !== "bash" || process.env.PITON_RUNTIME !== "sandbox") return undefined
+        const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+        if (!deniedProtectedWrite(text)) return undefined
+        return { content: [...event.content, { type: "text" as const, text: PROTECTED_HINT }] }
+    })
     return registerReviewCodemode(pi)
+}
+
+/** A shell output that reports a denied write under a protected folder. */
+export function deniedProtectedWrite(output: string): boolean {
+    return output
+        .split("\n")
+        .some(
+            (line) =>
+                /Operation not permitted|unable to unlink/.test(line) &&
+                /(^|[/\s'"])(\.piton(?!\/\.local)|\.pi|\.agents\/skills)(\/|['"\s:]|$)/.test(line),
+        )
 }
 
 // A level's shared file applies everywhere; its runtime file applies only in that runtime.

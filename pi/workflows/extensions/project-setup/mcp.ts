@@ -12,6 +12,7 @@ import {
     resolveSettings,
     section,
 } from "../../../extensions/__lib/settings.js"
+import { writeProtected } from "../../../extensions/__lib/protected.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
 import { setupRoot } from "./root.js"
 
@@ -66,7 +67,7 @@ type SettingsTarget = ProjectMcpConfiguration["target"]
  * (`local`). A server already registered anywhere in the configuration chain under the same name (or one differing
  * only by `-`/`_`) is refused unless it's this exact entry in the target file.
  */
-export function configureProjectMcp(cwd: string, input: unknown) {
+export async function configureProjectMcp(cwd: string, input: unknown) {
     const parsed = parse(ProjectMcpConfigurationValidator, input)
     const root = setupRoot(cwd)
     const resolved = resolveSettings(cwd)
@@ -111,8 +112,8 @@ export function configureProjectMcp(cwd: string, input: unknown) {
         ensureLocalSettingsExclusion(root, LOCAL_MCP_SETTINGS_FILE)
     }
     if (changed) {
-        fs.mkdirSync(path.dirname(targetPath), { recursive: true })
-        fs.writeFileSync(targetPath, `${JSON.stringify(target, null, 4)}\n`)
+        // A protected file: under the daemon, the user sees the diff and approves it.
+        await writeProtected(targetPath, `${JSON.stringify(target, null, 4)}\n`)
         clearSettingsCache()
     }
     const changedTargets: SettingsTarget[] = changed ? [parsed.target] : []

@@ -8,10 +8,13 @@
 
 use std::path::{Component, Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::settings::{LOCAL_DIR, PITON_DIR};
 
 /// What a protected path is, which decides whether a change needs the user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "file", rename_all = "snake_case")]
 pub enum Protected {
     /// A file in the source's `.piton/`: settings, permissions, sandbox grants.
     Configuration,
@@ -21,7 +24,8 @@ pub enum Protected {
     Skill(SkillFile),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillFile {
     /// `SKILL.md`: its `allowed-tools` grant permissions.
     Definition,
@@ -78,6 +82,37 @@ impl Roots {
             format!("(deny file-write* (regex #\"^{checkout}/(.+/)?\\.agents/skills(/|$)\"))"),
         ]
     }
+}
+
+/// A path as the file system will resolve it: canonical when it exists; otherwise its nearest existing ancestor made
+/// canonical, with the rest appended (a new file, possibly in new folders). `..` and `.` are resolved first, so a
+/// request can't step out of a protected folder by name.
+pub fn canonical_target(path: &Path) -> PathBuf {
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => clean.push(component),
+        }
+    }
+    if let Ok(real) = std::fs::canonicalize(&clean) {
+        return real;
+    }
+    let mut rest = Vec::new();
+    let mut base = clean.as_path();
+    while let Some(parent) = base.parent() {
+        if let Some(name) = base.file_name() {
+            rest.push(name.to_os_string());
+        }
+        base = parent;
+        if let Ok(real) = std::fs::canonicalize(base) {
+            return rest.iter().rev().fold(real, |path, name| path.join(name));
+        }
+    }
+    clean
 }
 
 /// A skill file is a script when it's in a `scripts/` folder or has a script's extension.

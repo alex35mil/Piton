@@ -117,7 +117,7 @@ export default function (pi: ExtensionAPI): void {
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             if (!ctx.isProjectTrusted())
                 throw new Error("Trust this project before configuring project MCP registrations")
-            const configured = configureProjectMcp(ctx.cwd, params)
+            const configured = await configureProjectMcp(ctx.cwd, params)
             return {
                 content: [
                     {

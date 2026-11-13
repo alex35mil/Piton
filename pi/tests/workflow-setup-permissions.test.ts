@@ -74,7 +74,7 @@ const writeRule = "mcp(team-gh, issue_write)"
 const gate = "write(.piton/*/plan.md)"
 
 describe("project setup permissions", () => {
-    it("merges allows and ask gates while preserving unrelated settings and the index", () => {
+    it("merges allows and ask gates while preserving unrelated settings and the index", async () => {
         const f = fixture()
         try {
             const original = {
@@ -85,7 +85,7 @@ describe("project setup permissions", () => {
             }
             f.write("project", original)
             const index = git(f.root, "ls-files", "--stage")
-            const configured = configureProjectPermissions(
+            const configured = await configureProjectPermissions(
                 f.root,
                 { target: "project", allow: [hint, writeRule], ask: [gate] },
                 live,
@@ -105,14 +105,14 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("skips coverage from every tier without touching files or exclusions", () => {
+    it("skips coverage from every tier without touching files or exclusions", async () => {
         for (const tier of ["global", "project", "local"] as const) {
             const f = fixture()
             try {
                 f.write(tier, { allow: ["mcp(team-gh, *)"] })
                 const before = fs.readFileSync(f.paths[tier], "utf-8")
                 const exclude = fs.readFileSync(path.join(f.root, ".git/info/exclude"), "utf-8")
-                const result = configureProjectPermissions(
+                const result = await configureProjectPermissions(
                     f.root,
                     { target: "local", allow: [hint, writeRule], ask: [] },
                     live,
@@ -131,10 +131,10 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("skips semantic duplicates within one approved request and on rerun", () => {
+    it("skips semantic duplicates within one approved request and on rerun", async () => {
         const f = fixture()
         try {
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "local", allow: [writeRule, "mcp(team-gh,issue_write)"], ask: [gate] },
                 live,
@@ -145,7 +145,8 @@ describe("project setup permissions", () => {
             assert.equal(git(f.root, "check-ignore", ".piton/permissions.local.json"), ".piton/permissions.local.json")
             const before = fs.readFileSync(f.paths.local, "utf-8")
             assert.equal(
-                configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live).changed,
+                (await configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live))
+                    .changed,
                 false,
             )
             assert.equal(fs.readFileSync(f.paths.local, "utf-8"), before)
@@ -154,14 +155,14 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("preserves blockers, skips fully blocked writes, and reports partial read access", () => {
+    it("preserves blockers, skips fully blocked writes, and reports partial read access", async () => {
         const f = fixture()
         try {
             f.write("global", { ask: [writeRule] })
             f.write("local", { deny: ["mcp(team-gh, issue_read)"] })
             const secondRead = { ...read, serverToolName: "list_issues" }
             const reads = new Map([...live, [fixtureToolName("team-gh", "list_issues"), secondRead] as const])
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "project", allow: [hint, writeRule], ask: [] },
                 reads,
@@ -178,12 +179,12 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("checks new ask rules and rechecks policy changed after inspection", () => {
+    it("checks new ask rules and rechecks policy changed after inspection", async () => {
         const f = fixture()
         try {
             assert.equal(inspectProjectPermissions(f.root, { rules: [writeRule] }, live).rules[0].status, "available")
             f.write("global", { deny: [writeRule] })
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "project", allow: [writeRule], ask: [gate] },
                 live,
@@ -191,7 +192,7 @@ describe("project setup permissions", () => {
             assert.deepEqual(result.added, { allow: [], ask: [gate] })
             assert.equal(result.skipped.allow[0].status, "blocked")
             fs.rmSync(f.paths.global)
-            const sameRequest = configureProjectPermissions(
+            const sameRequest = await configureProjectPermissions(
                 f.root,
                 { target: "local", allow: [writeRule], ask: [writeRule] },
                 live,
@@ -202,10 +203,10 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("reports unavailable tools and never creates an empty permission file", () => {
+    it("reports unavailable tools and never creates an empty permission file", async () => {
         const f = fixture()
         try {
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "local", allow: [hint, writeRule], ask: [] },
                 new Map(),
@@ -222,7 +223,7 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("validates complete requests and all persistent tiers before any mutation", () => {
+    it("validates complete requests and all persistent tiers before any mutation", async () => {
         const f = fixture()
         try {
             const exclude = fs.readFileSync(path.join(f.root, ".git/info/exclude"), "utf-8")
@@ -232,7 +233,7 @@ describe("project setup permissions", () => {
                 { target: "local", allow: ["mcp(team-gh, hint: unknown)"], ask: [gate] },
                 { target: "local", allow: [writeRule, writeRule], ask: [] },
             ]) {
-                assert.throws(() => configureProjectPermissions(f.root, input, live))
+                await assert.rejects(async () => configureProjectPermissions(f.root, input, live))
                 assert.equal(fs.existsSync(f.paths.local), false)
             }
             for (const tier of ["global", "project", "local"] as const) {
@@ -245,7 +246,7 @@ describe("project setup permissions", () => {
                 ]) {
                     fs.mkdirSync(path.dirname(f.paths[tier]), { recursive: true })
                     fs.writeFileSync(f.paths[tier], content)
-                    assert.throws(() =>
+                    await assert.rejects(async () =>
                         configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live),
                     )
                     assert.equal(fs.readFileSync(f.paths[tier], "utf-8"), content)
@@ -258,15 +259,16 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("refuses local files in Git and leaves their contents and index intact", () => {
+    it("refuses local files in Git and leaves their contents and index intact", async () => {
         const f = fixture()
         try {
             f.write("local", { allow: ["read"] })
             git(f.root, "add", ".piton/permissions.local.json")
             const before = fs.readFileSync(f.paths.local, "utf-8")
             const index = git(f.root, "ls-files", "--stage")
-            assert.throws(
-                () => configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live),
+            await assert.rejects(
+                async () =>
+                    configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live),
                 /in Git or staged/,
             )
             assert.equal(fs.readFileSync(f.paths.local, "utf-8"), before)
