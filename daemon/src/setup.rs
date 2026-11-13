@@ -193,19 +193,24 @@ fn check_step(host: &Host, step: Step) -> Status {
         },
         Step::State => {
             let db = host.config.state_db();
-            match db.is_file() {
-                // The daemon holds it open; a read-only look at its version is enough here.
-                true => match state_version(&db) {
-                    Ok(()) => Status::Ok {
-                        detail: db.display().to_string(),
-                    },
-                    Err(message) => Status::Failed { message },
-                },
-                false => Status::Missing {
+            // Missing only when the file system says so: a file this process can't see (a sandbox without access to
+            // the state folder) exists as far as anyone knows, and fails the check with the reason instead.
+            match std::fs::metadata(&db) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Status::Missing {
                     problems: vec![format!("{} doesn't exist yet", db.display())],
                     fix: Fix::Apply {
                         summary: "Create this host's state database".into(),
                     },
+                },
+                Err(e) => Status::Failed {
+                    message: format!("can't check {}: {e}", db.display()),
+                },
+                // The daemon holds it open; a read-only look at its version is enough here.
+                Ok(_) => match state_version(&db) {
+                    Ok(()) => Status::Ok {
+                        detail: db.display().to_string(),
+                    },
+                    Err(message) => Status::Failed { message },
                 },
             }
         }
