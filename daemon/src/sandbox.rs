@@ -282,11 +282,14 @@ profile = false
         // The protected files, for this launch's source and checkout.
         let rules = p["unsafe_macos_seatbelt_rules"].as_array().unwrap();
         assert_eq!(rules.len(), 3);
+        let source = h.replace('.', "\\.");
         assert!(
             rules[0]
                 .as_str()
                 .unwrap()
-                .contains(&format!("(subpath \"{h}/repo/.piton\")"))
+                .contains(&format!("(regex #\"^{source}/repo/\\.[pP][iI][tT][oO][nN](/|$)\")")),
+            "{}",
+            rules[0]
         );
     }
 

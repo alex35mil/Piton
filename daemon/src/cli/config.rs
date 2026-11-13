@@ -131,25 +131,42 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 ExitCode::from(EXIT_INVALID)
             }
         },
-        ConfigAction::Protected { path, workspace } => {
+        ConfigAction::Protected {
+            path,
+            workspace,
+            seatbelt_rules,
+        } => {
             let dir = workspace
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
-            match crate::launch::resolve_workspace(&dir) {
-                Ok(workspace) => {
-                    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-                    let roots = crate::protected::Roots {
-                        source: canonical(workspace.source()),
-                        checkout: canonical(&workspace.checkout),
-                    };
+            let workspace = match crate::launch::resolve_workspace(&dir) {
+                Ok(workspace) => workspace,
+                Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
+            };
+            let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            let roots = crate::protected::Roots {
+                source: canonical(workspace.source()),
+                checkout: canonical(&workspace.checkout),
+            };
+            match (path, seatbelt_rules) {
+                (_, true) => {
+                    for rule in roots.seatbelt_rules() {
+                        println!("{rule}");
+                    }
+                    ExitCode::SUCCESS
+                }
+                (Some(path), false) => {
                     let target = crate::protected::canonical_target(&workspace.path.join(path));
                     let protected = roots.classify(&target);
                     let output = serde_json::json!({"format": RESOLVE_FORMAT, "path": target, "protected": protected});
                     println!("{output}");
                     ExitCode::SUCCESS
                 }
-                Err(e) => print_error(ErrorBody::Workspace { message: e.to_string() }),
+                (None, false) => {
+                    eprintln!("piton: give a path, or --seatbelt-rules");
+                    ExitCode::from(1)
+                }
             }
         }
     }

@@ -166,6 +166,8 @@ const tests = {
         const title = JSON.parse(dialog.title);
         assert.equal(title.toolName, "write");
         assert.equal(title.toolInput.path, realpathSync(ctx.ws) + "/.piton/permissions.json");
+        // The current content, so a client that can't read the file shows a diff (null: the file is new).
+        assert.equal(title.current, null);
         // One at a time.
         const second = await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" });
         assert.equal(second.outcome, "refused");
@@ -189,13 +191,30 @@ const tests = {
         assert.equal((await rejected).outcome, "rejected");
         assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
 
-        // A skill's instructions with unchanged allowed-tools are written without asking.
+        // A skill asks too, whatever changed in it.
         const skill = join(ctx.ws, ".agents", "skills", "s", "SKILL.md");
         mkdirSync(join(ctx.ws, ".agents", "skills", "s"), { recursive: true });
         writeFileSync(skill, "---\nallowed-tools:\n  - read\n---\nold\n");
-        const quiet = await agentRequest(socket, { type: "protected_write", token, path: skill, content: "---\nallowed-tools:\n  - read\n---\nnew\n" });
-        assert.equal(quiet.outcome, "written");
+        const skillWrite = agentRequest(socket, { type: "protected_write", token, path: skill, content: "---\nallowed-tools:\n  - read\n---\nnew\n" });
+        const asked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        assert.equal(JSON.parse(asked.change.state.dialogs[0].title).current, "---\nallowed-tools:\n  - read\n---\nold\n");
+        await c.req("session.answer", { session: key, request_id: asked.change.state.dialogs[0].id, answer: { value: "Accept" } });
+        assert.equal((await skillWrite).outcome, "approved");
         assert.match(readFileSync(skill, "utf8"), /new/);
+
+        // The agent stops waiting (its tool call was aborted): the dialog closes, and the next request is asked again
+        // instead of being refused as "another is waiting".
+        const abandoned = net.connect(socket);
+        abandoned.write(JSON.stringify({ type: "protected_write", token, path: target, content: "left" }) + "\n");
+        await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        const closing = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        abandoned.destroy();
+        await closing;
+        const next = agentRequest(socket, { type: "protected_write", token, path: target, content: "again" });
+        const reasked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        await c.req("session.answer", { session: key, request_id: reasked.change.state.dialogs[0].id, answer: { value: "Reject" } });
+        assert.equal((await next).outcome, "rejected");
+        assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
 
         // The session ends: its token stops working.
         await c.req("session.stop", { session: key });

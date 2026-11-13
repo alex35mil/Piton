@@ -2,7 +2,8 @@
 //! itself. The agent can ask (over `agent.sock`, see agent.rs) but never answer: answers come only from clients.
 //!
 //! The dialog is pi's file review format, so pi.nvim opens its diff view and the apps their review sheet: a `select`
-//! whose title is `{"prompt", "toolName", "toolInput"}` with `toolName` `write` and `toolInput {path, content}`. pi.nvim
+//! whose title is `{"prompt", "toolName", "toolInput"}` with `toolName` `write` and `toolInput {path, content}`, plus
+//! `current` (the file's content now, null for a new file) so a client that can't read the file shows a diff. pi.nvim
 //! answers `"Reject"` or a JSON `{"result": "Accepted" | "AcceptModified" | "Rejected", "content"?, "notes"?}`; on
 //! acceptance it has already written the file itself (its diff view writes on accept), which the daemon then confirms
 //! by writing the same bytes again. The daemon's write, not the client's, is the one that counts: a client without
@@ -26,8 +27,6 @@ pub struct Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
-    /// Written as asked, without asking (skill instructions with unchanged `allowed-tools`).
-    Written,
     /// The user approved; `content` is what was written (the user's version when they changed it).
     Approved {
         modified: bool,
@@ -94,11 +93,12 @@ impl Decision {
 }
 
 /// The dialog record for a request, in pi's `extension_ui_request` format.
-pub fn dialog(id: &str, path: &Path, content: &str) -> Value {
+pub fn dialog(id: &str, path: &Path, current: Option<&str>, content: &str) -> Value {
     let title = json!({
         "prompt": format!("write (protected): {}", path.display()),
         "toolName": "write",
         "toolInput": {"path": path, "content": content},
+        "current": current,
     });
     json!({
         "type": "extension_ui_request",
@@ -109,68 +109,84 @@ pub fn dialog(id: &str, path: &Path, content: &str) -> Value {
     })
 }
 
-/// Writes `content` to `path` the way an editor saves: through a symlink to its target, atomically (a temporary file
-/// in the same folder, then a rename), keeping the file's permissions.
-pub fn write(path: &Path, content: &str) -> std::io::Result<()> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let dir = target.parent().unwrap_or(Path::new("/"));
-    std::fs::create_dir_all(dir)?;
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = dir.join(format!(".{name}.piton-{}-{n}", std::process::id()));
-    std::fs::write(&temporary, content)?;
-    if let Ok(meta) = std::fs::metadata(&target) {
-        let _ = std::fs::set_permissions(&temporary, meta.permissions());
-    }
-    std::fs::rename(&temporary, &target).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temporary);
-    })
-}
+/// Writes `content` to `path` (canonical, as approved) atomically, keeping an existing file's permissions, without
+/// following any symlink at or below `root`.
+///
+/// The agent can change its checkout while the user decides (move a folder away, put a symlink in its place). So the
+/// path is walked from `root` one folder at a time, each opened with `O_NOFOLLOW` (missing ones created, never
+/// followed), and the temporary file and the rename happen relative to the last folder's descriptor. A path that no
+/// longer leads where the user saw it fails here instead of writing elsewhere.
+pub fn write(root: &Path, path: &Path, content: &str) -> std::io::Result<()> {
+    use nix::fcntl::{AtFlags, OFlag, open, openat, renameat};
+    use nix::sys::stat::{Mode, fstatat, mkdirat};
+    use std::io::Write;
+    use std::os::fd::{AsFd, OwnedFd};
 
-/// Whether a skill's `SKILL.md` change leaves its `allowed-tools` as they were (then it needs no approval: the
-/// instructions changed, not what the skill may do).
-pub fn same_allowed_tools(before: &str, after: &str) -> bool {
-    allowed_tools(before) == allowed_tools(after)
-}
-
-/// The `allowed-tools` entries of a `SKILL.md`'s frontmatter, in order; empty when it has none.
-fn allowed_tools(text: &str) -> Vec<String> {
-    let Some(rest) = text.strip_prefix("---\n") else {
-        return Vec::new();
-    };
-    let Some(end) = rest.find("\n---") else {
-        return Vec::new();
-    };
-    let mut tools = Vec::new();
-    let mut inside = false;
-    for line in rest[..end].lines() {
-        if let Some(value) = line.strip_prefix("allowed-tools:") {
-            inside = true;
-            // An inline list: `allowed-tools: [a, b]` or `allowed-tools: a b`.
-            let inline = value.trim().trim_start_matches('[').trim_end_matches(']');
-            tools.extend(
-                inline
-                    .split([',', ' '])
-                    .map(|t| t.trim().trim_matches('"').trim_matches('\''))
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_string),
-            );
-            continue;
-        }
-        if inside {
-            match line.trim_start().strip_prefix("- ") {
-                Some(item) if line.starts_with(' ') || line.starts_with('-') => {
-                    tools.push(item.trim().trim_matches('"').trim_matches('\'').to_string());
-                }
-                Some(_) | None => inside = false,
+    let refused = |why: String| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why);
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| refused(format!("{} is outside {}", path.display(), root.display())))?;
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(name) => parts.push(name),
+            std::path::Component::Prefix(_)
+            | std::path::Component::RootDir
+            | std::path::Component::CurDir
+            | std::path::Component::ParentDir => {
+                return Err(refused(format!("{} isn't a plain path", path.display())));
             }
         }
     }
-    tools
+    let Some((name, folders)) = parts.split_last() else {
+        return Err(refused(format!("{} names no file", path.display())));
+    };
+    let directory = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let mut dir: OwnedFd = open(root, directory, Mode::empty())?;
+    for folder in folders {
+        match mkdirat(dir.as_fd(), *folder, Mode::from_bits_truncate(0o755)) {
+            Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+        // ELOOP or ENOTDIR here means a symlink or a file took the folder's place.
+        dir = openat(dir.as_fd(), *folder, directory, Mode::empty()).map_err(|e| {
+            refused(format!(
+                "{} no longer leads to the approved file ({e})",
+                Path::new(folder).display()
+            ))
+        })?;
+    }
+    // The file itself must be a regular file (or missing): a symlink there could have been put in place while the user
+    // decided, and would send the write elsewhere. Its mode carries over.
+    let mode = match fstatat(dir.as_fd(), *name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFREG => Mode::from_bits_truncate(stat.st_mode & 0o7777),
+        Ok(_) => {
+            return Err(refused(format!(
+                "{} isn't a regular file (a symlink or folder); change it by hand",
+                path.display()
+            )));
+        }
+        Err(nix::errno::Errno::ENOENT) => Mode::from_bits_truncate(0o644),
+        Err(e) => return Err(e.into()),
+    };
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = format!(".{}.piton-{}-{n}", Path::new(name).display(), std::process::id());
+    let file = openat(
+        dir.as_fd(),
+        temporary.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        mode,
+    )?;
+    let mut file = std::fs::File::from(file);
+    let written = file
+        .write_all(content.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| renameat(dir.as_fd(), temporary.as_str(), dir.as_fd(), *name).map_err(Into::into));
+    if written.is_err() {
+        let _ = nix::unistd::unlinkat(dir.as_fd(), temporary.as_str(), nix::unistd::UnlinkatFlags::NoRemoveDir);
+    }
+    written
 }
 
 #[cfg(test)]
@@ -217,47 +233,72 @@ mod tests {
     }
 
     #[test]
-    fn the_dialog_is_pi_nvims_diff_format() {
-        let d = dialog("piton:w:1", Path::new("/r/.piton/permissions.json"), "{}");
+    fn the_dialog_is_pi_nvims_diff_format_with_the_current_content() {
+        let d = dialog("piton:w:1", Path::new("/r/.piton/permissions.json"), Some("old"), "{}");
         assert_eq!(d["type"], "extension_ui_request");
         assert_eq!(d["method"], "select");
         let title: Value = serde_json::from_str(d["title"].as_str().unwrap()).unwrap();
         assert_eq!(title["toolName"], "write");
         assert_eq!(title["toolInput"]["path"], "/r/.piton/permissions.json");
         assert_eq!(title["toolInput"]["content"], "{}");
+        assert_eq!(title["current"], "old");
+        let new = dialog("piton:w:2", Path::new("/r/.pi/x"), None, "y");
+        let title: Value = serde_json::from_str(new["title"].as_str().unwrap()).unwrap();
+        assert_eq!(title["current"], Value::Null);
     }
 
     #[test]
-    fn writes_atomically_through_a_symlink() {
+    fn writes_atomically_creating_folders() {
         let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("dotfiles/permissions.json");
-        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
-        std::fs::write(&real, "old").unwrap();
-        let link = dir.path().join("permissions.json");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        write(&link, "new").unwrap();
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
-        // A new file in a new folder.
-        write(&dir.path().join("a/.pi/settings.json"), "{}").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("a/.pi/settings.json")).unwrap(),
-            "{}"
-        );
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join(".piton/config.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "old").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write(&root, &file, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        // A new file in new folders.
+        let skill = root.join("apps/.agents/skills/x/SKILL.md");
+        write(&root, &skill, "skill").unwrap();
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), "skill");
+        // Nothing outside the root.
+        assert!(write(&root, Path::new("/tmp/elsewhere"), "x").is_err());
     }
 
+    /// The agent swaps a folder on the approved path for a symlink while the user decides: the write refuses instead
+    /// of following it out of the checkout.
     #[test]
-    fn compares_allowed_tools() {
-        let list = "---\nname: s\nallowed-tools:\n    - \"read\"\n    - \"bash(git *)\"\n---\n# Body\n";
-        let edited = "---\nname: s\nallowed-tools:\n    - \"read\"\n    - \"bash(git *)\"\n---\n# Better body\n";
-        let widened = "---\nname: s\nallowed-tools:\n    - \"read\"\n    - \"bash(*)\"\n---\n# Body\n";
-        assert!(same_allowed_tools(list, edited));
-        assert!(!same_allowed_tools(list, widened));
-        assert!(same_allowed_tools("# no frontmatter", "# still none"));
-        assert!(!same_allowed_tools("# none", "---\nallowed-tools: [read]\n---\n"));
-        assert!(same_allowed_tools(
-            "---\nallowed-tools: [read, write]\n---\n",
-            "---\nallowed-tools: read write\n---\nmore\n"
-        ));
+    fn never_follows_a_symlink_on_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let root = base.join("repo");
+        let elsewhere = base.join("home");
+        std::fs::create_dir_all(root.join("apps")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let approved = root.join("apps/.agents/skills/x/SKILL.md");
+        std::fs::rename(root.join("apps"), root.join("apps.bak")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("apps")).unwrap();
+        let refused = write(&root, &approved, "allowed-tools: [\"bash(*)\"]").unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied, "{refused}");
+        assert!(!elsewhere.join(".agents").exists(), "nothing written through the link");
+
+        // Nor a symlink at the file itself: refused, and neither the link nor its target changes.
+        std::fs::remove_file(root.join("apps")).unwrap();
+        std::fs::create_dir_all(root.join(".piton")).unwrap();
+        let target = elsewhere.join("config.toml");
+        std::fs::write(&target, "theirs").unwrap();
+        std::os::unix::fs::symlink(&target, root.join(".piton/config.toml")).unwrap();
+        let refused = write(&root, &root.join(".piton/config.toml"), "mine").unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "theirs");
+        assert!(
+            root.join(".piton/config.toml")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }

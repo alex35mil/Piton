@@ -94,7 +94,12 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
         return;
     };
     let response = match serde_json::from_str::<Request>(&line) {
-        Ok(request) => respond(&daemon, request).await,
+        // The agent's tool call holds the connection while the user decides; when it's aborted, the connection closes
+        // and the wait ends, which the session sees (its reply channel closes) and settles.
+        Ok(request) => tokio::select! {
+            response = respond(&daemon, request) => response,
+            _ = closed(&mut lines) => return,
+        },
         Err(e) => Response::Error {
             message: format!("invalid request: {e}"),
         },
@@ -102,6 +107,11 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut out = serde_json::to_string(&response).unwrap_or_default();
     out.push('\n');
     let _ = write.write_all(out.as_bytes()).await;
+}
+
+/// Resolves when the client closes its side (or sends more, which this protocol doesn't allow).
+async fn closed(lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>) {
+    let _ = lines.next_line().await;
 }
 
 async fn respond(daemon: &Daemon, request: Request) -> Response {
@@ -122,6 +132,9 @@ async fn respond(daemon: &Daemon, request: Request) -> Response {
             if handle.tx.send(SessionCmd::ProtectedWrite { request, reply }).is_err() {
                 return unknown();
             }
+            // Wakes the session when the agent stops waiting, so it closes the dialog at once.
+            let session = handle.tx.clone();
+            let _wake = WakeOnDrop(session);
             // Waits for the user, as long as it takes; the agent's tool call waits with it.
             match outcome.await {
                 Ok(outcome) => Response::ProtectedWrite(outcome),
@@ -130,6 +143,15 @@ async fn respond(daemon: &Daemon, request: Request) -> Response {
                 },
             }
         }
+    }
+}
+
+/// Asks the session to look at its pending protected write when dropped: the agent stopped waiting.
+struct WakeOnDrop(tokio::sync::mpsc::UnboundedSender<SessionCmd>);
+
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.send(SessionCmd::SettleProtectedWrite);
     }
 }
 

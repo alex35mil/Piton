@@ -195,12 +195,15 @@ enum ConfigAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
-    /// Whether PATH is a protected file of the workspace (JSON): `configuration`, `pi`, `skill` with its file kind, or
-    /// null. The pi package asks before writing.
+    /// Whether PATH is a protected file of the workspace (JSON): `configuration`, `pi`, `skill`, or null. The pi
+    /// package asks before writing. With --seatbelt-rules, prints the sandbox rules a launch in the workspace gets
+    /// instead (one per line; the host check daemon/tests/probe/protected.sh uses them).
     Protected {
-        path: PathBuf,
+        path: Option<PathBuf>,
         #[usage(long)]
         workspace: Option<PathBuf>,
+        #[usage(long)]
+        seatbelt_rules: bool,
     },
 }
 

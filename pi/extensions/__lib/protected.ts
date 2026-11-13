@@ -18,11 +18,31 @@ import { BIN_ENV, pitonBinary, RESOLVE_FORMAT } from "./settings.js"
 export const TOKEN_ENV = "PITON_SESSION_TOKEN"
 export const SOCKET_ENV = "PITON_AGENT_SOCKET"
 
-export type SkillFile = "definition" | "script" | "support"
-export type Protected = { kind: "configuration" } | { kind: "pi" } | { kind: "skill"; file: SkillFile }
+export type Protected = { kind: "configuration" } | { kind: "pi" } | { kind: "skill" }
+
+/**
+ * Answers by workspace and path: protection depends only on where a path resolves, so asking the binary once per path
+ * is enough. (Retargeting a symlink along a path could change it; the sandbox still denies such a write, and the
+ * daemon checks the path again.)
+ */
+const kinds = new Map<string, Protected | null>()
+
+/** Forgets cached answers, for tests. */
+export function clearProtectedCache(): void {
+    kinds.clear()
+}
 
 /** Whether `file` (relative to `cwd`, or absolute) is protected, and what it is. */
 export function protectedKind(cwd: string, file: string): Protected | undefined {
+    const key = `${path.resolve(cwd)}\0${path.resolve(cwd, file)}`
+    const cached = kinds.get(key)
+    if (cached !== undefined) return cached ?? undefined
+    const kind = askBinary(cwd, file)
+    kinds.set(key, kind ?? null)
+    return kind
+}
+
+function askBinary(cwd: string, file: string): Protected | undefined {
     const bin = pitonBinary()
     let stdout: string
     try {
@@ -46,7 +66,6 @@ export function protectedKind(cwd: string, file: string): Protected | undefined 
 
 /** What the daemon did with a protected write. */
 export type ProtectedOutcome =
-    | { outcome: "written" }
     | { outcome: "approved"; modified: boolean; content: string; notes: unknown[] }
     | { outcome: "rejected"; notes: unknown[] }
     | { outcome: "refused"; reason: string }
@@ -114,8 +133,6 @@ export async function writeProtected(file: string, content: string, signal?: Abo
     }
     const outcome = await requestProtectedWrite(channel, file, content, signal)
     switch (outcome.outcome) {
-        case "written":
-            return
         case "approved":
             if (outcome.modified) throw new Error(`the user changed ${file} before approving it; read it again`)
             return

@@ -20,19 +20,9 @@ pub enum Protected {
     Configuration,
     /// A file under a `.pi/` folder: pi's own project settings and extensions, which run code.
     Pi,
-    /// A file under an `.agents/skills/<skill>/` folder.
-    Skill(SkillFile),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillFile {
-    /// `SKILL.md`: its `allowed-tools` grant permissions.
-    Definition,
-    /// A script the skill can run.
-    Script,
-    /// Anything else (references, assets).
-    Support,
+    /// A file under an `.agents/skills/` folder: skill instructions (their `allowed-tools` grant permissions) and the
+    /// scripts skills run.
+    Skill,
 }
 
 /// The roots protection is computed for: one launch's source and workspace checkouts (canonical).
@@ -43,13 +33,25 @@ pub struct Roots {
 }
 
 impl Roots {
-    /// What `path` (canonical, absolute) is, or None when it isn't protected.
+    /// The checkout a protected path of this kind is in: the source for configuration, the workspace's checkout for
+    /// `.pi/` and skills.
+    pub fn root_for(&self, kind: &Protected) -> &Path {
+        match kind {
+            Protected::Configuration => &self.source,
+            Protected::Pi | Protected::Skill => &self.checkout,
+        }
+    }
+
+    /// What `path` (canonical, absolute) is, or None when it isn't protected. Names compare case-insensitively: APFS
+    /// is case-insensitive by default, so `.PI/settings.json` is the file pi reads as `.pi/settings.json`.
     pub fn classify(&self, path: &Path) -> Option<Protected> {
-        let configuration = self.source.join(PITON_DIR);
-        if path.starts_with(&configuration) && !path.starts_with(self.source.join(LOCAL_DIR)) {
+        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        let path = lower(path);
+        let source = lower(&self.source);
+        if path.starts_with(source.join(PITON_DIR)) && !path.starts_with(source.join(LOCAL_DIR)) {
             return Some(Protected::Configuration);
         }
-        let relative = path.strip_prefix(&self.checkout).ok()?;
+        let relative = path.strip_prefix(lower(&self.checkout)).ok()?;
         let parts: Vec<&str> = relative
             .components()
             .filter_map(|c| match c {
@@ -60,26 +62,34 @@ impl Roots {
         if parts.contains(&".pi") {
             return Some(Protected::Pi);
         }
-        let skills = parts.windows(2).position(|w| w == [".agents", "skills"])?;
-        let inside = &parts[skills + 2..];
-        Some(Protected::Skill(match inside {
-            [_skill, "SKILL.md"] => SkillFile::Definition,
-            [_skill, rest @ ..] if is_script(rest) => SkillFile::Script,
-            [] | [_] | [_, ..] => SkillFile::Support,
-        }))
+        parts
+            .windows(2)
+            .any(|w| w == [".agents", "skills"])
+            .then_some(Protected::Skill)
     }
 
     /// The Seatbelt rules for a sandboxed launch: deny every write to the protected paths. Paths are canonical, as
     /// Seatbelt compares them.
     pub fn seatbelt_rules(&self) -> Vec<String> {
-        let source = quote(&self.source.to_string_lossy());
+        // Regexes throughout, every protected name in any case: Seatbelt compares paths as written, and APFS treats
+        // `.PITON` and `.piton` as one folder. `.piton/.local` stays writable in any case too.
+        let source = regex_escape(&self.source.to_string_lossy());
         let checkout = regex_escape(&self.checkout.to_string_lossy());
+        let piton = any_case(PITON_DIR);
+        let local = any_case(".local");
         vec![
             format!(
-                "(deny file-write* (require-all (subpath \"{source}/{PITON_DIR}\") (require-not (subpath \"{source}/{LOCAL_DIR}\"))))"
+                "(deny file-write* (require-all (regex #\"^{source}/{piton}(/|$)\") (require-not (regex #\"^{source}/{piton}/{local}(/|$)\"))))"
             ),
-            format!("(deny file-write* (regex #\"^{checkout}/(.+/)?\\.pi(/|$)\"))"),
-            format!("(deny file-write* (regex #\"^{checkout}/(.+/)?\\.agents/skills(/|$)\"))"),
+            format!(
+                "(deny file-write* (regex #\"^{checkout}/(.+/)?{}(/|$)\"))",
+                any_case(".pi")
+            ),
+            format!(
+                "(deny file-write* (regex #\"^{checkout}/(.+/)?{}/{}(/|$)\"))",
+                any_case(".agents"),
+                any_case("skills")
+            ),
         ]
     }
 }
@@ -115,21 +125,15 @@ pub fn canonical_target(path: &Path) -> PathBuf {
     clean
 }
 
-/// A skill file is a script when it's in a `scripts/` folder or has a script's extension.
-fn is_script(path: &[&str]) -> bool {
-    let in_scripts = path.len() > 1 && path[..path.len() - 1].contains(&"scripts");
-    let name = path.last().copied().unwrap_or_default();
-    let extension = name.rsplit_once('.').map(|(_, ext)| ext);
-    in_scripts
-        || matches!(
-            extension,
-            Some("sh" | "bash" | "zsh" | "fish" | "py" | "js" | "mjs" | "cjs" | "ts" | "rb" | "pl")
-        )
-}
-
-/// A path inside a Seatbelt string literal.
-fn quote(path: &str) -> String {
-    path.replace('\\', "\\\\").replace('"', "\\\"")
+/// A name as a regex matching it in any case: `.pi` becomes `\.[pP][iI]`.
+fn any_case(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            c if c.is_ascii_alphabetic() => format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase()),
+            '.' => "\\.".into(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// A path as a literal inside a Seatbelt regex (`#"..."`): regex metacharacters and the literal's quote escaped.
@@ -168,22 +172,20 @@ mod tests {
         assert_eq!(c("/u/p/repo--w/.piton/permissions.json"), None);
         assert_eq!(c("/u/p/repo--w/.pi/settings.json"), Some(Protected::Pi));
         assert_eq!(c("/u/p/repo--w/apps/sub/.pi/extensions/x.ts"), Some(Protected::Pi));
-        assert_eq!(
-            c("/u/p/repo--w/.agents/skills/deploy/SKILL.md"),
-            Some(Protected::Skill(SkillFile::Definition))
-        );
-        assert_eq!(
-            c("/u/p/repo--w/apps/.agents/skills/deploy/scripts/run"),
-            Some(Protected::Skill(SkillFile::Script))
-        );
-        assert_eq!(
-            c("/u/p/repo--w/.agents/skills/deploy/tool.py"),
-            Some(Protected::Skill(SkillFile::Script))
-        );
-        assert_eq!(
-            c("/u/p/repo--w/.agents/skills/deploy/reference.md"),
-            Some(Protected::Skill(SkillFile::Support))
-        );
+        // Every file pi could load as a skill, at any depth.
+        for skill in [
+            "/u/p/repo--w/.agents/skills/deploy/SKILL.md",
+            "/u/p/repo--w/.agents/skills/group/deploy/SKILL.md",
+            "/u/p/repo--w/apps/.agents/skills/tools/run.md",
+            "/u/p/repo--w/.agents/skills/deploy/scripts/run",
+        ] {
+            assert_eq!(c(skill), Some(Protected::Skill), "{skill}");
+        }
+        // Any case: APFS is case-insensitive.
+        assert_eq!(c("/u/p/repo--w/.PI/settings.json"), Some(Protected::Pi));
+        assert_eq!(c("/u/p/repo--w/.Agents/Skills/x/SKILL.md"), Some(Protected::Skill));
+        assert_eq!(c("/u/p/repo/.PITON/config.toml"), Some(Protected::Configuration));
+        assert_eq!(c("/u/p/repo/.piton/.LOCAL/x"), None);
         assert_eq!(c("/u/p/repo--w/.agents/rules/r.md"), None);
         assert_eq!(c("/u/p/repo--w/src/main.rs"), None);
         assert_eq!(c("/u/p/repo--w/apps/.pix/f"), None);
@@ -191,7 +193,8 @@ mod tests {
     }
 
     #[test]
-    fn rules_are_the_ones_the_host_check_proved() {
+    /// The rules `daemon/tests/probe/protected.sh` checks on the host (it builds them the same way).
+    fn rules_are_the_ones_the_host_check_proves() {
         let r = Roots {
             source: "/u/p/re.po".into(),
             checkout: "/u/p/re.po".into(),
@@ -199,9 +202,9 @@ mod tests {
         assert_eq!(
             r.seatbelt_rules(),
             [
-                r#"(deny file-write* (require-all (subpath "/u/p/re.po/.piton") (require-not (subpath "/u/p/re.po/.piton/.local"))))"#,
-                r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.pi(/|$)"))"#,
-                r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.agents/skills(/|$)"))"#,
+                r#"(deny file-write* (require-all (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN](/|$)") (require-not (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN]/\.[lL][oO][cC][aA][lL](/|$)"))))"#,
+                r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.[pP][iI](/|$)"))"#,
+                r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.[aA][gG][eE][nN][tT][sS]/[sS][kK][iI][lL][lL][sS](/|$)"))"#,
             ]
         );
     }

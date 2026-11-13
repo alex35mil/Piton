@@ -87,9 +87,8 @@ async function reviewFile(
 }
 
 /**
- * A write to a protected file, through the daemon: it asks the user (or, for a skill's instructions with unchanged
- * `allowed-tools`, writes at once) and writes on approval. Returns when written as proposed; otherwise throws the
- * outcome the agent gets.
+ * A write to a protected file, through the daemon: it asks the user and writes on approval. Returns when written as
+ * proposed; otherwise throws the outcome the agent gets.
  */
 async function writeThroughDaemon(
     channel: { socket: string; token: string },
@@ -100,8 +99,6 @@ async function writeThroughDaemon(
 ): Promise<void> {
     const outcome: ProtectedOutcome = await requestProtectedWrite(channel, file, content, signal)
     switch (outcome.outcome) {
-        case "written":
-            return
         case "approved": {
             if (!outcome.modified && outcome.notes.length === 0) return
             const notes = outcome.notes as FileReviewDetails["review"]["notes"]

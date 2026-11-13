@@ -713,23 +713,28 @@ agent is told, not what it may do. Without protection, a sandboxed agent in the 
 `.piton/permissions.host.json`, and a host session in the same checkout would run any command without asking from its
 next tool call. Changes are gated where they're written:
 
-1. **OS sandbox.** The daemon adds raw Seatbelt rules to each sandboxed launch (`(deny file-write* (require-all
-   (subpath "<source>/.piton") (require-not (subpath "<source>/.piton/.local"))))`, and regex rules for `.pi` and
-   `.agents/skills` at any depth), so
-   every write by any process in the sandbox fails: shell commands, scripts, `git checkout`, MCP servers, pi itself.
-   nono's typed rules can't express a read-only folder inside a writable one; its raw-rule field
-   (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the allows so the deny wins.
+1. **OS sandbox.** The daemon adds raw Seatbelt rules to each sandboxed launch: `(deny file-write* ...)` with regexes
+   for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` and `.agents/skills` at any depth in the
+   checkout. Every protected name matches in any case (`.PI`, `.Agents/Skills`), since APFS is case-insensitive by
+   default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
+   shell commands, scripts, `git checkout`, MCP servers, pi itself. nono's typed rules can't express a read-only
+   folder inside a writable one; its raw-rule field (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the
+   allows so the deny wins. `protected.rs` is the one definition; `piton config protected --seatbelt-rules` prints
+   the rules, and `daemon/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames, hard
+   links, symlinks, other cases).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
    the pi package. In a sandboxed session it sends the path and contents over `~/.local/state/piton/agent.sock`
    (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps
    and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
-   approve: answers come only from clients. One pending request per session. A skill edit that leaves
-   `allowed-tools` unchanged is written without asking. In a host session, or a pi outside piton, the permissions
-   extension asks itself and writes directly, whatever `defaultMode` or auto-accept says.
+   approve: answers come only from clients. One pending request per session; it ends when the agent stops waiting or
+   its run ends. Every protected write asks, skills included. The dialog carries the file's current content, so the
+   apps show a diff without reading the file. On approval the daemon walks the path from the checkout without
+   following any symlink, so a folder the agent swapped for a link while the user decided can't redirect the write.
+   In a host session, or a pi outside piton, the permissions extension asks itself and writes directly, whatever
+   `defaultMode` or auto-accept says.
 
 A rejected change never reaches disk. Limits: shell writes in host sessions aren't gated (as in Claude Code without
-its sandbox); the rule is macOS-only; and its effect on renames and hard links, and the pi.nvim dialog, are checked
-first when implemented. Codex and Claude Code don't need step 2 because they sandbox each shell command and run their
+its sandbox); the rule is macOS-only. Codex and Claude Code don't need step 2 because they sandbox each shell command and run their
 edit tools unsandboxed; piton sandboxes the whole pi process.
 
 **Sandbox backend.** The nono CLI on PATH for development. The `nono` Rust crate (the sandbox core: `CapabilitySet`,

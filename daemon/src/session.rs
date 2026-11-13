@@ -160,6 +160,8 @@ pub enum SessionCmd {
         request: crate::protected_write::Request,
         reply: oneshot::Sender<crate::protected_write::Outcome>,
     },
+    /// The agent stopped waiting for a protected write (or got its answer): settle it if it's still pending.
+    SettleProtectedWrite,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -417,6 +419,8 @@ enum Sent {
 /// A protected write the user is being asked about: the dialog's id, and where the outcome goes.
 struct PendingWrite {
     id: String,
+    /// The checkout the path is in: the write walks from here without following symlinks.
+    root: PathBuf,
     path: PathBuf,
     content: String,
     reply: oneshot::Sender<crate::protected_write::Outcome>,
@@ -634,6 +638,10 @@ impl SessionTask {
                 reply,
             } => self.view_command(watcher, command, reply),
             SessionCmd::ProtectedWrite { request, reply } => self.protected_write(request, reply),
+            SessionCmd::SettleProtectedWrite => {
+                self.settle_protected_write();
+                self.publish_view_state();
+            }
             SessionCmd::Stop { .. } => unreachable!("handled in run"),
         }
     }
@@ -646,8 +654,7 @@ impl SessionTask {
         request: crate::protected_write::Request,
         reply: oneshot::Sender<crate::protected_write::Outcome>,
     ) {
-        use crate::protected::{Protected, SkillFile};
-        use crate::protected_write::{Outcome, dialog, same_allowed_tools, write};
+        use crate::protected_write::{Outcome, dialog};
         let refuse = |reason: String| Outcome::Refused { reason };
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
         let path = crate::protected::canonical_target(&request.path);
@@ -658,40 +665,28 @@ impl SessionTask {
             )));
             return;
         };
+        self.settle_protected_write();
         if self.protected_write.is_some() {
             let _ = reply.send(refuse(
                 "another protected write is waiting for the user; try again after it's answered".into(),
             ));
             return;
         }
-        let before = std::fs::read_to_string(&path).unwrap_or_default();
-        let silent = match &kind {
-            Protected::Skill(SkillFile::Definition) => same_allowed_tools(&before, &request.content),
-            Protected::Skill(SkillFile::Support) => true,
-            Protected::Skill(SkillFile::Script) | Protected::Configuration | Protected::Pi => false,
-        };
+        // Every protected write asks, skills included: pi reads skills from more files and frontmatter forms than piton
+        // could reliably tell apart, and a skill's `allowed-tools` grant permissions.
+        let before = std::fs::read_to_string(&path).ok();
         let key = lock(&self.shared).key;
-        if silent {
-            let outcome = match write(&path, &request.content) {
-                Ok(()) => Outcome::Written,
-                Err(e) => refuse(format!("can't write {}: {e}", path.display())),
-            };
-            crate::log!(
-                "session {key}: protected write {} without asking ({kind:?})",
-                path.display()
-            );
-            let _ = reply.send(outcome);
-            return;
-        }
         self.next_internal += 1;
         let id = format!("piton:write:{}", self.next_internal);
         crate::log!(
             "session {key}: asking about a protected write to {} ({kind:?})",
             path.display()
         );
-        let record = dialog(&id, &path, &request.content);
+        let record = dialog(&id, &path, before.as_deref(), &request.content);
+        let root = self.protected.root_for(&kind).to_path_buf();
         self.protected_write = Some(PendingWrite {
             id,
+            root,
             path,
             content: request.content,
             reply,
@@ -711,7 +706,7 @@ impl SessionTask {
             Decision::Approve { content, notes } => {
                 let modified = content.as_ref().is_some_and(|c| *c != pending.content);
                 let content = content.unwrap_or(pending.content);
-                match write(&pending.path, &content) {
+                match write(&pending.root, &pending.path, &content) {
                     Ok(()) => {
                         crate::log!("session {key}: protected write to {} approved", pending.path.display());
                         Outcome::Approved {
@@ -1003,7 +998,36 @@ impl SessionTask {
             // The conversation was rewritten: rebuild the view from entries.
             self.internal(Internal::GetEntries);
         }
+        self.settle_protected_write();
         self.publish_view_state();
+    }
+
+    /// Ends a pending protected write that can no longer be answered: its dialog left (the run it belonged to ended,
+    /// so pi.nvim and the apps no longer show it) or the agent stopped waiting. The agent, if still there, hears that it
+    /// wasn't written; the next request isn't refused as "another is waiting".
+    fn settle_protected_write(&mut self) {
+        let Some(pending) = &self.protected_write else { return };
+        let gone = !self.replay.has_dialog(&pending.id);
+        if !gone && !pending.reply.is_closed() {
+            return;
+        }
+        let Some(pending) = self.protected_write.take() else {
+            return;
+        };
+        let key = lock(&self.shared).key;
+        crate::log!(
+            "session {key}: protected write to {} ended unanswered",
+            pending.path.display()
+        );
+        if gone {
+            let _ = pending.reply.send(crate::protected_write::Outcome::Refused {
+                reason: "the run ended before the user answered; ask again if it's still needed".into(),
+            });
+        } else {
+            // The agent left (its tool call was aborted): close the dialog in every client.
+            self.replay.answer_dialog(&pending.id);
+            self.sync_shared();
+        }
     }
 
     fn internal(&mut self, command: Internal) {
