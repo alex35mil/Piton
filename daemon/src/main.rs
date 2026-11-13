@@ -6,6 +6,7 @@ mod daemon;
 mod diagnostics;
 mod launch;
 mod log;
+mod migrate;
 mod project;
 mod prompts;
 mod replay;

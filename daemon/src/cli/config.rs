@@ -109,6 +109,17 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 for file in &resolved.files {
                     println!("  {:?}  {}", file.level, file.path.display());
                 }
+                // The global tier is the user's dotfiles: describe its conversion, never write it.
+                match crate::migrate::global(&Paths::current()) {
+                    Ok(moves) if moves.is_empty() => {}
+                    Ok(moves) => {
+                        println!("\nglobal files to move (the old layout):");
+                        for line in moves {
+                            println!("{line}");
+                        }
+                    }
+                    Err(e) => eprintln!("piton: the global tier can't be converted: {e}"),
+                }
                 if errors.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -120,6 +131,51 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 ExitCode::from(EXIT_INVALID)
             }
         },
+    }
+}
+
+/// `piton migrate`: plans the source checkout's migration (and its workers' relinks), prints it, and applies it unless
+/// `dry_run`.
+pub fn migrate(path: Option<&Path>, dry_run: bool) -> ExitCode {
+    let path = path
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let workers: Vec<PathBuf> = match crate::worker::list(&path) {
+        Ok(workers) => workers.into_iter().map(|worker| worker.path).collect(),
+        Err(e) => {
+            eprintln!("piton: {e}");
+            return ExitCode::from(EXIT_INVALID);
+        }
+    };
+    let plan = match crate::migrate::plan(&path, &workers) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("piton: {e}");
+            return ExitCode::from(EXIT_INVALID);
+        }
+    };
+    if plan.steps.is_empty() {
+        println!("{} already uses the current layout", plan.root.display());
+        return ExitCode::SUCCESS;
+    }
+    println!("in {}:", plan.root.display());
+    let prefix = format!("{}/", plan.root.display());
+    for step in &plan.steps {
+        println!("  {}", step.to_string().replace(&prefix, ""));
+    }
+    if dry_run {
+        return ExitCode::SUCCESS;
+    }
+    match crate::migrate::apply(&plan) {
+        Ok(()) => {
+            println!("\ndone: review and commit the staged moves; `piton config check` lists global files to move");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("piton: {e} (the steps above it were applied)");
+            ExitCode::from(1)
+        }
     }
 }
 

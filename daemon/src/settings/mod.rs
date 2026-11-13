@@ -13,12 +13,14 @@
 //! package and the Neovim plugin read the result through `piton config resolve` / `piton config get`.
 
 mod chain;
+pub mod convert;
 mod files;
 mod merge;
 mod resolve;
 
 pub use chain::{LevelKind, global_tier, home};
 pub use files::{DaemonFile, NetworkProfile, SandboxTable, SettingsFile, expand_home};
+pub use merge::sandbox as merge_sandbox;
 pub use resolve::{DaemonSettings, Part, Paths, Resolved, Runtime, Section, resolve, resolve_daemon, resolve_global};
 
 use std::path::PathBuf;

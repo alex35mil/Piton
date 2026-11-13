@@ -81,6 +81,15 @@ enum Cmd {
         #[usage(subcommand)]
         action: ConfigAction,
     },
+    /// Move a source checkout from the old layout (.project/, .agents/*.json, .nono*.json, .piton.toml) to .piton/,
+    /// staging the moves of committed files, and relink its workers. Refuses before changing anything.
+    Migrate {
+        /// The source checkout (default: current directory).
+        path: Option<PathBuf>,
+        /// Print the plan without changing anything.
+        #[usage(long)]
+        dry_run: bool,
+    },
     /// Print a shell completion script.
     Completion {
         #[usage(long, choices("bash", "zsh", "fish"))]
@@ -184,6 +193,7 @@ pub fn main() -> ExitCode {
     match &cli.command {
         Cmd::Service { action } => return service(action, cli.config_home.as_deref()),
         Cmd::Config { action } => return config::run(action),
+        Cmd::Migrate { path, dry_run } => return config::migrate(path.as_deref(), *dry_run),
         Cmd::Completion { shell } => {
             let shell = match shell.as_str() {
                 "bash" => usage_rs::complete::Shell::Bash,
@@ -231,7 +241,7 @@ pub fn main() -> ExitCode {
 
 async fn run(command: Cmd, config: crate::config::Config) -> ExitCode {
     match command {
-        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } => {
+        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } | Cmd::Migrate { .. } => {
             unreachable!("handled before the runtime starts")
         }
         Cmd::Daemon => match crate::daemon::run(config).await {

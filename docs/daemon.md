@@ -105,6 +105,22 @@ merged `[sandbox]` grants of every level, read access to the configuration chain
 the protected-file rules. A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after
 the workspace's mise environment.
 
+### Moving from the old layout
+
+Every tool refuses the files of the layout before `.piton/` (`.project/`, `.agents/{permissions,mcp,web-search}*.json`,
+`.nono*.json`, `.piton.toml`, the global `config.toml`, and the files in pi's agent folder), naming each file and
+its new place; only the parts that read a file refuse it.
+
+- `piton migrate [path] [--dry-run]`, on the host, in a source checkout: moves `.project/` to `.piton/`
+  (`config[.local].json` becomes `workflows[.local].json`), `.agents/` settings files to `.piton/`, and converts
+  `.nono.json` and `.piton.toml` into `.piton/daemon.toml` (`.nono.local.json` into `daemon.local.toml`). Committed
+  files move with Git, staged for you to commit. It rewrites the ignore rules to `/.piton/.local` and
+  `/.piton/*.local.*`, and relinks every worker's `.piton/.local`. It plans everything first and refuses before
+  changing anything: on a file already in the way, or a nono key `[sandbox]` doesn't model (named in the message).
+- `piton config check` prints the global tier's conversion for your dotfiles: `config.toml` split into `daemon.toml`
+  and `settings.toml`, the base nono profile as `[sandbox]` (refused by key name when it uses one `[sandbox]` doesn't
+  model), and the files and `rules/` to move out of pi's agent folder. It writes nothing.
+
 ## Logging
 
 `piton logging status`, `piton logging debug [--until-disabled]`, and `piton logging info` switch host logging through
