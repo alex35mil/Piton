@@ -37,16 +37,17 @@ EOF
 cat > "$scratch/attempts.sh" <<'EOF'
 attempt() {
     expect=$1; what=$2; shift 2
-    if sh -c "$*" >/dev/null 2>&1; then got=ok; else got=denied; fi
+    # No terminal: a tool that can't write asks before giving up (`rm`: "override rw-r--r--?") and would wait.
+    if sh -c "$*" </dev/null >/dev/null 2>&1; then got=ok; else got=denied; fi
     if [ "$got" = "$expect" ]; then mark=pass; else mark=FAIL; fi
     printf '%-5s %-7s %s\n' "$mark" "$got" "$what"
 }
 attempt ok     "read a protected file"                 'cat .piton/permissions.json'
 attempt denied "overwrite a protected file"            'echo x > .piton/permissions.json'
 attempt denied "create a file in .piton/"              'echo y > .piton/new.json'
-attempt denied "delete a protected file"               'rm .piton/permissions.json'
-attempt denied "rename .piton/"                        'mv .piton moved'
-attempt denied "rename a protected file"               'mv .piton/permissions.json .piton/p.json'
+attempt denied "delete a protected file"               'rm -f .piton/permissions.json'
+attempt denied "rename .piton/"                        'mv -f .piton moved'
+attempt denied "rename a protected file"               'mv -f .piton/permissions.json .piton/p.json'
 attempt denied "hard-link a protected file out"        "ln .piton/permissions.json $OUTSIDE/l && echo z >> $OUTSIDE/l"
 attempt denied "symlink-replace a protected file"      'ln -sf /tmp/x .piton/permissions.json'
 attempt denied "create .pi/ at the root"               'mkdir -p .pi/extensions'
@@ -60,7 +61,7 @@ attempt ok     "create a folder named like .pi but not" 'mkdir -p apps/.pix && e
 EOF
 
 cd "$src"
-OUTSIDE="$outside" nono run -s --profile "$profile" --allow-cwd -- sh "$scratch/attempts.sh" | tee "$scratch/out"
+OUTSIDE="$outside" nono run -s --profile "$profile" --allow-cwd -- sh "$scratch/attempts.sh" </dev/null | tee "$scratch/out"
 # The integrity of the protected file itself, checked from outside the sandbox.
 if [ "$(cat "$src/.piton/permissions.json")" = '{}' ]; then echo "pass  ok      protected file unchanged"; else echo "FAIL  changed protected file changed"; fi
 ! rg -q '^FAIL' "$scratch/out"
