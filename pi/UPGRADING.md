@@ -1,5 +1,15 @@
 # Upgrading
 
+## Configuration moves to `.piton/` and piton's global tier
+
+The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside piton, `piton` must be on `PATH`). Every extension refuses the old layout with a message naming each old file and its new place, so nothing loads until it's moved. `piton migrate` moves the files.
+
+- **Global settings** (`permissions*.json`, `mcp.json`, `web-search.json`, `workflows.json`) move from pi's agent folder to `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`); global rules and skills to its `agents/rules/` and `agents/skills/`.
+- **Project settings** move from `.agents/{permissions,mcp,web-search}*.json` to `.piton/`, and `.project/` becomes `.piton/`: `.project/config[.local].json` is `.piton/workflows[.local].json`, and artifacts live in `.piton/.local/`.
+- **Parent folders** strictly below home can hold their own `.piton/` and `.agents/`, shared by every repository below them.
+- **Files are strict:** unknown keys are errors. `keybindings`, `workflowProject`, and `sessionAnalysis` are accepted only in the global tier.
+- **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line for every local settings file. Run project setup again to write them.
+
 ## Simpler workflows: fewer gates, bounded reviews
 
 Workflows now stop for you only for clarifications, decisions, and once at the end. Task and Gig plans are reviewed once, published, and summarized instead of waiting for approval; small changes can skip the plan; reviews block only on real defects, with one verification pass; the result stops once before "submit" or "ship it"; intake and plan-update notes no longer ask; and Phase is visibility only. Epic plans keep their acceptance, now recorded by the new `accept_epic_tasks` tool. See the [workflows guide](workflows/README.md#working-lifecycle).

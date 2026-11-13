@@ -19,6 +19,7 @@ import type { CallToolResult, Tool } from "@earendil-works/pi-mcp"
 import { createInMemoryTransportPair, type InMemoryTransport } from "@earendil-works/pi-mcp/testing"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog } from "../extensions/__lib/mcp.ts"
+import { resetGlobalSettings, writeGlobalSetting } from "./host-runtime.ts"
 import { registerNativeMcp } from "../extensions/mcp/index.ts"
 
 type Hook = (event: any, ctx: ExtensionToolContext) => any
@@ -33,15 +34,12 @@ export function nativeMcpFixture(
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-mcp-"))
     const oldAgentDir = process.env.PI_CODING_AGENT_DIR
     process.env.PI_CODING_AGENT_DIR = path.join(root, "agent")
+    resetGlobalSettings()
     if (options.servers) {
-        fs.mkdirSync(path.join(root, "agent"))
-        fs.writeFileSync(
-            path.join(root, "agent/mcp.json"),
-            JSON.stringify({
-                mcpServers: Object.fromEntries(options.servers.map(({ name, config }) => [name, config])),
-                autoEnableCodemode: false,
-            }),
-        )
+        writeGlobalSetting("mcp.json", {
+            mcpServers: Object.fromEntries(options.servers.map(({ name, config }) => [name, config])),
+            autoEnableCodemode: false,
+        })
     }
     const tools = new Map<string, ToolDefinition>()
     const hooks = new Map<string, Hook[]>()
@@ -278,6 +276,7 @@ export function nativeMcpFixture(
             await emit("session_shutdown")
             if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
             else process.env.PI_CODING_AGENT_DIR = oldAgentDir
+            resetGlobalSettings()
             fs.rmSync(root, { recursive: true, force: true })
         },
     }

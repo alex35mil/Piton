@@ -44,20 +44,20 @@ function repository(withOrigin = true) {
     git(root, ["config", "user.email", "test@example.com"])
     git(root, ["config", "user.name", "Test"])
     fs.writeFileSync(path.join(root, "README.md"), "base\n")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     git(root, ["add", "README.md", ".gitignore"])
     git(root, ["commit", "-m", "initial"])
     if (withOrigin) {
         git(root, ["remote", "add", "origin", origin])
         git(root, ["push", "-u", "origin", "main"])
     }
-    fs.mkdirSync(path.join(root, ".project"), { recursive: true })
+    fs.mkdirSync(path.join(root, ".piton"), { recursive: true })
     fs.writeFileSync(
-        path.join(root, ".project", "config.json"),
+        path.join(root, ".piton", "workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
     fs.writeFileSync(
-        path.join(root, ".project", "integrations.json"),
+        path.join(root, ".piton", "integrations.json"),
         JSON.stringify({
             tracker: {
                 provider: "github",

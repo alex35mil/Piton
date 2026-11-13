@@ -6,10 +6,8 @@
  *
  * Auth: BRAVE_SEARCH_API_KEY from env var or settings.
  *
- * Settings file: web-search.json (3-tier loading)
- *   ~/<agent-dir>/web-search.json             (global)
- *   <repo-root>/.agents/web-search.json       (project, committed)
- *   <repo-root>/.agents/web-search.local.json (project, gitignored)
+ * Settings: web-search[.local].json in piton's configuration chain (the global tier, parent folders, the
+ * repository's .piton/), resolved by `piton config resolve`; the nearest apiKey wins.
  *
  * Schema:
  * {
@@ -20,12 +18,17 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 
-import * as project from "../__lib/project.js"
+import { resolveSettings, section } from "../__lib/settings.js"
 
 const EXTENSION = "web-search"
 
-interface WebSearchSettings {
-    apiKey?: string
+/** The configured key, or why the configuration couldn't be read. */
+function configuredKey(cwd: string): { apiKey?: string } | { error: string } {
+    try {
+        return { apiKey: section(resolveSettings(cwd).web_search).apiKey }
+    } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+    }
 }
 
 interface BraveSearchResult {
@@ -40,7 +43,7 @@ interface BraveSearchResponse {
 }
 
 export default async function (pi: ExtensionAPI) {
-    const settings = project.loadExtensionSettings<WebSearchSettings>(EXTENSION, process.cwd(), mergeSettings)
+    const settings = configuredKey(process.cwd())
 
     pi.registerTool({
         name: "web_search",
@@ -51,8 +54,14 @@ export default async function (pi: ExtensionAPI) {
         }),
 
         async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-            const apiKey = process.env.BRAVE_SEARCH_API_KEY ?? settings.apiKey
+            const apiKey = process.env.BRAVE_SEARCH_API_KEY ?? ("apiKey" in settings ? settings.apiKey : undefined)
 
+            if (!apiKey && "error" in settings) {
+                return {
+                    details: undefined,
+                    content: [{ type: "text" as const, text: `Web search settings can't be read: ${settings.error}` }],
+                }
+            }
             if (!apiKey) {
                 return {
                     details: undefined,
@@ -149,20 +158,11 @@ export default async function (pi: ExtensionAPI) {
         },
     })
 
-    const apiKey = process.env.BRAVE_SEARCH_API_KEY ?? settings.apiKey
+    const apiKey = process.env.BRAVE_SEARCH_API_KEY ?? ("apiKey" in settings ? settings.apiKey : undefined)
     if (!apiKey) {
         const announceStartup = (ctx: ExtensionContext) => {
             ctx.ui.setWidget(`${EXTENSION}:startup`, [`Missing: BRAVE_SEARCH_API_KEY`])
         }
         pi.on("session_start", async (_event, ctx) => announceStartup(ctx))
-    }
-}
-
-function mergeSettings(
-    base: Partial<WebSearchSettings>,
-    override: Partial<WebSearchSettings>,
-): Partial<WebSearchSettings> {
-    return {
-        apiKey: override.apiKey ?? base.apiKey,
     }
 }

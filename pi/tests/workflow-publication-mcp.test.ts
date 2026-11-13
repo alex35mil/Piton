@@ -40,9 +40,9 @@ function runtimeHarness(
         tools: [{ name: tool, inputSchema: nativeSchema }],
     })
     h.context.model = model
-    fs.mkdirSync(path.join(h.root, ".agents"))
+    fs.mkdirSync(path.join(h.root, ".piton"))
     fs.writeFileSync(
-        path.join(h.root, ".agents/permissions.json"),
+        path.join(h.root, ".piton/permissions.json"),
         JSON.stringify({ defaultMode: permissions === "absent" ? "ask" : permissions }),
     )
     if (permissions !== "absent") registerPermission(h.pi)
@@ -121,7 +121,8 @@ describe("workflow MCP publication binding", () => {
                     body: `Queue request.\n\n${githubFooter}`,
                     labels: ["Kind: Feature"],
                 })
-                assert.ok(!fs.existsSync(path.join(h.context.cwd, ".project")))
+                assert.ok(!fs.existsSync(path.join(h.context.cwd, ".piton/workflows.json")))
+                assert.ok(!fs.existsSync(path.join(h.context.cwd, ".piton/integrations.json")))
                 assert.equal(h.prompts.length, 0)
             } finally {
                 await h.cleanup()

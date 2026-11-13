@@ -21,6 +21,8 @@ import {
     type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent"
 
+import { clearSettingsCache } from "../extensions/__lib/settings.ts"
+
 const model: Model<"openai-completions"> = {
     id: "fixture",
     name: "Fixture",
@@ -89,8 +91,13 @@ export async function nativeSessionFixture(options: {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-"))
     const agentDir = path.join(root, "agent")
     const oldAgentDir = process.env.PI_CODING_AGENT_DIR
+    const oldConfigHome = process.env.PITON_CONFIG_HOME
     process.env.PI_CODING_AGENT_DIR = agentDir
+    // The session's own global tier: `setup` writes global piton settings to `<root>/config`.
+    process.env.PITON_CONFIG_HOME = path.join(root, "config")
     fs.mkdirSync(agentDir)
+    fs.mkdirSync(path.join(root, "config"))
+    clearSettingsCache()
     options.setup?.(root)
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } })
     settingsManager.setProjectTrusted(true)
@@ -207,6 +214,9 @@ export async function nativeSessionFixture(options: {
                 session.dispose()
                 if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
                 else process.env.PI_CODING_AGENT_DIR = oldAgentDir
+                if (oldConfigHome === undefined) delete process.env.PITON_CONFIG_HOME
+                else process.env.PITON_CONFIG_HOME = oldConfigHome
+                clearSettingsCache()
                 fs.rmSync(root, { recursive: true, force: true })
             }
         },

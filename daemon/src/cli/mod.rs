@@ -123,6 +123,9 @@ enum ConfigAction {
         /// host or sandbox (default: from PITON_RUNTIME).
         #[usage(long)]
         runtime: Option<String>,
+        /// Only the global tier: personal settings that never depend on a project.
+        #[usage(long)]
+        global: bool,
     },
     /// Print one resolved file as JSON: integrations, workflows, permissions, mcp, daemon, settings.
     Get {

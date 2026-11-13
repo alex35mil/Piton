@@ -4,13 +4,9 @@ Composes Pi 1.5.2's native MCP support with this package's tool metadata and dec
 
 ## Configuration
 
-| Source                | Path                                 | Root key     |
-| --------------------- | ------------------------------------ | ------------ |
-| Global                | `<agent-dir>/mcp.json`               | `mcpServers` |
-| Committed project     | `<repo-root>/.agents/mcp.json`       | `mcpServers` |
-| Private project-local | `<repo-root>/.agents/mcp.local.json` | `mcpServers` |
+`mcp[.local].json` (root key `mcpServers`) in every level of piton's `.piton/` chain: the global tier `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, and `<repo-root>/.piton/`.
 
-The adapter merges global, project, then local settings by exact server name; a later entry replaces the whole earlier entry. Global settings load independently of project trust; both project tiers require trust. Names differing only by `-` and `_` conflict rather than overriding one another. Keep private project registrations outside Git; setup ensures exact `/.agents/mcp.local.json` in `.git/info/exclude`. They are never moved into global configuration.
+`piton config resolve` merges them farthest first by exact server name; a nearer entry replaces the whole entry. Global servers load independently of project trust; every other level requires trust. Names differing only by `-` and `_` conflict rather than overriding one another. Keep private project registrations outside Git; setup ensures the shared `/.piton/*.local.*` line in `.git/info/exclude`. They are never moved into global configuration.
 
 Every effective server is registered through `pi.registerMcpServer()`. The composed native extension consumes those registrations without discovering another set of project files. `/mcp` retains native connection management; enabled/exposure changes to registered servers last for the session. Native `pi mcp` shell commands do not load this adapter or manage its project tiers.
 

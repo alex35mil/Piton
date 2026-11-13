@@ -239,9 +239,9 @@ describe("workflow model-facing contracts", () => {
             extensions: [...codingFactories, memoryMcp("memory", ["echo"]), ...workflowFactories],
             tools: ["+codemode"],
             setup(root) {
-                fs.writeFileSync(path.join(root, "agent/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+                fs.writeFileSync(path.join(root, "config/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
                 fs.writeFileSync(
-                    path.join(root, "agent/mcp.json"),
+                    path.join(root, "config/mcp.json"),
                     JSON.stringify({
                         mcpServers: { memory: { url: "https://memory.invalid/mcp", exposure: "codemode" } },
                     }),
@@ -281,7 +281,7 @@ describe("workflow model-facing contracts", () => {
             tools: ["+codemode"],
             setup(root) {
                 fs.writeFileSync(
-                    path.join(root, "agent/permissions.json"),
+                    path.join(root, "config/permissions.json"),
                     JSON.stringify({ defaultMode: "deny", allow: ["codemode"], deny: ["preflight_gig"] }),
                 )
             },
@@ -305,7 +305,7 @@ describe("workflow model-facing contracts", () => {
             // A deny fails only the nested call; it doesn't cancel the turn.
             assert.equal(outcome.details.calls[0].status, "error")
             assert.ok(JSON.stringify(outcome).includes("Denied by permission rule `preflight_gig`"))
-            assert.equal(fs.existsSync(path.join(h.root, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(h.root, ".piton/.local/gigs")), false)
         } finally {
             await h.cleanup()
         }
@@ -343,7 +343,7 @@ describe("workflow model-facing contracts", () => {
         }
     })
 
-    // "linked" is a sandboxed worker whose .project/.local is a symlink to its source checkout's directory;
+    // "linked" is a sandboxed worker whose .piton/.local is a symlink to its source checkout's directory;
     // "unlinked" is a sandboxed worker without that link, where the workflow must refuse to start.
     for (const layout of ["directory", "linked", "unlinked"] as const)
         it(`keeps discovery, setup, real initialization and Phase transitions working through reload and resume (${layout} local root)`, async () => {
@@ -356,7 +356,7 @@ describe("workflow model-facing contracts", () => {
                 tools: ["+codemode"],
                 setup(root) {
                     fs.writeFileSync(
-                        path.join(root, "agent/mcp.json"),
+                        path.join(root, "config/mcp.json"),
                         JSON.stringify({
                             mcpServers: { github: { url: "https://github.invalid/mcp", exposure: "codemode" } },
                         }),
@@ -368,12 +368,12 @@ describe("workflow model-facing contracts", () => {
                     git(root, "add", "seed.txt")
                     git(root, "commit", "-qm", "Initial fixture")
                     fs.writeFileSync(
-                        path.join(root, "agent/permissions.json"),
+                        path.join(root, "config/permissions.json"),
                         JSON.stringify({ defaultMode: "allow" }),
                     )
-                    fs.mkdirSync(path.join(root, ".project"))
+                    fs.mkdirSync(path.join(root, ".piton"))
                     fs.writeFileSync(
-                        path.join(root, ".project/config.json"),
+                        path.join(root, ".piton/workflows.json"),
                         JSON.stringify({ branches: { format: "identifier-title" } }),
                     )
                     const repository = { owner: "fixture", repo: "app" }
@@ -386,7 +386,7 @@ describe("workflow model-facing contracts", () => {
                         canceled: "Canceled",
                     }
                     fs.writeFileSync(
-                        path.join(root, ".project/integrations.json"),
+                        path.join(root, ".piton/integrations.json"),
                         JSON.stringify({
                             tracker: {
                                 provider: "github",
@@ -409,8 +409,8 @@ describe("workflow model-facing contracts", () => {
                             forge: { provider: "github", mcpServer: "github", repository },
                         }),
                     )
-                    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local\n")
-                    if (layout === "linked") fs.symlinkSync(source, path.join(root, ".project/.local"))
+                    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
+                    if (layout === "linked") fs.symlinkSync(source, path.join(root, ".piton/.local"))
                 },
             })
             async function invoke(code: string) {
@@ -424,10 +424,10 @@ describe("workflow model-facing contracts", () => {
                 await invoke(
                     'text(await tools.preflight_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor"})); text(await tools.init_github_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor",object:{issueId:900,issueNumber:9,issueUrl:"https://github.com/fixture/app/issues/9"}}));',
                 )
-                const directory = ".project/.local/gigs/9-fixture-work"
+                const directory = ".piton/.local/gigs/9-fixture-work"
                 if (layout === "unlinked") {
-                    // prepare_artifacts created a real .project/.local, which a sandbox must not write entities into.
-                    assert.ok(fs.statSync(path.join(h.root, ".project/.local")).isDirectory())
+                    // prepare_artifacts created a real .piton/.local, which a sandbox must not write entities into.
+                    assert.ok(fs.statSync(path.join(h.root, ".piton/.local")).isDirectory())
                     assert.equal(fs.existsSync(path.join(h.root, directory)), false)
                     assert.match(JSON.stringify(h.requests.at(-1)), /isn't linked to its source checkout/)
                     return
@@ -474,7 +474,7 @@ describe("workflow model-facing contracts", () => {
                 if (layout === "linked") {
                     assert.ok(fs.existsSync(path.join(source, "gigs/9-fixture-work/metadata.json")))
                     assert.equal(
-                        git(h.root, "status", "--porcelain", "--untracked-files=all", "--", ".project/.local"),
+                        git(h.root, "status", "--porcelain", "--untracked-files=all", "--", ".piton/.local"),
                         "",
                     )
                 }

@@ -2,7 +2,7 @@
 
 Read this when configuring the workflow source reference, or when a `target: "workflow"` inspection reports it missing or invalid.
 
-To report workflow problems from any consuming project, set `workflowProject` in the private global `workflows.json`, in Pi's resolved `getAgentDir()` directory:
+To report workflow problems from any consuming project, set `workflowProject` in the private global `workflows.json`, in piton's global tier (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`):
 
 ```json
 {
@@ -13,7 +13,7 @@ To report workflow problems from any consuming project, set `workflowProject` in
 **The reference:**
 
 - It points to the workflow source repository root. It can sit alongside a global `branches.username`, and either can appear alone.
-- The file stays outside Git, holds no credentials, and isn't a consuming-project setting. `.project/config.local.json` holds branch settings only and can't override it.
+- The file stays outside Git, holds no credentials, and isn't a consuming-project setting. `.piton/workflows.local.json` holds branch settings only and can't override it.
 
 **Session analysis:**
 
@@ -25,12 +25,12 @@ To report workflow problems from any consuming project, set `workflowProject` in
 
 - `inspect_integrations` and `inspect_queue_intake` take `target: "current" | "workflow"`.
 - `current` inspects the current repository and doesn't need the reference.
-- `workflow` reads the source's `.project/integrations.json` and `.project/config.json` with the same tracker schema, validation, and read-only readiness checks, and returns `target` and `projectRoot`.
+- `workflow` reads the source's `.piton/integrations.json` and `.piton/workflows.json` with the same tracker schema, validation, and read-only readiness checks, and returns `target` and `projectRoot`.
 - The path must be the repository root; filesystem aliases resolve consistently. Consuming-project setup isn't a prerequisite.
 
 **Errors:**
 
-- A missing reference errors with: `Set workflowProject to the absolute workflow source repository root in <resolved-agent-dir>/workflows.json.`
+- A missing reference errors with: `Set workflowProject to the absolute workflow source repository root in <global-tier>/workflows.json.`
 - Invalid references or source configuration name where to fix them.
 - Stop without setup questions, automatic repair, artifact preparation, or a fallback destination; the user leads any fix.
 

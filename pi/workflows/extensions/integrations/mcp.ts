@@ -1,9 +1,8 @@
-import * as fs from "node:fs"
-
 import { Type } from "typebox"
 
 import { compile } from "../../../extensions/__lib/schema.js"
-import { getMcpSettingsPaths, readMcpConfiguration, readMcpSettings } from "../../../extensions/__lib/mcp.js"
+import { readMcpConfiguration } from "../../../extensions/__lib/mcp.js"
+import { resolveSettings, section } from "../../../extensions/__lib/settings.js"
 
 export type WorkflowMcpService = "github" | "linear" | "other"
 
@@ -17,26 +16,31 @@ export function identifyMcpService(config: unknown): WorkflowMcpService {
 const ProviderRegistrationSchema = Type.Record(Type.String(), Type.Unknown())
 const ProviderRegistrationValidator = compile(ProviderRegistrationSchema)
 
+/**
+ * The MCP registrations pi uses for `cwd`: each server with its provider, credential reference, and the file it came
+ * from. Without project trust only the global tier's count. Never connects.
+ */
 export function inspectProjectMcp(cwd: string, projectTrusted: boolean) {
-    const paths = getMcpSettingsPaths(cwd)
-    const tiers = (["global", "project", "local"] as const).map((tier) =>
-        tier !== "global" && !projectTrusted
-            ? { tier, path: paths[tier], state: "untrusted" as const }
-            : inspectSettingsFile(tier, paths[tier]),
-    )
     try {
         const configured = readMcpConfiguration(cwd, projectTrusted)
+        // Informational only: a trusted project's own files failing must not hide the global servers that load.
+        const project = resolveSettings(cwd).mcp
+        const all = projectTrusted || "error" in project ? [] : project.ok.servers
         return {
-            tiers,
-            effectiveServers: configured.servers.map(({ name, config, tier }) => ({
+            effectiveServers: configured.servers.map(({ name, config, path, level }) => ({
                 ...inspectServer(name, config),
-                source: tier,
+                level,
+                path,
             })),
+            // Servers a trusted project would add: shown so setup can explain why they're not loaded.
+            untrustedServers: projectTrusted
+                ? []
+                : all.filter((server) => server.level !== "global").map(({ name, path }) => ({ name, path })),
         }
     } catch (error) {
         return {
-            tiers,
             effectiveServers: [],
+            untrustedServers: [],
             error: error instanceof Error ? error.message : String(error),
         }
     }
@@ -61,28 +65,6 @@ export function registeredCredentialEnvironment(
         )
     }
     return server.credentialEnv
-}
-
-function inspectSettingsFile(tier: "global" | "project" | "local", filePath: string) {
-    if (!fs.existsSync(filePath)) return { tier, path: filePath, state: "absent" as const }
-    try {
-        const settings = readMcpSettings(filePath)
-        const servers = Object.entries(settings.mcpServers ?? {}).map(([name, config]) => inspectServer(name, config))
-        return {
-            tier,
-            path: filePath,
-            state: "valid" as const,
-            serverNames: servers.map(({ name }) => name),
-            servers,
-        }
-    } catch (error) {
-        return {
-            tier,
-            path: filePath,
-            state: "invalid" as const,
-            error: error instanceof Error ? error.message : String(error),
-        }
-    }
 }
 
 function inspectServer(name: string, value: unknown) {

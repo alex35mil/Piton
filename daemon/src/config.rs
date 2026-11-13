@@ -158,7 +158,7 @@ pub fn load(config_home: Option<&Path>) -> Result<Config, ConfigError> {
         paths.global = dir.to_path_buf();
     }
     let resolved = crate::settings::resolve_global(&paths)?;
-    Ok(Config::from_files(resolved.daemon, resolved.settings, paths))
+    Ok(Config::from_files(resolved.daemon?, resolved.settings?, paths))
 }
 
 /// The user's home folder, from the user database (see settings::home).
@@ -194,7 +194,7 @@ mod tests {
         paths.global = global;
         paths.pi_agent_dir = dir.path().join("agent");
         let resolved = crate::settings::resolve_global(&paths).unwrap();
-        let config = Config::from_files(resolved.daemon, resolved.settings, paths);
+        let config = Config::from_files(resolved.daemon.unwrap(), resolved.settings.unwrap(), paths);
         assert_eq!(config.socket, PathBuf::from("/tmp/s.sock"));
         assert_eq!((config.stop.grace_ms, config.stop.term_grace_ms), (5, 7));
         assert_eq!(config.sandbox.command, ["/bin/nono"]);

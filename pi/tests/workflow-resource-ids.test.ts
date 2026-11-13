@@ -205,11 +205,11 @@ describe("local resource IDs storage", () => {
         try {
             const git = (args: string[]) => cp.execFileSync("git", args, { cwd: root, encoding: "utf-8" }).trim()
             git(["init", "-q"])
-            const directory = path.join(root, ".project/.local/gigs/work")
+            const directory = path.join(root, ".piton/.local/gigs/work")
             fs.mkdirSync(directory, { recursive: true })
             const metadata = path.join(directory, "metadata.json")
             fs.writeFileSync(metadata, "immutable work identity\n")
-            fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+            fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
             git(["add", ".gitignore"])
             const status = git(["status", "--short"])
             const bytes = fs.readFileSync(metadata)
@@ -218,7 +218,7 @@ describe("local resource IDs storage", () => {
             assert.deepEqual(fs.readFileSync(metadata), bytes)
             assert.equal(
                 git(["check-ignore", "--", path.relative(root, path.join(directory, RESOURCE_IDS_CACHE_FILE))]),
-                ".project/.local/gigs/work/resource-ids.json",
+                ".piton/.local/gigs/work/resource-ids.json",
             )
         } finally {
             cleanup()

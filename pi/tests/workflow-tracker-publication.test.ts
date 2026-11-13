@@ -38,16 +38,16 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
     git("init", "-b", "main")
     git("config", "user.email", "test@example.com")
     git("config", "user.name", "Test")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     git("add", ".gitignore")
     git("commit", "-m", "initial")
-    fs.mkdirSync(path.join(root, ".project"))
+    fs.mkdirSync(path.join(root, ".piton"))
     fs.writeFileSync(
-        path.join(root, ".project/config.json"),
+        path.join(root, ".piton/workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
     fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
+        path.join(root, ".piton/integrations.json"),
         JSON.stringify({
             tracker: {
                 provider: "github",
@@ -307,7 +307,7 @@ describe("managed GitHub plan comments", () => {
                     const pending = f.saved().tracker.planComment
                     assert.equal(pending.state, "pending")
                     assert.ok(prepared.mutation.arguments.body.endsWith(planPublicationMarker(pending.token)))
-                    assert.doesNotMatch(prepared.mutation.arguments.body, /(?:GIG|TASK|EPIC)-|\.project\//)
+                    assert.doesNotMatch(prepared.mutation.arguments.body, /(?:GIG|TASK|EPIC)-|\.piton\//)
                     assert.match(
                         prepared.mutation.arguments.body,
                         /^# Plan\n\nKeep the request and show the plan\.\n\n## Highlights\n\n- One comment\.\n\n<details>\n<summary>Full plan<\/summary>/,

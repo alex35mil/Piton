@@ -1,6 +1,6 @@
 # Linear tracker configuration
 
-Read this when configuring a Linear tracker: its `tracker` object in `.project/integrations.json`, status setup, and branch names.
+Read this when configuring a Linear tracker: its `tracker` object in `.piton/integrations.json`, status setup, and branch names.
 
 ```json
 {

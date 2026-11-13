@@ -5,7 +5,7 @@ import { Type } from "typebox"
 
 import { compile, parse } from "../../../extensions/__lib/schema.js"
 import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
-import { resolveRootDir } from "../../../extensions/__lib/project.js"
+import { clearSettingsCache, projectSettingsPath, resolveSettings } from "../../../extensions/__lib/settings.js"
 import {
     EXTENSION as PERMISSIONS_EXTENSION,
     inspectMcpAllowRules,
@@ -13,9 +13,9 @@ import {
     validatePermissionSettings,
 } from "../../../extensions/permissions/index.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
+import { setupRoot } from "./root.js"
 
-const LOCAL_PERMISSIONS_SETTINGS_FILE = `.agents/${PERMISSIONS_EXTENSION}.local.json`
-export const LOCAL_PERMISSIONS_SETTINGS_EXCLUDE = `/${LOCAL_PERMISSIONS_SETTINGS_FILE}`
+const LOCAL_PERMISSIONS_SETTINGS_FILE = `.piton/${PERMISSIONS_EXTENSION}.local.json`
 
 const SettingsTargetSchema = Type.Enum(["project", "local"], { type: "string" })
 const PermissionRuleSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
@@ -46,11 +46,24 @@ export function configureProjectPermissions(cwd: string, input: unknown, catalog
     const parsed = parse(ProjectPermissionConfigurationValidator, input)
     if (parsed.allow.length + parsed.ask.length === 0) throw new Error("request at least one allow or ask rule")
     validatePermissionSettings({ allow: parsed.allow, ask: parsed.ask })
-    const root = resolveRootDir(cwd)
-    const { sources } = inspectPersistentPermissions(root)
-    // Setup writes only the tier's shared file; runtime files are maintained by hand.
-    const target = sources.find((source) => source.tier === parsed.target && source.scope === "shared")!
-    const settingsPath = target.path
+    const root = setupRoot(cwd)
+    const resolved = resolveSettings(cwd)
+    const { sources } = inspectPersistentPermissions(cwd)
+    // Setup writes only the source checkout's shared file (or its .local); runtime files are maintained by hand.
+    const settingsPath = projectSettingsPath(resolved, PERMISSIONS_EXTENSION, parsed.target === "local")
+    // The target takes part in the inspection below, so rules added earlier in this request cover later ones. A file
+    // that doesn't exist yet joins the sources as the nearest one.
+    let target = sources.find((source) => source.path === settingsPath)
+    if (!target) {
+        target = {
+            level: "repository",
+            scope: "shared",
+            local: parsed.target === "local",
+            path: settingsPath,
+            settings: {},
+        }
+        sources.push(target)
+    }
     const existing = target.settings
     const added = { allow: [] as string[], ask: parsed.ask.filter((rule) => !(existing.ask ?? []).includes(rule)) }
     const skippedAsk = parsed.ask.filter((rule) => (existing.ask ?? []).includes(rule))
@@ -73,11 +86,12 @@ export function configureProjectPermissions(cwd: string, input: unknown, catalog
     })
     const exclusion =
         changed && parsed.target === "local"
-            ? ensureLocalSettingsExclusion(root, LOCAL_PERMISSIONS_SETTINGS_FILE, LOCAL_PERMISSIONS_SETTINGS_EXCLUDE)
+            ? ensureLocalSettingsExclusion(root, LOCAL_PERMISSIONS_SETTINGS_FILE)
             : undefined
     if (changed) {
         fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
         fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 4)}\n`)
+        clearSettingsCache()
     }
     return {
         target: parsed.target,

@@ -1,6 +1,6 @@
 ---
 name: task
-description: "Use for Deliverable work belonging to exactly one Epic under <repo>/.project/.local/epics/<epic>/tasks/."
+description: "Use for Deliverable work belonging to exactly one Epic under <repo>/.piton/.local/epics/<epic>/tasks/."
 allowed-tools:
     - "inspect_session_analysis"
     - "init_github_task"
@@ -43,9 +43,9 @@ allowed-tools:
     - "select_pull_request_resource"
     - "cleanup_delivery_branch"
     - "prepare_merge_resolution_comment"
-    - "read(.project/*)"
-    - "write(.project/*)"
-    - "edit(.project/*)"
+    - "read(.piton/*)"
+    - "write(.piton/*)"
+    - "edit(.piton/*)"
 ---
 
 # Task

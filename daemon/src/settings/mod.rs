@@ -19,7 +19,7 @@ mod resolve;
 
 pub use chain::{LevelKind, global_tier, home};
 pub use files::{DaemonFile, NetworkProfile, SandboxTable, SettingsFile, expand_home};
-pub use resolve::{DaemonSettings, Paths, Resolved, Runtime, resolve, resolve_daemon, resolve_global};
+pub use resolve::{DaemonSettings, Part, Paths, Resolved, Runtime, Section, resolve, resolve_daemon, resolve_global};
 
 use std::path::PathBuf;
 
@@ -57,11 +57,13 @@ pub enum SettingsError {
     Project(#[from] crate::project::ProjectError),
 }
 
-/// A file or folder from the layout before `.piton/`, and where its contents go now.
+/// A file or folder from the layout before `.piton/`, where its contents go now, and the parts of the configuration
+/// it held (only those refuse it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OldPath {
     pub path: PathBuf,
     pub now: &'static str,
+    pub parts: &'static [Part],
 }
 
 fn old_layout_message(paths: &[OldPath]) -> String {

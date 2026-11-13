@@ -1,11 +1,9 @@
 /**
  * Permissions Extension
  *
- * Controls tool execution via settings files, each tier followed by its runtime file:
- *   ~/<agent-dir>/permissions.json             (global)
- *   <repo-root>/.agents/permissions.json       (project, committed)
- *   <repo-root>/.agents/permissions.local.json (project, gitignored)
- * Runtime files insert the runtime before `.json` / `.local.json`, e.g. `permissions.sandbox.json`.
+ * Controls tool execution via permissions[.<runtime>][.local].json in piton's configuration chain (the global tier,
+ * parent folders, the repository's .piton/), resolved by `piton config resolve`. Within a level: the base file, its
+ * runtime file (e.g. `permissions.sandbox.json`), then their `.local` files.
  * PITON_RUNTIME selects the runtime: unset = host, `sandbox` = sandboxed worker; other values are invalid.
  *
  * Schema:
@@ -46,8 +44,8 @@ import * as path from "node:path"
 import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
-import * as project from "../__lib/project.js"
 import { requireRuntime, type Runtime } from "../__lib/runtime.js"
+import { type LevelKind, resolveSettings, section } from "../__lib/settings.js"
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
@@ -85,7 +83,7 @@ interface ResolvedPermissions {
     settings: PermissionSettings
     runtime: Runtime
     // Files that exist and were merged, in merge order.
-    files: { tier: PermissionTier; scope: PermissionScope; path: string }[]
+    files: { level: LevelKind; scope: PermissionScope; local: boolean; path: string }[]
 }
 
 type SettingsResult = ResolvedPermissions | { error: Error }
@@ -339,87 +337,37 @@ export default function (pi: ExtensionAPI) {
     return registerReviewCodemode(pi)
 }
 
-function mergePermissions(
-    base: Partial<PermissionSettings>,
-    override: Partial<PermissionSettings>,
-): Partial<PermissionSettings> {
-    return {
-        defaultMode: override.defaultMode ?? base.defaultMode,
-        allow: [...(base.allow ?? []), ...(override.allow ?? [])],
-        deny: [...(base.deny ?? []), ...(override.deny ?? [])],
-        ask: [...(base.ask ?? []), ...(override.ask ?? [])],
-        keybindings: { ...base.keybindings, ...override.keybindings },
-    }
-}
-
-export type PermissionTier = "global" | "project" | "local"
-
-// A tier's shared file applies everywhere; its runtime file applies only in that runtime.
+// A level's shared file applies everywhere; its runtime file applies only in that runtime.
 export type PermissionScope = "shared" | Runtime
 
+/** One permission file that exists, with its own contents. */
 export interface PermissionSource {
-    tier: PermissionTier
+    level: LevelKind
     scope: PermissionScope
+    local: boolean
     path: string
     settings: PermissionSettings
 }
 
-// `permissions.json` -> `permissions.sandbox.json`; `permissions.local.json` -> `permissions.sandbox.local.json`.
-function runtimeSettingsPath(sharedPath: string, tier: PermissionTier, runtime: Runtime): string {
-    const suffix = tier === "local" ? ".local.json" : ".json"
-    if (!sharedPath.endsWith(suffix)) throw new Error(`unexpected permission settings path ${sharedPath}`)
-    return `${sharedPath.slice(0, -suffix.length)}.${runtime}${suffix}`
-}
-
-/**
- * Every permission file for the runtime, in merge order: each tier's shared file, then its runtime file.
- * The more specific location wins for single values; rule lists from all files are combined.
- */
-export function permissionSourcePaths(cwd: string, runtime: Runtime) {
-    const paths = project.getExtensionSettingsPaths(EXTENSION, cwd)
-    return (["global", "project", "local"] as const).flatMap((tier) => [
-        { tier, scope: "shared" as PermissionScope, path: paths[tier] },
-        { tier, scope: runtime as PermissionScope, path: runtimeSettingsPath(paths[tier], tier, runtime) },
-    ])
-}
-
-export function readPermissionSettings(file: string): PermissionSettings {
-    if (!fs.existsSync(file)) return {}
-    let value: unknown
-    try {
-        value = JSON.parse(fs.readFileSync(file, "utf-8"))
-    } catch (error) {
-        throw new Error(`Invalid JSON in ${file}: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error(`invalid permission settings ${file}: expected an object`)
-    }
-    return validatePermissionSettings(value as PermissionSettings)
-}
-
+/** The resolved permissions for `cwd` in `runtime`: the merged settings and each file that contributed. */
 export function inspectPersistentPermissions(cwd: string, runtime: Runtime = requireRuntime()) {
-    const sources: PermissionSource[] = permissionSourcePaths(cwd, runtime).map((source) => ({
-        ...source,
-        settings: readPermissionSettings(source.path),
+    const resolved = section(resolveSettings(cwd, runtime).permissions)
+    const sources: PermissionSource[] = resolved.sources.map((source) => ({
+        level: source.level,
+        scope: source.scope,
+        local: source.local,
+        path: source.path,
+        settings: validatePermissionSettings(source.settings),
     }))
-    return {
-        runtime,
-        sources,
-        settings: sources.reduce<PermissionSettings>(
-            (settings, source) => mergePermissions(settings, source.settings),
-            {},
-        ),
-    }
+    return { runtime, sources, settings: validatePermissionSettings(resolved.merged) }
 }
 
 function loadSettings(cwd: string): ResolvedPermissions {
     const { runtime, sources, settings } = inspectPersistentPermissions(cwd)
     return {
         runtime,
-        settings: validatePermissionSettings(settings),
-        files: sources
-            .filter((source) => fs.existsSync(source.path))
-            .map(({ tier, scope, path: file }) => ({ tier, scope, path: file })),
+        settings,
+        files: sources.map(({ level, scope, local, path: file }) => ({ level, scope, local, path: file })),
     }
 }
 
@@ -429,7 +377,7 @@ export function inspectMcpAllowRules(rules: string[], sources: readonly Permissi
     const configured = sources.flatMap((source) =>
         (["allow", "ask", "deny"] as const).flatMap((mode) =>
             (source.settings[mode] ?? []).map((rule) => ({
-                tier: source.tier,
+                level: source.level,
                 scope: source.scope,
                 path: source.path,
                 mode,
@@ -437,10 +385,12 @@ export function inspectMcpAllowRules(rules: string[], sources: readonly Permissi
             })),
         ),
     )
-    const settings = sources.reduce<PermissionSettings>(
-        (settings, source) => mergePermissions(settings, source.settings),
-        {},
-    )
+    const settings: PermissionSettings = {
+        allow: sources.flatMap((source) => source.settings.allow ?? []),
+        ask: sources.flatMap((source) => source.settings.ask ?? []),
+        deny: sources.flatMap((source) => source.settings.deny ?? []),
+        defaultMode: sources.reduce<Mode | undefined>((mode, source) => source.settings.defaultMode ?? mode, undefined),
+    }
     return rules.map((rule) => {
         const candidate = parseMcpRule(rule)
         if (!candidate) throw new Error(`expected an MCP allow rule: ${JSON.stringify(rule)}`)

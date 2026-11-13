@@ -33,10 +33,10 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
     git("init", "-b", "main")
     git("config", "user.email", "test@example.com")
     git("config", "user.name", "Test")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     git("add", ".gitignore")
     git("commit", "-m", "initial")
-    fs.mkdirSync(path.join(root, ".project"))
+    fs.mkdirSync(path.join(root, ".piton"))
     const statuses = {
         backlog: "Backlog",
         todo: "Todo",
@@ -46,11 +46,11 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
         canceled: "Canceled",
     }
     fs.writeFileSync(
-        path.join(root, ".project/config.json"),
+        path.join(root, ".piton/workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
     fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
+        path.join(root, ".piton/integrations.json"),
         JSON.stringify({
             tracker: {
                 provider: "linear",
@@ -239,7 +239,7 @@ describe("managed Linear plan documents", () => {
                 assert.ok(typeof args.content === "string")
                 assert.match(args.content, /^Keep the original request\.\n\n## Highlights/)
                 assert.match(args.content, /\n>>> Full plan\n[\s\S]*\n>>>$/)
-                assert.doesNotMatch(args.content, /GIG-|TASK-|EPIC-|\.project\/|<!--/)
+                assert.doesNotMatch(args.content, /GIG-|TASK-|EPIC-|\.piton\/|<!--/)
                 assert.equal(
                     args[kind === "epic" ? "project" : "issue"],
                     kind === "epic" ? "project-uuid" : "issue-uuid",

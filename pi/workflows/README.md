@@ -8,7 +8,7 @@ Reusable Epic/Task/Gig planning and delivery for pi.
 - **Deliverable**: the shared Task/Gig lifecycle, with Feature, Bugfix, Refactor, Research, Audit, and Chore strategies.
 - **Tracker**: required GitHub or Linear work tracking. The tracker object (`#12`, `ENG-12`, or a Linear Project) is the entity's identity and holds native lifecycle, Phase, and Priority.
 - **Forge**: required GitHub pull requests. Every Deliverable ships through a merged PR.
-- **Artifacts**: plans, notes, and reviews live under `.project/.local/` and never enter Git.
+- **Artifacts**: plans, notes, and reviews live under `.piton/.local/` and never enter Git.
 
 ## Commands
 
@@ -53,13 +53,13 @@ See the [configuration reference](references/setup.md) for exact schemas, exampl
 
 Say **“Report this workflow issue.”** The Todo skill prepares a minimal sanitized report and, after you approve the exact content, destination, and intake choices, creates ordinary Todo work in the workflow project's tracker. Maintainers pick it up through the existing workflows.
 
-Set the source reference once in private global `workflows.json` in Pi's agent directory (`getAgentDir()`):
+Set the source reference once in private global `workflows.json` in piton's global tier (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`):
 
 ```json
 { "workflowProject": "/absolute/path/to/piton" }
 ```
 
-- The agent reads that source checkout's `.project/integrations.json` and `.project/config.json`, not the consuming project's tracker or policy.
+- The agent reads that source checkout's `.piton/integrations.json` and `.piton/workflows.json`, not the consuming project's tracker or policy.
 - Missing or invalid configuration gives a short error naming what to fix and where; you fix it separately.
 - The source tracker's MCP tools must be registered in the current session.
 - Nothing is sent without your approval, and unsafe project details stay local.
@@ -139,7 +139,7 @@ Plans and completion artifacts start with a concise `## Overview`, followed by t
 
 GitHub folds use `<details>`; Linear uses native `>>>` sections, so a Linear plan can't have a line starting with `>>>`. Nothing is summarized or dropped.
 
-- Published text never points at files under `.project/.local/`, since readers can't open them.
+- Published text never points at files under `.piton/.local/`, since readers can't open them.
 - Local tests check the generated Markdown, not live Linear rendering.
 
  See the [document shape](references/artifacts.md#reviewed-document-shape) and [provider-body contract](references/integrations/shared.md#provider-bodies).

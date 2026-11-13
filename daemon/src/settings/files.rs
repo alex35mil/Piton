@@ -408,7 +408,14 @@ where
             }
             toml::from_str(&text).map_err(|e| invalid(e.to_string()))?
         }
-        Format::Json => serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?,
+        Format::Json => {
+            // serde reads a JSON array into a struct too; a settings file must be an object.
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?;
+            if !value.is_object() {
+                return Err(invalid("must be a JSON object".into()));
+            }
+            serde_json::from_value(value).map_err(|e| invalid(e.to_string()))?
+        }
     };
     if level != LevelKind::Global
         && let Some(key) = value.global_only_keys().first()
@@ -517,6 +524,13 @@ mod tests {
         assert!(err.to_string().contains("allw"), "{err}");
         let path = write(dir.path(), "permissions.json", r#"{"alow": []}"#);
         assert!(load::<PermissionsFile>(&path, LevelKind::Repository, Format::Json).is_err());
+        for text in ["[]", "null", "1"] {
+            let path = write(dir.path(), "permissions.json", text);
+            assert!(
+                load::<PermissionsFile>(&path, LevelKind::Repository, Format::Json).is_err(),
+                "{text}"
+            );
+        }
     }
 
     #[test]

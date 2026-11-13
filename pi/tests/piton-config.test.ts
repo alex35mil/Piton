@@ -6,7 +6,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { describe, it } from "node:test"
 
-import { BIN_ENV, clearSettingsCache, RESOLVE_FORMAT, resolveSettings } from "../extensions/__lib/settings.ts"
+import { BIN_ENV, clearSettingsCache, RESOLVE_FORMAT, resolveSettings, section } from "../extensions/__lib/settings.ts"
 
 /** A stub `piton` that prints `output` and counts its calls. */
 function stub(output: unknown, exitCode = 0) {
@@ -42,14 +42,14 @@ function resolved(watch: string[]) {
         checkout: "/w",
         global: "/g",
         runtime: "host",
-        permissions: { allow: ["read"], ask: [], deny: [] },
-        mcp: { servers: [] },
-        web_search: {},
-        workflows: {},
-        integrations: null,
-        policies: [],
-        rules: [],
-        skills: [],
+        permissions: { ok: { merged: { allow: ["read"], ask: [], deny: [] }, sources: [] } },
+        mcp: { ok: { servers: [] } },
+        mcp_global: { ok: { servers: [] } },
+        web_search: { ok: {} },
+        workflows: { error: { message: "invalid /w/.piton/workflows.json" } },
+        integrations: { ok: null },
+        policies: { ok: [] },
+        instructions: { ok: { rules: [], skills: [] } },
         artifacts: "/w/.piton/.local",
         files: [],
         watch,
@@ -63,7 +63,9 @@ describe("piton config resolve client", () => {
             const watched = path.join(s.dir, "watched.json")
             fs.writeFileSync(path.join(s.dir, "out.json"), JSON.stringify(resolved([watched])))
             const cwd = s.dir
-            assert.deepEqual(resolveSettings(cwd, "host").permissions.allow, ["read"])
+            // A broken part fails only its readers.
+            assert.deepEqual(section(resolveSettings(cwd, "host").permissions).merged.allow, ["read"])
+            assert.throws(() => section(resolveSettings(cwd, "host").workflows), /workflows\.json/)
             resolveSettings(cwd, "host")
             assert.equal(s.calls().length, 1)
             assert.match(s.calls()[0], /config resolve --workspace .* --runtime host/)

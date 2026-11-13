@@ -5,7 +5,7 @@ Backlog and Todo save work in the configured tracker without starting an Epic, T
 - `backlog`: work we may do later but haven't committed to;
 - `todo`: work we've committed to and can pick up next.
 
-Both hold work that hasn't started. Adding work creates no `.project` entity, artifact, branch, or saved recovery state.
+Both hold work that hasn't started. Adding work creates no `.piton` entity, artifact, branch, or saved recovery state.
 
 ## Choose the project
 

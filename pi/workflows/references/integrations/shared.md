@@ -112,7 +112,7 @@ The tracker object comes first; the local entity is named from it. New work and 
 Workflow publications need no approval of their text ([approvals](../core.md#approvals)).
 
 1. **Start from the full source** in the [reviewed document shape](../artifacts.md#reviewed-document-shape). Never summarize or condense during publication.
-2. **Local references:** published text never points readers at ignored files under `.project/.local/` ([communication](../communication.md)).
+2. **Local references:** published text never points readers at ignored files under `.piton/.local/` ([communication](../communication.md)).
 3. **Tracker plans:** call `prepare_tracker_publication` with `entityDir` and the full source.
    - Run its returned mutation immediately, in the same step. The first call for an unpublished plan already saves pending state before it returns. Never call it again just to look at the output; a second call returns `recovery-required` and needs recovery reads.
    - Record a first creation with `record_tracker_publication`, passing the actual call as `evidence`.

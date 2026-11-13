@@ -253,15 +253,15 @@ describe("workflow operations", () => {
         const ctx = withToolExecution({ cwd: root } as ExtensionContext)
         try {
             git("init", "-q")
-            fs.mkdirSync(path.join(root, ".project"))
-            fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+            fs.mkdirSync(path.join(root, ".piton"))
+            fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
             fs.writeFileSync(
-                path.join(root, ".project/config.json"),
+                path.join(root, ".piton/workflows.json"),
                 JSON.stringify({ branches: { format: "identifier-title" } }),
             )
-            fs.writeFileSync(path.join(root, ".project/integrations.json"), JSON.stringify({ tracker: github, forge }))
+            fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify({ tracker: github, forge }))
             prepareArtifactPersistence(root)
-            const directory = path.join(root, ".project/.local/gigs/11-example")
+            const directory = path.join(root, ".piton/.local/gigs/11-example")
             fs.mkdirSync(directory, { recursive: true })
             writeEntityStatus(directory, entity("github"))
             const file = path.join(directory, "metadata.json")

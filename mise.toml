@@ -16,8 +16,9 @@ dir = "pi"
 run = "npm ci"
 
 [tasks."pi:test"]
-description = "Test the pi package"
+description = "Test the pi package (configuration resolves through the debug piton binary)"
 dir = "pi"
+depends = ["daemon:build"]
 run = "npm test"
 
 [tasks."pi:typecheck"]

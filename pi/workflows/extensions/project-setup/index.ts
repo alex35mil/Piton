@@ -7,17 +7,18 @@ import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { workflowTools } from "../__lib/tools.js"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
-import { getExtensionSettingsPaths } from "../../../extensions/__lib/project.js"
+import { projectSettingsPath, resolveSettings, settingsErrors } from "../../../extensions/__lib/settings.js"
 import { EXTENSION as PERMISSIONS_EXTENSION } from "../../../extensions/permissions/index.js"
-import { EPIC_ROOT, GIG_ROOT } from "../__lib/domain.js"
+import { EPIC_ROOT, GIG_ROOT, PROJECT_ROOT } from "../__lib/domain.js"
 import * as Git from "../__lib/git.js"
 import {
-    getWorkflowSettingsPaths,
-    LEGACY_PROJECT_LOCAL_IGNORE,
+    globalWorkflowSettingsPath,
+    LOCAL_SETTINGS_EXCLUDE,
     prepareArtifactPersistence,
     PROJECT_LOCAL_IGNORE,
 } from "../__lib/project-config.js"
 import { inspectProjectMcp } from "../integrations/mcp.js"
+import { setupRoot } from "./root.js"
 import { inspectLinearWorkspace, LinearWorkspaceInspectionToolSchema } from "../integrations/tracker/linear.js"
 import {
     GitHubProjectSetupToolSchema,
@@ -90,7 +91,7 @@ export default function (pi: ExtensionAPI): void {
         name: "prepare_artifacts",
         label: "prepare_artifacts",
         description:
-            "Validate that .project/.local/ is ignored and untracked, and prepare the local settings exclusion, without changing the Git index.",
+            "Validate that .piton/.local/ is ignored and untracked, and prepare the local settings exclusion, without changing the Git index.",
         parameters: EmptySchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             parse(EmptyValidator, params)
@@ -155,7 +156,7 @@ export default function (pi: ExtensionAPI): void {
         parameters: ProjectPermissionConfigurationSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const parsed = parse(ProjectPermissionConfigurationValidator, params)
-            const file = getExtensionSettingsPaths(PERMISSIONS_EXTENSION, ctx.cwd)[parsed.target]
+            const file = projectSettingsPath(resolveSettings(ctx.cwd), PERMISSIONS_EXTENSION, parsed.target === "local")
             const configured = await withFileMutationQueue(file, async () =>
                 configureProjectPermissions(ctx.cwd, parsed, mcpCatalog),
             )
@@ -301,31 +302,45 @@ export default function (pi: ExtensionAPI): void {
 }
 
 const PROJECT_SETUP_FILES = [
-    ".project/config.json",
-    ".project/config.local.json",
-    ".project/integrations.json",
-    ".project/policies.md",
+    `${PROJECT_ROOT}/workflows.json`,
+    `${PROJECT_ROOT}/workflows.local.json`,
+    `${PROJECT_ROOT}/integrations.json`,
+    `${PROJECT_ROOT}/policies.md`,
     ".gitignore",
-    `.agents/${PERMISSIONS_EXTENSION}.json`,
-    `.agents/${PERMISSIONS_EXTENSION}.local.json`,
+    `${PROJECT_ROOT}/${PERMISSIONS_EXTENSION}.json`,
+    `${PROJECT_ROOT}/${PERMISSIONS_EXTENSION}.local.json`,
     INCOMING_PR_WORKFLOW_PATH,
 ] as const
 
 export function inspectProjectSetup(cwd: string, projectTrusted: boolean) {
-    const root = path.resolve(Git.run(cwd, ["rev-parse", "--show-toplevel"]))
+    const root = setupRoot(cwd)
     const excludePath = path.resolve(root, Git.run(root, ["rev-parse", "--git-path", "info/exclude"]))
-    const workflowSettings = getWorkflowSettingsPaths(root)
+    const configuration = inspectConfiguration(cwd)
     return {
         repositoryRoot: root,
         repositoryIdentity: inspectRepositoryIdentity(root),
         files: PROJECT_SETUP_FILES.map((file) => snapshotFile(root, file)),
-        globalWorkflowSettings: snapshotAbsoluteFile(root, workflowSettings.global),
+        // Where parent folders' and the global tier's configuration comes from, or why it can't be read (for
+        // example the old layout, which `piton migrate` converts).
+        configuration,
+        globalWorkflowSettings: snapshotAbsoluteFile(root, globalWorkflowSettingsPath(cwd)),
         localExclude: snapshotAbsoluteFile(root, excludePath),
+        localSettingsExclusion: LOCAL_SETTINGS_EXCLUDE,
         mcp: inspectProjectMcp(cwd, projectTrusted),
         boundEntityTrackers: inspectBoundEntityTrackers(root),
         projectLocalIgnore: inspectProjectLocalIgnore(root),
-        projectPathsInGit: splitLines(Git.run(root, ["ls-files", "--cached", "--", ".project"])),
-        stagedProjectPaths: splitLines(Git.run(root, ["diff", "--cached", "--name-only", "--", ".project"])),
+        projectPathsInGit: splitLines(Git.run(root, ["ls-files", "--cached", "--", PROJECT_ROOT])),
+        stagedProjectPaths: splitLines(Git.run(root, ["diff", "--cached", "--name-only", "--", PROJECT_ROOT])),
+    }
+}
+
+function inspectConfiguration(cwd: string) {
+    try {
+        const settings = resolveSettings(cwd)
+        const errors = settingsErrors(settings)
+        return { global: settings.global, files: settings.files, ...(errors.length > 0 ? { errors } : {}) }
+    } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
     }
 }
 
@@ -393,14 +408,11 @@ function fileContent(file: string): { exists: false } | { exists: true; content:
     return fs.existsSync(file) ? { exists: true, content: fs.readFileSync(file, "utf-8") } : { exists: false }
 }
 
-// What setup must do to .gitignore: nothing, replace the directory-only legacy line, or append the rule.
+// What setup must do to .gitignore: nothing, or append the rule.
 function inspectProjectLocalIgnore(root: string) {
     const file = path.join(root, ".gitignore")
     const lines = fs.existsSync(file) ? fs.readFileSync(file, "utf-8").split(/\r?\n/) : []
     if (lines.includes(PROJECT_LOCAL_IGNORE)) return { state: "present" as const, rule: PROJECT_LOCAL_IGNORE }
-    if (lines.includes(LEGACY_PROJECT_LOCAL_IGNORE)) {
-        return { state: "replace" as const, from: LEGACY_PROJECT_LOCAL_IGNORE, rule: PROJECT_LOCAL_IGNORE }
-    }
     return { state: "append" as const, rule: PROJECT_LOCAL_IGNORE }
 }
 

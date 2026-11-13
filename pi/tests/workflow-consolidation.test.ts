@@ -176,21 +176,21 @@ describe("workflow consolidation contracts", () => {
     it("preserves caller-relative bases and rejects paths outside workflow roots", () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-paths-"))
         try {
-            const entity = path.join(root, ".project", ".local", "gigs", "example")
+            const entity = path.join(root, ".piton", ".local", "gigs", "example")
             fs.mkdirSync(entity, { recursive: true })
             const cwd = path.join(root, "src")
-            assert.equal(resolveEntityPath(root, cwd, ".project/.local/gigs/example"), entity)
-            assert.equal(resolveEntityPath(root, cwd, "../.project/.local/gigs/example"), entity)
-            assert.equal(resolveEntityPath(root, root, ".project/.local/gigs/example"), entity)
+            assert.equal(resolveEntityPath(root, cwd, ".piton/.local/gigs/example"), entity)
+            assert.equal(resolveEntityPath(root, cwd, "../.piton/.local/gigs/example"), entity)
+            assert.equal(resolveEntityPath(root, root, ".piton/.local/gigs/example"), entity)
             assert.equal(resolveEntityDirectory(root, cwd, entity), entity)
             for (const raw of [
-                ".project/.local/gigs",
-                ".project/.local/gigs/../../outside",
-                ".project/.local/gigs-sibling/example",
+                ".piton/.local/gigs",
+                ".piton/.local/gigs/../../outside",
+                ".piton/.local/gigs-sibling/example",
             ]) {
                 assert.throws(() => resolveEntityPath(root, root, raw), /must be inside/)
             }
-            assert.throws(() => resolveEntityDirectory(root, root, ".project/.local/gigs/missing"), /does not exist/)
+            assert.throws(() => resolveEntityDirectory(root, root, ".piton/.local/gigs/missing"), /does not exist/)
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }

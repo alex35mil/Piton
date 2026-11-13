@@ -125,12 +125,12 @@ function fixture() {
     const git = (...args: string[]) =>
         cp.execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim()
     git("init", "-q", "-b", "main")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     git("add", ".")
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
-    fs.mkdirSync(path.join(root, ".project"))
+    fs.mkdirSync(path.join(root, ".piton"))
     fs.writeFileSync(
-        path.join(root, ".project/config.json"),
+        path.join(root, ".piton/workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
     const config = {
@@ -151,7 +151,7 @@ function fixture() {
             },
         },
     }
-    fs.writeFileSync(path.join(root, ".project/integrations.json"), JSON.stringify(config))
+    fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify(config))
     prepareArtifactPersistence(root)
     const request = (extra: object = {}) => ({
         operation: "incomingPullRequestProject",
@@ -215,7 +215,7 @@ describe("maintainer-controlled incoming PR Project", () => {
                 }).state,
                 "blocked",
             )
-            assert.equal(fs.existsSync(path.join(f.root, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/gigs")), false)
         } finally {
             f.close()
         }
@@ -565,7 +565,7 @@ describe("maintainer-controlled incoming PR Project", () => {
             assert.equal(f.git("status", "--porcelain"), before)
             assert.deepEqual(fs.readFileSync(path.join(f.root, ".git/index")), index)
             fs.writeFileSync(
-                path.join(f.root, ".project/integrations.json"),
+                path.join(f.root, ".piton/integrations.json"),
                 JSON.stringify({ tracker: minimalTracker(), forge: f.config.forge }),
             )
             assert.equal(f.plan().state, "blocked")

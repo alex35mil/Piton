@@ -16,7 +16,7 @@ Related files, read when the step is reached:
 2. Read:
    - `brief.md`, `metadata.json`, `notes.md`, and `pending.md` when present;
    - `plan.md` when the work is planned, any `result.md` or `report.md`, and the relevant local review round;
-   - `<repo>/.project/policies.md` when present. Apply it throughout.
+   - `<repo>/.piton/policies.md` when present. Apply it throughout.
 
    Create missing notes or pending files when continuing local work.
 3. Read lifecycle and Priority fresh from the tracker.

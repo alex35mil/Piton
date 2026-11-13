@@ -514,7 +514,7 @@ function buildWorkflowIntegrationContext(ctx: ExtensionContext, input: WorkflowC
  * Whether an operation starts, resumes, or addresses an entity whose artifacts a sandboxed
  * worker must keep in its source checkout. Project inspection and queue intake create no
  * entity or artifacts, so the sandbox link guard doesn't apply, including when they target
- * the workflow source project, whose `.project/.local` is a real directory.
+ * the workflow source project, whose `.piton/.local` is a real directory.
  */
 function persistsEntityArtifacts(operation: WorkflowContextInput["operation"]): boolean {
     switch (operation) {

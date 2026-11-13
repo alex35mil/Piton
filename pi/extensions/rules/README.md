@@ -4,12 +4,13 @@ Discovers rule files and delivers them to the agent. Rules are Markdown files th
 
 ## Rule Locations
 
-| Scope   | Directory                    |
-| ------- | ---------------------------- |
-| Global  | `~/<agent-dir>/rules/`       |
-| Project | `<repo-root>/.agents/rules/` |
+| Level      | Directory                                                           |
+| ---------- | ------------------------------------------------------------------- |
+| Global     | `$XDG_CONFIG_HOME/piton/agents/rules/` (default `~/.config/piton/`) |
+| Parent     | `<ancestor>/.agents/rules/`, each folder strictly below home        |
+| Repository | `<repo-root>/.agents/rules/`                                        |
 
-All `.md` files in these directories (including subdirectories) are discovered.
+`piton config resolve` supplies the folders. All `.md` files in them (including subdirectories) are discovered, farthest first. Parent and global `skills/` folders are added to pi's skill discovery the same way. If the configuration can't be resolved, no rules load and `/rules` shows why.
 
 ## Rule Types
 

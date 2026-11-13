@@ -49,10 +49,10 @@ for (const exposure of ["direct", "deferred", "codemode"] as const) {
             ],
             tools: [exposure === "codemode" ? "codemode" : "tool_search", "mcp__*"],
             setup(root) {
-                fs.mkdirSync(path.join(root, ".agents"))
-                fs.writeFileSync(path.join(root, ".agents/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+                fs.mkdirSync(path.join(root, ".piton"))
+                fs.writeFileSync(path.join(root, ".piton/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
                 fs.writeFileSync(
-                    path.join(root, ".agents/mcp.json"),
+                    path.join(root, ".piton/mcp.json"),
                     JSON.stringify({
                         mcpServers: {
                             publisher: { url: "https://api.githubcopilot.com/mcp/", exposure },

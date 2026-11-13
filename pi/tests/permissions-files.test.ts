@@ -39,9 +39,9 @@ function fixture(
 ) {
     const h = nativeMcpFixture({ servers: [] })
     const file = path.join(h.root, "target.txt")
-    fs.mkdirSync(path.join(h.root, ".agents"))
+    fs.mkdirSync(path.join(h.root, ".piton"))
     fs.writeFileSync(
-        path.join(h.root, ".agents/permissions.json"),
+        path.join(h.root, ".piton/permissions.json"),
         JSON.stringify({ defaultMode: mode, ...rules, allow: ["codemode", "later", ...(rules.allow ?? [])] }),
     )
     fs.writeFileSync(file, "before")
@@ -396,7 +396,7 @@ describe("native file permission execution", () => {
     it("runs the rules gate before editor review even when permission registered first", async () => {
         const h = fixture()
         try {
-            fs.mkdirSync(path.join(h.root, ".agents/rules"))
+            fs.mkdirSync(path.join(h.root, ".agents/rules"), { recursive: true })
             fs.writeFileSync(
                 path.join(h.root, ".agents/rules/scoped.md"),
                 '---\npaths: ["target.txt"]\n---\nRead this scope before editing.\n',
@@ -416,12 +416,26 @@ describe("native file permission execution", () => {
     it("blocks invalid permission settings without asking or writing", async () => {
         const h = fixture()
         try {
-            fs.writeFileSync(path.join(h.root, ".agents/permissions.json"), '{"allow":[7]}')
+            fs.writeFileSync(path.join(h.root, ".piton/permissions.json"), '{"allow":[7]}')
             const outcome = await h.run("write", args("write"))
             assert.equal(outcome.isError, true)
             assert.equal(h.prompts(), 0)
             assert.equal(h.writes(), 0)
             assert.equal(h.aborted(), true)
+        } finally {
+            await h.cleanup()
+        }
+    })
+
+    it("keeps checking tools when an unrelated configuration file is broken", async () => {
+        const h = fixture("allow")
+        try {
+            fs.writeFileSync(path.join(h.root, ".piton/integrations.json"), "{ broken")
+            fs.writeFileSync(path.join(h.root, ".piton/workflows.json"), '{"unknown":1}')
+            const outcome = await h.run("write", args("write"))
+            assert.equal(outcome.isError, false)
+            assert.equal(h.writes(), 1)
+            assert.equal(h.aborted(), false)
         } finally {
             await h.cleanup()
         }

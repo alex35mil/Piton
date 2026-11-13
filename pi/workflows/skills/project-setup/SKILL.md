@@ -20,13 +20,13 @@ allowed-tools:
     - "apply_label_setup"
     - "render_incoming_pr_intake"
     - "inspect_integrations"
-    - "read(.project/*)"
-    - "write(.project/*)"
-    - "edit(.project/*)"
+    - "read(.piton/*)"
+    - "write(.piton/*)"
+    - "edit(.piton/*)"
     - "read(.gitignore)"
     - "read(.git/info/exclude)"
-    - "read(.agents/permissions.json)"
-    - "read(.agents/permissions.local.json)"
+    - "read(.piton/permissions.json)"
+    - "read(.piton/permissions.local.json)"
 ---
 
 # Project setup
@@ -90,7 +90,7 @@ For example:
 5. Provider configuration for the selected roles. Once GitHub forge and Project are both known, offer fork-only incoming PR intake.
 6. Project Policies, then convenience permissions.
 
-Workflow work always stays local under `.project/.local/`; there's no persistence choice. When applying the ignore rule, read [artifacts](../../references/artifacts.md#persistence-and-authority). Removing files from Git needs separate approval and is outside setup.
+Workflow work always stays local under `.piton/.local/`; there's no persistence choice. When applying the ignore rule, read [artifacts](../../references/artifacts.md#persistence-and-authority). Removing files from Git needs separate approval and is outside setup.
 
 ## Decisions
 
@@ -116,17 +116,17 @@ Workflow work always stays local under `.project/.local/`; there's no persistenc
 **Adding missing servers:**
 
 1. Offer to add the official servers. First ask one shared persistence question for every new registration in this setup:
-   1. Private local checkout configuration (`local`) — `.agents/mcp.local.json`
-   2. Committed project configuration (`project`) — `.agents/mcp.json`
+   1. Private local checkout configuration (`local`) — `.piton/mcp.local.json`
+   2. Committed project configuration (`project`) — `.piton/mcp.json`
 
    Never infer this choice or ask it per provider. Project trust is required for either.
 2. Then ask for each missing server's name and credential variable name, never the value. Defaults are `LINEAR_API_KEY` and `GITHUB_PERSONAL_ACCESS_TOKEN`.
-3. Preview the exact server entries, the target file, and, for local, the `/.agents/mcp.local.json` exclude append. Get approval, then call `configure_mcp`. Merge order, name conflicts, and toolsets are in [MCP registrations](../../references/setup.md#mcp-registrations).
+3. Preview the exact server entries, the target file, and, for local, the `/.piton/*.local.*` exclude append. Get approval, then call `configure_mcp`. Merge order, name conflicts, and toolsets are in [MCP registrations](../../references/setup.md#mcp-registrations).
 
 **Restarting:**
 
 - New registrations aren't available to the running session. When `configure_mcp` reports `restartRequired`:
-  - make no `.project` writes;
+  - make no `.piton` writes;
   - tell the user which variables to export;
   - ask them to reload or restart Pi and restore this session. Not an empty session, and not `/project-setup` again; the restored conversation holds the approved answers.
 - After restoring, refresh with `inspect_project_setup`, continue from the next unanswered decision, and proceed only once the provider's registered tools are available.
@@ -167,9 +167,9 @@ Workflow work always stays local under `.project/.local/`; there's no persistenc
 
 **Username (`username/identifier-title`):**
 
-- Use `.project/config.local.json` when it has one, otherwise the global `workflows.json`.
-- When neither has one, ask and propose `.project/config.local.json` with `{ "branches": { "username": "<value>" } }`.
-- Never store it in `.project/config.json`, infer it from Git or provider identity, or ask for it otherwise.
+- Use `.piton/workflows.local.json` when it has one, otherwise the global `workflows.json`.
+- When neither has one, ask and propose `.piton/workflows.local.json` with `{ "branches": { "username": "<value>" } }`.
+- Never store it in `.piton/workflows.json`, infer it from Git or provider identity, or ask for it otherwise.
 
 ### 5. Provider configuration
 
@@ -230,7 +230,7 @@ Workflow work always stays local under `.project/.local/`; there's no persistenc
    - Always present the `defaultStatus` note: available MCP tools and public APIs don't expose a setter, so the user sets Project Settings → the Status field → Default value → the configured Backlog option, then saves and reloads.
    - Require confirmation or a screenshot of that saved default, and of any other unreadable setting, before claiming full setup. That applies with or without a default repository; opting out of the default repository adds no requirement.
    - Leave built-in automations and existing item values unchanged.
-6. **Configuration.** Use only the returned `trackerConfig` in `.project/integrations.json`. Presentation and manual confirmation stay out of runtime configuration.
+6. **Configuration.** Use only the returned `trackerConfig` in `.piton/integrations.json`. Presentation and manual confirmation stay out of runtime configuration.
 
 When initialized entities are already bound to another GitHub Project, stop. Replacing the Project needs a separate, user-directed migration.
 
@@ -242,7 +242,7 @@ For either tracker, after its configuration, read [label groups](../../reference
 2. **Inspect and preview.** Call `inspect_label_setup` and show the existing labels. Ask whether any should become configured values, and pass those as `remap`. Then call `preview_label_setup`.
 3. **Decisions.** Ask the user about each returned decision, exactly as listed, and preview again with the answers until none remain. Present each conflict with its `resolution`.
 4. **Approve and apply.** Present every action, with removals and their usage called out separately. Require approval of that exact `planHash`, then call `apply_label_setup`.
-5. **Save.** Use only the returned `configuration` in `.project/integrations.json`.
+5. **Save.** Use only the returned `configuration` in `.piton/integrations.json`.
 
 A rerun can change only labels. Reuse the saved groups and lists as the desired starting point.
 
@@ -259,7 +259,7 @@ When GitHub forge and Project configuration are both known, read [incoming PR in
 **Project Policies:**
 
 - Briefly explain the boundary ([setup](../../references/setup.md#project-policies)) and precedence ([artifacts](../../references/artifacts.md#project-policy-precedence)), then ask whether the user wants help.
-- If not, omit `.project/policies.md` without inspecting the repository.
+- If not, omit `.piton/policies.md` without inspecting the repository.
 - If yes, ask which behavior to add or override, inspect only the relevant workflow and repository guidance, and propose evidence-backed policies naming the stage or behavior, each for acceptance. Generic repository instructions stay where the harness keeps them.
 
 **Permissions:** read [setup permissions](../../references/setup/permissions.md).
@@ -269,27 +269,27 @@ When GitHub forge and Project configuration are both known, read [incoming PR in
 - Never remove or weaken existing `ask` and `deny` rules, and never revoke existing allows. Never recommend whole-server write wildcards, PR merge allows, or unrelated writes.
 - Present numbered, independently selectable options, including decline-all. Explain each grant: a write-tool allow covers the entire tool across the credential's resources, and the submit and ship requests still apply.
 - Declining everything changes no permission file or exclusion.
-- Once rules are selected, ask once where to store them, `local` (`.agents/permissions.local.json`) or `project` (`.agents/permissions.json`). Never infer this from the MCP choice.
+- Once rules are selected, ask once where to store them, `local` (`.piton/permissions.local.json`) or `project` (`.piton/permissions.json`). Never infer this from the MCP choice.
 - `configure_permissions` does the merging; never edit permission settings by hand.
 
 ## Preview and approval
 
 GitHub provisioning has its own preview and hash approval and must finish first. Apart from that and the MCP bootstrap, show one bounded proposal before any write:
 
-- **`.project/config.json`**, exactly; it never contains a username.
-- **`.project/config.local.json`**, exactly, when a local username is needed; otherwise the existing global username source, or no local file.
-- **`.project/integrations.json`**, exactly, or that it will be absent.
-- **`.project/policies.md`**, exactly, or that it will be absent.
+- **`.piton/workflows.json`**, exactly; it never contains a username.
+- **`.piton/workflows.local.json`**, exactly, when a local username is needed; otherwise the existing global username source, or no local file.
+- **`.piton/integrations.json`**, exactly, or that it will be absent.
+- **`.piton/policies.md`**, exactly, or that it will be absent.
 - **Fork-only intake**, when opted in: the rendered `.github/workflows/incoming-pr-project.yml` diff, the Project and repository, the secret name, and the prerequisites. Otherwise the path stays unchanged.
-- **`.gitignore`:** follow the setup context's `projectLocalIgnore`: an explicit no-op for `present`, the exact line replacement for `replace`, or this exact append for `append`:
+- **`.gitignore`:** follow the setup context's `projectLocalIgnore`: an explicit no-op for `present`, or this exact append for `append`:
 
     ```gitignore
-    /.project/.local
+    /.piton/.local
     ```
 
-  Mention the `/.project/config.local.json` exclusion only when that local file exists or is proposed, either as an existing no-op or as the exact append.
+  Mention the `/.piton/*.local.*` exclusion only when a local settings file exists or is proposed, either as an existing no-op or as the exact append.
 
-- **Permissions**, when selected: the target, the exact `allow` and `ask` additions, skipped rules, and conflicts. For local additions, note that `configure_permissions` keeps `.agents/permissions.local.json` outside Git and ensures its exclude entry; unchanged permissions add no exclusion.
+- **Permissions**, when selected: the target, the exact `allow` and `ask` additions, skipped rules, and conflicts. For local additions, note that `configure_permissions` keeps `.piton/permissions.local.json` outside Git and ensures its exclude entry; unchanged permissions add no exclusion.
 
 Require explicit approval. Workflow JSON must match the documented shapes, contain no credentials, and end with a newline. Never infer missing product rules, lifecycle mappings, field scopes, provider identities, or policy text.
 
@@ -297,8 +297,8 @@ Require explicit approval. Workflow JSON must match the documented shapes, conta
 
 After approval:
 
-1. Create or edit only the approved files, preserving unrelated content. Create `.project/` when absent.
-2. Apply the approved `.gitignore` change: replace the old `/.project/.local/` line, or append `/.project/.local` when neither is present.
+1. Create or edit only the approved files, preserving unrelated content. Create `.piton/` when absent.
+2. Apply the approved `.gitignore` change: append `/.piton/.local` when it isn't present.
 3. When permissions are selected, call `configure_permissions` once with the approved `target`, `allow`, and `ask` (use `[]` for an unselected list). Report actual additions, skips, and conflicts; a skipped rule grants nothing. A changed conflict needing a different grant needs approval again.
 4. Call `prepare_artifacts`. Stop on any Git-membership or exclusion conflict; never fix it by changing the index.
 5. With integrations, call `inspect_integrations` with `target: "current"`.

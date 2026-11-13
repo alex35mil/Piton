@@ -12,7 +12,6 @@ import * as path from "node:path"
 
 import {
     convertToLlm,
-    getAgentDir,
     parseFrontmatter,
     type ExtensionAPI,
     type ExtensionContext,
@@ -20,14 +19,14 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai"
 
-import * as project from "../__lib/project.js"
+import { type LevelKind, resolveSettings, section } from "../__lib/settings.js"
 
 const EXTENSION = "rules"
 
-const RULES_SUBDIR = "rules"
 const RULES_STATE_ENTRY = "rules-state"
 
-type RuleSource = "global" | "project"
+/** The level of piton's configuration chain a rule file comes from. */
+type RuleSource = LevelKind
 
 type RuleFrontmatter = {
     paths?: string | string[]
@@ -44,9 +43,11 @@ interface RuleFile {
 
 interface RuleInventory {
     repoRoot: string
-    projectRulesDir: string
-    globalRulesDir: string
+    /** Rule folders, farthest first, with their levels. */
+    ruleDirs: { dir: string; level: RuleSource }[]
     rules: RuleFile[]
+    /** Why the configuration couldn't be resolved; no rules apply until it's fixed. */
+    error?: string
 }
 
 interface RuntimeState extends RuleInventory {
@@ -72,6 +73,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     const announceStartup = (ctx: ExtensionContext) => {
+        if (runtime.error) {
+            ctx.ui.setWidget(`${EXTENSION}:startup`, ["Rules can't be loaded:", runtime.error])
+            return
+        }
         const alwaysOn = runtime.rules.filter((r) => r.patterns.length === 0)
         const conditional = runtime.rules.filter((r) => r.patterns.length > 0)
         if (alwaysOn.length === 0 && conditional.length === 0) {
@@ -94,6 +99,18 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_start", async (_event, ctx) => {
         resetState(ctx)
         announceStartup(ctx)
+    })
+    // pi discovers `.agents/skills` up to the repository root; piton's chain adds the parent folders' and the global
+    // tier's (`agents/skills`). A configuration error adds none; the rules widget reports it.
+    pi.on("resources_discover", async (event) => {
+        try {
+            const skillPaths = section(resolveSettings(event.cwd).instructions).skills.filter((dir) =>
+                fs.existsSync(dir),
+            )
+            return { skillPaths }
+        } catch {
+            return {}
+        }
     })
     pi.on("session_tree", async (_event, ctx) => resetState(ctx))
     pi.on("session_compact", async () => {
@@ -305,24 +322,34 @@ function getConditionalRulesForTarget(runtime: RuntimeState, targetPath: string)
     return runtime.rules.filter((rule) => rule.patterns.length > 0 && matchesRule(rule, targetPath, runtime.repoRoot))
 }
 
+/** The rules of piton's configuration chain: `agents/rules` in the global tier, then `.agents/rules` in each parent
+ * folder and the workspace's checkout. Farthest first; within a folder, by path. */
 function scanRules(cwd: string): RuleInventory {
-    const repoRoot = project.resolveRootDir(cwd)
-    const projectRulesDir = path.join(project.resolveProjectAgentsDir(cwd), RULES_SUBDIR)
-    const globalRulesDir = path.join(getAgentDir(), RULES_SUBDIR)
+    let resolved
+    let folders
+    try {
+        resolved = resolveSettings(cwd)
+        folders = section(resolved.instructions).rules
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return { repoRoot: path.resolve(cwd), ruleDirs: [], rules: [], error: message }
+    }
+    const repoRoot = resolved.checkout
+    const global = resolved.global
+    const ruleDirs = folders.map((dir) => ({ dir, level: ruleLevel(dir, global, repoRoot) }))
+    const rules = ruleDirs.flatMap(({ dir, level }) =>
+        findMarkdownFiles(dir)
+            .map((filePath) => parseRuleFile(filePath, level, repoRoot))
+            .filter((rule): rule is RuleFile => Boolean(rule))
+            .sort((a, b) => a.displayPath.localeCompare(b.displayPath)),
+    )
+    return { repoRoot, ruleDirs, rules }
+}
 
-    const rules = [
-        ...findMarkdownFiles(globalRulesDir)
-            .map((filePath) => parseRuleFile(filePath, "global", repoRoot))
-            .filter((rule): rule is RuleFile => Boolean(rule)),
-        ...findMarkdownFiles(projectRulesDir)
-            .map((filePath) => parseRuleFile(filePath, "project", repoRoot))
-            .filter((rule): rule is RuleFile => Boolean(rule)),
-    ].sort((a, b) => {
-        if (a.source !== b.source) return a.source === "global" ? -1 : 1
-        return a.displayPath.localeCompare(b.displayPath)
-    })
-
-    return { repoRoot, projectRulesDir, globalRulesDir, rules }
+function ruleLevel(dir: string, global: string, repoRoot: string): RuleSource {
+    if (isWithinDir(dir, global)) return "global"
+    if (isWithinDir(dir, repoRoot)) return "repository"
+    return "parent"
 }
 
 function parseRuleFile(filePath: string, source: RuleSource, repoRoot: string): RuleFile | undefined {
@@ -419,8 +446,8 @@ function formatRulesReport(runtime: RuntimeState): string {
 
     const lines: string[] = []
     lines.push(`Repo root: ${runtime.repoRoot}`)
-    lines.push(`Project rules dir: ${runtime.projectRulesDir}`)
-    lines.push(`Global rules dir: ${runtime.globalRulesDir}`)
+    if (runtime.error) lines.push(`Configuration error: ${runtime.error}`)
+    for (const { dir, level } of runtime.ruleDirs) lines.push(`Rules dir (${level}): ${dir}`)
     lines.push("")
 
     lines.push(`Rules: ${runtime.rules.length}`)
@@ -467,14 +494,36 @@ function isWithinDir(target: string, dir: string): boolean {
     return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
 }
 
+// Tool paths are matched against the resolver's canonical repository root (`/private/var/...`, not `/var/...`), so
+// they're canonicalized too: the nearest existing ancestor through realpath, the rest appended.
 function resolveToolPath(rawPath: string, cwd: string): string {
     const cleaned = stripLeadingAt(rawPath.trim())
-    if (!cleaned) return path.resolve(cwd)
-    return path.isAbsolute(cleaned) ? path.resolve(cleaned) : path.resolve(cwd, cleaned)
+    const absolute = !cleaned
+        ? path.resolve(cwd)
+        : path.isAbsolute(cleaned)
+          ? path.resolve(cleaned)
+          : path.resolve(cwd, cleaned)
+    return canonicalPath(absolute)
+}
+
+function canonicalPath(absolute: string): string {
+    let existing = absolute
+    const rest: string[] = []
+    while (!fs.existsSync(existing)) {
+        const parent = path.dirname(existing)
+        if (parent === existing) return absolute
+        rest.unshift(path.basename(existing))
+        existing = parent
+    }
+    try {
+        return path.join(fs.realpathSync(existing), ...rest)
+    } catch {
+        return absolute
+    }
 }
 
 function formatDisplayPath(filePath: string, source: RuleSource, repoRoot: string): string {
-    if (source === "project") {
+    if (source === "repository") {
         const relativePath = normalizePosixPath(path.relative(repoRoot, filePath))
         return relativePath || path.basename(filePath)
     }

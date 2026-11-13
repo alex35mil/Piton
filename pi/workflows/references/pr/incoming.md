@@ -72,7 +72,7 @@ Present one score for the exact PR, base, and head identity, using the context's
 
 **The checkout:**
 
-- An approved independent nested checkout at `.project/.local/pull-requests/<number>/checkout/` gives normal source files and real line numbers. It has its own `.git`, HEAD, and index.
+- An approved independent nested checkout at `.piton/.local/pull-requests/<number>/checkout/` gives normal source files and real line numbers. It has its own `.git`, HEAD, and index.
 - Keep the main repository's files, branch, index, and session root unchanged, and address files with the full checkout prefix.
 
 **Operations:**
@@ -108,7 +108,7 @@ Present one score for the exact PR, base, and head identity, using the context's
 
 ## Local evidence and independent review
 
-All evidence stays outside Git under the returned `.project/.local/pull-requests/<number>/` directory. The `/.project/.local` ignore rule covers it; no extra ignore rule is needed. Evidence paths never traverse a symlink, except a worker's linked `.project/.local` itself. Full base and fork-head identities stay in metadata.
+All evidence stays outside Git under the returned `.piton/.local/pull-requests/<number>/` directory. The `/.piton/.local` ignore rule covers it; no extra ignore rule is needed. Evidence paths never traverse a symlink, except a worker's linked `.piton/.local` itself. Full base and fork-head identities stay in metadata.
 
 ### The dossier
 
@@ -144,7 +144,7 @@ Create `inspection.md` in the PR directory with these nonempty level-two section
    - an explicit `sourcePaths` list of every local source file the dossier uses.
 
    Use the same project-relative or absolute convention as `dossierPath`. Include dependency excerpts as well as `source.md` and `diff.md`. Use an empty list only when the dossier holds all evidence inline. The dossier is snapshotted separately and doesn't go in `sourcePaths`. Source references can be ordinary file paths; their prose formatting isn't parsed.
-2. The tool validates identity, evidence, and the six sections, then saves each source file write-once under `.project/.local/pull-requests/<number>/reviews/<base-sha>-<head-sha>/review-NNN/inputs/`, keeping its path relative to the PR directory.
+2. The tool validates identity, evidence, and the six sections, then saves each source file write-once under `.piton/.local/pull-requests/<number>/reviews/<base-sha>-<head-sha>/review-NNN/inputs/`, keeping its path relative to the PR directory.
    - Every pass owns its source bytes, including successive uncommitted drafts against the same PR head. Reusing working filenames never changes an earlier pass.
 3. Each pass also snapshots the full dossier and saves `source-files.json`, which binds each original `inputPath` to its immutable `snapshotPath`.
    - The reviewer reads the saved dossier and map, then reads `snapshotPath` for every referenced source, never the mutable original input.

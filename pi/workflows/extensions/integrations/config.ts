@@ -1,10 +1,7 @@
-import * as fs from "node:fs"
-import * as path from "node:path"
-
 import { type Static, Type } from "typebox"
 
 import { compile, describeErrors } from "../../../extensions/__lib/schema.js"
-import * as project from "../../../extensions/__lib/project.js"
+import { resolveSettings, section } from "../../../extensions/__lib/settings.js"
 import { PRIORITY_NOT_SET } from "../__lib/domain.js"
 import {
     assertGitHubLabels,
@@ -15,7 +12,7 @@ import {
 } from "./labels.js"
 import { linearPriorityNumber } from "./records.js"
 
-export const INTEGRATION_CONFIG_PATH = ".project/integrations.json"
+export const INTEGRATION_CONFIG_PATH = ".piton/integrations.json"
 
 const FieldNameSchema = Type.String({ minLength: 1 })
 
@@ -189,20 +186,21 @@ function assertGitHubTrackerInvariants(config: GitHubTracker): void {
     }
 }
 
-// Workflows need both a tracker and a GitHub forge.
+// Workflows need both a tracker and a GitHub forge: the nearest integrations.json in piton's configuration chain.
 export function loadIntegrationConfig(cwd: string): IntegrationConfig {
-    const configPath = path.join(project.resolveRootDir(cwd), INTEGRATION_CONFIG_PATH)
-    if (!fs.existsSync(configPath))
-        throw new Error(`missing required ${INTEGRATION_CONFIG_PATH}: configure a tracker and a forge`)
-    return validateIntegrationConfig(readIntegrationConfig(configPath))
+    const integrations = section(resolveSettings(cwd).integrations)
+    if (!integrations) throw new Error(`missing required ${INTEGRATION_CONFIG_PATH}: configure a tracker and a forge`)
+    return validateIntegrationConfig(integrations.value)
 }
 
-function readIntegrationConfig(configPath: string): unknown {
+export type IntegrationPresence = { kind: "configured" } | { kind: "absent" } | { kind: "unreadable"; error: string }
+
+/** Whether any level of the chain configures integrations, or why that can't be told. */
+export function integrationPresence(cwd: string): IntegrationPresence {
     try {
-        return JSON.parse(fs.readFileSync(configPath, "utf-8"))
+        return section(resolveSettings(cwd).integrations) === null ? { kind: "absent" } : { kind: "configured" }
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`invalid ${INTEGRATION_CONFIG_PATH}: ${message}`)
+        return { kind: "unreadable", error: error instanceof Error ? error.message : String(error) }
     }
 }
 

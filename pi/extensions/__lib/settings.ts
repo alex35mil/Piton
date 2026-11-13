@@ -34,8 +34,55 @@ export interface ResolvedPermissions {
 export interface ResolvedMcpServer {
     name: string
     config: Record<string, unknown>
-    /** The file the entry came from. */
+    /** The file the entry came from, and its level. */
     path: string
+    level: LevelKind
+}
+
+export interface ResolvedMcp {
+    servers: ResolvedMcpServer[]
+    autoEnableCodemode?: boolean
+}
+
+export type PermissionScope = "shared" | Runtime
+
+export interface ResolvedPermissionSource {
+    path: string
+    level: LevelKind
+    scope: PermissionScope
+    local: boolean
+    settings: ResolvedPermissions
+}
+
+/**
+ * One part of the configuration: its merged value, or why its files can't be used (invalid, or the old layout). Each
+ * consumer fails only on the parts it reads, so a broken `integrations.json` never stops permission checks.
+ */
+export type Section<T> = { ok: T } | { error: { message: string } }
+
+/** The part's value; throws the resolver's message when the part's files can't be used. */
+export function section<T>(part: Section<T>): T {
+    if ("error" in part) throw new Error(part.error.message)
+    return part.ok
+}
+
+const PARTS = [
+    "permissions",
+    "mcp",
+    "mcp_global",
+    "web_search",
+    "workflows",
+    "integrations",
+    "policies",
+    "instructions",
+] as const satisfies readonly (keyof ResolvedSettings)[]
+
+/** Every part whose files can't be used, with the resolver's message. */
+export function settingsErrors(settings: ResolvedSettings): { part: (typeof PARTS)[number]; message: string }[] {
+    return PARTS.flatMap((part) => {
+        const value: Section<unknown> = settings[part]
+        return "error" in value ? [{ part, message: value.error.message }] : []
+    })
 }
 
 export interface ResolvedWorkflows {
@@ -57,17 +104,27 @@ export interface ResolvedSettings {
     /** The workspace's own checkout. */
     checkout: string
     global: string
+    /** The user's home folder (from the user database), for `~` in path values. */
+    home: string
     runtime: Runtime
-    permissions: ResolvedPermissions
-    mcp: { servers: ResolvedMcpServer[]; autoEnableCodemode?: boolean }
-    web_search: { apiKey?: string }
-    workflows: ResolvedWorkflows
-    integrations: FileValue<unknown> | null
-    policies: FileValue<string>[]
-    /** Rule folders, farthest first. */
-    rules: string[]
-    /** Skill folders piton adds to pi's own discovery, farthest first. */
-    skills: string[]
+    /** The merged rules, and each permission file of the runtime that exists, in merge order, with its contents. */
+    permissions: Section<{ merged: ResolvedPermissions; sources: ResolvedPermissionSource[] }>
+    /** Every level's servers. */
+    mcp: Section<ResolvedMcp>
+    /** The global tier's servers alone: what pi loads in a project it doesn't trust. */
+    mcp_global: Section<ResolvedMcp>
+    web_search: Section<{ apiKey?: string }>
+    workflows: Section<ResolvedWorkflows>
+    /** The nearest `integrations.json`, unvalidated. */
+    integrations: Section<FileValue<unknown> | null>
+    /** Every `policies.md`, farthest first. */
+    policies: Section<FileValue<string>[]>
+    instructions: Section<{
+        /** Rule folders, farthest first. */
+        rules: string[]
+        /** Skill folders piton adds to pi's own discovery, farthest first. */
+        skills: string[]
+    }>
     /** Workflow artifacts: the source's `.piton/.local`. */
     artifacts: string
     files: { path: string; level: LevelKind }[]
@@ -93,15 +150,26 @@ export function pitonBinary(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * The resolved configuration for `cwd`, in the current runtime. Throws the resolver's message when the configuration
- * is invalid or uses the old layout, and a clear error when the binary is missing.
+ * The resolved configuration for `cwd`, in the current runtime. Each part carries its own error (read it with
+ * {@link section}); this throws only when nothing can be resolved: the binary is missing, the workspace is invalid, or
+ * a level folder exists but can't be listed.
  */
 export function resolveSettings(cwd: string, runtime: Runtime = requireRuntime()): ResolvedSettings {
     const workspace = path.resolve(cwd)
     const key = `${runtime}\0${workspace}`
     const cached = cache.get(key)
     if (cached && fingerprint(cached.settings.watch) === cached.fingerprint) return cached.settings
-    const settings = runResolve(workspace, runtime)
+    const settings = runResolve(["config", "resolve", "--workspace", workspace, "--runtime", runtime])
+    cache.set(key, { settings, fingerprint: fingerprint(settings.watch) })
+    return settings
+}
+
+/** Only the global tier: personal settings that never depend on the current project. */
+export function resolveGlobalSettings(): ResolvedSettings {
+    const key = "global"
+    const cached = cache.get(key)
+    if (cached && fingerprint(cached.settings.watch) === cached.fingerprint) return cached.settings
+    const settings = runResolve(["config", "resolve", "--global"])
     cache.set(key, { settings, fingerprint: fingerprint(settings.watch) })
     return settings
 }
@@ -111,11 +179,24 @@ export function clearSettingsCache(): void {
     cache.clear()
 }
 
-function runResolve(workspace: string, runtime: Runtime): ResolvedSettings {
+/** The file a project-level setting is written to: `<source>/.piton/<name>.json` or its `.local` variant. */
+export function projectSettingsPath(settings: ResolvedSettings, name: string, local: boolean): string {
+    return path.join(settings.source, PITON_DIR, local ? `${name}.local.json` : `${name}.json`)
+}
+
+/** The global tier's `<name>.json`. */
+export function globalSettingsPath(settings: ResolvedSettings, name: string): string {
+    return path.join(settings.global, `${name}.json`)
+}
+
+/** The folder piton's tools read in a repository or parent folder. */
+export const PITON_DIR = ".piton"
+
+function runResolve(args: string[]): ResolvedSettings {
     const bin = pitonBinary()
     let stdout: string
     try {
-        stdout = execFileSync(bin, ["config", "resolve", "--workspace", workspace, "--runtime", runtime], {
+        stdout = execFileSync(bin, args, {
             encoding: "utf-8",
             stdio: ["ignore", "pipe", "pipe"],
             maxBuffer: 16 * 1024 * 1024,

@@ -626,7 +626,11 @@ $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
 - **One resolver.** The Rust `settings` module is the only implementation. The pi package and the Neovim plugin call
   `piton config resolve` / `piton config get`, which read files and don't need the daemon running. The daemon passes
   the binary's path in `PITON_BIN` after the mise environment; the pi package caches the result and calls again only
-  when a watched file changed.
+  when a watched file changed. The result is per part (permissions, MCP, the global tier's MCP alone, web search,
+  workflows, integrations, policies, rule and skill folders), each its value or its error, so a broken or old-layout
+  file fails only the tools that read it: a malformed `integrations.json` stops workflows, never permission checks.
+  `--global` resolves the global tier alone, for personal settings (`workflowProject`, `sessionAnalysis`) that a
+  consuming project's files mustn't block.
 
 #### Config and state together
 
@@ -725,8 +729,8 @@ security work with no upstream sharing it.
 
 No compatibility period. `piton migrate` (run on the host; a sandboxed agent can't write `.piton/`) moves a
 repository's files (`git mv` for committed ones), converts `.nono*.json` into `[sandbox]` tables, and updates the
-ignore rules. Every consumer refuses the old paths with a message naming each one and its new place: the daemon at
-start and launch, the pi package before the tools that need them, the Neovim plugin for its queue. Global-tier
+ignore rules. Every consumer refuses the old paths with a message naming each one and its new place, in the parts that read
+them: the daemon at start and launch, the pi package in the tools that need them, the Neovim plugin for its queue. Global-tier
 files are the user's dotfiles: `piton config check` lists what to move.
 
 ### Deploying from a sandbox

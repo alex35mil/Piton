@@ -1,4 +1,4 @@
-import "./host-runtime.ts"
+import { resetGlobalSettings, TEST_CONFIG_HOME } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -10,7 +10,7 @@ import { describe, it } from "node:test"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata } from "../extensions/__lib/mcp.ts"
-import { getExtensionSettingsPaths } from "../extensions/__lib/project.ts"
+import { clearSettingsCache } from "../extensions/__lib/settings.ts"
 import { inspectPersistentPermissions } from "../extensions/permissions/index.ts"
 import registerProjectSetup from "../workflows/extensions/project-setup/index.ts"
 import {
@@ -31,17 +31,24 @@ function fixture() {
     process.env.PI_CODING_AGENT_DIR = path.join(root, "agent")
     git(root, "init", "-b", "main")
     git(root, "config", "core.excludesFile", "/dev/null")
-    const paths = getExtensionSettingsPaths("permissions", root)
+    resetGlobalSettings()
+    const paths = {
+        global: path.join(TEST_CONFIG_HOME, "permissions.json"),
+        project: path.join(root, ".piton/permissions.json"),
+        local: path.join(root, ".piton/permissions.local.json"),
+    }
     return {
         root,
         paths,
         write(tier: keyof typeof paths, value: unknown) {
             fs.mkdirSync(path.dirname(paths[tier]), { recursive: true })
             fs.writeFileSync(paths[tier], `${JSON.stringify(value, null, 2)}\n`)
+            clearSettingsCache()
         },
         cleanup() {
             if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR
             else process.env.PI_CODING_AGENT_DIR = previous
+            resetGlobalSettings()
             fs.rmSync(root, { recursive: true, force: true })
         },
     }
@@ -64,7 +71,7 @@ const live: McpToolCatalog = new Map(
 )
 const hint = "mcp(team-gh, hint: readOnly)"
 const writeRule = "mcp(team-gh, issue_write)"
-const gate = "write(.project/*/plan.md)"
+const gate = "write(.piton/*/plan.md)"
 
 describe("project setup permissions", () => {
     it("merges allows and ask gates while preserving unrelated settings and the index", () => {
@@ -75,8 +82,6 @@ describe("project setup permissions", () => {
                 allow: ["read"],
                 ask: ["edit(existing.md)"],
                 deny: ["bash(rm *)"],
-                keybindings: { autoAcceptEdits: "ctrl+shift+a" },
-                other: { keep: true },
             }
             f.write("project", original)
             const index = git(f.root, "ls-files", "--stage")
@@ -137,10 +142,7 @@ describe("project setup permissions", () => {
             assert.deepEqual(result.added, { allow: [writeRule], ask: [gate] })
             assert.equal(result.skipped.allow[0].status, "covered")
             assert.equal(result.localExclusionChanged, true)
-            assert.equal(
-                git(f.root, "check-ignore", ".agents/permissions.local.json"),
-                ".agents/permissions.local.json",
-            )
+            assert.equal(git(f.root, "check-ignore", ".piton/permissions.local.json"), ".piton/permissions.local.json")
             const before = fs.readFileSync(f.paths.local, "utf-8")
             assert.equal(
                 configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live).changed,
@@ -260,7 +262,7 @@ describe("project setup permissions", () => {
         const f = fixture()
         try {
             f.write("local", { allow: ["read"] })
-            git(f.root, "add", ".agents/permissions.local.json")
+            git(f.root, "add", ".piton/permissions.local.json")
             const before = fs.readFileSync(f.paths.local, "utf-8")
             const index = git(f.root, "ls-files", "--stage")
             assert.throws(
@@ -274,7 +276,7 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("loads the same three-tier precedence used by runtime permission checks", () => {
+    it("loads the same chain precedence used by runtime permission checks", () => {
         const f = fixture()
         try {
             f.write("global", { defaultMode: "deny", allow: [hint], ask: [gate] })
@@ -285,8 +287,8 @@ describe("project setup permissions", () => {
             assert.deepEqual(snapshot.settings.allow, [hint, writeRule])
             assert.deepEqual(snapshot.settings.deny, [writeRule])
             assert.deepEqual(
-                snapshot.sources.map((source) => `${source.tier}:${source.scope}`),
-                ["global:shared", "global:host", "project:shared", "project:host", "local:shared", "local:host"],
+                snapshot.sources.map((source) => `${source.level}:${source.local ? "local" : source.scope}`),
+                ["global:shared", "repository:shared", "repository:local"],
             )
         } finally {
             f.cleanup()

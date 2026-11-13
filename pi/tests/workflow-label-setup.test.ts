@@ -104,8 +104,8 @@ function project(integrations?: unknown): string {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "label-setup-"))
     cp.execFileSync("git", ["init", "-q", "-b", "main"], { cwd: root })
     if (integrations) {
-        fs.mkdirSync(path.join(root, ".project"))
-        fs.writeFileSync(path.join(root, ".project/integrations.json"), JSON.stringify(integrations))
+        fs.mkdirSync(path.join(root, ".piton"))
+        fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify(integrations))
     }
     return root
 }

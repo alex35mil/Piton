@@ -94,19 +94,16 @@ function fixture() {
     git("init", "-b", "main")
     git("config", "user.name", "Fixture")
     git("config", "user.email", "fixture@example.com")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     fs.writeFileSync(path.join(root, "README.md"), "Trusted fixture\n")
     git("add", ".gitignore", "README.md")
     git("commit", "-m", "fixture")
-    fs.mkdirSync(path.join(root, ".project"))
+    fs.mkdirSync(path.join(root, ".piton"))
     fs.writeFileSync(
-        path.join(root, ".project/config.json"),
+        path.join(root, ".piton/workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
-    fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
-        JSON.stringify({ tracker: minimalTracker(), forge }),
-    )
+    fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify({ tracker: minimalTracker(), forge }))
     prepareArtifactPersistence(root)
     return { root, git, close: () => fs.rmSync(root, { recursive: true, force: true }) }
 }
@@ -227,9 +224,9 @@ describe("incoming PR identity and context", () => {
             if (result.incomingPullRequest.read.state !== "available")
                 assert.fail("Expected the configured PR read tool")
             assert.equal(result.incomingPullRequest.read.tool, "mcp__contributions__pull_request_read")
-            assert.equal(result.incomingPullRequest.localDirectory, ".project/.local/pull-requests/12")
-            assert.equal(result.incomingPullRequest.checkoutDirectory, ".project/.local/pull-requests/12/checkout")
-            assert.equal(result.incomingPullRequest.reviewsDirectory, ".project/.local/pull-requests/12/reviews")
+            assert.equal(result.incomingPullRequest.localDirectory, ".piton/.local/pull-requests/12")
+            assert.equal(result.incomingPullRequest.checkoutDirectory, ".piton/.local/pull-requests/12/checkout")
+            assert.equal(result.incomingPullRequest.reviewsDirectory, ".piton/.local/pull-requests/12/reviews")
             assert.deepEqual(result.safety.checkout.tools, INCOMING_CHECKOUT_TOOLS)
             assert.equal(result.safety.checkout.tools.prepare, "prepare_incoming_pr_checkout")
             assert.equal(result.safety.checkout.tools.rebase, "rebase_incoming_pr")
@@ -261,7 +258,7 @@ describe("incoming PR identity and context", () => {
                 /configured repository/,
             )
             assert.equal("entity" in result, false)
-            assert.equal(fs.existsSync(path.join(f.root, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/gigs")), false)
             assert.deepEqual(
                 [f.git("branch", "--show-current"), f.git("status", "--porcelain"), f.git("ls-files", "--stage")],
                 before,
@@ -274,9 +271,9 @@ describe("incoming PR identity and context", () => {
                 }),
                 false,
             )
-            fs.writeFileSync(path.join(f.root, ".project/integrations.json"), "{}")
+            fs.writeFileSync(path.join(f.root, ".piton/integrations.json"), "{}")
             assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools))
-            fs.rmSync(path.join(f.root, ".project/integrations.json"))
+            fs.rmSync(path.join(f.root, ".piton/integrations.json"))
             assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools), /missing required/)
         } finally {
             f.close()
@@ -289,7 +286,7 @@ describe("incoming PR identity and context", () => {
             const before = f.git("status", "--porcelain", "--untracked-files=all")
             const local = incomingPullRequestContext(f.root, "#12", mcpTools).incomingPullRequest.localDirectory
             const files = [
-                ".project/.local/pull-requests/notes.md",
+                ".piton/.local/pull-requests/notes.md",
                 path.join(local, "notes.md"),
                 path.join(local, "source.md"),
                 path.join(local, "diff.md"),
@@ -299,10 +296,10 @@ describe("incoming PR identity and context", () => {
                 fs.mkdirSync(path.dirname(path.join(f.root, file)), { recursive: true })
                 fs.writeFileSync(path.join(f.root, file), "Private incoming PR evidence\n")
                 const ignored = f.git("check-ignore", "-v", file)
-                assert.match(ignored, /^\.gitignore:1:\/\.project\/\.local\t/)
+                assert.match(ignored, /^\.gitignore:1:\/\.piton\/\.local\t/)
             }
             assert.equal(f.git("status", "--porcelain", "--untracked-files=all"), before)
-            assert.equal(fs.readFileSync(path.join(f.root, ".gitignore"), "utf-8"), "/.project/.local\n")
+            assert.equal(fs.readFileSync(path.join(f.root, ".gitignore"), "utf-8"), "/.piton/.local\n")
         } finally {
             f.close()
         }
@@ -384,7 +381,7 @@ describe("incoming PR identity and context", () => {
         const previous = process.env.PITON_RUNTIME
         try {
             process.env.PITON_RUNTIME = "sandbox"
-            const local = path.join(f.root, ".project", ".local")
+            const local = path.join(f.root, ".piton", ".local")
             fs.mkdirSync(local, { recursive: true })
             assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools), /isn't linked/)
             fs.cpSync(local, source, { recursive: true })
@@ -405,7 +402,7 @@ describe("incoming PR identity and context", () => {
         try {
             const input = inspection(f.root)
             const selected = parseIncomingReference("#12", forge.repository)
-            const local = path.join(f.root, ".project", ".local")
+            const local = path.join(f.root, ".piton", ".local")
             fs.cpSync(local, source, { recursive: true })
             fs.rmSync(local, { recursive: true })
             fs.symlinkSync(source, local)
@@ -435,7 +432,7 @@ describe("incoming PR private review", () => {
             assert.equal(first.round, 1)
             assert.equal(first.root, f.root)
             const reviewPath = path.join(
-                ".project/.local/pull-requests/12/reviews",
+                ".piton/.local/pull-requests/12/reviews",
                 `${baseSha}-${headSha}`,
                 "review-001",
             )
@@ -536,7 +533,7 @@ describe("incoming PR private review", () => {
                 /does not match the reviewed/,
             )
             assert.equal(ReviewPullRequestValidator.check({ ...input, entityDir: "fake" }), false)
-            assert.equal(fs.existsSync(path.join(f.root, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/gigs")), false)
         } finally {
             f.close()
         }
@@ -749,7 +746,7 @@ describe("incoming PR private review", () => {
             assert.notEqual(first.directory, changed.directory)
             assert.equal(changed.round, 1)
             assert.ok(f.git("check-ignore", path.relative(f.root, changed.directory)))
-            assert.equal(f.git("ls-files", ".project"), "")
+            assert.equal(f.git("ls-files", ".piton"), "")
             assert.equal(f.git("branch", "--show-current"), "main")
         } finally {
             f.close()

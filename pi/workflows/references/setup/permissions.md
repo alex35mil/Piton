@@ -87,10 +87,10 @@ Results reflect persistent settings only; session overrides and skill-derived al
 
 **Targets:**
 
-- The target is committed `.agents/permissions.json` (`project`) or local `.agents/permissions.local.json` (`local`).
-- Before changing local settings, the tool checks the file is outside Git and ensures exact `/.agents/permissions.local.json` in `.git/info/exclude`. It never changes the index, and a no-op adds no exclusion.
+- The target is committed `.piton/permissions.json` (`project`) or local `.piton/permissions.local.json` (`local`).
+- Before changing local settings, the tool checks the file is outside Git and ensures `/.piton/*.local.*` in `.git/info/exclude`. It never changes the index, and a no-op adds no exclusion.
 
-Workflow skills allow routine `.project/` bookkeeping, including `epic.md`, `plan.md`, `result.md`, and `report.md`. Setup offers no `ask` gate for those files; the workflow stops for the user where it needs to.
+Workflow skills allow routine `.piton/` bookkeeping, including `epic.md`, `plan.md`, `result.md`, and `report.md`. Setup offers no `ask` gate for those files; the workflow stops for the user where it needs to.
 
 ## Reviewer tools
 

@@ -65,10 +65,10 @@ function fixture() {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "workflow-resource-ids-")))
     const git = (args: string[]) => cp.execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim()
     git(["init", "-q"])
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
-    fs.mkdirSync(path.join(root, ".project"))
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
+    fs.mkdirSync(path.join(root, ".piton"))
     fs.writeFileSync(
-        path.join(root, ".project/config.json"),
+        path.join(root, ".piton/workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
     const statuses = {
@@ -80,7 +80,7 @@ function fixture() {
         canceled: "Canceled",
     }
     fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
+        path.join(root, ".piton/integrations.json"),
         JSON.stringify({
             tracker: {
                 provider: "github",
@@ -97,7 +97,7 @@ function fixture() {
         }),
     )
     prepareArtifactPersistence(root)
-    const directory = path.join(root, ".project/.local/gigs", common.entity)
+    const directory = path.join(root, ".piton/.local/gigs", common.entity)
     fs.mkdirSync(directory, { recursive: true })
     const metadata: Record<string, unknown> = {
         slug: "example",
@@ -518,7 +518,7 @@ describe("resource ID operations", () => {
         const f = fixture()
         try {
             await assert.rejects(beginPullRequestCreation(f.root, f.directory, mcpTools), /PR intent already exists/)
-            const epicDir = path.join(f.root, ".project/.local/epics/9-rollout")
+            const epicDir = path.join(f.root, ".piton/.local/epics/9-rollout")
             fs.mkdirSync(epicDir, { recursive: true })
             fs.writeFileSync(
                 path.join(epicDir, "metadata.json"),
@@ -656,7 +656,7 @@ describe("resource ID operations", () => {
                 assert.deepEqual(fs.readdirSync(f.directory).sort(), ["metadata.json", "resource-ids.json", "reviews"])
                 assert.equal(f.git(["rev-list", "--count", "HEAD"]), "1")
                 assert.equal(f.git(["status", "--porcelain"]), "")
-                assert.equal(f.git(["ls-files", "--", ".project/.local"]), "")
+                assert.equal(f.git(["ls-files", "--", ".piton/.local"]), "")
             } finally {
                 f.cleanup()
             }

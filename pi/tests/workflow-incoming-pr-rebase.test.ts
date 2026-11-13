@@ -46,20 +46,17 @@ function fixture(kind: Kind = "clean") {
     git(root, "config", "--global", "user.name", "Fixture")
     git(root, "config", "--global", "user.email", "fixture@example.invalid")
     git(root, "init", "-b", "main")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     fs.writeFileSync(path.join(root, "README.md"), "parent\n")
     git(root, "add", ".")
     git(root, "commit", "-m", "parent")
-    fs.mkdirSync(path.join(root, ".project"))
+    fs.mkdirSync(path.join(root, ".piton"))
     const forge = { provider: "github", mcpServer: "fixture", repository: { owner: "upstream", repo: "app" } }
     fs.writeFileSync(
-        path.join(root, ".project/config.json"),
+        path.join(root, ".piton/workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
-    fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
-        JSON.stringify({ tracker: minimalTracker(), forge }),
-    )
+    fs.writeFileSync(path.join(root, ".piton/integrations.json"), JSON.stringify({ tracker: minimalTracker(), forge }))
     prepareArtifactPersistence(root)
     fs.writeFileSync(path.join(root, "README.md"), "parent staged\n")
     git(root, "add", "README.md")
@@ -156,7 +153,7 @@ function fixture(kind: Kind = "clean") {
         )
         return JSON.parse((result.content[0] as { text: string }).text)
     }
-    const checkout = path.join(root, ".project/.local/pull-requests/12/checkout")
+    const checkout = path.join(root, ".piton/.local/pull-requests/12/checkout")
     const record = () => JSON.parse(fs.readFileSync(path.join(path.dirname(checkout), "checkout.json"), "utf-8"))
     const ready = async () => {
         await call("prepare")
@@ -1162,7 +1159,7 @@ process.exit(result.status ?? 1);
     it("requires exact configured Project Done proof before removing a merged checkout", async () => {
         const f = fixture()
         try {
-            const configFile = path.join(f.root, ".project/integrations.json")
+            const configFile = path.join(f.root, ".piton/integrations.json")
             const config = JSON.parse(fs.readFileSync(configFile, "utf8"))
             const values = {
                 backlog: "Backlog",

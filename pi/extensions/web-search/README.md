@@ -16,13 +16,7 @@ export BRAVE_SEARCH_API_KEY="..."
 
 ### Settings File
 
-`web-search.json` (3-tier loading):
-
-| Tier    | Path                                        |
-| ------- | ------------------------------------------- |
-| Global  | `~/<agent-dir>/web-search.json`             |
-| Project | `<repo-root>/.agents/web-search.json`       |
-| Local   | `<repo-root>/.agents/web-search.local.json` |
+`web-search[.local].json` in any level of piton's `.piton/` chain: the global tier `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/`, and `<repo-root>/.piton/`. The nearest value wins; `piton config resolve` does the merging.
 
 ```json
 {

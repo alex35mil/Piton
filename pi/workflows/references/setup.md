@@ -50,7 +50,7 @@ It works before configuration exists or while it's invalid, and touches no files
 
 ## Project configuration
 
-`.project/config.json` is required:
+`.piton/workflows.json` is required:
 
 ```json
 {
@@ -67,7 +67,7 @@ It works before configuration exists or while it's invalid, and touches no files
 
 ### Username
 
-`username/identifier-title` needs `branches.username` in the global `~/<agent-dir>/workflows.json` or the local `.project/config.local.json`:
+`username/identifier-title` needs `branches.username` in the global tier's `workflows.json` (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) or the local `.piton/workflows.local.json`:
 
 ```json
 {
@@ -77,11 +77,11 @@ It works before configuration exists or while it's invalid, and touches no files
 
 - The local value overrides the global one.
 - A username is non-empty and can't contain `/`, carriage return, or newline.
-- Never put it in committed `.project/config.json` or infer it from Git or provider identity.
+- Never put it in committed `.piton/workflows.json` or infer it from Git or provider identity.
 
 ## Integration configuration
 
-`.project/integrations.json` is required and holds both roles: `tracker` (GitHub or Linear) and `forge` (GitHub).
+`.piton/integrations.json` is required and holds both roles: `tracker` (GitHub or Linear) and `forge` (GitHub).
 
 - Every role has a non-empty MCP server name made of letters, digits, `_`, `.`, or `-`.
 - A GitHub repository identity is a non-empty `owner` and `repo`.
@@ -212,9 +212,9 @@ MCP settings are shared Pi configuration, not workflow JSON. Use `configure_mcp`
 
 | Target | File | Notes |
 | --- | --- | --- |
-| Local | `.agents/mcp.local.json`, with `mcpServers` | add exact `/.agents/mcp.local.json` to `.git/info/exclude` |
-| Project | `.agents/mcp.json`, with `mcpServers` | committed |
-| Global | `<agent-dir>/mcp.json`, with `mcpServers` | never the target for a private project registration |
+| Local | `.piton/mcp.local.json`, with `mcpServers` | add `/.piton/*.local.*` to `.git/info/exclude` |
+| Project | `.piton/mcp.json`, with `mcpServers` | committed |
+| Global | the global tier's `mcp.json`, with `mcpServers` | never the target for a private project registration |
 
 **Credentials and toolsets:**
 
@@ -223,7 +223,7 @@ MCP settings are shared Pi configuration, not workflow JSON. Use `configure_mcp`
 
 **Merging and registration:**
 
-- The adapter merges global, committed project, then local entries by exact name; later entries replace earlier ones. Names differing only by `-` and `_` conflict.
+- Entries merge from the global tier to the repository, `.local` after the committed file, by exact name; nearer entries replace farther ones. Names differing only by `-` and `_` conflict.
 - Both project tiers require trust; untrusted-project inspection doesn't read project MCP files.
 - Every effective server is registered with `pi.registerMcpServer()`, and native Pi owns its transport. Native `/mcp` enable or exposure changes last for the session.
 - Keep private project scope; never move a local registration into global settings.
@@ -252,7 +252,7 @@ Example project registrations produced by `configure_mcp`:
 
 ## Project Policies
 
-`.project/policies.md` is optional Markdown with user-approved additions or overrides to these workflows for this repository.
+`.piton/policies.md` is optional Markdown with user-approved additions or overrides to these workflows for this repository.
 
 - Each policy names the stage or behavior it affects and says what it adds or replaces.
 - Generic repository instructions belong in `AGENTS.md` or the harness equivalent; provider configuration belongs in the setup JSON files.

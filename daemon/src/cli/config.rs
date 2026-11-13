@@ -39,7 +39,29 @@ enum ErrorBody {
 
 pub fn run(action: &ConfigAction) -> ExitCode {
     match action {
-        ConfigAction::Resolve { workspace, runtime } => {
+        ConfigAction::Resolve {
+            workspace,
+            runtime,
+            global: true,
+        } => {
+            let _ = (workspace, runtime);
+            match crate::settings::resolve_global(&Paths::current()) {
+                Ok(resolved) => {
+                    let output = Output {
+                        format: RESOLVE_FORMAT,
+                        resolved: &resolved,
+                    };
+                    println!("{}", serde_json::to_string(&output).unwrap_or_default());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => print_error(ErrorBody::Invalid { message: e.to_string() }),
+            }
+        }
+        ConfigAction::Resolve {
+            workspace,
+            runtime,
+            global: false,
+        } => {
             let runtime = match runtime.as_deref() {
                 None => runtime_from_env(),
                 Some("host") => Ok(Runtime::Host),
@@ -64,10 +86,11 @@ pub fn run(action: &ConfigAction) -> ExitCode {
         }
         ConfigAction::Get { file, workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
             Ok(resolved) => match get(&resolved, file) {
-                Some(value) => {
+                Some(Ok(value)) => {
                     println!("{}", serde_json::to_string(&value).unwrap_or_default());
                     ExitCode::SUCCESS
                 }
+                Some(Err(message)) => print_error(ErrorBody::Invalid { message }),
                 None => {
                     eprintln!("piton: unknown configuration {file:?}");
                     ExitCode::from(1)
@@ -77,12 +100,20 @@ pub fn run(action: &ConfigAction) -> ExitCode {
         },
         ConfigAction::Check { workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
             Ok(resolved) => {
-                println!("ok: {}", resolved.workspace.display());
+                let errors = resolved.errors();
+                for (part, error) in &errors {
+                    eprintln!("piton: {part}: {error}");
+                }
+                println!("workspace: {}", resolved.workspace.display());
                 println!("global tier: {}", resolved.global.display());
                 for file in &resolved.files {
                     println!("  {:?}  {}", file.level, file.path.display());
                 }
-                ExitCode::SUCCESS
+                if errors.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(EXIT_INVALID)
+                }
             }
             Err(ErrorBody::Invalid { message } | ErrorBody::Workspace { message }) => {
                 eprintln!("piton: {message}");
@@ -123,18 +154,24 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
     })
 }
 
-/// One resolved file, for tools that need only that (the Neovim plugin's tracker queue).
-fn get(resolved: &Resolved, file: &str) -> Option<serde_json::Value> {
-    let value = match file {
-        "integrations" => serde_json::to_value(&resolved.integrations),
-        "workflows" => serde_json::to_value(&resolved.workflows),
-        "permissions" => serde_json::to_value(&resolved.permissions),
-        "mcp" => serde_json::to_value(&resolved.mcp),
-        "daemon" => serde_json::to_value(&resolved.daemon),
-        "settings" => serde_json::to_value(&resolved.settings),
+/// One resolved part, for tools that need only that (the Neovim plugin's tracker queue): its value, or why its files
+/// can't be used. `None` for an unknown name.
+fn get(resolved: &Resolved, file: &str) -> Option<Result<serde_json::Value, String>> {
+    fn value<T: Serialize>(section: &crate::settings::Section<T>) -> Result<serde_json::Value, String> {
+        match section {
+            Ok(value) => serde_json::to_value(value).map_err(|e| e.to_string()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+    Some(match file {
+        "integrations" => value(&resolved.integrations),
+        "workflows" => value(&resolved.workflows),
+        "permissions" => value(&resolved.permissions),
+        "mcp" => value(&resolved.mcp),
+        "daemon" => value(&resolved.daemon),
+        "settings" => value(&resolved.settings),
         _ => return None,
-    };
-    value.ok()
+    })
 }
 
 fn print_error(body: ErrorBody) -> ExitCode {
@@ -159,6 +196,7 @@ mod tests {
         let repo = home.join("repo");
         std::fs::create_dir_all(repo.join(".piton")).unwrap();
         std::fs::write(repo.join(".piton/permissions.json"), r#"{"allow":["read"]}"#).unwrap();
+        std::fs::write(repo.join(".piton/workflows.json"), "{ broken").unwrap();
         let paths = Paths {
             home: home.clone(),
             global: home.join(".config/piton"),
@@ -177,10 +215,18 @@ mod tests {
         .unwrap();
         assert_eq!(json["format"], RESOLVE_FORMAT);
         assert_eq!(json["runtime"], "sandbox");
-        assert_eq!(json["permissions"]["allow"][0], "read");
+        // Each part is `{ok}` or `{error: {message}}`.
+        assert_eq!(json["permissions"]["ok"]["merged"]["allow"][0], "read");
+        assert!(json["integrations"]["ok"].is_null());
+        assert!(
+            json["workflows"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("workflows.json")
+        );
+        assert!(json["workflows"].get("ok").is_none());
         assert_eq!(json["artifacts"], repo.join(".piton/.local").to_string_lossy().as_ref());
         assert!(json["watch"].as_array().unwrap().len() > 10);
-        assert!(json["integrations"].is_null());
 
         let error = serde_json::to_value(ErrorOutput {
             format: RESOLVE_FORMAT,

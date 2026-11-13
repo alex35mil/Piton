@@ -148,21 +148,21 @@ describe("workflow reviewer isolation", () => {
     for (const layout of ["directory", "linked"] as const)
         it(`chooses each pass from the saved rounds, whatever the Phase (${layout} local root)`, async () => {
             const repository = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-review-phase-tools-"))
-            // A worker's .project/.local is a symlink to its source checkout's directory.
+            // A worker's .piton/.local is a symlink to its source checkout's directory.
             const source = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-review-source-"))
-            const entityDir = ".project/.local/gigs/7-example"
+            const entityDir = ".piton/.local/gigs/7-example"
             const directory = path.join(repository, entityDir)
             const metadataPath = path.join(directory, "metadata.json")
             try {
                 cp.execFileSync("git", ["init", "-q", repository])
                 if (layout === "linked") {
-                    fs.mkdirSync(path.join(repository, ".project"))
-                    fs.symlinkSync(source, path.join(repository, ".project/.local"))
+                    fs.mkdirSync(path.join(repository, ".piton"))
+                    fs.symlinkSync(source, path.join(repository, ".piton/.local"))
                 }
                 fs.mkdirSync(directory, { recursive: true })
-                fs.writeFileSync(path.join(repository, ".gitignore"), "/.project/.local\n")
+                fs.writeFileSync(path.join(repository, ".gitignore"), "/.piton/.local\n")
                 fs.writeFileSync(
-                    path.join(repository, ".project/config.json"),
+                    path.join(repository, ".piton/workflows.json"),
                     JSON.stringify({ branches: { format: "identifier-title" } }),
                 )
                 prepareArtifactPersistence(repository)
@@ -321,10 +321,10 @@ describe("workflow reviewer isolation", () => {
         const repository = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-review-preconditions-"))
         try {
             cp.execFileSync("git", ["init", "-q", repository])
-            fs.mkdirSync(path.join(repository, ".project"), { recursive: true })
-            fs.writeFileSync(path.join(repository, ".gitignore"), "/.project/.local/\n")
+            fs.mkdirSync(path.join(repository, ".piton"), { recursive: true })
+            fs.writeFileSync(path.join(repository, ".gitignore"), "/.piton/.local\n")
             fs.writeFileSync(
-                path.join(repository, ".project/config.json"),
+                path.join(repository, ".piton/workflows.json"),
                 JSON.stringify({ branches: { format: "identifier-title" } }),
             )
             prepareArtifactPersistence(repository)
@@ -395,7 +395,7 @@ describe("workflow reviewer isolation", () => {
                 return after.filter((entry) => !before.includes(entry))
             }
             const gig = (kind: string, phase: string, files: Record<string, string>, slug: string) =>
-                entity(`.project/.local/gigs/7-${slug}`, { entity: "gig", kind, phase }, files)
+                entity(`.piton/.local/gigs/7-${slug}`, { entity: "gig", kind, phase }, files)
             const result = { "result.md": "# Result\n\nDone.\n" }
 
             // Each rejected precondition leaves no new round behind.
@@ -422,7 +422,7 @@ describe("workflow reviewer isolation", () => {
                 [
                     "review_epic",
                     entity(
-                        ".project/.local/epics/7-example",
+                        ".piton/.local/epics/7-example",
                         { entity: "epic", phase: "planning" },
                         { "epic.md": "# Epic\n" },
                     ),
@@ -432,7 +432,7 @@ describe("workflow reviewer isolation", () => {
                 [
                     "review_task",
                     entity(
-                        ".project/.local/gigs/orphan/tasks/7-example",
+                        ".piton/.local/gigs/orphan/tasks/7-example",
                         { entity: "task", kind: "feature", phase: "planning" },
                         { "plan.md": "# Plan\n" },
                     ),
@@ -674,7 +674,7 @@ describe("workflow reviewer isolation", () => {
         assert.equal(
             ReviewRequestValidator.check({
                 entity: "epic",
-                entityDir: ".project/.local/epics/example",
+                entityDir: ".piton/.local/epics/example",
                 phase: "plan",
             }),
             true,
@@ -682,7 +682,7 @@ describe("workflow reviewer isolation", () => {
         assert.equal(
             ReviewRequestValidator.check({
                 entity: "epic",
-                entityDir: ".project/.local/epics/example",
+                entityDir: ".piton/.local/epics/example",
                 phase: "final",
             }),
             false,
@@ -690,7 +690,7 @@ describe("workflow reviewer isolation", () => {
         assert.equal(
             ReviewRequestValidator.check({
                 entity: "task",
-                entityDir: ".project/.local/epics/example/tasks/task",
+                entityDir: ".piton/.local/epics/example/tasks/task",
                 phase: "final",
             }),
             true,
@@ -698,7 +698,7 @@ describe("workflow reviewer isolation", () => {
         assert.equal(
             ReviewRequestValidator.check({
                 entity: "task",
-                entityDir: ".project/.local/epics/example/tasks/task",
+                entityDir: ".piton/.local/epics/example/tasks/task",
                 phase: "final",
                 continuation: { approved: true },
             }),
@@ -707,14 +707,14 @@ describe("workflow reviewer isolation", () => {
         assert.equal(
             ReviewRequestValidator.check({
                 entity: "gig",
-                entityDir: ".project/.local/gigs/example",
+                entityDir: ".piton/.local/gigs/example",
                 phase: "plan",
-                epicDir: ".project/.local/epics/example",
+                epicDir: ".piton/.local/epics/example",
             }),
             false,
         )
         // Each input exists only for the category that uses it.
-        const gig = { entity: "gig", entityDir: ".project/.local/gigs/example" }
+        const gig = { entity: "gig", entityDir: ".piton/.local/gigs/example" }
         const checks: Array<[Record<string, unknown>, boolean]> = [
             [{ phase: "conflict-plan", resolution: "Keep both lines." }, true],
             [{ phase: "conflict-plan" }, false],
@@ -737,7 +737,7 @@ describe("workflow reviewer isolation", () => {
         assert.equal(
             ReviewRequestValidator.check({
                 entity: "epic",
-                entityDir: ".project/.local/epics/example",
+                entityDir: ".piton/.local/epics/example",
                 phase: "conflict-plan",
                 resolution: "Keep both lines.",
             }),
@@ -804,7 +804,7 @@ describe("workflow reviewer isolation", () => {
     it("propagates Project Policies into a fresh review prompt", async () => {
         const repository = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-review-prompt-"))
         try {
-            const epicDir = path.join(repository, ".project", ".local", "epics", "example")
+            const epicDir = path.join(repository, ".piton", ".local", "epics", "example")
             fs.mkdirSync(epicDir, { recursive: true })
             const policies = [
                 "# Project Policies",
@@ -814,7 +814,7 @@ describe("workflow reviewer isolation", () => {
                 "- Override Deliverable submission: on a submit request, commit locally, then wait for a separate explicit user request before pushing or creating a PR.",
                 "",
             ].join("\n")
-            fs.writeFileSync(path.join(repository, ".project", "policies.md"), policies)
+            fs.writeFileSync(path.join(repository, ".piton", "policies.md"), policies)
             fs.writeFileSync(path.join(epicDir, "brief.md"), "# Brief\n")
             const candidate = path.join(epicDir, "epic.md")
             fs.writeFileSync(candidate, "# Candidate\n")
@@ -830,7 +830,7 @@ describe("workflow reviewer isolation", () => {
             assert.match(prompt, /Return only one JSON object/)
             assert.doesNotMatch(prompt, /## Findings/)
 
-            const gigDir = path.join(repository, ".project", ".local", "gigs", "7-example")
+            const gigDir = path.join(repository, ".piton", ".local", "gigs", "7-example")
             fs.mkdirSync(path.join(gigDir, "reviews"), { recursive: true })
             fs.writeFileSync(path.join(gigDir, "brief.md"), "# Brief\n")
             fs.writeFileSync(path.join(gigDir, "plan.md"), "# Root cause\n\nUnique bugfix evidence.\n")
@@ -1007,7 +1007,7 @@ describe("workflow reviewer isolation", () => {
             git("config", "user.email", "test@example.com")
             git("config", "user.name", "Test")
             git("remote", "add", "origin", path.join(parent, "origin.git"))
-            fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local\n")
+            fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
             write("a\nbase\nc\n")
             git("add", ".")
             git("commit", "-q", "-m", "initial")
@@ -1019,13 +1019,13 @@ describe("workflow reviewer isolation", () => {
             const branchHead = git("rev-parse", "HEAD")
             const targetSha = changeTarget("a\ntarget\nc\n")
 
-            fs.mkdirSync(path.join(root, ".project"))
+            fs.mkdirSync(path.join(root, ".piton"))
             fs.writeFileSync(
-                path.join(root, ".project/config.json"),
+                path.join(root, ".piton/workflows.json"),
                 JSON.stringify({ branches: { format: "identifier-title" } }),
             )
             prepareArtifactPersistence(root)
-            const entityDir = ".project/.local/gigs/7-example"
+            const entityDir = ".piton/.local/gigs/7-example"
             const directory = path.join(root, entityDir)
             fs.mkdirSync(directory, { recursive: true })
             fs.writeFileSync(path.join(directory, "plan.md"), "# Plan\n\n## Overview\n\nAccepted.\n")
@@ -1104,7 +1104,7 @@ describe("workflow reviewer isolation", () => {
             const response = { round: 1, responses: [] }
             await respond.execute("test", { entityDir, phase: "conflict-plan", ...response }, undefined, undefined, ctx)
             assert.ok(fs.existsSync(path.join(reviewRoundDir(directory, "conflict-plan", 1), "response.json")))
-            const epicDir = ".project/.local/epics/7-example"
+            const epicDir = ".piton/.local/epics/7-example"
             fs.mkdirSync(path.join(root, epicDir), { recursive: true })
             fs.writeFileSync(
                 path.join(root, epicDir, "metadata.json"),

@@ -19,9 +19,9 @@ it("keeps a completed parallel edit when a different in-flight review returns no
     const h = await nativeSessionFixture({
         extensions: [registerPermission],
         setup(root) {
-            fs.mkdirSync(path.join(root, ".agents"))
+            fs.mkdirSync(path.join(root, ".piton"))
             fs.writeFileSync(
-                path.join(root, ".agents/permissions.json"),
+                path.join(root, ".piton/permissions.json"),
                 JSON.stringify({ defaultMode: "ask", allow: ["codemode"] }),
             )
             for (const file of ["first.txt", "second.txt"]) fs.writeFileSync(path.join(root, file), "before")

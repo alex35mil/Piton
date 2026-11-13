@@ -1,4 +1,4 @@
-import "./host-runtime.ts"
+import { resetGlobalSettings, writeGlobalSetting } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -16,7 +16,7 @@ import {
     loadIntegrationConfig,
     PriorityFieldValidator,
 } from "../workflows/extensions/integrations/config.ts"
-import { getWorkflowSettingsPaths, prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
+import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
 import registerIntegrations, {
     buildIntegrationContext,
     IntegrationContextValidator,
@@ -103,22 +103,19 @@ function prepareWorkflowProject(root: string, tracker: unknown = config()): void
     })
     cp.execFileSync("git", ["config", "user.name", "Test"], { cwd: root })
     fs.writeFileSync(path.join(root, "README.md"), "test\n")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     cp.execFileSync("git", ["add", "README.md", ".gitignore"], { cwd: root })
     cp.execFileSync("git", ["commit", "-m", "initial"], { cwd: root })
-    fs.mkdirSync(path.join(root, ".project"), { recursive: true })
+    fs.mkdirSync(path.join(root, ".piton"), { recursive: true })
     fs.writeFileSync(
-        path.join(root, ".project", "config.json"),
+        path.join(root, ".piton", "workflows.json"),
         JSON.stringify({ branches: { format: "identifier-title" } }),
     )
-    fs.writeFileSync(
-        path.join(root, ".project", "integrations.json"),
-        JSON.stringify({ tracker, forge: forgeConfig() }),
-    )
+    fs.writeFileSync(path.join(root, ".piton", "integrations.json"), JSON.stringify({ tracker, forge: forgeConfig() }))
 }
 
 function writeEntity(cwd: string, entity: "epic" | "gig", name: string, tracker: unknown, slug: string): string {
-    const directory = path.join(".project", ".local", entity === "epic" ? "epics" : "gigs", name)
+    const directory = path.join(".piton", ".local", entity === "epic" ? "epics" : "gigs", name)
     fs.mkdirSync(path.join(cwd, directory), { recursive: true })
     const metadata = {
         slug,
@@ -181,10 +178,10 @@ function workflowFixture(t: TestContext) {
     t.after(() => {
         if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR
         else process.env.PI_CODING_AGENT_DIR = previous
+        resetGlobalSettings()
         fs.rmSync(root, { recursive: true, force: true })
     })
-    const settingsPath = getWorkflowSettingsPaths(consumer).global
-    fs.writeFileSync(settingsPath, JSON.stringify({ workflowProject: source }))
+    const settingsPath = writeGlobalSetting("workflows.json", { workflowProject: source })
     return {
         root,
         source,
@@ -266,12 +263,12 @@ describe("workflow-source queue context", () => {
                           }
                 prepareWorkflowProject(f.source, tracker)
                 prepareArtifactPersistence(f.source)
-                const sourceIntegrations = path.join(f.source, ".project/integrations.json")
+                const sourceIntegrations = path.join(f.source, ".piton/integrations.json")
                 if (consumingSetup !== "missing") {
                     prepareWorkflowProject(f.consumer)
                     if (consumingSetup === "malformed") {
-                        fs.writeFileSync(path.join(f.consumer, ".project/integrations.json"), "broken JSON")
-                        fs.writeFileSync(path.join(f.consumer, ".project/config.json"), "broken JSON")
+                        fs.writeFileSync(path.join(f.consumer, ".piton/integrations.json"), "broken JSON")
+                        fs.writeFileSync(path.join(f.consumer, ".piton/workflows.json"), "broken JSON")
                     }
                 }
                 const before = fileSnapshot(f.root)
@@ -314,7 +311,7 @@ describe("workflow-source queue context", () => {
         const f = workflowFixture(t)
         prepareWorkflowProject(f.consumer)
         prepareArtifactPersistence(f.consumer)
-        fs.rmSync(f.settingsPath)
+        resetGlobalSettings()
         const before = fileSnapshot(f.root)
         assert.throws(
             () => buildIntegrationContext(f.ctx, { operation: "inspect", target: "workflow" }, mcpTools),
@@ -331,12 +328,12 @@ describe("workflow-source queue context", () => {
             if (previous === undefined) delete process.env.PITON_RUNTIME
             else process.env.PITON_RUNTIME = previous
         })
-        // The source checkout owns a real .project/.local; the worker links to it.
+        // The source checkout owns a real .piton/.local; the worker links to it.
         prepareWorkflowProject(f.source)
         prepareArtifactPersistence(f.source)
         prepareWorkflowProject(f.consumer)
-        fs.writeFileSync(path.join(f.consumer, ".gitignore"), "/.project/.local\n")
-        fs.symlinkSync(path.join(f.source, ".project/.local"), path.join(f.consumer, ".project/.local"))
+        fs.writeFileSync(path.join(f.consumer, ".gitignore"), "/.piton/.local\n")
+        fs.symlinkSync(path.join(f.source, ".piton/.local"), path.join(f.consumer, ".piton/.local"))
         prepareArtifactPersistence(f.consumer)
         process.env.PITON_RUNTIME = "sandbox"
 
@@ -352,13 +349,13 @@ describe("workflow-source queue context", () => {
         assert.deepEqual(fileSnapshot(f.source), before)
 
         // An unlinked worker still inspects and queues, but can't address an entity.
-        fs.rmSync(path.join(f.consumer, ".project/.local"))
-        fs.mkdirSync(path.join(f.consumer, ".project/.local"))
+        fs.rmSync(path.join(f.consumer, ".piton/.local"))
+        fs.mkdirSync(path.join(f.consumer, ".piton/.local"))
         for (const input of [{ operation: "inspect" as const, target: "current" as const }, queueSelection])
             assert.equal(buildIntegrationContext(f.ctx, input, mcpTools).state, "enabled")
         for (const input of [
             { operation: "adopt" as const, entity: "gig" as const },
-            { operation: "resume" as const, entityDir: ".project/.local/gigs/1-work" },
+            { operation: "resume" as const, entityDir: ".piton/.local/gigs/1-work" },
         ])
             assert.throws(() => buildIntegrationContext(f.ctx, input, mcpTools), /isn't linked to its source checkout/)
     })
@@ -366,7 +363,7 @@ describe("workflow-source queue context", () => {
     it("names source config errors without falling back or preparing artifacts", (t) => {
         const f = workflowFixture(t)
         prepareWorkflowProject(f.source)
-        const integrations = path.join(f.source, ".project/integrations.json")
+        const integrations = path.join(f.source, ".piton/integrations.json")
         for (const content of [
             undefined,
             JSON.stringify({ forge: forgeConfig() }),
@@ -384,7 +381,7 @@ describe("workflow-source queue context", () => {
         }
         fs.writeFileSync(integrations, JSON.stringify({ tracker: config(), forge: forgeConfig() }))
         fs.writeFileSync(
-            path.join(f.source, ".project/config.local.json"),
+            path.join(f.source, ".piton/workflows.local.json"),
             JSON.stringify({ branches: { username: "alex" } }),
         )
         const unprepared = fileSnapshot(f.root)
@@ -394,16 +391,16 @@ describe("workflow-source queue context", () => {
         )
         assert.deepEqual(fileSnapshot(f.root), unprepared)
         prepareArtifactPersistence(f.source)
-        const projectConfig = path.join(f.source, ".project/config.json")
+        const projectConfig = path.join(f.source, ".piton/workflows.json")
         fs.writeFileSync(projectConfig, "broken JSON")
         assert.throws(
             () => buildIntegrationContext(f.ctx, { operation: "inspect", target: "workflow" }, mcpTools),
-            (error: Error) => error.message.includes(f.source) && error.message.includes("config.json"),
+            (error: Error) => error.message.includes(f.source) && error.message.includes("workflows.json"),
         )
         fs.rmSync(projectConfig)
         assert.throws(
             () => buildIntegrationContext(f.ctx, { operation: "inspect", target: "workflow" }, mcpTools),
-            /missing required/,
+            /missing branches\.format/,
         )
     })
 
@@ -444,11 +441,11 @@ describe("workflow-source queue context", () => {
                     .execute("inspect", {}, undefined, undefined, withToolExecution(f.ctx))
             ).details
         assert.deepEqual(await inspect(), { sessionAnalysis: "disabled" })
-        fs.writeFileSync(f.settingsPath, JSON.stringify({ workflowProject: f.source, sessionAnalysis: true }))
+        writeGlobalSetting("workflows.json", { workflowProject: f.source, sessionAnalysis: true })
         const before = fileSnapshot(f.root)
         assert.deepEqual(await inspect(), { sessionAnalysis: "enabled" })
         assert.deepEqual(fileSnapshot(f.root), before)
-        fs.writeFileSync(f.settingsPath, JSON.stringify({ sessionAnalysis: 1 }))
+        writeGlobalSetting("workflows.json", { sessionAnalysis: 1 })
         await assert.rejects(inspect, (error: Error) => error.message.includes(f.settingsPath))
     })
 })
@@ -525,7 +522,7 @@ describe("workflow integration configuration", () => {
             assert.match(sent, /Use the backlog skill.*external Backlog intake, not Epic\/Task\/Gig initialization/)
             await commands.get("todo")!.handler("Queue committed work", context)
             assert.match(sent, /Use the todo skill.*external Todo intake, not Epic\/Task\/Gig initialization/)
-            assert.equal(fs.existsSync(path.join(cwd, ".project")), false)
+            assert.equal(fs.existsSync(path.join(cwd, ".piton")), false)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -534,12 +531,12 @@ describe("workflow integration configuration", () => {
     it("requires both a tracker and a forge", () => {
         const cwd = temporaryProject()
         try {
-            assert.throws(() => loadIntegrationConfig(cwd), /missing required \.project\/integrations\.json/)
-            fs.mkdirSync(path.join(cwd, ".project"))
-            const file = path.join(cwd, ".project/integrations.json")
+            assert.throws(() => loadIntegrationConfig(cwd), /missing required \.piton\/integrations\.json/)
+            fs.mkdirSync(path.join(cwd, ".piton"))
+            const file = path.join(cwd, ".piton/integrations.json")
             for (const content of [{ forge: forgeConfig() }, { tracker: config() }]) {
                 fs.writeFileSync(file, JSON.stringify(content))
-                assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+                assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
             }
             fs.writeFileSync(file, JSON.stringify({ tracker: config(), forge: forgeConfig() }))
             assert.deepEqual(loadIntegrationConfig(cwd), {
@@ -645,7 +642,7 @@ describe("workflow integration configuration", () => {
             assert.deepEqual(labels({ ...queueSelection, kind: "not set" }), [])
             const write = (tracker: unknown) =>
                 fs.writeFileSync(
-                    path.join(cwd, ".project/integrations.json"),
+                    path.join(cwd, ".piton/integrations.json"),
                     JSON.stringify({ tracker, forge: forgeConfig() }),
                 )
             const area = {
@@ -706,8 +703,8 @@ describe("workflow integration configuration", () => {
 
         const cwd = temporaryProject()
         try {
-            fs.mkdirSync(path.join(cwd, ".project"))
-            const integrationPath = path.join(cwd, ".project", "integrations.json")
+            fs.mkdirSync(path.join(cwd, ".piton"))
+            const integrationPath = path.join(cwd, ".piton", "integrations.json")
             const write = (tracker: unknown) =>
                 fs.writeFileSync(integrationPath, JSON.stringify({ tracker, forge: forgeConfig() }))
             write(linearConfig())
@@ -721,15 +718,15 @@ describe("workflow integration configuration", () => {
             const missingIssueCanceled = linearConfig()
             delete (missingIssueCanceled.statuses.issues as Partial<typeof statuses>).canceled
             write(missingIssueCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
 
             const missingProjectCanceled = linearConfig()
             delete (missingProjectCanceled.statuses.projects as Partial<typeof statuses>).canceled
             write(missingProjectCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
 
             write({ ...linearConfig(), repository: { owner: "x", repo: "y" } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -738,10 +735,10 @@ describe("workflow integration configuration", () => {
     it("requires complete, distinct GitHub mappings while preserving separate scopes", () => {
         const cwd = temporaryProject()
         try {
-            fs.mkdirSync(path.join(cwd, ".project"))
+            fs.mkdirSync(path.join(cwd, ".piton"))
             const writeConfig = (tracker: unknown) =>
                 fs.writeFileSync(
-                    path.join(cwd, ".project", "integrations.json"),
+                    path.join(cwd, ".piton", "integrations.json"),
                     JSON.stringify({ tracker, forge: forgeConfig() }),
                 )
 
@@ -753,7 +750,7 @@ describe("workflow integration configuration", () => {
             const missingCanceled = config("project")
             delete (missingCanceled.fields.status.values as Partial<typeof statuses>).canceled
             writeConfig(missingCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
 
             const duplicateProjectField = config("project")
             duplicateProjectField.fields.priority.field = duplicateProjectField.fields.status.field
@@ -844,7 +841,7 @@ describe("workflow integration configuration", () => {
             )
 
             fs.writeFileSync(
-                path.join(cwd, ".project", "integrations.json"),
+                path.join(cwd, ".piton", "integrations.json"),
                 JSON.stringify({
                     tracker: config("project"),
                     forge: {
@@ -979,9 +976,9 @@ describe("workflow integration configuration", () => {
     it("permits a personal Project to use issue-scoped fields", () => {
         const cwd = temporaryProject()
         try {
-            fs.mkdirSync(path.join(cwd, ".project"))
+            fs.mkdirSync(path.join(cwd, ".piton"))
             fs.writeFileSync(
-                path.join(cwd, ".project/integrations.json"),
+                path.join(cwd, ".piton/integrations.json"),
                 JSON.stringify({
                     tracker: {
                         ...config("issue"),
@@ -1202,8 +1199,8 @@ describe("workflow integration configuration", () => {
     it("fails loudly for invalid configuration without substituting labels", () => {
         const cwd = temporaryProject()
         try {
-            fs.mkdirSync(path.join(cwd, ".project"))
-            const integrationPath = path.join(cwd, ".project", "integrations.json")
+            fs.mkdirSync(path.join(cwd, ".piton"))
+            const integrationPath = path.join(cwd, ".piton", "integrations.json")
             const valid = config("project")
             const write = (tracker: unknown) =>
                 fs.writeFileSync(integrationPath, JSON.stringify({ tracker, forge: forgeConfig() }))
@@ -1214,9 +1211,9 @@ describe("workflow integration configuration", () => {
             })
             assert.throws(() => loadIntegrationConfig(cwd), /`kind` label group values must be exactly/)
             write({ ...valid, fields: { ...valid.fields, type: { scope: "project", field: "Kind" } } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
             write({ ...valid, fields: { labels: true } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -1225,8 +1222,8 @@ describe("workflow integration configuration", () => {
     it("validates label groups, the kind group, and kept or retired labels", () => {
         const cwd = temporaryProject()
         try {
-            fs.mkdirSync(path.join(cwd, ".project"))
-            const integrationPath = path.join(cwd, ".project", "integrations.json")
+            fs.mkdirSync(path.join(cwd, ".piton"))
+            const integrationPath = path.join(cwd, ".piton", "integrations.json")
             const write = (tracker: unknown) =>
                 fs.writeFileSync(integrationPath, JSON.stringify({ tracker, forge: forgeConfig() }))
             const label = (name: string, description = "") => ({ name, color: "#1D76DB", description })
@@ -1274,12 +1271,12 @@ describe("workflow integration configuration", () => {
                 github({ groups: { gate: { ...gate, values: { ...gate.values, review: label("Gate: Review") } } } }),
                 /unknown gate "review"; known gates: "plan"/,
             )
-            rejects(github({ groups: { Area: area } }), /invalid \.project\/integrations\.json/)
-            rejects(github({ groups: { area: { ...area, appliesTo: [] } } }), /invalid \.project\/integrations\.json/)
-            rejects(github({ groups: { area: { ...area, values: {} } } }), /invalid \.project\/integrations\.json/)
+            rejects(github({ groups: { Area: area } }), /invalid \.piton\/integrations\.json/)
+            rejects(github({ groups: { area: { ...area, appliesTo: [] } } }), /invalid \.piton\/integrations\.json/)
+            rejects(github({ groups: { area: { ...area, values: {} } } }), /invalid \.piton\/integrations\.json/)
             rejects(
                 github({ groups: { area: { ...area, cardinality: "some" } } }),
-                /invalid \.project\/integrations\.json/,
+                /invalid \.piton\/integrations\.json/,
             )
             rejects(
                 github({
@@ -1364,21 +1361,21 @@ describe("workflow integration configuration", () => {
     it("rejects the old label shapes through normal validation", () => {
         const cwd = temporaryProject()
         try {
-            fs.mkdirSync(path.join(cwd, ".project"))
-            const integrationPath = path.join(cwd, ".project", "integrations.json")
+            fs.mkdirSync(path.join(cwd, ".piton"))
+            const integrationPath = path.join(cwd, ".piton", "integrations.json")
             const write = (tracker: unknown) =>
                 fs.writeFileSync(integrationPath, JSON.stringify({ tracker, forge: forgeConfig() }))
             write({
                 ...config("project", false),
                 labels: { kind: { epic: "Kind: Epic", deliverableKinds: { feature: "Kind: Feature" } } },
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
             const linear = linearConfig()
             write({
                 ...linear,
                 phase: { ...linear.phase, issues: { scope: "workspace", group: "Phase", values: phaseValues } },
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.project\/integrations\.json/)
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid \.piton\/integrations\.json/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

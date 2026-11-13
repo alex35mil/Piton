@@ -26,7 +26,7 @@ Offer it as a numbered enable or decline choice.
 - runs trusted default-branch metadata handling for fork PR opened and reopened events;
 - excludes same-repository PRs, and adds only the actual PR's membership to the selected Project;
 - relies on the Project's required native Status default for the configured Backlog option. No Status writer is generated; reruns return the existing item and can't requeue In Review or terminal work;
-- contains no checkout, contributor-code execution, installs, caches, private `.project` paths, workflow IDs, or credential values;
+- contains no checkout, contributor-code execution, installs, caches, private `.piton` paths, workflow IDs, or credential values;
 - uses the renderer's full-commit-pinned trusted action and safe static script. Never rebuild executable code from PR text.
 
 **Credentials:** the token value is supplied by the operator through GitHub, not by setup. Never inspect or copy an MCP token, commit credentials, create secrets, or silently reuse `GITHUB_TOKEN` or Git SSH authorization.
