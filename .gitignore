@@ -18,5 +18,5 @@ DerivedData/
 
 # local, per-machine
 mise.local.toml
-/.nono.local.json
-/.project/.local
+/.piton/*.local.*
+/.piton/.local
