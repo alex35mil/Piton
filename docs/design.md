@@ -372,8 +372,8 @@ arrive out of request order.
 | --- | --- |
 | `sessions.list` | `{sessions}`: live sessions (key, id, file, workspace, checkout, mode, status, clients, pid, title) |
 | `sessions.subscribe` | `{}`; then pushes `sessions` and `daemon {state}` lines on change |
-| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `value`, `kind` (`config` with `file` and `placement`, or `state`), `value_type`, `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
-| `settings.set {key, value, local?}` | `{state}`; state to the database, configuration to its global file; `value: null` resets; `local` moves the key between the shared and `.local` file |
+| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `scope` (`host`, `client`, `project`), `value`, `placement` (`shared`, `local`, or null), `local_choice`, `value_type`, `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
+| `settings.set {scope, key, value, local?}` | `{state}`; the key in the global file of `scope`; `value: null` resets; `local` moves the key between the shared and `.local` file (refused for `client`, which has no local file) |
 | `daemon.logging {policy}` | `{state}`; until it expires or the daemon restarts |
 | `workspaces.browse {path?}` | `{entries}`; see "Workspace roots" |
 | `session.start {workspace, mode?, prompt?}` | `{session}`; mode defaults to `sandbox`; `workspace` must be a checkout under a root |
@@ -495,9 +495,9 @@ Attention is derived from the event stream:
   assertion (`caffeinate -i`), so the phone can reach sessions it might want to steer; released when the last
   session ends. Idle sessions count: a Mac that slept with only idle sessions made the phone lose access
   (2026-11-08). The display may still sleep and the screen lock; the daemon and Tailscale keep running.
-- On/off: state in the host's database (default on); the apps toggle it (`settings.set` `keep_awake`, the macOS menu bar
-  item and Settings > General on both platforms), and the choice survives restarts. A `keep_awake` key in
-  `config.toml` is refused: it's state, not configuration.
+- On/off: `keep_awake` in `config.host.toml` (default on), or `config.host.local.toml` to keep frequent toggles out
+  of a dotfiles diff; the apps toggle it (`settings.set` on `host` `keep_awake`, the macOS menu bar item and Settings >
+  General on both platforms), and a hand edit applies at once.
 - Lid closed on battery without an external display sleeps regardless. For that, `piton-sleepd` toggles
   `pmset disablesleep` while agents work: it accepts XPC only from the signed daemon, restores normal sleep when the
   connection drops, and enforces a maximum duration and a low-battery/thermal cutoff.
@@ -507,7 +507,7 @@ Attention is derived from the event stream:
 
 The Info level records essential events; opt-in Debug adds detailed traces and expires after an hour by default unless
 explicitly kept on. The apps retain bounded files alongside Apple's unified logger. Host logging (the
-Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `[host] logging` in `config.toml`
+Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `logging` in `config.host.toml`
 is the default, and `daemon.logging` (the Mac app) or `piton logging` switches it until it expires or the daemon restarts.
 The policy is part of the pushed daemon state. The phone's capture setting is a device setting, local
 to the phone, and works offline. No logging control changes pi's settings, uses its RPC channel, or restarts sessions.
@@ -555,7 +555,7 @@ the roomier reading line spacing apply to the session list and conversations, no
 system chrome (bars, alerts, menus): iOS 27 has no opt-out.
 
 Fonts are client preferences (Settings > Appearance): a text font and a code font, each the system font or any family
-available to the app, scaled with Dynamic Type. Each is shared through the host (`[client]` in its `config.toml`,
+available to the app, scaled with Dynamic Type. Each is shared through the host (`config.client.toml`,
 the same on every device, cached for offline start) unless Local keeps a value on this device; a shared font a
 device lacks shows as the system font there. Settings > Host shows every host setting with where it comes from. The Mac lists its installed fonts. On the phone, fonts the user owns
 (a paid one like Berkeley Mono can't be bundled) are imported from .otf/.ttf files: copied into the app's Application
@@ -581,9 +581,9 @@ Four stores, each with one job; every value has exactly one home.
 
 | Store | Where | Owns | Written by |
 | --- | --- | --- | --- |
-| Config files | `.piton/` and `.agents/` in the repository and its parent folders; the global tier `$XDG_CONFIG_HOME/piton/` | what you decide; travels through dotfiles and repositories | the user; the daemon for app edits to the global files and for approved protected writes |
-| State database | `~/.local/state/piton/piton.db` | this host's state: sessions, drafts, recent projects, keep-awake, `host_id` | the daemon |
-| Client storage | each app's container | hosts it connects to, imported fonts, log capture, local client preferences, unsent work | that app |
+| Config files | `.piton/` and `.agents/` in the repository and its parent folders; the global tier `$XDG_CONFIG_HOME/piton/` | what you decide, preferences included; travels through dotfiles and repositories | the user; the daemon for app edits to the global files and for approved protected writes |
+| State database | `~/.local/state/piton/piton.db` | facts about this host and what happened on it: `host_id`; later sessions, drafts, recent projects. No preferences | the daemon |
+| Client storage | each app's container | hosts it connects to, a device's own preference values, imported fonts, log capture, unsent work | that app |
 | Memory | the daemon | live pis, session views, temporary switches, pending protected writes | the daemon |
 
 piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, trust).
@@ -592,30 +592,40 @@ piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, tru
 
 ```
 $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
-  config[.local].toml            # everything below, plus how the daemon runs and the apps' preferences
+  config[.local].toml            # the chain's farthest level: defaults every project inherits
+  config.host[.local].toml       # how the daemon runs on this host, this host's preferences, [development]
+  config.client.toml             # the apps' preferences, served to every client (no local file)
   mcp[.local].json               # MCP servers, in the format other harnesses read
   policies.md
   agents/rules/, agents/skills/  # global agent instructions
 <ancestor>/.piton/, .agents/     # shared by every repository below
 <repo>/
   .piton/
-    config.toml                  # committed: [sandbox] [workers] [permissions] [branches] [tracker] [forge] [web_search]
-    config.local.toml            # this machine's values: the same tables, plus [branches] username
+    config.toml                  # committed: [sandbox] [workers] [permissions] [branches] [tracker] [forge]
+    config.local.toml            # not committed: the same tables, plus [branches] username and [web_search] api_key
     mcp[.local].json, policies.md
     .local/                      # workflow artifacts (gitignored); a worker links its source's
   .agents/rules/, skills/
   AGENTS.md
 ```
 
-One file per level, like mise: each level's settings are tables of `config.toml`, and `config.local.toml` holds the
-same tables with this machine's values (never shared; `/.piton/*.local.*` keeps it out of Git). Keys are snake_case.
-The global file also holds `socket`, `log`, `[pi]`, `[env]`, `[stop]`, `[tailnet]` (how the daemon runs), `[host]`
-and `[client]` (the apps' preferences), and `[development]` (switches for a development install, in
-[development.md](development.md)).
+Three families of files, each read by its own consumer:
 
-The file's top-level keys belong to parts, each parsed on its own, so a bad value in `[tracker]` never stops permission
-checks. A syntax error, or an unknown top-level key, fails every part read from that file: that's the cost of one
-file per level, and the message names the line.
+- **`config.toml` / `config.local.toml`, every level:** a project's settings, read along the chain by launches, pi,
+  and workflows. The global pair is the chain's farthest level, appended from its fixed location. `.local` means "not
+  committed": this machine's values, secrets, or anything you don't want in a diff (`/.piton/*.local.*` keeps it out
+  of Git).
+- **`config.host.toml` / `config.host.local.toml`, global only:** read by the daemon. Top-level keys: `socket`, `log`,
+  `roots`, `favorites`, `logging`, `default_attach_mode`, `empty_grace_ms`, `keep_awake`; tables `[pi]`, `[sandbox]`
+  (only `command`, the sandbox program), `[env]`, `[stop]`, `[tailnet]`, and `[development]` (switches for a
+  development install, in [development.md](development.md)), which the pi package reads through
+  `piton config resolve --global` on whichever machine pi runs.
+- **`config.client.toml`, global only:** the apps' preferences (`text_font`, `code_font`; themes and keybindings
+  later), served by the host to every client. It has no local file: a device keeps its own value in its app.
+
+Keys are snake_case. A project file's tables are each parsed on their own, so a bad value in `[tracker]` never stops
+permission checks; a syntax error, or an unknown top-level key, fails every table of that file, and the message names
+the line. A host or client file has one schema and is read whole.
 
 - **Chains.** `.piton/` is read from the source checkout (a worker's source; the checkout around a subfolder), then
   each ancestor strictly below the home folder, then the global tier. `.agents/` starts from the workspace's own
@@ -625,79 +635,84 @@ file per level, and the message names the line.
 - **Locating the global tier** can't depend on the workspace, whose `mise.toml` can set `HOME` or `XDG_CONFIG_HOME`.
   The daemon resolves it once from its login-shell environment and sets `PITON_CONFIG_HOME` for every pi after the
   mise environment; a pi started outside piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
-- **Scopes.** Mac-wide keys (the daemon's socket, tailnet, pi and sandbox commands, `[host]`, `[client]`,
-  `[development]`, permission keybindings) are accepted only in the global tier; elsewhere they fail their part.
-  `branches.username` is personal: accepted only in a `config.local.toml`.
-- **Merging,** farthest to nearest; within a level `config.toml`, then `config.local.toml`.
-  - `[sandbox]`: grant lists (`allow`, `read`, `read_file`, `allow_file`, `deny`, `unix_socket`) only add.
-    `sandbox.base` (the backend's base profile) and `bypass` are global-only. The daemon's `sandbox` module, the only
-    code that knows the backend, translates the merged table and the protected-file rules into a nono profile for
-    each launch.
+- **Where a key may be set** is fixed by piton, declared next to each table's type, and enforced by the reader (a
+  file that breaks it fails that table, naming the key):
+  - `sandbox.base`, `groups`, `bypass`, `network.profile`: the global `config.toml` only.
+  - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
+    repository's.
+  - `web_search.api_key`: a `config.local.toml` only (a secret).
+  - `branches.username`: a project's `config.local.toml`, where `config.toml` is committed; either file in the global
+    tier, which is yours alone.
+  - Everything else, keep-awake included: either file, any level.
+- **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
+  - `[sandbox]`: grant lists (`allow`, `read`, `read_file`, `allow_file`, `deny`, `unix_socket`) only add. The
+    daemon's `sandbox` module, the only code that knows the backend, translates the merged table and the
+    protected-file rules into a nono profile for each launch.
   - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
     and ask beat allow; `default_mode` from the nearest table that sets it.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
-  - `[branches]`, `[web_search]`, the daemon's other keys: the nearer value per key.
-  - `[host]`, `[client]`: global only; `config.local.toml` wins per key.
+  - `[branches]`, `[web_search]`, the host file's keys: the nearer value per key.
   - `[tracker]` and `[forge]`: each the nearest table, whole.
   - `policies.md` and rules: combined, farthest first.
-- **Writes.** The apps and `piton config set` change one key with `toml_edit`, keeping comments and layout. The pi
-  package writes through `piton config set --dry-run`, which returns the file's new text; a protected file then goes
-  through the daemon's confirmation. Nothing else writes these files.
+- **Writes.** The apps and `piton config set` change keys with `toml_edit`, keeping comments and layout
+  (`--global` for the global `config.toml`, `--scope host|client` for the host and client files). The pi package
+  writes through `piton config set --dry-run`, which returns the file's new text; a protected file then goes through
+  the daemon's confirmation. Nothing else writes these files.
 - Paths in every file accept `~` and `$HOME`.
 - **When read.** The global files at daemon start and on every change (watched; keys that need a restart are
-  reported as pending); the project chain at every launch and `worker create`; the
-  pi package's files at pi start and `/reload`. `piton config check` validates, lists the files read, and warns about
-  what doesn't travel (below); `piton config get` serves one resolved part to other tools (the Neovim plugin's tracker
-  queue).
-- **One resolver.** The daemon crate's `config` module is the only implementation (layout below). The pi package and the Neovim plugin call
-  `piton config resolve` / `piton config get`, which read files and don't need the daemon running. The daemon passes
-  the binary's path in `PITON_BIN` after the mise environment; the pi package caches the result and calls again only
-  when a watched file changed. The result is per part: one per table of `config.toml`, named as the table (the
-  daemon's top-level keys together as `run`), plus MCP, the global tier's MCP alone, policies, and rule and skill
-  folders. Each is its value or its error, so a broken table fails only the tools that read it: a malformed
-  `[tracker]` stops workflows, never permission checks, and a typo in `[tailnet]` never blocks `[sandbox]`. A syntax
-  error fails every part of its file. `--global` resolves the global tier alone, for `[development]`, which a
-  consuming project's files mustn't block.
+  reported as pending); the project chain at every launch and `worker create`; the pi package's files at pi start and
+  `/reload`. `piton config check` validates the workspace's chain and the host and client files, lists the files
+  read, and warns about what doesn't travel (below); `piton config get` serves one resolved part to other tools (the
+  Neovim plugin's tracker queue).
+- **One resolver.** The daemon crate's `config` module is the only implementation (layout below). The pi package and
+  the Neovim plugin call `piton config resolve` / `piton config get`, which read files and don't need the daemon
+  running. The daemon passes the binary's path in `PITON_BIN` after the mise environment; the pi package caches the
+  result and calls again only when a watched file changed. The result is per part: one per table of `config.toml`,
+  named as the table, plus MCP, the global tier's MCP alone, policies, and rule and skill folders. Each is its value or
+  its error, so a broken table fails only the tools that read it. `--global` returns the host file's `[development]`.
 - **Code layout.** `daemon/src/config/` is the only code that reads or writes these files. Its `mod.rs` is the API;
   the four layers are private:
-  - `model/`: what configuration is, with no I/O: paths and the file pair, levels and chains, one file per table
-    (its schema, global- or local-only keys, checks, merge rule), and the daemon's options with defaults.
-  - `read/`: one file into its parts, a chain into one value or error per part, the global tier's tables.
+  - `model/`: what configuration is, with no I/O: paths and scopes, levels and chains, one file per project table
+    (its schema, where its keys may be set, checks, merge rule), the host and client files, and the daemon's options
+    with defaults.
+  - `read/`: one file into its parts, a chain into one value or error per part, the global tier's own files.
   - `write/`: key edits that keep comments and layout, and the one write path (which file, the change as a dotted key
     and a JSON value, checked before writing) for `piton config set` and the apps.
   - `check/`: read-only diagnostics such as the portability warnings.
 
   Outside it, and using its API: `cli/config.rs` (the `piton config` command), `app_settings.rs` (the apps' settings
-  list over config and state), `watch.rs` and `daemon.rs` (reload the global files: the daemon's options from its own
-  tables, so a broken `[client]` stops only the apps' list), `sandbox.rs` (`[sandbox]` into a nono profile), and
-  `state.rs` (the state database).
+  list), `watch.rs` and `daemon.rs` (reload the global files: the daemon's options from the host file alone, so a
+  broken client file stops only the apps' list), `sandbox.rs` (`[sandbox]` into a nono profile), and `state/` (the
+  state database).
 
 #### Config and state together
 
-- **Config or state.** Config is what you decide: roots, favorites, appearance, the logging default, sandbox grants,
-  permissions. State is what happened on this host: sessions, drafts, recent projects, keep-awake. Each value is one
-  or the other; `config.toml` doesn't accept a state key (it's an unknown key there).
-- **Shared unless Local.** Each preference has one Local checkbox. Unchecked, it lives in `config.toml`: host
-  preferences apply on every host through dotfiles, client preferences are served by the host to every client (which
-  caches them for offline start). Checked, it moves to `config.local.toml` (this host) or into the app (this
-  client). A shared client choice a client can't honor (a font it lacks) falls back there only.
-- **The apps change both.** `settings.set {key, value, local?}` goes to the database for state and to the global
-  `config.toml` pair for config. The daemon edits with `toml_edit`, keeping comments and order, writes
-  through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. The apps edit the daemon's keys
-  (`socket` shown read-only), `[sandbox]`, `[workers]`, `[host]`, and `[client]`; `[development]`, `[permissions]`,
-  `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited in the file. The apps never write repository or
-  parent-folder files. A change is checked against the schema before it's written. The daemon watches the global
-  folder (and a symlink's target folder): edits apply at once; `log`, `[env]`, and `[tailnet]` wait for a restart
-  and show as pending; an invalid file keeps the last good values and `settings_error` says why.
-- `daemon.state` carries each setting with its value, kind (config with the file of the pair that sets it, or
-  state), whether the apps may change it, and any pending restart. Clients never see file contents.
+- **Config or state.** Config is what you decide, preferences included: roots, favorites, appearance, keep-awake,
+  the logging default, sandbox grants, permissions. State is facts and history on this host: its identity, and later
+  sessions, drafts, recent projects. The database holds no preferences.
+- **Shared unless Local.** Each preference has one Local checkbox where its file has a local one. Unchecked, a host
+  preference lives in `config.host.toml` (every host through dotfiles); checked, in `config.host.local.toml` (this
+  host). A client preference unchecked lives in `config.client.toml`, served to every client (which caches it for
+  offline start); checked, in that app (this device). A shared client choice a client can't honor (a font it lacks)
+  falls back there only.
+- **The apps' settings list** (`daemon.state` `settings`) shows global config keys, each with `key` as written in its
+  file, `scope` (`host`, `client`, or `project` for the global `config.toml`), `placement` (`shared`, `local`, or
+  unset), whether its scope has a local file, its type, whether it applies live or after a restart, and whether the
+  apps may change it. `settings.set {scope, key, value, local?}` writes it. The daemon edits with `toml_edit`, keeping
+  comments and order, writes through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. The
+  apps edit the host file's keys (`socket` shown read-only), the client file, and the global `[sandbox]` and
+  `[workers]`; `[development]`, `[permissions]`, `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited
+  in the file. The apps never write repository or parent-folder files. A change is checked against the schema before
+  it's written. The daemon watches the global folder (and a symlink's target folder): edits apply at once; `log`,
+  `[env]`, and `[tailnet]` wait for a restart and show as pending; a file that can't be used keeps its last good
+  values and `settings_error` says why.
 
 #### State database
 
 SQLite (`rusqlite`, bundled), WAL, owned by the daemon alone, in its `0700` state folder. Tables, each added by the
-work that needs it: `host` (`host_id`); `settings` (state values such as keep-awake); `projects` (canonical source
-path, last used); `sessions` (piton's session identity and its state `draft`, `creating`, `live`, `failed`, title,
-pi session file); `drafts` and `draft_attachments` (size-bounded). Rows decode into Rust sum types at the boundary.
+work that needs it: `host` (`host_id`); later `projects` (canonical source path, last used); `sessions` (piton's
+session identity and its state `draft`, `creating`, `live`, `failed`, title, pi session file); `drafts` and
+`draft_attachments` (size-bounded). Rows decode into Rust sum types at the boundary.
 
 - `PRAGMA user_version` is the schema version; ordered migrations run at start in one transaction, after a
   `VACUUM INTO` backup of the previous version. A database newer than the binary refuses to start.
