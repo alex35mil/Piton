@@ -1,10 +1,19 @@
 import Foundation
 
-/// A client preference: shared (kept by the host in its `config.toml` `[client]`, the same for every client) or local
-/// (this app's own value, kept on this device). The Local checkbox moves a preference between the two.
+/// A client preference: shared (kept by the host in its `config.client.toml`, the same for every client) or local
+/// (this app's own value, kept on this device). The Local checkbox moves a preference between the two. The raw value
+/// names this device's `UserDefaults` keys.
 public enum ClientPreference: String, CaseIterable, Sendable {
     case textFont = "client.text_font"
     case codeFont = "client.code_font"
+
+    /// The key in `config.client.toml`.
+    public var key: String {
+        switch self {
+        case .textFont: "text_font"
+        case .codeFont: "code_font"
+        }
+    }
 
     /// Where this device keeps its own value (and whether it's local) in `UserDefaults`. Public so views can observe
     /// them (`@AppStorage`).
@@ -46,7 +55,7 @@ public struct ClientPreferences {
     /// Keeps the host's shared values from a pushed daemon state, for the next offline start.
     public func cache(_ state: DaemonState) {
         for preference in ClientPreference.allCases {
-            guard let setting = state.setting(preference.rawValue) else { continue }
+            guard let setting = state.setting(.client, preference.key) else { continue }
             switch setting.value {
             case .string(let value): defaults.set(value, forKey: preference.cacheKey)
             case .null, .bool, .integer, .number, .array, .object: defaults.removeObject(forKey: preference.cacheKey)

@@ -127,7 +127,7 @@ public struct AppearanceSettings: View {
                 case .local: ClientPreferences().setLocal(preference, choice.preference)
                 case .shared:
                     let value: JSON = choice.preference.map(JSON.string) ?? .null
-                    Task { _ = await store?.setSetting(preference.rawValue, to: value) }
+                    Task { _ = await store?.setSetting(.client, preference.key, to: value) }
                 }
             })
     }

@@ -483,7 +483,7 @@ public struct DaemonState: Codable, Sendable, Hashable {
     /// This host's identity: stable across restarts and kept when the host's state moves to a replacement Mac.
     public let hostID: String
     /// Keep-awake is enabled: the Mac is held awake while sessions are live (idle ones too), so the phone can reach
-    /// them. Toggled from the apps and kept across restarts.
+    /// them. `keep_awake` in the host's `config.host.toml`, toggled from the apps.
     public let keepAwake: Bool
     /// The Mac is being held awake right now (enabled and at least one live session).
     public let awake: Bool
@@ -502,67 +502,62 @@ public struct DaemonState: Codable, Sendable, Hashable {
         case settingsError = "settings_error"
     }
 
-    public func setting(_ key: String) -> Setting? {
-        settings.first { $0.key == key }
+    public func setting(_ scope: SettingScope, _ key: String) -> Setting? {
+        settings.first { $0.scope == scope && $0.key == key }
     }
 }
 
-/// One setting of the host: configuration in its global `config.toml` (or `config.local.toml`), or state the host keeps.
+/// Which of the host's global files a setting lives in.
+public enum SettingScope: String, Codable, Sendable, Hashable {
+    /// `config.host.toml` / `config.host.local.toml`: how the daemon runs and this host's preferences.
+    case host
+    /// `config.client.toml`: the apps' preferences, shared by every client. It has no local file.
+    case client
+    /// The global `config.toml` / `config.local.toml`: the defaults every project inherits.
+    case project
+
+    /// The file of `placement`, as the user sees it.
+    public func fileName(_ placement: SettingPlacement) -> String {
+        switch (self, placement) {
+        case (.host, .shared): "config.host.toml"
+        case (.host, .local): "config.host.local.toml"
+        case (.client, .shared), (.client, .local): "config.client.toml"
+        case (.project, .shared): "config.toml"
+        case (.project, .local): "config.local.toml"
+        }
+    }
+}
+
+/// One setting of the host: a key of one of its global files.
 public struct Setting: Codable, Sendable, Hashable, Identifiable {
+    /// The key as written in its file (`tailnet.port` is `[tailnet] port`).
     public let key: String
-    /// The value in effect: the file's (or the host's state), else the default.
+    public let scope: SettingScope
+    /// The value in effect: the file's, else the default.
     public let value: JSON
-    public let kind: SettingKind
+    /// Which file of the scope's pair sets it; nil when neither does (the default applies).
+    public let placement: SettingPlacement?
+    /// Whether the apps offer the Local choice: the scope has a local file.
+    public let localChoice: Bool
     public let valueType: SettingValueType
     public let applies: SettingApplies
     /// Whether the apps may change it.
     public let editable: Bool
 
-    public var id: String { key }
+    public var id: String { "\(scope.rawValue).\(key)" }
 
     enum CodingKeys: String, CodingKey {
-        case key, value, kind, applies, editable
+        case key, scope, value, placement, applies, editable
+        case localChoice = "local_choice"
         case valueType = "value_type"
     }
 }
 
-/// Which file of the host's global pair sets a key: `config.toml` (every host through dotfiles) or
-/// `config.local.toml` (this host).
+/// Which file of a scope's pair sets a key: the shared one (every host through dotfiles) or the `.local` one (this
+/// host).
 public enum SettingPlacement: String, Codable, Sendable {
     case shared
     case local
-}
-
-public enum SettingKind: Codable, Sendable, Hashable {
-    /// Configuration; `placement` is nil when neither file sets it (the default applies).
-    case config(placement: SettingPlacement?)
-    /// The host's state, kept in its database; it has no Local choice.
-    case state
-
-    enum CodingKeys: String, CodingKey { case kind, placement }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        switch try c.decode(String.self, forKey: .kind) {
-        case "config":
-            self = .config(placement: try c.decodeIfPresent(SettingPlacement.self, forKey: .placement))
-        case "state": self = .state
-        case let other:
-            throw DecodingError.dataCorruptedError(
-                forKey: .kind, in: c, debugDescription: "unknown setting kind \(other)")
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var c = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .config(let placement):
-            try c.encode("config", forKey: .kind)
-            try c.encode(placement, forKey: .placement)
-        case .state:
-            try c.encode("state", forKey: .kind)
-        }
-    }
 }
 
 public enum SettingValueType: Codable, Sendable, Hashable {
@@ -725,9 +720,9 @@ public enum Request: Sendable, Hashable {
     case sessionsList
     case sessionsSubscribe
     case daemonState
-    /// Changes one setting; `value: .null` returns it to the default. `local` (configuration only) moves it to this
-    /// host's `.local` file (`true`) or the shared one (`false`); nil keeps it where it is.
-    case settingsSet(key: String, value: JSON, local: Bool?)
+    /// Changes one setting of `scope`; `value: .null` returns it to the default. `local` moves it to the scope's
+    /// `.local` file (`true`) or the shared one (`false`); nil keeps it where it is.
+    case settingsSet(scope: SettingScope, key: String, value: JSON, local: Bool?)
     /// Switches host logging until the policy expires or the daemon restarts.
     case daemonLogging(LoggingPolicy)
     /// Folders under the daemon's roots, one level (the roots when `path` is nil).
@@ -755,8 +750,9 @@ public enum Request: Sendable, Hashable {
             fields["type"] = .string("sessions.list")
         case .daemonState:
             fields["type"] = .string("daemon.state")
-        case .settingsSet(let key, let value, let local):
+        case .settingsSet(let scope, let key, let value, let local):
             fields["type"] = .string("settings.set")
+            fields["scope"] = .string(scope.rawValue)
             fields["key"] = .string(key)
             fields["value"] = value
             if let local { fields["local"] = .bool(local) }

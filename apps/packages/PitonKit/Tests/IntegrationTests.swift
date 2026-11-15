@@ -44,12 +44,17 @@ private final class Daemon: @unchecked Sendable {
             #"{"Node":{"StableID":"iphone","Name":"iphone.tail.ts.net.","User":1},"UserProfile":{"ID":1,"LoginName":"me@example.com"}}"#
             .write(to: whois, atomically: true, encoding: .utf8)
         log = dir.appendingPathComponent("piton.log")
-        // The global configuration folder: how the daemon runs, and the host preferences.
+        // The global configuration folder's host file: how the daemon runs, and the host preferences. Keep-awake starts
+        // off, so no caffeinate runs.
         let config = dir.appendingPathComponent("config")
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
         try """
         socket = "\(socket)"
         log = "\(log.path)"
+        default_attach_mode = "host"
+        empty_grace_ms = 60000
+        roots = ["\(root.path)"]
+        keep_awake = false
         [pi]
         args = ["-e", "\(ext)", "--model", "faux/faux-1"]
         [env]
@@ -61,21 +66,15 @@ private final class Daemon: @unchecked Sendable {
         [tailnet]
         port = 0
         cli = "\(tailscale)"
-        [host]
-        attach_mode = "host"
-        empty_grace_ms = 60000
-        roots = ["\(root.path)"]
-        """.write(to: config.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
-        // Keep-awake is state in the daemon's database (next to its socket): start with it off, so no caffeinate runs.
+        """.write(to: config.appendingPathComponent("config.host.toml"), atomically: true, encoding: .utf8)
+        // A fixed host identity in the daemon's database (next to its socket).
         let seed = Process()
         seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         seed.arguments = [
             dir.appendingPathComponent("piton.db").path,
             """
             CREATE TABLE host (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL);
-            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO host VALUES (1, 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0');
-            INSERT INTO settings VALUES ('keep_awake', 'false');
             PRAGMA user_version = 1;
             """,
         ]

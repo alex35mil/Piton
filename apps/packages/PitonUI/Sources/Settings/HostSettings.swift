@@ -1,10 +1,10 @@
 import PitonKit
 import SwiftUI
 
-/// Every setting of the host this app is connected to, as the daemon reports them: each with its value, where it
-/// lives (the host's state, or its global `config.toml` and whether shared or Local), whether it waits for a
-/// restart, and a control when the apps may change it. Client preferences (fonts) are in Appearance, which also
-/// handles their per-device Local choice.
+/// Every setting of the host this app is connected to, as the daemon reports them: each with its value, the file it
+/// lives in (`config.host.toml` or the global `config.toml`, shared or Local), whether it waits for a restart, and a
+/// control when the apps may change it. Client preferences (fonts) are in Appearance, which also handles their
+/// per-device Local choice.
 public struct HostSettings: View {
     let store: Store
 
@@ -25,7 +25,7 @@ public struct HostSettings: View {
                     }
                 }
                 ForEach(HostSettingGroup.allCases) { group in
-                    let settings = state.settings.filter { HostSettingGroup(key: $0.key) == group }
+                    let settings = state.settings.filter { HostSettingGroup($0) == group }
                     if !settings.isEmpty {
                         Section(group.title) {
                             ForEach(settings) { setting in
@@ -43,30 +43,37 @@ public struct HostSettings: View {
     }
 }
 
-/// How the host's settings are grouped, by key prefix.
+/// How the host's settings are grouped: by file, and within the host file by table.
 enum HostSettingGroup: String, CaseIterable, Identifiable {
-    case host, sandbox, tailnet, daemon
+    case host, tailnet, daemon, projects
 
     var id: Self { self }
 
     /// A setting's group; client preferences are shown in Appearance, so they have none.
-    init?(key: String) {
-        let prefix = key.split(separator: ".").first.map(String.init) ?? key
-        switch prefix {
-        case "host", "keep_awake": self = .host
-        case "sandbox", "workers": self = .sandbox
-        case "tailnet": self = .tailnet
-        case "client": return nil
-        default: self = .daemon
+    init?(_ setting: Setting) {
+        switch setting.scope {
+        case .client: return nil
+        case .project: self = .projects
+        case .host:
+            let table = setting.key.split(separator: ".").count > 1 ? setting.key.split(separator: ".").first : nil
+            switch table.map(String.init) {
+            case "tailnet": self = .tailnet
+            case "pi", "sandbox", "env", "stop": self = .daemon
+            case .some, nil:
+                switch setting.key {
+                case "socket", "log": self = .daemon
+                default: self = .host
+                }
+            }
         }
     }
 
     var title: String {
         switch self {
         case .host: "This host"
-        case .sandbox: "Sandbox"
         case .tailnet: "Remote access"
         case .daemon: "Daemon"
+        case .projects: "Every project"
         }
     }
 }
@@ -87,7 +94,7 @@ struct HostSettingRow: View {
                 }
                 Spacer()
                 // Local moves a value between the files; a key no file sets has nothing to move yet.
-                if case .config(.some) = setting.kind, setting.editable {
+                if setting.localChoice, setting.placement != nil, setting.editable {
                     Toggle("Local", isOn: local).font(.caption)
                         #if os(macOS)
                             .toggleStyle(.checkbox)
@@ -125,26 +132,24 @@ struct HostSettingRow: View {
 
     /// Where the value comes from.
     private var origin: String {
-        switch setting.kind {
-        case .state: "This host's state"
-        case .config(.some(.local)): "config.local.toml"
-        case .config(.some(.shared)): "config.toml"
-        case .config(nil): "Default"
+        switch setting.placement {
+        case .some(let placement): setting.scope.fileName(placement)
+        case nil: "Default"
         }
     }
 
     private var local: Binding<Bool> {
         Binding(
             get: {
-                switch setting.kind {
-                case .config(.some(.local)): true
-                case .config(.some(.shared)), .config(nil), .state: false
+                switch setting.placement {
+                case .local: true
+                case .shared, nil: false
                 }
             },
             set: { isLocal in
                 saving = true
                 Task {
-                    _ = await store.setSetting(setting.key, to: setting.value, local: isLocal)
+                    _ = await store.setSetting(setting.scope, setting.key, to: setting.value, local: isLocal)
                     saving = false
                 }
             })
@@ -153,7 +158,7 @@ struct HostSettingRow: View {
     private func save(_ value: JSON) {
         saving = true
         Task {
-            _ = await store.setSetting(setting.key, to: value)
+            _ = await store.setSetting(setting.scope, setting.key, to: value)
             saving = false
         }
     }

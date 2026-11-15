@@ -14,9 +14,11 @@ private func state(textFont: JSON) throws -> DaemonState {
         "settings_error": .null,
         "settings": .array([
             .object([
-                "key": .string("client.text_font"),
+                "key": .string("text_font"),
+                "scope": .string("client"),
                 "value": textFont,
-                "kind": .object(["kind": .string("config"), "placement": .null]),
+                "placement": .null,
+                "local_choice": .bool(false),
                 "value_type": .object(["kind": .string("text")]),
                 "applies": .object(["kind": .string("live")]),
                 "editable": .bool(true),
