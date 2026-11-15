@@ -1,10 +1,10 @@
 //! `[permissions]`: pi's tool rules, with `[permissions.host]` / `[permissions.sandbox]` for one launch mode. Each file
 //! contributes `[permissions]` and then the current runtime's table; rule lists combine across levels (deny and ask
-//! beat allow when evaluated), and `default_mode` and keybindings come from the nearest table that sets them.
+//! beat allow when evaluated), and `default_mode` comes from the nearest table that sets it.
 
 use serde::{Deserialize, Serialize};
 
-use super::{TableValue, nearer, present};
+use super::{TableValue, nearer};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -17,8 +17,6 @@ pub struct PermissionsTable {
     pub ask: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    #[serde(default, skip_serializing_if = "Keybindings::is_empty")]
-    pub keybindings: Keybindings,
     #[serde(default, skip_serializing_if = "PermissionRules::is_empty")]
     pub host: PermissionRules,
     #[serde(default, skip_serializing_if = "PermissionRules::is_empty")]
@@ -47,30 +45,13 @@ pub enum PermissionMode {
     Deny,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Keybindings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_accept_edits: Option<String>,
-}
-
 impl PermissionRules {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
 }
 
-impl Keybindings {
-    pub fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-impl TableValue for PermissionsTable {
-    fn global_only_keys(&self) -> Vec<&'static str> {
-        present(&[("permissions.keybindings", !self.keybindings.is_empty())])
-    }
-}
+impl TableValue for PermissionsTable {}
 
 /// The rules in effect for one runtime: `[permissions]` and `[permissions.<runtime>]` of every file, merged.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -80,18 +61,15 @@ pub struct PermissionSettings {
     pub allow: Vec<String>,
     pub ask: Vec<String>,
     pub deny: Vec<String>,
-    #[serde(skip_serializing_if = "Keybindings::is_empty")]
-    pub keybindings: Keybindings,
 }
 
 impl PermissionSettings {
-    /// Folds a nearer table's rules in: lists combine; `default_mode` and keybindings from the nearest that sets them.
+    /// Folds a nearer table's rules in: lists combine; `default_mode` from the nearest that sets it.
     pub fn merge(&mut self, n: PermissionSettings) {
         nearer(&mut self.default_mode, n.default_mode);
         self.allow.extend(n.allow);
         self.ask.extend(n.ask);
         self.deny.extend(n.deny);
-        nearer(&mut self.keybindings.auto_accept_edits, n.keybindings.auto_accept_edits);
     }
 
     /// A file's `[permissions]`, without its runtime tables.
@@ -101,7 +79,6 @@ impl PermissionSettings {
             allow: table.allow.clone(),
             ask: table.ask.clone(),
             deny: table.deny.clone(),
-            keybindings: table.keybindings.clone(),
         }
     }
 }
@@ -119,7 +96,6 @@ impl From<PermissionRules> for PermissionSettings {
             allow,
             ask,
             deny,
-            keybindings: Keybindings::default(),
         }
     }
 }

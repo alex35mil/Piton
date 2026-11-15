@@ -51,8 +51,10 @@ const tests = {
 
     "a configuration the daemon would refuse is a step's problem, not a failed command"() {
         for (const [file, text, expected] of [
-            ["config.toml", "[host\n", /config\.toml/],
-            ["config.toml", "[host]\nroots = 1\n", /roots/],
+            ["config.host.toml", "roots = [\n", /config\.host\.toml/],
+            ["config.host.toml", "roots = 1\n", /roots/],
+            ["config.client.toml", "text_font = 1\n", /client/],
+            ["config.toml", "[tracker]\nprovider = \"github\"\n", /project/],
         ]) {
             const h = home();
             mkdirSync(h.config, { recursive: true });

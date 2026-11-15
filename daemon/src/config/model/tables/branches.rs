@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{Merge, TableValue, nearer, present};
+use super::{Merge, Rule, TableValue, nearer, present};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -26,8 +26,12 @@ pub enum BranchFormat {
 }
 
 impl TableValue for BranchesTable {
-    fn local_only_keys(&self) -> Vec<&'static str> {
-        present(&[("branches.username", self.username.is_some())])
+    /// A name: never in a project's committed `config.toml`.
+    fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
+        present(
+            Rule::LOCAL_IN_PROJECTS,
+            &[("branches.username", self.username.is_some())],
+        )
     }
 }
 

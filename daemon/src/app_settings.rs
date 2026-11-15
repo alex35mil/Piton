@@ -1,23 +1,15 @@
-//! The settings list the apps show and change: keys of the global `config.toml` / `config.local.toml` (configuration)
-//! and the host's state values (in the state database). One catalog says, for each key, where it lives, its type,
-//! whether a change applies to the next launch or needs a restart, and whether the apps may change it. Reads and
-//! writes go through [`crate::config`] and [`crate::state`]; this module only describes the list.
+//! The settings list the apps show and change: keys of the global tier's files (configuration). One catalog says, for
+//! each key, which file it lives in (its scope), its type, whether a change applies to the next launch or needs a
+//! restart, and whether the apps may change it. Reads and writes go through [`crate::config`]; this module only
+//! describes the list.
 
 use std::collections::BTreeMap;
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::config::{DaemonConfig, DaemonTables, GlobalConfig, Paths, Sharing};
-use crate::config::{EditError, KeyChange, Placement, Placements};
-
-/// Where a value lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    /// The global `config.toml` pair.
-    Config,
-    State(crate::state::Setting),
-}
+use crate::config::{DaemonConfig, GlobalConfig, Paths, Resolved, Scope, Sharing};
+use crate::config::{EditError, KeyChange, Placement};
 
 /// When a changed value takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -47,8 +39,10 @@ pub enum ValueType {
 
 #[derive(Debug)]
 pub struct Entry {
+    /// The key as written in its file (`tailnet.port` is `[tailnet] port`).
     pub key: &'static str,
-    pub kind: Kind,
+    /// The file family it lives in.
+    pub scope: Scope,
     pub value_type: ValueType,
     pub applies: Applies,
     /// `socket` is a test and development override the apps don't change.
@@ -57,7 +51,8 @@ pub struct Entry {
     default: fn(&DaemonConfig) -> Value,
 }
 
-const fn config(
+const fn entry_of(
+    scope: Scope,
     key: &'static str,
     value_type: ValueType,
     applies: Applies,
@@ -65,12 +60,25 @@ const fn config(
 ) -> Entry {
     Entry {
         key,
-        kind: Kind::Config,
+        scope,
         value_type,
         applies,
         editable: true,
         default,
     }
+}
+
+const fn host(
+    key: &'static str,
+    value_type: ValueType,
+    applies: Applies,
+    default: fn(&DaemonConfig) -> Value,
+) -> Entry {
+    entry_of(Scope::Host, key, value_type, applies, default)
+}
+
+const fn project(key: &'static str, value_type: ValueType, default: fn(&DaemonConfig) -> Value) -> Entry {
+    entry_of(Scope::Project, key, value_type, Applies::Live, default)
 }
 
 fn empty(_: &DaemonConfig) -> Value {
@@ -85,83 +93,81 @@ use Applies::{Live, Restart};
 use ValueType::{Bool, Integer, IntegerList, Text, TextList};
 
 pub static CATALOG: &[Entry] = &[
-    Entry {
-        key: "keep_awake",
-        kind: Kind::State(crate::state::Setting::KeepAwake),
-        value_type: Bool,
-        applies: Live,
-        editable: true,
-        default: |_| json!(true),
-    },
-    config("host.roots", TextList, Live, empty),
-    config("host.favorites", TextList, Live, empty),
-    config(
-        "host.logging",
+    host("keep_awake", Bool, Live, |c| json!(c.keep_awake)),
+    host("roots", TextList, Live, empty),
+    host("favorites", TextList, Live, empty),
+    host(
+        "logging",
         ValueType::Choice {
             options: &["info", "debug"],
         },
         Live,
         |c| json!(c.logging.mode),
     ),
-    config(
-        "host.attach_mode",
+    host(
+        "default_attach_mode",
         ValueType::Choice {
             options: &["sandbox", "host"],
         },
         Live,
-        |c| json!(c.attach_mode),
+        |c| json!(c.default_attach_mode),
     ),
-    config("host.empty_grace_ms", Integer, Live, |c| json!(c.empty_grace_ms)),
-    config("client.text_font", Text, Live, null),
-    config("client.code_font", Text, Live, null),
+    host("empty_grace_ms", Integer, Live, |c| json!(c.empty_grace_ms)),
     Entry {
         key: "socket",
-        kind: Kind::Config,
+        scope: Scope::Host,
         value_type: Text,
         applies: Restart,
         editable: false,
         default: |c| json!(c.socket),
     },
-    config("log", Text, Restart, |c| json!(c.log)),
-    config("pi.command", TextList, Live, |c| json!(c.pi.command)),
-    config("pi.args", TextList, Live, |c| json!(c.pi.args)),
-    config("env.login_shell", Bool, Restart, |c| json!(c.env.login_shell)),
-    config("env.mise", Bool, Restart, |c| json!(c.env.mise)),
-    config("stop.grace_ms", Integer, Live, |c| json!(c.stop.grace_ms)),
-    config("stop.term_grace_ms", Integer, Live, |c| json!(c.stop.term_grace_ms)),
-    config("tailnet.enabled", Bool, Restart, |c| json!(c.tailnet.enabled)),
-    config("tailnet.port", Integer, Restart, |c| json!(c.tailnet.port)),
-    config("tailnet.cli", Text, Restart, |c| json!(c.tailnet.cli)),
-    config("tailnet.heartbeat_ms", Integer, Restart, |c| {
+    host("log", Text, Restart, |c| json!(c.log)),
+    host("pi.command", TextList, Live, |c| json!(c.pi.command)),
+    host("pi.args", TextList, Live, |c| json!(c.pi.args)),
+    host("sandbox.command", TextList, Live, |c| json!(c.sandbox.command)),
+    host("env.login_shell", Bool, Restart, |c| json!(c.env.login_shell)),
+    host("env.mise", Bool, Restart, |c| json!(c.env.mise)),
+    host("stop.grace_ms", Integer, Live, |c| json!(c.stop.grace_ms)),
+    host("stop.term_grace_ms", Integer, Live, |c| json!(c.stop.term_grace_ms)),
+    host("tailnet.enabled", Bool, Restart, |c| json!(c.tailnet.enabled)),
+    host("tailnet.port", Integer, Restart, |c| json!(c.tailnet.port)),
+    host("tailnet.cli", Text, Restart, |c| json!(c.tailnet.cli)),
+    host("tailnet.heartbeat_ms", Integer, Restart, |c| {
         json!(c.tailnet.heartbeat_ms)
     }),
-    config("tailnet.retry_ms", Integer, Restart, |c| json!(c.tailnet.retry_ms)),
-    config("sandbox.command", TextList, Live, |c| json!(c.sandbox.command)),
-    config("sandbox.base", Text, Live, |_| json!(crate::sandbox::DEFAULT_BASE)),
-    config("sandbox.groups", TextList, Live, empty),
-    config("sandbox.allow", TextList, Live, empty),
-    config("sandbox.read", TextList, Live, empty),
-    config("sandbox.read_file", TextList, Live, empty),
-    config("sandbox.allow_file", TextList, Live, empty),
-    config("sandbox.deny", TextList, Live, empty),
-    config("sandbox.bypass", TextList, Live, empty),
-    config("sandbox.unix_socket", TextList, Live, empty),
-    config("sandbox.network.open_port", IntegerList, Live, empty),
-    config("sandbox.network.profile", ValueType::NetworkProfile, Live, null),
-    config("workers.skip", TextList, Live, empty),
+    host("tailnet.retry_ms", Integer, Restart, |c| json!(c.tailnet.retry_ms)),
+    entry_of(Scope::Client, "text_font", Text, Live, null),
+    entry_of(Scope::Client, "code_font", Text, Live, null),
+    project("sandbox.base", Text, |_| json!(crate::sandbox::DEFAULT_BASE)),
+    project("sandbox.groups", TextList, empty),
+    project("sandbox.allow", TextList, empty),
+    project("sandbox.read", TextList, empty),
+    project("sandbox.read_file", TextList, empty),
+    project("sandbox.allow_file", TextList, empty),
+    project("sandbox.deny", TextList, empty),
+    project("sandbox.bypass", TextList, empty),
+    project("sandbox.unix_socket", TextList, empty),
+    project("sandbox.network.open_port", IntegerList, empty),
+    project("sandbox.network.profile", ValueType::NetworkProfile, null),
+    project("workers.skip", TextList, empty),
 ];
 
-pub fn entry(key: &str) -> Option<&'static Entry> {
-    CATALOG.iter().find(|entry| entry.key == key)
+/// The entry for `key` in `scope`.
+pub fn entry(scope: Scope, key: &str) -> Option<&'static Entry> {
+    CATALOG.iter().find(|entry| entry.scope == scope && entry.key == key)
 }
 
 /// One setting as the apps see it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettingInfo {
     pub key: &'static str,
-    /// The value in effect: the file's (or the database's), else the default.
+    pub scope: Scope,
+    /// The value in effect: the file's, else the default.
     pub value: Value,
-    pub kind: KindInfo,
+    /// Which file of the scope's pair sets it; `None` when neither does (the default applies).
+    pub placement: Option<Sharing>,
+    /// Whether the apps offer the Local choice: the scope has a local file.
+    pub local_choice: bool,
     pub value_type: ValueType,
     pub applies: AppliesInfo,
     pub editable: bool,
@@ -175,25 +181,18 @@ pub enum AppliesInfo {
     Restart { pending: bool },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum KindInfo {
-    Config {
-        /// Which file of the pair sets it; `None` when neither does (the default applies).
-        placement: Option<Sharing>,
-    },
-    State,
-}
+/// A setting's identity in the list: its scope and key.
+type Id = (Scope, &'static str);
 
-/// What the files said at the last good read, and what they say now if they can't be used.
+/// What the files said at the last good read, and why they can't be used now if they can't.
 #[derive(Debug)]
 pub struct Snapshot {
-    /// Configuration values in effect, by key.
-    values: BTreeMap<&'static str, Value>,
-    placements: BTreeMap<&'static str, Option<Sharing>>,
+    /// Values in effect.
+    values: BTreeMap<Id, Value>,
+    placements: BTreeMap<Id, Option<Sharing>>,
     /// Restart-only values the daemon started with.
-    started: BTreeMap<&'static str, Value>,
-    /// Why the files' latest version can't be used (the values are the last good ones).
+    started: BTreeMap<Id, Value>,
+    /// Why some file's latest version can't be used (its values are the last good ones).
     pub error: Option<String>,
 }
 
@@ -211,55 +210,71 @@ impl Snapshot {
         snapshot
     }
 
-    fn restart_values(&self) -> BTreeMap<&'static str, Value> {
+    fn restart_values(&self) -> BTreeMap<Id, Value> {
         CATALOG
             .iter()
             .filter(|entry| entry.applies == Restart)
-            .filter_map(|entry| self.values.get(entry.key).map(|value| (entry.key, value.clone())))
+            .filter_map(|entry| {
+                let id = (entry.scope, entry.key);
+                self.values.get(&id).map(|value| (id, value.clone()))
+            })
             .collect()
     }
 
-    /// Rereads the global files: the values in effect and where each is set, or, when the files can't be used, the
-    /// error for the apps (the previous values stay).
+    /// Rereads the global files. Each scope's file is read on its own: one that can't be used keeps its last good
+    /// values and says why; the others update.
     pub fn reload(&mut self, paths: &Paths) {
-        let read = || -> Result<_, String> {
-            let global = crate::config::global(paths).map_err(|e| e.to_string())?;
-            let placements = paths.global_files().read().map_err(|e| e.to_string())?;
-            Ok((global, placements))
-        };
-        match read() {
-            Ok((global, placements)) => {
-                self.values = values(&global, paths);
-                self.placements = placement_map(&placements);
-                self.error = None;
+        let GlobalConfig { host, client, project } = crate::config::global(paths);
+        let defaults = DaemonConfig::defaults(paths.clone());
+        let mut errors = Vec::new();
+        let scopes: [(Scope, Result<Value, String>); 3] = [
+            (
+                Scope::Host,
+                host.map(|host| file_value(&host)).map_err(|e| e.to_string()),
+            ),
+            (
+                Scope::Client,
+                client.map(|client| file_value(&client)).map_err(|e| e.to_string()),
+            ),
+            (Scope::Project, project_value(project)),
+        ];
+        for (scope, value) in scopes {
+            let placements = paths.global_files(scope).read().map_err(|e| e.to_string());
+            match (value, placements) {
+                (Ok(value), Ok(placements)) => {
+                    for entry in CATALOG.iter().filter(|entry| entry.scope == scope) {
+                        let id = (scope, entry.key);
+                        let current = lookup(&value, entry.key)
+                            .cloned()
+                            .unwrap_or_else(|| (entry.default)(&defaults));
+                        self.values.insert(id, current);
+                        self.placements.insert(id, placements.of(entry.key));
+                    }
+                }
+                (Err(error), _) | (_, Err(error)) => errors.push(error),
             }
-            Err(error) => self.error = Some(error),
         }
+        self.error = (!errors.is_empty()).then(|| errors.join("; "));
     }
 
-    pub fn info(&self, keep_awake: bool) -> Vec<SettingInfo> {
+    pub fn info(&self) -> Vec<SettingInfo> {
         CATALOG
             .iter()
             .map(|entry| {
-                let (value, kind) = match entry.kind {
-                    Kind::State(crate::state::Setting::KeepAwake) => (json!(keep_awake), KindInfo::State),
-                    Kind::Config => (
-                        self.values.get(entry.key).cloned().unwrap_or(Value::Null),
-                        KindInfo::Config {
-                            placement: self.placements.get(entry.key).copied().flatten(),
-                        },
-                    ),
-                };
+                let id = (entry.scope, entry.key);
+                let value = self.values.get(&id).cloned().unwrap_or(Value::Null);
                 let applies = match entry.applies {
                     Live => AppliesInfo::Live,
                     Restart => AppliesInfo::Restart {
-                        pending: self.started.get(entry.key).is_some_and(|started| *started != value),
+                        pending: self.started.get(&id).is_some_and(|started| *started != value),
                     },
                 };
                 SettingInfo {
                     key: entry.key,
+                    scope: entry.scope,
                     value,
-                    kind,
+                    placement: self.placements.get(&id).copied().flatten(),
+                    local_choice: entry.scope.local_name().is_some(),
                     value_type: entry.value_type,
                     applies,
                     editable: entry.editable,
@@ -269,50 +284,17 @@ impl Snapshot {
     }
 }
 
-/// Every configuration key's value in effect: the file's, else the daemon's default.
-fn values(global: &GlobalConfig, paths: &Paths) -> BTreeMap<&'static str, Value> {
-    // The file's shape: the run keys at the top, each table under its name.
-    let GlobalConfig {
-        daemon: DaemonTables { run, sandbox, host },
-        workers,
-        client,
-    } = global;
-    let mut merged = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
-    if let Value::Object(object) = &mut merged {
-        for (name, table) in [
-            ("sandbox", serde_json::to_value(sandbox)),
-            ("workers", serde_json::to_value(workers)),
-            ("host", serde_json::to_value(host)),
-            ("client", serde_json::to_value(client)),
-        ] {
-            if let Ok(table) = table {
-                object.insert(name.into(), table);
-            }
-        }
-    }
-    let defaults = DaemonConfig::defaults(paths.clone());
-    CATALOG
-        .iter()
-        .filter_map(|entry| match entry.kind {
-            Kind::State(_) => None,
-            Kind::Config => {
-                let value = lookup(&merged, entry.key)
-                    .cloned()
-                    .unwrap_or_else(|| (entry.default)(&defaults));
-                Some((entry.key, value))
-            }
-        })
-        .collect()
+/// A file's values in its own shape.
+fn file_value<T: Serialize>(file: &T) -> Value {
+    serde_json::to_value(file).unwrap_or_else(|_| json!({}))
 }
 
-fn placement_map(placements: &Placements) -> BTreeMap<&'static str, Option<Sharing>> {
-    CATALOG
-        .iter()
-        .filter_map(|entry| match entry.kind {
-            Kind::State(_) => None,
-            Kind::Config => Some((entry.key, placements.of(entry.key))),
-        })
-        .collect()
+/// The global `config.toml`'s tables the apps show, in the file's shape.
+fn project_value(project: Result<Resolved, crate::config::ConfigError>) -> Result<Value, String> {
+    let project = project.map_err(|e| e.to_string())?;
+    let sandbox = project.sandbox.map_err(|e| e.to_string())?;
+    let workers = project.workers.map_err(|e| e.to_string())?;
+    Ok(json!({"sandbox": file_value(&sandbox), "workers": file_value(&workers)}))
 }
 
 fn lookup<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
@@ -321,33 +303,33 @@ fn lookup<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SetError {
-    #[error("unknown setting {key:?}")]
-    Unknown { key: String },
+    #[error("unknown setting {key:?} in {scope:?}")]
+    Unknown { scope: Scope, key: String },
     #[error("{key} can't be changed from the apps")]
     NotEditable { key: &'static str },
     #[error("{key}: expected {expected}")]
     WrongType { key: &'static str, expected: &'static str },
-    #[error("{key} is this host's state; it has no Local choice")]
+    #[error("{key} has no Local choice: every client shares it")]
     NoLocal { key: &'static str },
     #[error(transparent)]
     Edit(#[from] EditError),
-    #[error(transparent)]
-    State(#[from] crate::state::StateError),
 }
 
-/// A validated change.
+/// A validated change to a global file.
 #[derive(Debug)]
-pub enum Change {
-    /// A state value (`None`: back to the default).
-    State(crate::state::Setting, Option<bool>),
-    /// A configuration key, written to the global file pair.
-    Config { change: KeyChange, placement: Placement },
+pub struct Change {
+    pub scope: Scope,
+    pub change: KeyChange,
+    pub placement: Placement,
 }
 
-/// Checks a change from the apps: the key exists and may change, the value has its type (`null` resets it), and
-/// `local` is given only for configuration.
-pub fn validate(key: &str, value: &Value, local: Option<bool>) -> Result<Change, SetError> {
-    let entry = entry(key).ok_or_else(|| SetError::Unknown { key: key.to_string() })?;
+/// Checks a change from the apps: the key exists in its scope and may change, the value has its type (`null` resets
+/// it), and `local` is given only where the scope has a local file.
+pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> Result<Change, SetError> {
+    let entry = entry(scope, key).ok_or_else(|| SetError::Unknown {
+        scope,
+        key: key.to_string(),
+    })?;
     if !entry.editable {
         return Err(SetError::NotEditable { key: entry.key });
     }
@@ -358,31 +340,20 @@ pub fn validate(key: &str, value: &Value, local: Option<bool>) -> Result<Change,
             Some(value.clone())
         }
     };
-    match entry.kind {
-        Kind::State(setting) => {
-            if local.is_some() {
-                return Err(SetError::NoLocal { key: entry.key });
-            }
-            let value = value.map(|value| {
-                value.as_bool().ok_or(SetError::WrongType {
-                    key: entry.key,
-                    expected: "true or false",
-                })
-            });
-            Ok(Change::State(setting, value.transpose()?))
-        }
-        Kind::Config => Ok(Change::Config {
-            change: KeyChange {
-                key: entry.key.to_string(),
-                value,
-            },
-            placement: match local {
-                None => Placement::Current,
-                Some(true) => Placement::Move(Sharing::Local),
-                Some(false) => Placement::Move(Sharing::Shared),
-            },
-        }),
-    }
+    let placement = match (local, scope.local_name()) {
+        (None, _) => Placement::Current,
+        (Some(_), None) => return Err(SetError::NoLocal { key: entry.key }),
+        (Some(true), Some(_)) => Placement::Move(Sharing::Local),
+        (Some(false), Some(_)) => Placement::Move(Sharing::Shared),
+    };
+    Ok(Change {
+        scope,
+        change: KeyChange {
+            key: entry.key.to_string(),
+            value,
+        },
+        placement,
+    })
 }
 
 /// The value has the entry's type, so the apps' controls and the file agree.
@@ -421,9 +392,9 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
     }
 }
 
-/// Writes a configuration change to the global pair.
-pub fn write(paths: &Paths, change: &KeyChange, placement: Placement) -> Result<(), SetError> {
-    crate::config::set_global(paths, change, placement)?;
+/// Writes a change to its global file.
+pub fn write(paths: &Paths, change: &Change) -> Result<(), SetError> {
+    crate::config::set_global(paths, change.scope, &change.change, change.placement)?;
     Ok(())
 }
 
@@ -440,24 +411,19 @@ mod tests {
         }
     }
 
-    fn config(paths: &Paths) -> DaemonConfig {
-        DaemonConfig::defaults(paths.clone())
-    }
-
-    fn info<'a>(list: &'a [SettingInfo], key: &str) -> &'a SettingInfo {
-        list.iter().find(|s| s.key == key).unwrap()
+    fn info<'a>(list: &'a [SettingInfo], scope: Scope, key: &str) -> &'a SettingInfo {
+        list.iter().find(|s| s.scope == scope && s.key == key).unwrap()
     }
 
     #[test]
     fn every_catalog_key_is_a_key_of_its_file() {
-        // Writing each key's default to an empty file must parse: the catalog can't name a key the schema lacks. And
-        // the catalog shows what the file sets: every part it reads reaches the apps.
+        // Writing each key to an empty file of its scope must parse: the catalog can't name a key the schema lacks.
+        // And the list shows what the file sets: every file it reads reaches the apps.
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
-        let defaults = config(&paths);
+        let defaults = DaemonConfig::defaults(paths.clone());
         for entry in CATALOG {
-            let Kind::Config = entry.kind else { continue };
-            // Not the default, so reading it back proves the file's value reached the catalog.
+            // Not the default, so reading it back proves the file's value reached the list.
             let default = (entry.default)(&defaults);
             let sample = match entry.value_type {
                 ValueType::NetworkProfile => json!(false),
@@ -479,16 +445,24 @@ mod tests {
             };
             // `check_type` is what `validate` uses; calling it directly covers the non-editable `socket` too.
             check_type(entry, &sample).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
-            let pair = paths.global_files();
-            let _ = std::fs::remove_file(&pair.shared);
-            let change = KeyChange {
-                key: entry.key.into(),
-                value: Some(sample.clone()),
+            let _ = std::fs::remove_file(&paths.global_files(entry.scope).shared);
+            let change = Change {
+                scope: entry.scope,
+                change: KeyChange {
+                    key: entry.key.into(),
+                    value: Some(sample.clone()),
+                },
+                placement: Placement::Current,
             };
-            write(&paths, &change, Placement::Current).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
+            write(&paths, &change).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
             let snapshot = Snapshot::new(&paths);
             assert_eq!(snapshot.error, None, "{}", entry.key);
-            assert_eq!(info(&snapshot.info(true), entry.key).value, sample, "{}", entry.key);
+            assert_eq!(
+                info(&snapshot.info(), entry.scope, entry.key).value,
+                sample,
+                "{}",
+                entry.key
+            );
         }
     }
 
@@ -497,80 +471,95 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
         std::fs::create_dir_all(&paths.global).unwrap();
-        std::fs::write(paths.global.join("config.toml"), "[host]\nroots = [\"~/a\"]\n").unwrap();
+        std::fs::write(paths.global.join("config.host.toml"), "roots = [\"~/a\"]\n").unwrap();
         let mut snapshot = Snapshot::new(&paths);
 
         assert!(matches!(
-            validate("nope", &json!(1), None),
+            validate(Scope::Host, "nope", &json!(1), None),
             Err(SetError::Unknown { .. })
         ));
         assert!(matches!(
-            validate("socket", &json!("/s"), None),
+            validate(Scope::Client, "roots", &json!([]), None),
+            Err(SetError::Unknown { .. })
+        ));
+        assert!(matches!(
+            validate(Scope::Host, "socket", &json!("/s"), None),
             Err(SetError::NotEditable { .. })
         ));
         assert!(matches!(
-            validate("host.roots", &json!("~/a"), None),
+            validate(Scope::Host, "roots", &json!("~/a"), None),
             Err(SetError::WrongType { .. })
         ));
         assert!(matches!(
-            validate("host.logging", &json!("loud"), None),
+            validate(Scope::Host, "logging", &json!("loud"), None),
             Err(SetError::WrongType { .. })
         ));
+        // The client file has no local one: a device keeps its own value in its app.
         assert!(matches!(
-            validate("keep_awake", &json!(true), Some(true)),
+            validate(Scope::Client, "text_font", &json!("Inter"), Some(true)),
             Err(SetError::NoLocal { .. })
         ));
-        assert!(matches!(
-            validate("keep_awake", &json!(false), None),
-            Ok(Change::State(crate::state::Setting::KeepAwake, Some(false)))
-        ));
 
-        let Change::Config { change, placement } = validate("host.roots", &json!(["~/b"]), Some(true)).unwrap() else {
-            unreachable!()
-        };
-        write(&paths, &change, placement).unwrap();
-        let Change::Config { change, placement } = validate("tailnet.port", &json!(9000), None).unwrap() else {
-            unreachable!()
-        };
-        write(&paths, &change, placement).unwrap();
+        write(
+            &paths,
+            &validate(Scope::Host, "roots", &json!(["~/b"]), Some(true)).unwrap(),
+        )
+        .unwrap();
+        write(
+            &paths,
+            &validate(Scope::Host, "tailnet.port", &json!(9000), None).unwrap(),
+        )
+        .unwrap();
+        write(
+            &paths,
+            &validate(Scope::Host, "keep_awake", &json!(false), None).unwrap(),
+        )
+        .unwrap();
         snapshot.reload(&paths);
         assert_eq!(snapshot.error, None);
 
-        let list = snapshot.info(true);
-        let roots = info(&list, "host.roots");
+        let list = snapshot.info();
+        let roots = info(&list, Scope::Host, "roots");
         assert_eq!(roots.value, json!(["~/b"]));
+        assert_eq!(roots.placement, Some(Sharing::Local));
+        assert!(roots.local_choice);
+        assert!(!info(&list, Scope::Client, "text_font").local_choice);
         assert_eq!(
-            roots.kind,
-            KindInfo::Config {
-                placement: Some(Sharing::Local)
-            }
-        );
-        assert_eq!(
-            info(&list, "tailnet.port").applies,
+            info(&list, Scope::Host, "tailnet.port").applies,
             AppliesInfo::Restart { pending: true }
         );
         assert_eq!(
-            info(&list, "tailnet.enabled").applies,
+            info(&list, Scope::Host, "tailnet.enabled").applies,
             AppliesInfo::Restart { pending: false }
         );
-        assert_eq!(info(&list, "host.roots").applies, AppliesInfo::Live);
-        assert_eq!(info(&list, "tailnet.enabled").value, json!(true));
-        assert_eq!(info(&list, "keep_awake").kind, KindInfo::State);
+        assert_eq!(info(&list, Scope::Host, "keep_awake").value, json!(false));
+        assert_eq!(info(&list, Scope::Host, "tailnet.enabled").value, json!(true));
 
         // A value the schema refuses never reaches the file.
-        let Change::Config { change, placement } = validate("tailnet.port", &json!(70000), None).unwrap() else {
-            unreachable!()
-        };
-        assert!(write(&paths, &change, placement).is_err());
+        let before = std::fs::read_to_string(paths.global.join("config.host.toml")).unwrap();
+        assert!(
+            before.contains("port = 9000") && before.contains("keep_awake = false"),
+            "{before}"
+        );
+        assert!(
+            write(
+                &paths,
+                &validate(Scope::Host, "tailnet.port", &json!(70000), None).unwrap()
+            )
+            .is_err()
+        );
         assert_eq!(
-            std::fs::read_to_string(paths.global.join("config.toml")).unwrap(),
-            "[tailnet]\nport = 9000\n"
+            std::fs::read_to_string(paths.global.join("config.host.toml")).unwrap(),
+            before
         );
 
-        // A broken hand edit keeps the last good values and says why.
-        std::fs::write(paths.global.join("config.toml"), "[host\n").unwrap();
+        // A broken hand edit keeps that file's last good values and says why; the other files still update.
+        std::fs::write(paths.global.join("config.host.local.toml"), "roots = [\n").unwrap();
+        std::fs::write(paths.global.join("config.client.toml"), "text_font = \"Inter\"\n").unwrap();
         snapshot.reload(&paths);
         assert!(snapshot.error.is_some());
-        assert_eq!(info(&snapshot.info(true), "host.roots").value, json!(["~/b"]));
+        let list = snapshot.info();
+        assert_eq!(info(&list, Scope::Host, "roots").value, json!(["~/b"]));
+        assert_eq!(info(&list, Scope::Client, "text_font").value, json!("Inter"));
     }
 }

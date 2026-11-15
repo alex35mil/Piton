@@ -1,7 +1,7 @@
 //! Keeps the Mac reachable while piton has live sessions: holds a prevent-idle-sleep assertion (`caffeinate -i`, an
 //! IOKit assertion held for as long as the process runs) whenever keep-awake is on and at least one pi is running,
 //! working or idle, so the phone can always reach a session it might want to steer. Released when the last session
-//! ends or keep-awake is turned off (state in the host's database, toggled from the apps, kept across restarts). The display may still
+//! ends or keep-awake is turned off (`keep_awake` in the host file, toggled from the apps or by hand). The display may still
 //! sleep and the screen lock; the daemon and Tailscale keep running. Lid-closed sleep on battery needs the privileged
 //! helper (not built yet).
 

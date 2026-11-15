@@ -264,15 +264,11 @@ fn configuration(config: &DaemonConfig) -> Status {
             },
         };
     }
-    let mut problems = Vec::new();
-    match crate::config::resolve_global(paths) {
-        Ok(resolved) => {
-            for (part, error) in resolved.errors() {
-                problems.push(format!("{part}: {error}"));
-            }
-        }
-        Err(e) => problems.push(e.to_string()),
-    }
+    let mut problems: Vec<String> = crate::config::global(paths)
+        .errors()
+        .into_iter()
+        .map(|(part, error)| format!("{part}: {error}"))
+        .collect();
     if let Some(problem) = local_files_in_git(&paths.global) {
         problems.push(problem);
     }

@@ -42,7 +42,7 @@ function setup() {
             env: { login_shell: false, mise: false },
             tailnet: { port: 0, heartbeat_ms: 300, retry_ms: 200, cli: fakeTailscale },
         },
-        host: { attach_mode: "host", empty_grace_ms: 60000, roots: [root] },
+        host: { default_attach_mode: "host", empty_grace_ms: 60000, roots: [root] },
     });
     const stopped = join(dir, "tailscale-stopped");
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40", PITON_FAKE_WHOIS: whoisFile, PITON_FAKE_STOPPED: stopped, PITON_LOGS_DIR: join(dir, "logging") };

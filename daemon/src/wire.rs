@@ -53,17 +53,18 @@ pub enum ViewRequest {
     /// Daemon-wide state (keep-awake, settings). Also pushed as `daemon` lines after `sessions.subscribe`, on change.
     #[serde(rename = "daemon.state")]
     DaemonState,
-    /// Change one setting: a state value in the database, or a configuration key in its global file. `value: null`
-    /// returns it to the default. `local` (configuration only) moves the key to the `.local` file (`true`) or the
-    /// shared one (`false`); omitted, it stays in the file that sets it.
+    /// Change one setting: `key` (as written in its file) in the global file of `scope`. `value: null` returns it to
+    /// the default. `local` moves the key to the scope's `.local` file (`true`) or the shared one (`false`); omitted, it
+    /// stays in the file that sets it. A scope without a local file (`client`) refuses `local`.
     #[serde(rename = "settings.set")]
     SettingsSet {
+        scope: crate::config::Scope,
         key: String,
         value: serde_json::Value,
         #[serde(default)]
         local: Option<bool>,
     },
-    /// Switch host logging until the policy expires or the daemon restarts (`[host] logging` in `config.toml` is the
+    /// Switch host logging until the policy expires or the daemon restarts (`logging` in `config.host.toml` is the
     /// default).
     #[serde(rename = "daemon.logging")]
     DaemonLogging { policy: crate::diagnostics::Policy },
@@ -259,7 +260,7 @@ pub struct DaemonState {
     pub version: String,
     /// This host's identity, stable across restarts and kept by `piton state export|import`.
     pub host_id: String,
-    /// Keep-awake is enabled: the Mac is held awake while sessions are live. Kept across restarts.
+    /// Keep-awake is enabled (`keep_awake` in the host file): the Mac is held awake while sessions are live.
     pub keep_awake: bool,
     /// The assertion is held right now (enabled and at least one live session).
     pub awake: bool,

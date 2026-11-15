@@ -1,4 +1,5 @@
-//! One file into its parts: `config[.local].toml` table by table, `mcp[.local].json`, and `policies.md` as text.
+//! One file into its parts: a project's `config[.local].toml` table by table, the global tier's host and client files
+//! whole, `mcp[.local].json`, and `policies.md` as text.
 //!
 //! A syntax error or an unknown top-level key fails the whole file; a table that doesn't match its schema, or that
 //! a file at this level (or of this sharing) may not set, fails only that table.
@@ -8,11 +9,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigError;
+use crate::config::model::client::ClientFile;
+use crate::config::model::host::HostFile;
 use crate::config::model::level::LevelKind;
-use crate::config::model::paths::{Sharing, global_tier};
+use crate::config::model::paths::{Scope, Sharing, global_tier};
 use crate::config::model::tables::{
-    BranchesTable, ClientTable, DevelopmentTable, HostTable, PermissionsTable, RunTable, SandboxTable, Table,
-    TableValue, WebSearchTable, WorkersTable,
+    BranchesTable, Files, Integration, Levels, PermissionsTable, Rule, SandboxTable, Table, TableValue, WebSearchTable,
+    WorkersTable,
 };
 
 /// Where a file came from, for messages and for `piton config check`.
@@ -62,92 +65,70 @@ impl ConfigDoc {
         })
     }
 
-    /// One part of the file, strictly, with the level's and the file's scope checked; `None` when the file doesn't
-    /// set it.
+    /// One table of the file, strictly, with each key's rule checked against the file's level and sharing; `None` when
+    /// the file doesn't set it.
     pub fn part<T: TableValue>(&self, table: Table) -> Result<Option<T>, ConfigError> {
         let path = &self.origin.path;
         let invalid = |reason: String| ConfigError::Invalid {
             path: path.clone(),
             reason,
         };
-        let value = match table {
-            // The run keys sit at the top of the file: the part is their subset.
-            Table::Run => {
-                let subset: toml::Table = self
-                    .table
-                    .iter()
-                    .filter(|(key, _)| table.keys().contains(&key.as_str()))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect();
-                if subset.is_empty() {
-                    return Ok(None);
-                }
-                // serde reads an empty array as an empty struct: a key that names a table must hold one.
-                if let Some((key, _)) = subset
-                    .iter()
-                    .find(|(key, value)| !matches!(key.as_str(), "socket" | "log") && !value.is_table())
-                {
-                    return Err(invalid(format!("`{key}` must be a table")));
-                }
-                toml::Value::Table(subset)
-            }
-            Table::Sandbox
-            | Table::Workers
-            | Table::Host
-            | Table::Client
-            | Table::Development
-            | Table::Permissions
-            | Table::Branches
-            | Table::Tracker
-            | Table::Forge
-            | Table::WebSearch => {
-                let key = table.keys()[0];
-                let Some(value) = self.table.get(key) else {
-                    return Ok(None);
-                };
-                if !value.is_table() {
-                    return Err(invalid(format!("`{key}` must be a table")));
-                }
-                value.clone()
-            }
+        let name = table.name();
+        let Some(value) = self.table.get(name) else {
+            return Ok(None);
         };
-        let value: T = value.try_into().map_err(|e: toml::de::Error| {
-            invalid(match table {
-                Table::Run => e.to_string(),
-                Table::Sandbox
-                | Table::Workers
-                | Table::Host
-                | Table::Client
-                | Table::Development
-                | Table::Permissions
-                | Table::Branches
-                | Table::Tracker
-                | Table::Forge
-                | Table::WebSearch => format!("[{}] {e}", table.keys()[0]),
-            })
-        })?;
-        value.check().map_err(invalid)?;
-        if self.origin.level != LevelKind::Global
-            && let Some(key) = value.global_only_keys().first()
-        {
-            return Err(ConfigError::GlobalOnly {
-                path: path.clone(),
-                key: (*key).to_string(),
-                global: global_tier(),
-            });
+        // serde reads an empty array as an empty struct: a table key must hold a table.
+        if !value.is_table() {
+            return Err(invalid(format!("`{name}` must be a table")));
         }
-        match self.sharing {
-            Sharing::Local => {}
-            Sharing::Shared => {
-                if let Some(key) = value.local_only_keys().first() {
-                    return Err(ConfigError::LocalOnly {
-                        path: path.clone(),
-                        key: (*key).to_string(),
-                    });
-                }
-            }
+        let value: T = value
+            .clone()
+            .try_into()
+            .map_err(|e: toml::de::Error| invalid(format!("[{name}] {e}")))?;
+        value.check().map_err(invalid)?;
+        // `[tracker]` and `[forge]` are project only as a whole.
+        let table_rule = match table {
+            Table::Tracker | Table::Forge => vec![(name, Rule::PROJECT)],
+            Table::Sandbox | Table::Workers | Table::Permissions | Table::Branches | Table::WebSearch => Vec::new(),
+        };
+        for (key, rule) in table_rule.into_iter().chain(value.ruled_keys()) {
+            self.check_rule(key, rule)?;
         }
         Ok(Some(value))
+    }
+
+    /// Refuses `key` when this file may not hold it.
+    fn check_rule(&self, key: &str, rule: Rule) -> Result<(), ConfigError> {
+        let path = self.origin.path.clone();
+        let global = self.origin.level == LevelKind::Global;
+        match (rule.levels, global) {
+            (Levels::Global, false) => {
+                return Err(ConfigError::GlobalOnly {
+                    path,
+                    key: key.to_string(),
+                    global: global_tier(),
+                });
+            }
+            (Levels::Project, true) => {
+                return Err(ConfigError::ProjectOnly {
+                    path,
+                    key: key.to_string(),
+                });
+            }
+            (Levels::Any, _) | (Levels::Global, true) | (Levels::Project, false) => {}
+        }
+        let local_only = match rule.files {
+            Files::Either => false,
+            Files::Local => true,
+            Files::LocalInProjects => !global,
+        };
+        match (local_only, self.sharing) {
+            (true, Sharing::Shared) => Err(ConfigError::LocalOnly {
+                path,
+                key: key.to_string(),
+            }),
+            (true, Sharing::Local) | (false, Sharing::Shared | Sharing::Local) => Ok(()),
+        }
     }
 
     /// Every table of the file, checked: a file every reader accepts.
@@ -155,20 +136,61 @@ impl ConfigDoc {
         fn drop_value<T>(_: Option<T>) {}
         for table in Table::ALL {
             match table {
-                Table::Run => self.part::<RunTable>(table).map(drop_value)?,
                 Table::Sandbox => self.part::<SandboxTable>(table).map(drop_value)?,
                 Table::Workers => self.part::<WorkersTable>(table).map(drop_value)?,
-                Table::Host => self.part::<HostTable>(table).map(drop_value)?,
-                Table::Client => self.part::<ClientTable>(table).map(drop_value)?,
-                Table::Development => self.part::<DevelopmentTable>(table).map(drop_value)?,
                 Table::Permissions => self.part::<PermissionsTable>(table).map(drop_value)?,
                 Table::Branches => self.part::<BranchesTable>(table).map(drop_value)?,
-                Table::Tracker | Table::Forge => self.part::<toml::Table>(table).map(drop_value)?,
+                Table::Tracker | Table::Forge => self.part::<Integration>(table).map(drop_value)?,
                 Table::WebSearch => self.part::<WebSearchTable>(table).map(drop_value)?,
             }
         }
         Ok(())
     }
+}
+
+/// A global tier file of its own scope (host or client), parsed whole: one schema, so a mistake fails the file.
+pub trait GlobalFile: serde::de::DeserializeOwned + Default {
+    const SCOPE: Scope;
+    /// Values the schema accepts but piton can't use.
+    fn check(&self) -> Result<(), String> {
+        Ok(())
+    }
+    /// Folds the local file in.
+    fn merge(&mut self, local: Self);
+}
+
+impl GlobalFile for HostFile {
+    const SCOPE: Scope = Scope::Host;
+    fn check(&self) -> Result<(), String> {
+        HostFile::check(self)
+    }
+    fn merge(&mut self, local: Self) {
+        HostFile::merge(self, local);
+    }
+}
+
+impl GlobalFile for ClientFile {
+    const SCOPE: Scope = Scope::Client;
+    /// There's no local client file.
+    fn merge(&mut self, local: Self) {
+        *self = local;
+    }
+}
+
+/// Parses `text` as the global file at `path`, checked.
+pub fn parse_global<T: GlobalFile>(text: &str, path: &Path) -> Result<T, ConfigError> {
+    let invalid = |reason: String| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let value: T = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
+    value.check().map_err(invalid)?;
+    Ok(value)
+}
+
+/// Reads a global file; `None` when it doesn't exist.
+pub fn read_global<T: GlobalFile>(path: &Path) -> Result<Option<T>, ConfigError> {
+    read_text(path)?.map(|text| parse_global(&text, path)).transpose()
 }
 
 /// Reads one level's file; `None` when it doesn't exist.
@@ -229,8 +251,18 @@ mod tests {
         let d = doc("[sandbox]\nallw = []\n", LevelKind::Repository, Sharing::Shared).unwrap();
         let err = d.part::<SandboxTable>(Table::Sandbox).unwrap_err();
         assert!(err.to_string().contains("allw"), "{err}");
+        // The host's and the apps' keys have their own files; pi's TUI keybindings are gone.
+        for text in [
+            "[host]\nroots = []\n",
+            "[client]\ntext_font = \"x\"\n",
+            "[tailnet]\nport = 1\n",
+            "socket = \"/s\"\n",
+            "[development]\nsession_analysis = true\n",
+        ] {
+            assert!(doc(text, LevelKind::Global, Sharing::Shared).is_err(), "{text}");
+        }
         let d = doc(
-            "[permissions.host]\nkeybindings = {}\n",
+            "[permissions.keybindings]\nauto_accept_edits = \"ctrl+a\"\n",
             LevelKind::Global,
             Sharing::Shared,
         )
@@ -240,91 +272,96 @@ mod tests {
         let d = doc("permissions = []\n", LevelKind::Repository, Sharing::Shared).unwrap();
         assert!(d.part::<PermissionsTable>(Table::Permissions).is_err());
         let d = doc("tracker = 1\n", LevelKind::Repository, Sharing::Shared).unwrap();
-        assert!(d.part::<toml::Table>(Table::Tracker).is_err());
-        let d = doc("stop = []\n", LevelKind::Global, Sharing::Shared).unwrap();
-        assert!(d.part::<RunTable>(Table::Run).is_err());
+        assert!(d.part::<Integration>(Table::Tracker).is_err());
     }
 
-    /// A broken table fails only its part: a typo in `[tailnet]` leaves `[sandbox]` readable, and a bad `[client]`
-    /// leaves `[host]`.
+    /// A broken table fails only its part.
     #[test]
-    fn parts_are_parsed_on_their_own() {
+    fn tables_are_parsed_on_their_own() {
         let d = doc(
-            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[tailnet]\nprot = 1\n[sandbox]\nread = [\"/r\"]\n[client]\ntext_font = 1\n[host]\nroots = [\"~/p\"]\n",
-            LevelKind::Global,
+            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\nread = [\"/r\"]\n",
+            LevelKind::Repository,
             Sharing::Shared,
         )
         .unwrap();
         assert!(d.part::<BranchesTable>(Table::Branches).is_err());
-        assert!(d.part::<RunTable>(Table::Run).is_err());
-        assert!(d.part::<ClientTable>(Table::Client).is_err());
         assert_eq!(
             d.part::<PermissionsTable>(Table::Permissions).unwrap().unwrap().allow,
             ["read"]
         );
         assert_eq!(d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().read, ["/r"]);
-        assert!(d.part::<HostTable>(Table::Host).unwrap().is_some());
-        assert!(d.part::<toml::Table>(Table::Tracker).unwrap().is_some());
-        assert!(d.part::<toml::Table>(Table::Forge).unwrap().is_none());
+        assert!(d.part::<Integration>(Table::Tracker).unwrap().is_some());
+        assert!(d.part::<Integration>(Table::Forge).unwrap().is_none());
+    }
+
+    /// Each key's rule, per level and file.
+    #[test]
+    fn keys_are_where_their_rule_allows() {
+        let part = |text: &str, level, sharing, table| -> Result<(), ConfigError> {
+            let d = doc(text, level, sharing).unwrap();
+            match table {
+                Table::Sandbox => d.part::<SandboxTable>(table).map(drop),
+                Table::Branches => d.part::<BranchesTable>(table).map(drop),
+                Table::WebSearch => d.part::<WebSearchTable>(table).map(drop),
+                Table::Tracker | Table::Forge => d.part::<Integration>(table).map(drop),
+                Table::Workers | Table::Permissions => Ok(()),
+            }
+        };
+        use LevelKind::{Global, Parent, Repository};
+        use Sharing::{Local, Shared};
+        // The base sandbox: global only.
+        let base = "[sandbox]\nbase = \"default\"\n";
+        assert!(matches!(
+            part(base, Parent, Shared, Table::Sandbox),
+            Err(ConfigError::GlobalOnly { ref key, .. }) if key == "sandbox.base"
+        ));
+        assert!(part(base, Global, Local, Table::Sandbox).is_ok());
+        assert!(part("[sandbox]\nread = [\"/r\"]\n", Repository, Shared, Table::Sandbox).is_ok());
+        // Integrations: project only.
+        for table in [Table::Tracker, Table::Forge] {
+            let text = format!("[{}]\nprovider = \"github\"\n", table.name());
+            assert!(matches!(
+                part(&text, Global, Shared, table),
+                Err(ConfigError::ProjectOnly { .. })
+            ));
+            assert!(part(&text, Parent, Local, table).is_ok());
+        }
+        // A secret: local only everywhere.
+        let key = "[web_search]\napi_key = \"k\"\n";
+        assert!(matches!(
+            part(key, Global, Shared, Table::WebSearch),
+            Err(ConfigError::LocalOnly { .. })
+        ));
+        assert!(part(key, Repository, Local, Table::WebSearch).is_ok());
+        // A name: local only in projects, either file in the global tier.
+        let name = "[branches]\nusername = \"me\"\n";
+        assert!(matches!(
+            part(name, Repository, Shared, Table::Branches),
+            Err(ConfigError::LocalOnly { .. })
+        ));
+        assert!(part(name, Repository, Local, Table::Branches).is_ok());
+        assert!(part(name, Global, Shared, Table::Branches).is_ok());
     }
 
     #[test]
-    fn global_only_and_local_only_keys() {
-        let d = doc("[sandbox]\nbase = \"default\"\n", LevelKind::Parent, Sharing::Shared).unwrap();
-        let err = d.part::<SandboxTable>(Table::Sandbox).unwrap_err();
-        assert!(matches!(err, ConfigError::GlobalOnly { ref key, .. } if key == "sandbox.base"));
-        let refused = |text: &str, table: Table| {
-            let d = doc(text, LevelKind::Repository, Sharing::Local).unwrap();
-            match table {
-                Table::Host => d.part::<HostTable>(table).is_err(),
-                Table::Development => d.part::<DevelopmentTable>(table).is_err(),
-                Table::Permissions => d.part::<PermissionsTable>(table).is_err(),
-                Table::Run => d.part::<RunTable>(table).is_err(),
-                Table::Sandbox
-                | Table::Workers
-                | Table::Client
-                | Table::Branches
-                | Table::Tracker
-                | Table::Forge
-                | Table::WebSearch => false,
-            }
-        };
-        for (text, table) in [
-            ("[host]\nroots = []\n", Table::Host),
-            ("[development]\nsession_analysis = true\n", Table::Development),
-            (
-                "[permissions.keybindings]\nauto_accept_edits = \"ctrl+a\"\n",
-                Table::Permissions,
-            ),
-            ("[tailnet]\nport = 1\n", Table::Run),
-        ] {
-            assert!(refused(text, table), "{text}");
-            assert!(
-                doc(text, LevelKind::Global, Sharing::Shared)
-                    .unwrap()
-                    .validate()
-                    .is_ok()
-            );
-        }
-
-        let text = "[branches]\nusername = \"me\"\n";
-        let err = doc(text, LevelKind::Global, Sharing::Shared)
-            .unwrap()
-            .part::<BranchesTable>(Table::Branches)
-            .unwrap_err();
-        assert!(matches!(err, ConfigError::LocalOnly { .. }), "{err}");
-        assert!(
-            doc(text, LevelKind::Repository, Sharing::Local)
-                .unwrap()
-                .part::<BranchesTable>(Table::Branches)
-                .is_ok()
-        );
+    fn global_files_are_parsed_whole() {
+        let path = Path::new("config.host.toml");
+        let host: HostFile = parse_global(
+            "roots = [\"~/p\"]\nkeep_awake = false\n[sandbox]\ncommand = [\"nono\"]\n",
+            path,
+        )
+        .unwrap();
+        assert_eq!(host.keep_awake, Some(false));
+        assert!(parse_global::<HostFile>("[pi]\ncommand = []\n", path).is_err());
+        assert!(parse_global::<HostFile>("[host]\nroots = []\n", path).is_err());
+        let client: ClientFile = parse_global("text_font = \"Inter\"\n", Path::new("config.client.toml")).unwrap();
+        assert_eq!(client.text_font.as_deref(), Some("Inter"));
     }
 
     #[test]
     fn missing_files_are_none_and_folders_are_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(Sharing::Shared.file_name());
+        let path = dir.path().join("config.toml");
         assert!(
             read_config(&path, LevelKind::Global, Sharing::Shared)
                 .unwrap()
@@ -332,6 +369,11 @@ mod tests {
         );
         std::fs::create_dir(&path).unwrap();
         assert!(read_config(&path, LevelKind::Global, Sharing::Shared).is_err());
+        assert!(
+            read_global::<HostFile>(&dir.path().join("config.host.toml"))
+                .unwrap()
+                .is_none()
+        );
         assert!(load_mcp(&dir.path().join("mcp.json")).unwrap().is_none());
         std::fs::write(dir.path().join("mcp.json"), "[]").unwrap();
         assert!(load_mcp(&dir.path().join("mcp.json")).is_err());

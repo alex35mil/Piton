@@ -90,7 +90,7 @@ enum Cmd {
         #[usage(long, global)]
         json: bool,
     },
-    /// Move this host's state database (host identity, keep-awake, ...) to a replacement Mac.
+    /// Move this host's state database (its identity, and later sessions and drafts) to a replacement Mac.
     State {
         #[usage(subcommand)]
         action: StateAction,
@@ -172,22 +172,24 @@ enum ConfigAction {
         /// host or sandbox (default: from PITON_RUNTIME).
         #[usage(long)]
         runtime: Option<String>,
-        /// Only the global tier: personal settings that never depend on a project.
+        /// Only the global tier's settings for the pi package that never depend on a project (`[development]` from
+        /// `config.host.toml`).
         #[usage(long)]
         global: bool,
     },
-    /// Print one resolved part as JSON, by its name in `config resolve`: a table (run, sandbox, workers, host, client,
-    /// development, permissions, branches, tracker, forge, web_search), mcp, mcp_global, policies, or instructions.
+    /// Print one resolved part as JSON, by its name in `config resolve`: a table (sandbox, workers, permissions,
+    /// branches, tracker, forge, web_search), mcp, mcp_global, policies, or instructions.
     Get {
         part: String,
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
-    /// Set KEY (dotted, like `branches.format`) in the repository's `.piton/config.toml`, or the global tier's with
-    /// --global; `config.local.toml` with --local. VALUE is JSON (an object becomes a table); text that isn't JSON is a
-    /// string. With --changes, KEY is instead a JSON object of keys and values written together (`null` removes a
-    /// key). With --dry-run, prints the file's new content as JSON and writes nothing (the pi package writes
-    /// protected files through the daemon).
+    /// Set KEY (dotted, like `branches.format`) in the repository's `.piton/config.toml`, the global tier's with
+    /// --global, or the global `config.host.toml` / `config.client.toml` with --scope host|client; the `.local` file of
+    /// the pair with --local. VALUE is JSON (an object becomes a table); text that isn't JSON is a string. With
+    /// --changes, KEY is instead a JSON object of keys and values written together (`null` removes a key). With
+    /// --dry-run, prints the file's new content as JSON and writes nothing (the pi package writes protected files
+    /// through the daemon).
     Set {
         key: String,
         value: Option<String>,
@@ -197,6 +199,9 @@ enum ConfigAction {
         workspace: Option<PathBuf>,
         #[usage(long)]
         global: bool,
+        /// host or client: one of the global tier's own files.
+        #[usage(long)]
+        scope: Option<String>,
         #[usage(long)]
         local: bool,
         /// Remove KEY instead.

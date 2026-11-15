@@ -1472,49 +1472,42 @@ mod tests {
                         default: crate::diagnostics::Mode::Info,
                     },
                     settings: {
-                        use crate::app_settings::{AppliesInfo, KindInfo, SettingInfo, ValueType};
-                        use crate::config::Sharing;
+                        use crate::app_settings::{AppliesInfo, SettingInfo, ValueType};
+                        use crate::config::{Scope, Sharing};
+                        let setting = |scope, key, value, placement, value_type, applies, editable| SettingInfo {
+                            key,
+                            scope,
+                            value,
+                            placement,
+                            local_choice: scope != Scope::Client,
+                            value_type,
+                            applies,
+                            editable,
+                        };
                         vec![
-                            SettingInfo {
-                                key: "keep_awake",
-                                value: json!(true),
-                                kind: KindInfo::State,
-                                value_type: ValueType::Bool,
-                                applies: AppliesInfo::Live,
-                                editable: true,
-                            },
-                            SettingInfo {
-                                key: "host.roots",
-                                value: json!(["~/Projects"]),
-                                kind: KindInfo::Config { placement: Some(Sharing::Local) },
-                                value_type: ValueType::TextList,
-                                applies: AppliesInfo::Live,
-                                editable: true,
-                            },
-                            SettingInfo {
-                                key: "host.logging",
-                                value: json!("info"),
-                                kind: KindInfo::Config { placement: None },
-                                value_type: ValueType::Choice { options: &["info", "debug"] },
-                                applies: AppliesInfo::Live,
-                                editable: true,
-                            },
-                            SettingInfo {
-                                key: "tailnet.port",
-                                value: json!(9000),
-                                kind: KindInfo::Config { placement: Some(Sharing::Shared) },
-                                value_type: ValueType::Integer,
-                                applies: AppliesInfo::Restart { pending: true },
-                                editable: true,
-                            },
-                            SettingInfo {
-                                key: "socket",
-                                value: json!("/Users/me/.local/state/piton/piton.sock"),
-                                kind: KindInfo::Config { placement: None },
-                                value_type: ValueType::Text,
-                                applies: AppliesInfo::Restart { pending: false },
-                                editable: false,
-                            },
+                            setting(Scope::Host, "keep_awake", json!(true), Some(Sharing::Local), ValueType::Bool, AppliesInfo::Live, true),
+                            setting(Scope::Host, "roots", json!(["~/Projects"]), Some(Sharing::Shared), ValueType::TextList, AppliesInfo::Live, true),
+                            setting(
+                                Scope::Host,
+                                "logging",
+                                json!("info"),
+                                None,
+                                ValueType::Choice { options: &["info", "debug"] },
+                                AppliesInfo::Live,
+                                true,
+                            ),
+                            setting(Scope::Host, "tailnet.port", json!(9000), Some(Sharing::Shared), ValueType::Integer, AppliesInfo::Restart { pending: true }, true),
+                            setting(
+                                Scope::Host,
+                                "socket",
+                                json!("/Users/me/.local/state/piton/piton.sock"),
+                                None,
+                                ValueType::Text,
+                                AppliesInfo::Restart { pending: false },
+                                false,
+                            ),
+                            setting(Scope::Client, "text_font", json!("Inter"), Some(Sharing::Shared), ValueType::Text, AppliesInfo::Live, true),
+                            setting(Scope::Project, "workers.skip", json!([".build"]), None, ValueType::TextList, AppliesInfo::Live, true),
                         ]
                     },
                     settings_error: None,

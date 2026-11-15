@@ -45,17 +45,19 @@ pub fn run(action: &ConfigAction) -> ExitCode {
             global: true,
         } => {
             let _ = (workspace, runtime);
-            match crate::config::resolve_global(&Paths::current()) {
-                Ok(resolved) => {
-                    let output = Output {
-                        format: RESOLVE_FORMAT,
-                        resolved: &resolved,
-                    };
-                    println!("{}", serde_json::to_string(&output).unwrap_or_default());
-                    ExitCode::SUCCESS
-                }
-                Err(e) => print_error(ErrorBody::Invalid { message: e.to_string() }),
+            #[derive(Serialize)]
+            struct GlobalOutput<'a> {
+                format: u32,
+                #[serde(flatten)]
+                resolved: &'a crate::config::GlobalResolved,
             }
+            let resolved = crate::config::resolve_global(&Paths::current());
+            let output = GlobalOutput {
+                format: RESOLVE_FORMAT,
+                resolved: &resolved,
+            };
+            println!("{}", serde_json::to_string(&output).unwrap_or_default());
+            ExitCode::SUCCESS
         }
         ConfigAction::Resolve {
             workspace,
@@ -104,6 +106,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
             changes,
             workspace,
             global,
+            scope,
             local,
             unset,
             dry_run,
@@ -113,13 +116,26 @@ pub fn run(action: &ConfigAction) -> ExitCode {
             changes: *changes,
             workspace: workspace.as_deref(),
             global: *global,
+            scope: scope.as_deref(),
             local: *local,
             unset: *unset,
             dry_run: *dry_run,
         }),
         ConfigAction::Check { workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
             Ok(resolved) => {
-                let errors = resolved.errors();
+                // The workspace's chain, and the global tier's own files (host and client).
+                let global = crate::config::global(&Paths::current());
+                let mut errors: Vec<(String, String)> = resolved
+                    .errors()
+                    .into_iter()
+                    .map(|(part, e)| (part.to_string(), e.to_string()))
+                    .collect();
+                errors.extend(
+                    global
+                        .errors()
+                        .into_iter()
+                        .filter(|(part, _)| part == "host" || part == "client"),
+                );
                 for (part, error) in &errors {
                     eprintln!("piton: {part}: {error}");
                 }
@@ -209,6 +225,7 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         ConfigError::Read { .. }
         | ConfigError::Invalid { .. }
         | ConfigError::GlobalOnly { .. }
+        | ConfigError::ProjectOnly { .. }
         | ConfigError::LocalOnly { .. }
         | ConfigError::Conflict { .. } => ErrorBody::Invalid { message: e.to_string() },
     })
@@ -238,6 +255,7 @@ struct SetRequest<'a> {
     changes: bool,
     workspace: Option<&'a Path>,
     global: bool,
+    scope: Option<&'a str>,
     local: bool,
     unset: bool,
     dry_run: bool,
@@ -257,19 +275,23 @@ fn set(request: &SetRequest) -> ExitCode {
     use crate::config::{ConfigFile, KeyChange, Sharing, WriteLevel};
     let invalid = |message: String| print_error(ErrorBody::Invalid { message });
     let paths = Paths::current();
-    let level = if request.global {
-        WriteLevel::Global
-    } else {
-        let path = request
-            .workspace
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        match crate::launch::resolve_workspace(&path) {
-            Ok(workspace) => WriteLevel::Repository {
-                source: workspace.source().to_path_buf(),
-            },
-            Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
+    let level = match (request.scope, request.global) {
+        (Some("host"), _) => WriteLevel::Host,
+        (Some("client"), _) => WriteLevel::Client,
+        (Some(other), _) => return invalid(format!("unknown --scope {other:?}: host or client")),
+        (None, true) => WriteLevel::Global,
+        (None, false) => {
+            let path = request
+                .workspace
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            match crate::launch::resolve_workspace(&path) {
+                Ok(workspace) => WriteLevel::Repository {
+                    source: workspace.source().to_path_buf(),
+                },
+                Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
+            }
         }
     };
     let sharing = if request.local { Sharing::Local } else { Sharing::Shared };
@@ -312,9 +334,13 @@ fn set(request: &SetRequest) -> ExitCode {
             Ok(content) => content,
             Err(e) => return invalid(e.to_string()),
         };
+        let path = match target.path(&paths) {
+            Ok(path) => path,
+            Err(e) => return invalid(e.to_string()),
+        };
         let planned = Planned {
             format: RESOLVE_FORMAT,
-            path: target.path(&paths),
+            path,
             content,
         };
         println!("{}", serde_json::to_string(&planned).unwrap_or_default());

@@ -1,16 +1,14 @@
-//! `[sandbox]`: grants for sandboxed pis. Grant lists only add across levels; the base profile, extra groups,
-//! bypasses, the nono command, and the network profile belong to the global tier.
+//! `[sandbox]`: the sandbox policy for sandboxed pis. Grant lists only add across levels; the base profile, extra
+//! groups, bypasses, and the network profile belong to the global tier. The sandbox program itself is a host option
+//! (`config.host.toml`).
 
 use serde::{Deserialize, Serialize};
 
-use super::{Merge, TableValue, is_grant_path, nearer, present, union};
+use super::{Merge, Rule, TableValue, is_grant_path, nearer, present, union};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxTable {
-    /// nono executable and leading arguments.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<Vec<String>>,
     /// The backend's built-in base profile (nono: `default`, `mise-dev`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
@@ -63,20 +61,19 @@ pub enum NetworkProfile {
 }
 
 impl TableValue for SandboxTable {
-    fn global_only_keys(&self) -> Vec<&'static str> {
-        present(&[
-            ("sandbox.command", self.command.is_some()),
-            ("sandbox.base", self.base.is_some()),
-            ("sandbox.groups", !self.groups.is_empty()),
-            ("sandbox.bypass", !self.bypass.is_empty()),
-            ("sandbox.network.profile", self.network.profile.is_some()),
-        ])
+    fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
+        present(
+            Rule::GLOBAL,
+            &[
+                ("sandbox.base", self.base.is_some()),
+                ("sandbox.groups", !self.groups.is_empty()),
+                ("sandbox.bypass", !self.bypass.is_empty()),
+                ("sandbox.network.profile", self.network.profile.is_some()),
+            ],
+        )
     }
 
     fn check(&self) -> Result<(), String> {
-        if self.command.as_ref().is_some_and(Vec::is_empty) {
-            return Err("sandbox.command must not be empty".into());
-        }
         for (key, paths) in [
             ("allow", &self.allow),
             ("read", &self.read),
@@ -104,7 +101,6 @@ impl TableValue for SandboxTable {
 impl Merge for SandboxTable {
     /// Grants only add; a nearer level can't remove a grant or a deny.
     fn merge(&mut self, n: Self) {
-        nearer(&mut self.command, n.command);
         nearer(&mut self.base, n.base);
         union(&mut self.groups, n.groups);
         union(&mut self.allow, n.allow);

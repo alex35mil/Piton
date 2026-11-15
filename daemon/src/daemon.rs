@@ -38,11 +38,7 @@ pub struct Daemon {
     status_changed: Arc<Notify>,
     /// Fires whenever the session list (membership, status, clients, identity, title) may have changed.
     list_changed: tokio::sync::broadcast::Sender<()>,
-    /// Whether keep-awake is enabled: state, kept in the database, so it survives restarts. On by default.
-    keep_awake: std::sync::atomic::AtomicBool,
-    /// The host's state database. Writes are rare and small, so one connection behind a lock.
-    state: Mutex<crate::state::State>,
-    /// This host's identity, from the database.
+    /// This host's identity, from the state database (opened once at start; nothing else in it is read yet).
     host_id: String,
     /// Fires when host logging changes, so the expiry task re-arms.
     logging_changed: Arc<Notify>,
@@ -133,9 +129,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         found.join(", ")
     );
 
-    let state = crate::state::State::open(&config.state_db())?;
-    let host_id = state.host_id()?;
-    let keep_awake = state.bool(crate::state::Setting::KeepAwake)?.unwrap_or(true);
+    let host_id = crate::state::State::open(&config.state_db())?.host_id()?;
     crate::log!("state: {} (host {host_id})", config.state_db().display());
     let mise = config.env.mise.then(|| crate::worker::Mise {
         program: launch::resolve_program("mise", &base_env),
@@ -152,8 +146,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         next_client: AtomicU64::new(1),
         status_changed: Arc::new(Notify::new()),
         list_changed: tokio::sync::broadcast::channel(64).0,
-        keep_awake: std::sync::atomic::AtomicBool::new(keep_awake),
-        state: Mutex::new(state),
         host_id,
         logging_changed: Arc::new(Notify::new()),
         agent_tokens: crate::agent::Tokens::default(),
@@ -247,20 +239,9 @@ impl Daemon {
         lock(&self.sessions).len()
     }
 
+    /// Whether keep-awake is enabled: `keep_awake` in the host file, on by default.
     pub fn keep_awake(&self) -> bool {
-        self.keep_awake.load(Ordering::Relaxed)
-    }
-
-    /// Turns keep-awake on or off, and keeps the choice across restarts.
-    pub fn set_keep_awake(&self, on: bool) -> Result<(), crate::state::StateError> {
-        lock(&self.state).set_bool(crate::state::Setting::KeepAwake, on)?;
-        let was = self.keep_awake.swap(on, Ordering::Relaxed);
-        if was != on {
-            crate::log!("keep-awake turned {}", if on { "on" } else { "off" });
-            self.status_changed.notify_one();
-            let _ = self.list_changed.send(());
-        }
-        Ok(())
+        self.config().keep_awake
     }
 
     /// Switches host logging until the policy expires or the daemon restarts. Clients see the change in the pushed
@@ -287,7 +268,7 @@ impl Daemon {
             awake: keep_awake && sessions > 0,
             sessions,
             logging: crate::diagnostics::current(),
-            settings: app_settings.info(keep_awake),
+            settings: app_settings.info(),
             settings_error: app_settings.error.clone(),
         }
     }
@@ -325,22 +306,27 @@ impl Daemon {
     /// writer or the watcher, and an older read never replaces a newer configuration.
     fn reload_locked(&self, snapshot: &mut crate::app_settings::Snapshot) {
         let current = self.config();
-        // The daemon's options from its own tables: a broken `[client]` stops only the apps' list.
-        match crate::config::daemon_tables(&current.paths) {
-            Ok(tables) => {
-                let mut new = crate::config::DaemonConfig::new(&tables, current.paths.clone());
+        // The daemon's options from the host file alone: a broken client file stops only the apps' list.
+        match crate::config::host(&current.paths) {
+            Ok(host) => {
+                let mut new = crate::config::DaemonConfig::new(&host, current.paths.clone());
                 // What needs a restart keeps the values the daemon started with; the apps see them as pending.
                 new.socket = current.socket.clone();
                 new.log = current.log.clone();
                 new.env = current.env.clone();
                 new.tailnet = current.tailnet.clone();
                 let mode = new.logging.mode;
+                let keep_awake = new.keep_awake;
                 *self.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new);
                 if mode != current.logging.mode {
                     let mut state = crate::diagnostics::current();
                     state.default = mode;
                     crate::diagnostics::set(state);
                     self.logging_changed.notify_one();
+                }
+                if keep_awake != current.keep_awake {
+                    crate::log!("keep-awake turned {}", if keep_awake { "on" } else { "off" });
+                    self.status_changed.notify_one();
                 }
                 crate::log!("config: reloaded the global files");
             }
@@ -352,19 +338,16 @@ impl Daemon {
         let _ = self.list_changed.send(());
     }
 
-    /// Applies a change from the apps: state to the database, configuration to its global file.
+    /// Applies a change from the apps to its global file, then rereads the files.
     pub fn set_app_setting(&self, change: crate::app_settings::Change) -> Result<(), crate::app_settings::SetError> {
-        match change {
-            crate::app_settings::Change::State(crate::state::Setting::KeepAwake, value) => {
-                self.set_keep_awake(value.unwrap_or(true))?;
-            }
-            crate::app_settings::Change::Config { change, placement } => {
-                let mut snapshot = lock(&self.app_settings);
-                crate::app_settings::write(&self.config().paths, &change, placement)?;
-                crate::log!("config: {} changed from the apps", change.key);
-                self.reload_locked(&mut snapshot);
-            }
-        }
+        let mut snapshot = lock(&self.app_settings);
+        crate::app_settings::write(&self.config().paths, &change)?;
+        crate::log!(
+            "config: {} ({:?}) changed from the apps",
+            change.change.key,
+            change.scope
+        );
+        self.reload_locked(&mut snapshot);
         Ok(())
     }
 
@@ -708,7 +691,7 @@ impl Daemon {
         let (tx, rx) = mpsc::unbounded_channel::<Frame>();
         let writer = tokio::spawn(write_frames(write, rx));
 
-        let mode = self.config().attach_mode;
+        let mode = self.config().default_attach_mode;
         let mut current = match self.launch_in(&workspace, mode, SessionArg::New).await {
             Ok(handle) => handle,
             Err(e) => {

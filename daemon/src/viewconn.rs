@@ -107,14 +107,19 @@ fn handle(
     match request {
         ViewRequest::SessionsList => Ok(sessions_value(daemon)).into(),
         ViewRequest::DaemonState => Ok(json!({"state": daemon.state()})).into(),
-        ViewRequest::SettingsSet { key, value, local } => {
-            crate::log!("view client {watcher}: set {key}");
+        ViewRequest::SettingsSet {
+            scope,
+            key,
+            value,
+            local,
+        } => {
+            crate::log!("view client {watcher}: set {key} ({scope:?})");
             let daemon = daemon.clone();
-            // Writes files and the database: off the connection's loop.
+            // Writes files: off the connection's loop.
             Handled::Later(
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        crate::app_settings::validate(&key, &value, local)
+                        crate::app_settings::validate(scope, &key, &value, local)
                             .and_then(|change| daemon.set_app_setting(change))
                             .map(|()| json!({"state": daemon.state()}))
                             .map_err(|e| e.to_string())

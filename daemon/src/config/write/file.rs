@@ -6,32 +6,55 @@ use std::path::{Path, PathBuf};
 
 use super::edit::{Change, EditError, edited, item_from_json, write_changes};
 use crate::config::ConfigError;
+use crate::config::model::client::ClientFile;
+use crate::config::model::host::HostFile;
 use crate::config::model::level::LevelKind;
-use crate::config::model::paths::{FilePair, PITON_DIR, Paths, Sharing};
-use crate::config::read::parse::ConfigDoc;
+use crate::config::model::paths::{FilePair, PITON_DIR, Paths, Scope, Sharing};
+use crate::config::read::parse::{ConfigDoc, parse_global};
 
 pub use super::edit::Placement;
 
-/// The level a write goes to: the global tier, or a repository (its source checkout's `.piton/`; a worker's own copy
-/// is never read).
+/// The files a write goes to: a project's (the global tier's `config.toml`, or a repository's source checkout's
+/// `.piton/`; a worker's own copy is never read), or one of the global tier's own files.
 #[derive(Debug, Clone)]
 pub enum WriteLevel {
+    /// The global `config.toml`: the defaults every project inherits.
     Global,
-    Repository { source: PathBuf },
+    Repository {
+        source: PathBuf,
+    },
+    /// `config.host[.local].toml`.
+    Host,
+    /// `config.client.toml`.
+    Client,
 }
 
 impl WriteLevel {
-    fn kind(&self) -> LevelKind {
-        match self {
-            WriteLevel::Global => LevelKind::Global,
-            WriteLevel::Repository { .. } => LevelKind::Repository,
+    /// The global tier's files of `scope`.
+    pub fn global(scope: Scope) -> Self {
+        match scope {
+            Scope::Project => WriteLevel::Global,
+            Scope::Host => WriteLevel::Host,
+            Scope::Client => WriteLevel::Client,
         }
     }
 
     fn files(&self, paths: &Paths) -> FilePair {
         match self {
-            WriteLevel::Global => paths.global_files(),
-            WriteLevel::Repository { source } => FilePair::in_dir(&source.join(PITON_DIR)),
+            WriteLevel::Global => paths.global_files(Scope::Project),
+            WriteLevel::Repository { source } => FilePair::project(&source.join(PITON_DIR)),
+            WriteLevel::Host => paths.global_files(Scope::Host),
+            WriteLevel::Client => paths.global_files(Scope::Client),
+        }
+    }
+
+    /// A file's new text, checked as every reader will read it.
+    fn validate(&self, text: &str, path: &Path, sharing: Sharing) -> Result<(), ConfigError> {
+        match self {
+            WriteLevel::Global => ConfigDoc::parse(text, path, LevelKind::Global, sharing)?.validate(),
+            WriteLevel::Repository { .. } => ConfigDoc::parse(text, path, LevelKind::Repository, sharing)?.validate(),
+            WriteLevel::Host => parse_global::<HostFile>(text, path).map(drop),
+            WriteLevel::Client => parse_global::<ClientFile>(text, path).map(drop),
         }
     }
 }
@@ -52,14 +75,19 @@ pub struct ConfigFile {
 }
 
 impl ConfigFile {
-    pub fn path(&self, paths: &Paths) -> PathBuf {
-        self.level.files(paths).path(self.sharing).to_path_buf()
+    /// The file, or why its pair has none of this sharing (the client file has no local one).
+    pub fn path(&self, paths: &Paths) -> Result<PathBuf, EditError> {
+        let files = self.level.files(paths);
+        files
+            .path(self.sharing)
+            .map(Path::to_path_buf)
+            .ok_or(EditError::NoLocalFile { path: files.shared })
     }
 
     /// The file's text with `changes` applied, without writing it; `None` when nothing changes. For a caller that
     /// writes the file another way (a protected file, through the daemon).
     pub fn plan(&self, paths: &Paths, changes: &[KeyChange]) -> Result<Option<String>, EditError> {
-        let path = self.path(paths);
+        let path = self.path(paths)?;
         let items = Items::new(changes, &path)?;
         let current = match std::fs::read_to_string(&path) {
             Ok(text) => Some(text),
@@ -68,38 +96,32 @@ impl ConfigFile {
         };
         let content = edited(current.as_deref(), &items.changes(), &path)?;
         if let Some(text) = &content {
-            validate(text, &path, self.level.kind(), self.sharing)?;
+            self.level.validate(text, &path, self.sharing)?;
         }
         Ok(content)
     }
 
     /// Writes `changes`, keeping comments and layout.
     pub fn write(&self, paths: &Paths, changes: &[KeyChange]) -> Result<(), EditError> {
-        let path = self.path(paths);
+        let path = self.path(paths)?;
         let items = Items::new(changes, &path)?;
-        let (level, sharing) = (self.level.kind(), self.sharing);
+        let sharing = self.sharing;
         write_changes(&path, &items.changes(), &|text, path| {
-            validate(text, path, level, sharing)
+            self.level.validate(text, path, sharing)
         })
     }
 }
 
-/// Sets one key of the global pair in the file `placement` names, moving it out of the other one when it moves. Returns
+/// Sets one key of a global pair in the file `placement` names, moving it out of the other one when it moves. Returns
 /// the file it's now in.
-pub fn set_global(paths: &Paths, change: &KeyChange, placement: Placement) -> Result<Sharing, EditError> {
-    let path = paths.global_files().path(Sharing::Shared).to_path_buf();
-    let items = Items::new(std::slice::from_ref(change), &path)?;
+pub fn set_global(paths: &Paths, scope: Scope, change: &KeyChange, placement: Placement) -> Result<Sharing, EditError> {
+    let level = WriteLevel::global(scope);
+    let files = level.files(paths);
+    let items = Items::new(std::slice::from_ref(change), &files.shared)?;
     let (key, item) = &items.0[0];
-    paths
-        .global_files()
-        .set(key, item.clone(), placement, &|text, path, sharing| {
-            validate(text, path, LevelKind::Global, sharing)
-        })
-}
-
-/// A file's new text, checked as every reader will read it.
-fn validate(text: &str, path: &Path, level: LevelKind, sharing: Sharing) -> Result<(), ConfigError> {
-    ConfigDoc::parse(text, path, level, sharing)?.validate()
+    files.set(key, item.clone(), placement, &|text, path, sharing| {
+        level.validate(text, path, sharing)
+    })
 }
 
 /// Changes as key parts and TOML items.

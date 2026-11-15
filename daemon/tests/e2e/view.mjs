@@ -34,7 +34,7 @@ function setup(options = {}) {
             env: { login_shell: false, mise: false },
             stop: { grace_ms: 3000, term_grace_ms: 1000 },
         },
-        host: { attach_mode: "host", empty_grace_ms: 60000, ...(options.roots === false ? {} : { roots: [root] }) },
+        host: { default_attach_mode: "host", empty_grace_ms: 60000, ...(options.roots === false ? {} : { roots: [root] }) },
     });
     return { dir, root, ws, socket, config, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
 }
@@ -457,9 +457,9 @@ const tests = {
         const c = viewClient(ctx, "mac");
         await c.req("sessions.subscribe");
         const daemonLine = (pred) => c.wait((m) => m.type === "daemon" && pred(m.state));
-        // The test's state database has keep-awake off.
+        // The test's host file has keep-awake off.
         await daemonLine((s) => s.keep_awake === false && s.awake === false && s.sessions === 0);
-        const keepAwake = (on) => c.req("settings.set", { key: "keep_awake", value: on });
+        const keepAwake = (on) => c.req("settings.set", { scope: "host", key: "keep_awake", value: on });
         await keepAwake(true);
         await daemonLine((s) => s.keep_awake === true && s.awake === false);
         const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
@@ -477,8 +477,10 @@ const tests = {
         assert.match(version, /^\d+\.\d+\.\d+ \([0-9a-f]{10}(-dirty)?\)$/, "version with the git commit");
         assert.deepEqual(settings.find((s) => s.key === "keep_awake"), {
             key: "keep_awake",
+            scope: "host",
             value: true,
-            kind: { kind: "state" },
+            placement: "shared",
+            local_choice: true,
             value_type: { kind: "bool" },
             applies: { kind: "live" },
             editable: true,
@@ -492,69 +494,65 @@ const tests = {
             logging: { policy: { mode: "info" }, default: "info" },
         });
         c.close();
-        // The choice is state: it's in the database for the next start.
-        const saved = execFileSync("sqlite3", [join(ctx.dir, "piton.db"), "SELECT value FROM settings WHERE key = 'keep_awake'"]);
-        assert.equal(saved.toString().trim(), "true");
+        // The choice is configuration: it's in the host file for the next start.
+        assert.match(readFileSync(join(ctx.config, "config.host.toml"), "utf8"), /keep_awake = true/);
     },
 
     async "settings: changed from the view, kept in the files, hand edits applied live"(ctx) {
         const c = viewClient(ctx, "mac");
         await c.req("sessions.subscribe");
-        const setting = (state, key) => state.settings.find((s) => s.key === key);
+        const setting = (state, scope, key) => state.settings.find((s) => s.scope === scope && s.key === key);
         const daemonLine = (pred) => c.waitNew((m) => m.type === "daemon" && pred(m.state));
-        const settingsFile = join(ctx.config, "config.toml");
-        const localFile = join(ctx.config, "config.local.toml");
+        const hostFile = join(ctx.config, "config.host.toml");
+        const localFile = join(ctx.config, "config.host.local.toml");
+        const clientFile = join(ctx.config, "config.client.toml");
+        const set = (scope, key, value, local) => c.req("settings.set", { scope, key, value, ...(local === undefined ? {} : { local }) });
 
-        // A preference moves to this host's file and stays commented and ordered in the shared one.
-        writeFileSync(settingsFile, readFileSync(settingsFile, "utf8").replace("[host]", "# mine\n[host]"));
+        // A preference moves to this host's local file and the shared one keeps its comments and order.
+        writeFileSync(hostFile, "# mine\n" + readFileSync(hostFile, "utf8"));
         const roots = [ctx.root];
-        const set = await c.req("settings.set", { key: "host.favorites", value: [ctx.ws], local: true });
-        assert.deepEqual(setting(set.state, "host.favorites").kind, { kind: "config", placement: "local" });
-        assert.equal(readFileSync(localFile, "utf8"), `[host]\nfavorites = ${JSON.stringify([ctx.ws])}\n`);
-        assert.match(readFileSync(settingsFile, "utf8"), /\n# mine\n\[host\]/);
-        assert.deepEqual(setting(set.state, "host.roots").value, roots);
+        const moved = await set("host", "favorites", [ctx.ws], true);
+        assert.equal(setting(moved.state, "host", "favorites").placement, "local");
+        assert.equal(readFileSync(localFile, "utf8"), `favorites = ${JSON.stringify([ctx.ws])}\n`);
+        assert.match(readFileSync(hostFile, "utf8"), /^# mine\n/);
+        assert.deepEqual(setting(moved.state, "host", "roots").value, roots);
 
         // A key that needs a restart is written, and waits.
-        const port = await c.req("settings.set", { key: "tailnet.port", value: 9123 });
-        assert.deepEqual(setting(port.state, "tailnet.port").applies, { kind: "restart", pending: true });
+        const port = await set("host", "tailnet.port", 9123);
+        assert.deepEqual(setting(port.state, "host", "tailnet.port").applies, { kind: "restart", pending: true });
 
         // Refused before anything is written.
-        const bad = await c.reqRaw("settings.set", { key: "socket", value: "/elsewhere" });
-        assert.equal(bad.ok, false);
-        const wrong = await c.reqRaw("settings.set", { key: "host.roots", value: "not a list" });
-        assert.equal(wrong.ok, false);
-        const state = await c.reqRaw("settings.set", { key: "keep_awake", value: true, local: true });
-        assert.equal(state.ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "socket", value: "/elsewhere" })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "roots", value: "not a list" })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "roots", value: [] })).ok, false);
+        // The client file has no local one: a device keeps its own value in its app.
+        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "text_font", value: "x", local: true })).ok, false);
 
-        // A hand edit applies without a restart; a broken one keeps the last good values and says why.
-        writeFileSync(localFile, `[host]\nfavorites = []\n`);
-        await daemonLine((s) => setting(s, "host.favorites").value.length === 0);
-        writeFileSync(localFile, "[host\n");
-        await daemonLine((s) => s.settings_error !== null && setting(s, "host.roots").value.length === 1);
+        // A hand edit applies without a restart; a broken one keeps that file's last good values and says why.
+        writeFileSync(localFile, `favorites = []\n`);
+        await daemonLine((s) => setting(s, "host", "favorites").value.length === 0);
+        writeFileSync(localFile, "favorites = [\n");
+        await daemonLine((s) => s.settings_error !== null && setting(s, "host", "roots").value.length === 1);
         writeFileSync(localFile, "");
         await daemonLine((s) => s.settings_error === null);
 
-        // Two changes to one file at once: both kept.
-        await Promise.all([
-            c.req("settings.set", { key: "host.empty_grace_ms", value: 61000 }),
-            c.req("settings.set", { key: "client.text_font", value: "Iosevka" }),
-        ]);
-        const both = readFileSync(settingsFile, "utf8");
-        assert.match(both, /empty_grace_ms = 61000/);
-        assert.match(both, /text_font = "Iosevka"/);
+        // Changes to two files at once: both kept, each in its own file.
+        await Promise.all([set("host", "empty_grace_ms", 61000), set("client", "text_font", "Iosevka")]);
+        assert.match(readFileSync(hostFile, "utf8"), /empty_grace_ms = 61000/);
+        assert.match(readFileSync(clientFile, "utf8"), /text_font = "Iosevka"/);
 
         // A file linked into a dotfiles folder after the daemon started: edits there apply too, and app writes keep
         // the link.
         const dotfiles = join(ctx.dir, "dotfiles");
         mkdirSync(dotfiles);
-        const linked = join(dotfiles, "config.local.toml");
+        const linked = join(dotfiles, "config.host.local.toml");
         writeFileSync(linked, "");
         rmSync(localFile);
         symlinkSync(linked, localFile);
         await sleep(500);
-        writeFileSync(linked, `[host]\nfavorites = ["/from/dotfiles"]\n`);
-        await daemonLine((s) => setting(s, "host.favorites").value[0] === "/from/dotfiles");
-        await c.req("settings.set", { key: "host.favorites", value: ["/from/app"] });
+        writeFileSync(linked, `favorites = ["/from/dotfiles"]\n`);
+        await daemonLine((s) => setting(s, "host", "favorites").value[0] === "/from/dotfiles");
+        await set("host", "favorites", ["/from/app"]);
         assert.ok(lstatSync(localFile).isSymbolicLink());
         assert.match(readFileSync(linked, "utf8"), /\/from\/app/);
         c.close();

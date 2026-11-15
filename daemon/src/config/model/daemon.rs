@@ -1,29 +1,13 @@
-//! The global tier's tables as one value, and the daemon's options: those tables with the daemon's defaults applied.
+//! The daemon's options: the host file (`config.host[.local].toml`) with the daemon's defaults applied. Only the host
+//! file can stop the daemon from starting.
 
 use std::path::{Path, PathBuf};
 
+use super::host::HostFile;
 use super::paths::{Paths, expand_home};
-use super::tables::{ClientTable, HostTable, RunTable, SandboxTable, WorkersTable};
 use crate::wire::LaunchMode;
 
-/// The global tables the daemon runs with, merged (`config.local.toml` over `config.toml`), as written: absent keys
-/// stay absent. Only these three can stop the daemon from starting.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct DaemonTables {
-    pub run: RunTable,
-    pub sandbox: SandboxTable,
-    pub host: HostTable,
-}
-
-/// Every global table the apps' settings list shows: the daemon's, plus `[workers]` and `[client]`.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct GlobalConfig {
-    pub daemon: DaemonTables,
-    pub workers: WorkersTable,
-    pub client: ClientTable,
-}
-
-/// How the daemon runs: the global tables with defaults applied.
+/// How the daemon runs: the host file with defaults applied.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     /// Unix socket of the daemon. An override for tests and development: the Mac app always connects to the default
@@ -31,8 +15,10 @@ pub struct DaemonConfig {
     pub socket: PathBuf,
     /// Daemon log file (appended). Lines also go to stderr.
     pub log: Option<PathBuf>,
-    /// Mode for sessions launched by `piton attach`.
-    pub attach_mode: LaunchMode,
+    /// Mode for sessions launched by `piton attach` when none is given.
+    pub default_attach_mode: LaunchMode,
+    /// Hold the Mac awake while sessions are live.
+    pub keep_awake: bool,
     pub pi: PiConfig,
     pub sandbox: SandboxConfig,
     pub env: EnvConfig,
@@ -78,7 +64,7 @@ pub struct PiConfig {
 
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
-    /// nono executable. Grants come from each launch's `[sandbox]` chain (sandbox.rs).
+    /// The sandbox executable. Its policy comes from each launch's `[sandbox]` chain (sandbox.rs).
     pub command: Vec<String>,
 }
 
@@ -99,43 +85,44 @@ pub struct StopConfig {
 }
 
 impl DaemonConfig {
-    /// The defaults, overridden by the global tables.
-    pub fn new(tables: &DaemonTables, paths: Paths) -> Self {
+    /// The defaults, overridden by the host file.
+    pub fn new(host: &HostFile, paths: Paths) -> Self {
         let home = paths.home.clone();
-        let DaemonTables { run, sandbox, host } = tables.clone();
+        let host = host.clone();
         Self {
-            socket: run
+            socket: host
                 .socket
                 .map(|s| expand_home(&s, &home))
                 .unwrap_or_else(|| home.join(".local/state/piton/piton.sock")),
             log: Some(
-                run.log
+                host.log
                     .map(|l| expand_home(&l, &home))
                     .unwrap_or_else(|| crate::diagnostics::root().join("daemon/current.log")),
             ),
-            attach_mode: host.attach_mode.unwrap_or(LaunchMode::Sandbox),
+            default_attach_mode: host.default_attach_mode.unwrap_or(LaunchMode::Sandbox),
+            keep_awake: host.keep_awake.unwrap_or(true),
             pi: PiConfig {
-                command: run.pi.command.unwrap_or_else(|| vec!["pi".into()]),
-                args: run.pi.args.unwrap_or_default(),
+                command: host.pi.command.unwrap_or_else(|| vec!["pi".into()]),
+                args: host.pi.args.unwrap_or_default(),
             },
             sandbox: SandboxConfig {
-                command: sandbox.command.unwrap_or_else(|| vec!["nono".into()]),
+                command: host.sandbox.command.unwrap_or_else(|| vec!["nono".into()]),
             },
             env: EnvConfig {
-                login_shell: run.env.login_shell.unwrap_or(true),
-                mise: run.env.mise.unwrap_or(true),
+                login_shell: host.env.login_shell.unwrap_or(true),
+                mise: host.env.mise.unwrap_or(true),
             },
             stop: StopConfig {
-                grace_ms: run.stop.grace_ms.unwrap_or(15_000),
-                term_grace_ms: run.stop.term_grace_ms.unwrap_or(3_000),
+                grace_ms: host.stop.grace_ms.unwrap_or(15_000),
+                term_grace_ms: host.stop.term_grace_ms.unwrap_or(3_000),
             },
             empty_grace_ms: host.empty_grace_ms.unwrap_or(10_000),
             tailnet: TailnetConfig {
-                enabled: run.tailnet.enabled.unwrap_or(true),
-                port: run.tailnet.port.unwrap_or(7357),
-                cli: run.tailnet.cli.unwrap_or_else(|| "tailscale".into()),
-                heartbeat_ms: run.tailnet.heartbeat_ms.unwrap_or(10_000),
-                retry_ms: run.tailnet.retry_ms.unwrap_or(10_000),
+                enabled: host.tailnet.enabled.unwrap_or(true),
+                port: host.tailnet.port.unwrap_or(7357),
+                cli: host.tailnet.cli.unwrap_or_else(|| "tailscale".into()),
+                heartbeat_ms: host.tailnet.heartbeat_ms.unwrap_or(10_000),
+                retry_ms: host.tailnet.retry_ms.unwrap_or(10_000),
             },
             logging: LoggingConfig {
                 mode: host.logging.unwrap_or_default(),
@@ -145,9 +132,9 @@ impl DaemonConfig {
         }
     }
 
-    /// Only defaults: no global file sets anything.
+    /// Only defaults: no host file sets anything.
     pub fn defaults(paths: Paths) -> Self {
-        Self::new(&DaemonTables::default(), paths)
+        Self::new(&HostFile::default(), paths)
     }
 
     /// Only defaults, for this user's home and its default global tier.

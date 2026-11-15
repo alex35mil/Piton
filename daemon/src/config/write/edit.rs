@@ -32,6 +32,8 @@ pub enum EditError {
     Busy { path: PathBuf },
     #[error("{path}: {reason}")]
     Value { path: PathBuf, reason: String },
+    #[error("{path} has no local file; its values are shared by every client")]
+    NoLocalFile { path: PathBuf },
 }
 
 impl FilePair {
@@ -43,12 +45,21 @@ impl FilePair {
     /// Both files, parsed once, to tell where many keys are set.
     pub fn read(&self) -> Result<Placements, EditError> {
         let parse = |sharing| -> Result<Option<DocumentMut>, EditError> {
-            let path = self.path(sharing);
+            let Some(path) = self.path(sharing) else {
+                return Ok(None);
+            };
             read(path)?.map(|text| document(&text, path)).transpose()
         };
         Ok(Placements {
             shared: parse(Sharing::Shared)?,
             local: parse(Sharing::Local)?,
+        })
+    }
+
+    /// The file of `sharing`, or why this pair has none.
+    fn file(&self, sharing: Sharing) -> Result<&Path, EditError> {
+        self.path(sharing).ok_or_else(|| EditError::NoLocalFile {
+            path: self.shared.clone(),
         })
     }
 
@@ -69,13 +80,14 @@ impl FilePair {
         let other = sharing.other();
         // The destination first, so the key is never in neither file; if removing it from the other file then fails,
         // the destination goes back to what it was, so a failed move changes nothing.
-        let destination = self.path(sharing);
+        let destination = self.file(sharing)?;
         let previous = read(&link_target(destination)?)?;
         write_key(destination, key, value.as_ref(), &|text, path| {
             validate(text, path, sharing)
         })?;
         if matches!(placement, Placement::Move(_))
-            && let Err(e) = write_key(self.path(other), key, None, &|text, path| validate(text, path, other))
+            && let Some(other_path) = self.path(other)
+            && let Err(e) = write_key(other_path, key, None, &|text, path| validate(text, path, other))
         {
             let target = link_target(destination)?;
             match previous {
@@ -378,7 +390,11 @@ mod tests {
     use toml_edit::Value;
 
     fn pair(dir: &Path) -> FilePair {
-        FilePair::in_dir(dir)
+        FilePair::project(dir)
+    }
+
+    fn local(files: &FilePair) -> &Path {
+        files.local.as_deref().unwrap()
     }
 
     fn ok(_: &str, _: &Path, _: Sharing) -> Result<(), ConfigError> {
@@ -569,11 +585,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = pair(dir.path());
         std::fs::write(&files.shared, "[host]\nlogging = \"info\"\n").unwrap();
-        std::fs::write(&files.local, "[host]\nroots = [\"~/here\"]\n").unwrap();
+        std::fs::write(local(&files), "[host]\nroots = [\"~/here\"]\n").unwrap();
         // Removing the key from the local file is refused (validation of the local file's new text).
-        let local = files.local.clone();
+        let local_path = local(&files).to_path_buf();
         let refuse_local = move |_: &str, path: &Path, _: Sharing| {
-            if path == local {
+            if path == local_path {
                 Err(ConfigError::Invalid {
                     path: path.to_path_buf(),
                     reason: "no".into(),
@@ -597,7 +613,7 @@ mod tests {
             "[host]\nlogging = \"info\"\n"
         );
         assert_eq!(
-            std::fs::read_to_string(&files.local).unwrap(),
+            std::fs::read_to_string(local(&files)).unwrap(),
             "[host]\nroots = [\"~/here\"]\n"
         );
     }
@@ -614,7 +630,7 @@ mod tests {
             .set(&roots, Some(strings(&["~/here"])), Placement::Move(Sharing::Local), &ok)
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(&files.local).unwrap(),
+            std::fs::read_to_string(local(&files)).unwrap(),
             "[host]\nroots = [\"~/here\"]\n"
         );
         assert_eq!(
@@ -627,14 +643,14 @@ mod tests {
             .set(&roots, Some(strings(&["~/there"])), Placement::Current, &ok)
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(&files.local).unwrap(),
+            std::fs::read_to_string(local(&files)).unwrap(),
             "[host]\nroots = [\"~/there\"]\n"
         );
 
         files
             .set(&roots, Some(strings(&["~/all"])), Placement::Move(Sharing::Shared), &ok)
             .unwrap();
-        assert_eq!(std::fs::read_to_string(&files.local).unwrap(), "");
+        assert_eq!(std::fs::read_to_string(local(&files)).unwrap(), "");
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
             "[host]\nlogging = \"info\"\nroots = [\"~/all\"]\n"

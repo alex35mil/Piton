@@ -18,12 +18,14 @@ mod write;
 use std::path::PathBuf;
 
 pub use check::portability::warnings as portability_warnings;
-pub use model::daemon::{DaemonConfig, DaemonTables, GlobalConfig, TailnetConfig};
-pub use model::paths::{LOCAL_DIR, PITON_DIR, Paths, Sharing, expand_home, home};
+pub use model::daemon::{DaemonConfig, TailnetConfig};
+pub use model::paths::{LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home};
 pub use model::tables::{NetworkProfile, SandboxTable};
-pub use read::global::{daemon, daemon_lenient, daemon_tables, global};
-pub use read::resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_global, resolve_launch};
-pub use write::edit::{EditError, Placement, Placements};
+pub use read::global::{
+    GlobalConfig, GlobalResolved, daemon, daemon_lenient, global, global_candidates, host, resolve_global,
+};
+pub use read::resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_launch};
+pub use write::edit::{EditError, Placement};
 pub use write::file::{ConfigFile, KeyChange, WriteLevel, set_global};
 
 /// Why configuration can't be used.
@@ -39,7 +41,9 @@ pub enum ConfigError {
         key: String,
         global: PathBuf,
     },
-    #[error("{path}: `{key}` is personal; set it in config.local.toml")]
+    #[error("{path}: `{key}` belongs in a project's .piton/, not the global tier")]
+    ProjectOnly { path: PathBuf, key: String },
+    #[error("{path}: `{key}` belongs in config.local.toml, which isn't committed")]
     LocalOnly { path: PathBuf, key: String },
     #[error("{path}: `{key}` {reason}")]
     Conflict { path: PathBuf, key: String, reason: String },

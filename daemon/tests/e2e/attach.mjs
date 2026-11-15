@@ -30,7 +30,7 @@ function setup() {
             env: { login_shell: false, mise: false },
             stop: { grace_ms: 3000, term_grace_ms: 1000 },
         },
-        host: { attach_mode: "host", empty_grace_ms: 1500 },
+        host: { default_attach_mode: "host", empty_grace_ms: 1500 },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" };
     return { dir, ws, agent, socket, config, env };

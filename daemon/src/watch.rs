@@ -81,8 +81,7 @@ impl Watching {
 /// link targets (a dotfiles repository).
 fn watched(paths: &Paths) -> Vec<PathBuf> {
     let mut dirs = vec![paths.global.clone()];
-    let pair = paths.global_files();
-    for path in [pair.shared, pair.local] {
+    for path in crate::config::global_candidates(paths) {
         if path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink())
             && let Ok(target) = std::fs::canonicalize(&path)
             && let Some(dir) = target.parent()

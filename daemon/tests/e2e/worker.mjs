@@ -59,11 +59,12 @@ function setup() {
             log,
             tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
-            sandbox: { command: [join(bin, "nono")], base: "mise-dev", allow: ["/global-grant"] },
+            sandbox: { command: [join(bin, "nono")] },
             env: { login_shell: false, mise: false },
             stop: { grace_ms: 3000, term_grace_ms: 1000 },
         },
-        host: { attach_mode: "sandbox", empty_grace_ms: 60000 },
+        host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
+        project: { sandbox: { base: "mise-dev", allow: ["/global-grant"] } },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_TEST_NONO_ARGS: join(dir, "nono-args") };
     return { dir, source, log, env };

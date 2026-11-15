@@ -10,8 +10,8 @@ use crate::config::ConfigError;
 use crate::config::model::level::{Chain, Level, LevelKind};
 use crate::config::model::paths::{FilePair, Paths, Sharing};
 use crate::config::model::tables::{
-    BranchesTable, ClientTable, DevelopmentTable, HostTable, Merge, PermissionSettings, PermissionsTable, RunTable,
-    SandboxTable, Table, TableValue, WebSearchTable, WorkersTable,
+    BranchesTable, Integration, Merge, PermissionSettings, PermissionsTable, SandboxTable, Table, TableValue,
+    WebSearchTable, WorkersTable,
 };
 use crate::project::Workspace;
 
@@ -28,8 +28,8 @@ pub enum Runtime {
 /// `{"error": {"message": ...}}`.
 pub type Section<T> = Result<T, ConfigError>;
 
-/// Everything resolved for one workspace: one part per table of `config.toml` (the daemon's top-level run keys are
-/// one part, `run`), the MCP servers, policies, and instruction folders.
+/// Everything resolved for one workspace: one part per table of `config.toml`, the MCP servers, policies, and
+/// instruction folders. The global tier's host and client files aren't part of a workspace (see `read::global`).
 #[derive(Debug, Serialize)]
 pub struct Resolved {
     pub workspace: PathBuf,
@@ -42,17 +42,9 @@ pub struct Resolved {
     pub home: PathBuf,
     pub runtime: Runtime,
     #[serde(serialize_with = "section")]
-    pub run: Section<RunTable>,
-    #[serde(serialize_with = "section")]
     pub sandbox: Section<SandboxTable>,
     #[serde(serialize_with = "section")]
     pub workers: Section<WorkersTable>,
-    #[serde(serialize_with = "section")]
-    pub host: Section<HostTable>,
-    #[serde(serialize_with = "section")]
-    pub client: Section<ClientTable>,
-    #[serde(serialize_with = "section")]
-    pub development: Section<DevelopmentTable>,
     #[serde(serialize_with = "section")]
     pub permissions: Section<ResolvedPermissions>,
     #[serde(serialize_with = "section")]
@@ -89,12 +81,8 @@ impl Resolved {
     /// Every part that can't be used, by its name in the output.
     pub fn errors(&self) -> Vec<(&'static str, &ConfigError)> {
         let Resolved {
-            run,
             sandbox,
             workers,
-            host,
-            client,
-            development,
             permissions,
             branches,
             tracker,
@@ -114,12 +102,8 @@ impl Resolved {
             watch: _,
         } = self;
         [
-            ("run", run.as_ref().err()),
             ("sandbox", sandbox.as_ref().err()),
             ("workers", workers.as_ref().err()),
-            ("host", host.as_ref().err()),
-            ("client", client.as_ref().err()),
-            ("development", development.as_ref().err()),
             ("permissions", permissions.as_ref().err()),
             ("branches", branches.as_ref().err()),
             ("tracker", tracker.as_ref().err()),
@@ -136,7 +120,10 @@ impl Resolved {
     }
 }
 
-fn section<T: Serialize, S: serde::Serializer>(value: &Section<T>, serializer: S) -> Result<S::Ok, S::Error> {
+pub(super) fn section<T: Serialize, S: serde::Serializer>(
+    value: &Section<T>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeMap;
     #[derive(Serialize)]
     struct Error {
@@ -254,9 +241,9 @@ impl Docs {
     fn read(levels: &[Level], files: &mut Vec<FileOrigin>) -> Self {
         let mut docs = Vec::new();
         for level in levels {
-            let pair = FilePair::in_dir(&level.dir);
-            for sharing in [Sharing::Shared, Sharing::Local] {
-                let path = pair.path(sharing).to_path_buf();
+            let pair = FilePair::project(&level.dir);
+            for (sharing, path) in pair.paths() {
+                let path = path.to_path_buf();
                 match read_config(&path, level.kind, sharing) {
                     Ok(None) => {}
                     Ok(Some(doc)) => {
@@ -271,6 +258,7 @@ impl Docs {
                             ConfigError::Read { source, .. } => FailedRead::Io(source.kind(), source.to_string()),
                             ConfigError::Invalid { reason, .. } => FailedRead::Invalid(reason),
                             other @ (ConfigError::GlobalOnly { .. }
+                            | ConfigError::ProjectOnly { .. }
                             | ConfigError::LocalOnly { .. }
                             | ConfigError::Conflict { .. }) => FailedRead::Invalid(other.to_string()),
                         };
@@ -305,7 +293,7 @@ impl Docs {
 
     /// The nearest file's table, whole, as JSON.
     fn nearest(&self, table: Table) -> Section<Option<FileValue<serde_json::Value>>> {
-        let Some((value, doc)) = self.parts::<toml::Table>(table)?.pop() else {
+        let Some((Integration(value), doc)) = self.parts::<Integration>(table)?.pop() else {
             return Ok(None);
         };
         let value = serde_json::to_value(value).map_err(|e| ConfigError::Invalid {
@@ -326,8 +314,8 @@ pub fn resolve(workspace: &Workspace, paths: &Paths, runtime: Runtime) -> Result
     read_chain(&chain, &workspace.path, &paths.home, runtime)
 }
 
-/// Only the global tier: the daemon's own options and the apps' settings, which never depend on a project.
-pub fn resolve_global(paths: &Paths) -> Result<Resolved, ConfigError> {
+/// The global tier's `config.toml` alone: the defaults every project inherits, without any project's files.
+pub fn resolve_global_project(paths: &Paths) -> Result<Resolved, ConfigError> {
     let chain = Chain::global_only(&paths.global);
     read_chain(&chain, &paths.global, &paths.home, Runtime::Host)
 }
@@ -407,8 +395,8 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
     }
     // Every candidate, whether or not its part can be read: fixing a broken file changes the result.
     for level in &piton {
-        let pair = FilePair::in_dir(&level.dir);
-        watch.extend([pair.shared, pair.local]);
+        let pair = FilePair::project(&level.dir);
+        watch.extend(pair.paths().map(|(_, path)| path.to_path_buf()));
         for name in ["mcp.json", "mcp.local.json", "policies.md"] {
             watch.push(level.dir.join(name));
         }
@@ -441,13 +429,8 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
         global: chain.global.clone(),
         home: home.to_path_buf(),
         runtime,
-        run: docs.merged(Table::Run),
         sandbox: docs.merged(Table::Sandbox),
         workers: docs.merged(Table::Workers),
-        // Global-only parts: a nearer level that sets one is refused by the part's scope check.
-        host: docs.merged(Table::Host),
-        client: docs.merged(Table::Client),
-        development: docs.merged(Table::Development),
         permissions: read_permissions(&docs, runtime),
         branches: docs.merged(Table::Branches),
         // Each table whole: a nearer level's replaces a farther one's.
@@ -643,18 +626,9 @@ default_mode = "allow"
 ask = ["bash(git push *)"]
 [permissions.host]
 default_mode = "ask"
-
-[development]
-session_analysis = false
-
-[host]
-roots = ["~/Projects"]
 "#,
         );
-        write(
-            &t.global.join("config.local.toml"),
-            "[host]\nroots = [\"~/Projects/personal\"]\n[branches]\nusername = \"me\"\n",
-        );
+        write(&t.global.join("config.local.toml"), "[branches]\nusername = \"me\"\n");
         write(
             &t.global.join("mcp.json"),
             r#"{"mcpServers":{"github":{"url":"https://a"},"docs":{"command":"d"}}}"#,
@@ -680,13 +654,11 @@ format = "username/identifier-title"
 [tracker]
 provider = "linear"
 mcp_server = "linear"
-[web_search]
-api_key = "k"
 "#,
         );
         write(
             &repo.join(".piton/config.local.toml"),
-            "[sandbox]\nallow = [\"/local\"]\n",
+            "[sandbox]\nallow = [\"/local\"]\n[web_search]\napi_key = \"k\"\n",
         );
         write(
             &repo.join(".piton/mcp.local.json"),
@@ -731,11 +703,6 @@ api_key = "k"
         let branches = r.branches.as_ref().unwrap();
         assert_eq!(branches.format, Some(BranchFormat::UsernameIdentifierTitle));
         assert_eq!(branches.username.as_deref(), Some("me"));
-        assert_eq!(r.development.as_ref().unwrap().session_analysis, Some(false));
-        assert_eq!(
-            r.host.as_ref().unwrap().roots.as_deref(),
-            Some(&["~/Projects/personal".to_string()][..])
-        );
         assert_eq!(r.web_search.as_ref().unwrap().api_key.as_deref(), Some("k"));
 
         // [tracker] is replaced whole by the nearer level; [forge] comes from the parent.
@@ -777,10 +744,15 @@ api_key = "k"
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.sandbox, Err(ConfigError::GlobalOnly { .. })));
         assert!(r.permissions.is_ok());
-        // Global-only tables in a repository fail their part, even though only the global tier's are used.
-        write(&repo.join(".piton/config.toml"), "[host]\nroots = []\n");
+        // Integrations are project only: a global [tracker] fails its part.
+        write(&t.global.join("config.toml"), "[tracker]\nprovider = \"github\"\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.host, Err(ConfigError::GlobalOnly { .. })));
+        assert!(matches!(r.tracker, Err(ConfigError::ProjectOnly { .. })));
+        std::fs::remove_file(t.global.join("config.toml")).unwrap();
+        // A secret in a shared file.
+        write(&repo.join(".piton/config.toml"), "[web_search]\napi_key = \"k\"\n");
+        let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
+        assert!(matches!(r.web_search, Err(ConfigError::LocalOnly { .. })));
         // A username in a shared file.
         write(&repo.join(".piton/config.toml"), "[branches]\nusername = \"me\"\n");
         let r = run(&t, &source(repo), Runtime::Host).unwrap();
@@ -819,13 +791,13 @@ api_key = "k"
         assert_eq!(r.permissions.as_ref().unwrap().merged.allow, ["read"]);
         assert!(r.tracker.is_ok() && r.mcp.is_ok() && r.policies.is_ok() && r.instructions.is_ok());
 
-        // A typo in the global [tailnet] leaves [sandbox] readable, and launches with it.
+        // A typo in the global [branches] leaves [sandbox] readable, and launches with it.
         write(
             &t.global.join("config.toml"),
-            "[tailnet]\nprot = 1\n[sandbox]\nread = [\"/g\"]\n",
+            "[branches]\nformt = 1\n[sandbox]\nread = [\"/g\"]\n",
         );
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.run, Err(ConfigError::Invalid { .. })));
+        assert!(matches!(r.branches, Err(ConfigError::Invalid { .. })));
         assert_eq!(r.sandbox.as_ref().unwrap().read, ["/g"]);
         assert_eq!(
             resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox.read,

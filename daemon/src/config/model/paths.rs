@@ -30,9 +30,44 @@ impl Paths {
         }
     }
 
-    /// The global tier's file pair.
-    pub fn global_files(&self) -> FilePair {
-        FilePair::in_dir(&self.global)
+    /// The global tier's pair of `scope`.
+    pub fn global_files(&self, scope: Scope) -> FilePair {
+        FilePair::of(&self.global, scope)
+    }
+}
+
+/// Which configuration a file holds: a project's (`config.toml` at every level of the chain), or one of the global
+/// tier's own files. The scope decides the file names and who reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// `config.toml` / `config.local.toml` at every level: a project's settings, the global one its defaults.
+    Project,
+    /// `config.host.toml` / `config.host.local.toml`, global only: how the daemon runs and this host's preferences.
+    Host,
+    /// `config.client.toml`, global only, no local file: the apps' preferences, served to every client.
+    Client,
+}
+
+impl Scope {
+    pub const GLOBAL: [Scope; 3] = [Scope::Project, Scope::Host, Scope::Client];
+
+    /// The shared file: every scope has one.
+    pub fn shared_name(self) -> &'static str {
+        match self {
+            Scope::Project => "config.toml",
+            Scope::Host => "config.host.toml",
+            Scope::Client => "config.client.toml",
+        }
+    }
+
+    /// The local file, when the scope has one (the client file doesn't: per-device values live in each app).
+    pub fn local_name(self) -> Option<&'static str> {
+        match self {
+            Scope::Project => Some("config.local.toml"),
+            Scope::Host => Some("config.host.local.toml"),
+            Scope::Client => None,
+        }
     }
 }
 
@@ -89,13 +124,6 @@ pub enum Sharing {
 }
 
 impl Sharing {
-    pub fn file_name(self) -> &'static str {
-        match self {
-            Sharing::Shared => "config.toml",
-            Sharing::Local => "config.local.toml",
-        }
-    }
-
     pub fn other(self) -> Sharing {
         match self {
             Sharing::Shared => Sharing::Local,
@@ -104,26 +132,41 @@ impl Sharing {
     }
 }
 
-/// A level's `config.toml` and `config.local.toml`, existing or not.
+/// A level's files of one scope, existing or not: the shared one, and the local one when the scope has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilePair {
+    pub scope: Scope,
     pub shared: PathBuf,
-    pub local: PathBuf,
+    pub local: Option<PathBuf>,
 }
 
 impl FilePair {
-    pub fn in_dir(dir: &Path) -> Self {
+    /// `dir`'s files of `scope`.
+    pub fn of(dir: &Path, scope: Scope) -> Self {
         Self {
-            shared: dir.join(Sharing::Shared.file_name()),
-            local: dir.join(Sharing::Local.file_name()),
+            scope,
+            shared: dir.join(scope.shared_name()),
+            local: scope.local_name().map(|name| dir.join(name)),
         }
     }
 
-    pub fn path(&self, sharing: Sharing) -> &Path {
+    /// A project level's `config.toml` and `config.local.toml`.
+    pub fn project(dir: &Path) -> Self {
+        Self::of(dir, Scope::Project)
+    }
+
+    /// The file of `sharing`, or `None` when the scope has no such file.
+    pub fn path(&self, sharing: Sharing) -> Option<&Path> {
         match sharing {
-            Sharing::Shared => &self.shared,
-            Sharing::Local => &self.local,
+            Sharing::Shared => Some(&self.shared),
+            Sharing::Local => self.local.as_deref(),
         }
+    }
+
+    /// Every file of the pair, in merge order: the shared file, then the local one.
+    pub fn paths(&self) -> impl Iterator<Item = (Sharing, &Path)> {
+        std::iter::once((Sharing::Shared, self.shared.as_path()))
+            .chain(self.local.as_deref().map(|local| (Sharing::Local, local)))
     }
 }
 
