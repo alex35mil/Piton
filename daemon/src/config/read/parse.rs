@@ -99,35 +99,35 @@ impl ConfigDoc {
 
     /// Refuses `key` when this file may not hold it.
     fn check_rule(&self, key: &str, rule: Rule) -> Result<(), ConfigError> {
+        use LevelKind::{Global, Parent, Repository};
         let path = self.origin.path.clone();
-        let global = self.origin.level == LevelKind::Global;
-        match (rule.levels, global) {
-            (Levels::Global, false) => {
+        match (rule.levels, self.origin.level) {
+            (Levels::Global, Parent | Repository) => {
                 return Err(ConfigError::GlobalOnly {
                     path,
                     key: key.to_string(),
                     global: global_tier(),
                 });
             }
-            (Levels::Project, true) => {
+            (Levels::Project, Global) => {
                 return Err(ConfigError::ProjectOnly {
                     path,
                     key: key.to_string(),
                 });
             }
-            (Levels::Any, _) | (Levels::Global, true) | (Levels::Project, false) => {}
+            (Levels::Any, Global | Parent | Repository)
+            | (Levels::Global, Global)
+            | (Levels::Project, Parent | Repository) => {}
         }
-        let local_only = match rule.files {
-            Files::Either => false,
-            Files::Local => true,
-            Files::LocalInProjects => !global,
-        };
-        match (local_only, self.sharing) {
-            (true, Sharing::Shared) => Err(ConfigError::LocalOnly {
+        match (rule.files, self.origin.level, self.sharing) {
+            (Files::Local, Global | Parent | Repository, Sharing::Shared)
+            | (Files::LocalInProjects, Parent | Repository, Sharing::Shared) => Err(ConfigError::LocalOnly {
                 path,
                 key: key.to_string(),
             }),
-            (true, Sharing::Local) | (false, Sharing::Shared | Sharing::Local) => Ok(()),
+            (Files::Either, Global | Parent | Repository, Sharing::Shared | Sharing::Local)
+            | (Files::Local | Files::LocalInProjects, Global | Parent | Repository, Sharing::Local)
+            | (Files::LocalInProjects, Global, Sharing::Shared) => Ok(()),
         }
     }
 

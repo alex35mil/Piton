@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The Logging settings section. On the phone it's local and works while disconnected. On the Mac it switches the
 /// daemon's host level (Mac app, daemon, phone-log collector) until it expires or the daemon restarts; the default is
-/// `[host] logging` in the host's config.toml (changeable in Settings > Host).
+/// `logging` in the host's config.host.toml (changeable in Settings > Host).
 public struct LoggingSettings: View {
     public enum Scope {
         /// This device's own capture (the phone).

@@ -22,7 +22,8 @@ pub use model::daemon::{DaemonConfig, TailnetConfig};
 pub use model::paths::{LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home};
 pub use model::tables::{NetworkProfile, SandboxTable};
 pub use read::global::{
-    GlobalConfig, GlobalResolved, daemon, daemon_lenient, global, global_candidates, host, resolve_global,
+    GlobalConfig, GlobalResolved, client, daemon, daemon_lenient, global, global_candidates, host, own_files,
+    resolve_global,
 };
 pub use read::resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_launch};
 pub use write::edit::{EditError, Placement};

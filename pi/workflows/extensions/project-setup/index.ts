@@ -340,7 +340,7 @@ export function inspectProjectSetup(cwd: string, projectTrusted: boolean) {
         files: PROJECT_SETUP_FILES.map((file) => snapshotFile(root, file)),
         // Where parent folders' and the global tier's configuration comes from, or why it can't be read.
         configuration,
-        // Where a global username can come from (`[branches] username` in the global config.local.toml).
+        // Where a global username can come from (`[branches] username` in the global config.toml or config.local.toml).
         globalConfig: Object.fromEntries(
             Object.entries(globalConfigPaths(cwd)).map(([name, file]) => [name, snapshotAbsoluteFile(root, file)]),
         ),

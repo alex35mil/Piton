@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::parse::{GlobalFile, read_global};
+use super::parse::{FileOrigin, GlobalFile, read_global};
 use super::resolve::{Resolved, Section, resolve_global_project, section};
 use crate::config::ConfigError;
 use crate::config::model::client::ClientFile;
 use crate::config::model::daemon::DaemonConfig;
 use crate::config::model::host::{DevelopmentTable, HostFile};
+use crate::config::model::level::LevelKind;
 use crate::config::model::paths::{Paths, Scope};
 
 /// A global file read as a whole, with its own file and its local one merged (the local one wins per key).
@@ -74,6 +75,25 @@ pub fn global(paths: &Paths) -> GlobalConfig {
         client: client(paths),
         project: resolve_global_project(paths),
     }
+}
+
+/// The global tier's own files that exist (host and client), for `piton config check` to list and check for
+/// portability. The global `config.toml` is part of every workspace's chain, so it's listed there.
+pub fn own_files(paths: &Paths) -> Vec<FileOrigin> {
+    [Scope::Host, Scope::Client]
+        .into_iter()
+        .flat_map(|scope| {
+            paths
+                .global_files(scope)
+                .paths()
+                .filter(|(_, path)| path.is_file())
+                .map(|(_, path)| FileOrigin {
+                    path: path.to_path_buf(),
+                    level: LevelKind::Global,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Every path whose change can change the global files: the candidate files of each scope (the folders are watched).
@@ -179,6 +199,34 @@ mod tests {
         assert!(all.project.unwrap().workers.is_err());
         std::fs::write(global.join("config.host.toml"), "[tailnet]\nprot = 1\n").unwrap();
         assert!(daemon(Some(&global)).is_err());
+    }
+
+    /// `piton config check` lists the host and client files and checks them for portability like the chain's.
+    #[test]
+    fn own_files_are_listed_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let home = root.join("users/me");
+        let global = home.join(".config/piton");
+        std::fs::create_dir_all(&global).unwrap();
+        let host_file = global.join("config.host.toml");
+        let other = root.join("users/other/Projects");
+        std::fs::write(&host_file, format!("roots = [\"{}\"]\n", other.display())).unwrap();
+        std::fs::write(global.join("config.client.toml"), "text_font = \"Inter\"\n").unwrap();
+        let paths = Paths {
+            home: home.clone(),
+            global: global.clone(),
+        };
+        let files = own_files(&paths);
+        assert_eq!(
+            files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            [host_file.clone(), global.join("config.client.toml")]
+        );
+        let warnings = crate::config::portability_warnings(&files, &home);
+        assert!(
+            matches!(&warnings[..], [crate::config::check::portability::Warning::ForeignHome { path, key, .. }] if *path == host_file && key == "roots"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

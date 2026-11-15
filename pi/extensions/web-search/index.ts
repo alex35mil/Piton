@@ -6,8 +6,9 @@
  *
  * Auth: BRAVE_SEARCH_API_KEY from env var or settings.
  *
- * Settings: `[web_search]` of config.toml in piton's configuration chain (the global folder, parent folders, the
- * repository's .piton/), resolved by `piton config resolve`; the nearest api_key wins.
+ * Settings: `[web_search]` of config.local.toml in piton's configuration chain (the global folder, parent folders, the
+ * repository's .piton/), resolved by `piton config resolve`; the nearest api_key wins. It's a secret: a config.toml that
+ * sets it is refused.
  *
  * Schema:
  *   [web_search]
@@ -67,7 +68,7 @@ export default async function (pi: ExtensionAPI) {
                     content: [
                         {
                             type: "text" as const,
-                            text: "Web search is not configured. Set BRAVE_SEARCH_API_KEY as an environment variable, or set api_key in [web_search] of piton's config.toml.",
+                            text: "Web search is not configured. Set BRAVE_SEARCH_API_KEY as an environment variable, or set api_key in [web_search] of piton's config.local.toml.",
                         },
                     ],
                 }

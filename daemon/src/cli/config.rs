@@ -124,28 +124,34 @@ pub fn run(action: &ConfigAction) -> ExitCode {
         ConfigAction::Check { workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
             Ok(resolved) => {
                 // The workspace's chain, and the global tier's own files (host and client).
-                let global = crate::config::global(&Paths::current());
+                let paths = Paths::current();
                 let mut errors: Vec<(String, String)> = resolved
                     .errors()
                     .into_iter()
                     .map(|(part, e)| (part.to_string(), e.to_string()))
                     .collect();
-                errors.extend(
-                    global
-                        .errors()
-                        .into_iter()
-                        .filter(|(part, _)| part == "host" || part == "client"),
-                );
+                if let Err(e) = crate::config::host(&paths) {
+                    errors.push(("host".into(), e.to_string()));
+                }
+                if let Err(e) = crate::config::client(&paths) {
+                    errors.push(("client".into(), e.to_string()));
+                }
                 for (part, error) in &errors {
                     eprintln!("piton: {part}: {error}");
                 }
+                let files: Vec<_> = resolved
+                    .files
+                    .iter()
+                    .cloned()
+                    .chain(crate::config::own_files(&paths))
+                    .collect();
                 println!("workspace: {}", resolved.workspace.display());
                 println!("global tier: {}", resolved.global.display());
-                for file in &resolved.files {
+                for file in &files {
                     println!("  {:?}  {}", file.level, file.path.display());
                 }
                 // Portability: warnings only, the files still work here.
-                for warning in crate::config::portability_warnings(&resolved.files, &resolved.home) {
+                for warning in crate::config::portability_warnings(&files, &resolved.home) {
                     eprintln!("piton: warning: {warning}");
                 }
                 if errors.is_empty() {

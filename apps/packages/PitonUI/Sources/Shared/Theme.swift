@@ -58,7 +58,7 @@ extension SessionStatus {
 // MARK: Typography
 
 /// A font the user chose: the system's, or an installed (or, on the phone, imported) family. A client preference:
-/// shared through the host (`[client]` in its config.toml) or local to this device.
+/// shared through the host (its config.client.toml) or local to this device.
 public enum FontChoice: Hashable, Sendable, RawRepresentable {
     case system
     case family(String)

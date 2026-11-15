@@ -48,7 +48,7 @@ export function loadProjectConfig(cwd: string): ProjectConfig {
     const username = branches.username
     if (!username) {
         throw new Error(
-            `invalid branch configuration: branches.username is required in ${repositoryConfigFile("local")} or the global ${configFileName("local")}`,
+            `invalid branch configuration: branches.username is required in ${repositoryConfigFile("local")} or the global ${configFileName("shared")} or ${configFileName("local")}`,
         )
     }
     return { branches: { format, username } }

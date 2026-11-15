@@ -110,7 +110,7 @@ pub struct Placements {
 }
 
 impl Placements {
-    /// The file that sets a dotted `key` (`host.roots`), if either does; the local file wins.
+    /// The file that sets a dotted `key` (`tailnet.port`), if either does; the local file wins.
     pub fn of(&self, key: &str) -> Option<Sharing> {
         self.placement(&key.split('.').collect::<Vec<_>>())
     }

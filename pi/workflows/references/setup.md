@@ -64,7 +64,7 @@ format = "identifier-title"
 
 ### Username
 
-`username/identifier-title` needs a username in a `config.local.toml`: the repository's `.piton/config.local.toml`, or the global one.
+`username/identifier-title` needs a username: in the repository's `.piton/config.local.toml`, or in the global `config.toml` or `config.local.toml`.
 
 ```toml
 [branches]
@@ -73,7 +73,7 @@ username = "alex"
 
 - The repository's value overrides the global one.
 - A username is non-empty and can't contain `/`, carriage return, or newline.
-- Only `config.local.toml` may hold it; a shared `config.toml` is refused. Never infer it from Git or provider identity.
+- A repository's committed `config.toml` can't hold it; that file is refused. Never infer it from Git or provider identity.
 
 ## Integration configuration
 
