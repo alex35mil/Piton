@@ -126,9 +126,9 @@ color = "#4FB3BF"
 description = "Pi package plumbing: dependencies, Pi upgrades, shared extension lib, test harness, commit skill."
 
 [tracker.labels.groups.area.values.daemon]
-name = "Area: Daemon"
+name = "Area: CLI"
 color = "#DEA584"
-description = "The Rust daemon and CLI: pi RPC processes, worker clones, attach, and app serving."
+description = "The piton binary (Rust): daemon and CLI: pi RPC processes, worker clones, attach, and app serving."
 
 [tracker.labels.groups.area.values.apps-kit]
 name = "Area: Apps/Kit"
