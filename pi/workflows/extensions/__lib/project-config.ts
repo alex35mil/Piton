@@ -102,7 +102,7 @@ function currentInstallation(): Installation {
 
 /**
  * Whether a finished workflow ends with session analysis: only in a development install, where it's on unless the
- * global `[development] session_analysis = false` turns it off.
+ * host file's `[development] session_analysis = false` turns it off.
  */
 export function loadSessionAnalysis(): SessionAnalysis {
     const install = currentInstallation()

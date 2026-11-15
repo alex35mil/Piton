@@ -4,7 +4,7 @@ Controls tool execution with configurable allow/deny/ask rules. Prompts the user
 
 ## Configuration
 
-Settings: `[permissions]` and `[permissions.<runtime>]` of `config.toml` (then `config.local.toml`) in every level of piton's `.piton/` chain, farthest first: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, then `<repo-root>/.piton/`. `piton config resolve` reads them; `keybindings` is accepted only in the global folder.
+Settings: `[permissions]` and `[permissions.<runtime>]` of `config.toml` (then `config.local.toml`) in every level of piton's `.piton/` chain, farthest first: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, then `<repo-root>/.piton/`. `piton config resolve` reads them.
 
 ### Runtime
 
@@ -24,9 +24,6 @@ default_mode = "ask"
 allow = ["read", "bash(git *)"]
 deny = ["bash(rm -rf *)"]
 ask = ["write", "edit"]
-
-[permissions.keybindings]   # global folder only
-auto_accept_edits = "ctrl+shift+a"
 
 [permissions.sandbox]       # only in a sandboxed worker; [permissions.host] for the host
 default_mode = "allow"
@@ -116,7 +113,7 @@ Setup's `configure_permissions` merges approved MCP `allow` and `ask` lists into
 
 ### Auto-accept toggle
 
-`/permissions-toggle-auto-accept` (and the `auto_accept_edits` keybinding) switches `edit` and `write` away from what the settings resolve to, for the current session. Toggling again returns to the settings' default.
+`/permissions-toggle-auto-accept` switches `edit` and `write` away from what the settings resolve to, for the current session. Toggling again returns to the settings' default.
 
 - **Review default** (the usual host setup, where edits ask): the toggle turns auto-accept on.
 - **Auto-accept default** (both `edit` and `write` allowed, for example a sandbox's `[permissions.sandbox]` with `allow = ["edit", "write"]`): the toggle turns diff review on.

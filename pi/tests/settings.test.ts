@@ -190,8 +190,12 @@ describe("shared settings contract", () => {
         const fetch = globalThis.fetch
         const apiKey = process.env.BRAVE_SEARCH_API_KEY
         try {
-            writeConfig("global", { "web_search.api_key": "global-fixture" })
-            writeConfig(h.repositoryRoot, { "web_search.api_key": "project-fixture" })
+            // A secret: only ever in a config.local.toml.
+            writeConfig("global", { "web_search.api_key": "global-fixture" }, true)
+            assert.throws(
+                () => writeConfig(h.repositoryRoot, { "web_search.api_key": "shared" }),
+                /config\.local\.toml/,
+            )
             writeConfig(h.repositoryRoot, { "web_search.api_key": "local-fixture" }, true)
             delete process.env.BRAVE_SEARCH_API_KEY
             process.chdir(h.nested)

@@ -16,7 +16,7 @@ export BRAVE_SEARCH_API_KEY="..."
 
 ### Settings
 
-`[web_search]` of `config.toml` (or `config.local.toml`, for a key you keep out of Git) in any level of piton's `.piton/` chain: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/`, and `<repo-root>/.piton/`. The nearest value wins; `piton config resolve` does the merging.
+`[web_search]` of `config.local.toml` (the key is a secret, so a `config.toml` that sets it is refused) in any level of piton's `.piton/` chain: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/`, and `<repo-root>/.piton/`. The nearest value wins; `piton config resolve` does the merging.
 
 ```toml
 [web_search]

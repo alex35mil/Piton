@@ -81,7 +81,7 @@ Results reflect persistent settings only; session overrides and skill-derived al
 **What the writer does:**
 
 - It rechecks current settings and live metadata, skips covered, blocked, or unavailable allows and exact ask duplicates, and merges only accepted additions.
-- It reports the actual `added`, `skipped`, and `inspection` results, and keeps unrelated keys, the default mode, keybindings, deny rules, and existing lists.
+- It reports the actual `added`, `skipped`, and `inspection` results, and keeps unrelated keys, the default mode, deny rules, and existing lists.
 - Invalid settings or rules fail before any change. A no-op leaves files and exclusions untouched.
 - Read-back validates the result. A skipped rule is not a new grant.
 

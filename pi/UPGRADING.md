@@ -4,9 +4,11 @@
 
 The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside piton, `piton` must be on `PATH`). Earlier files (`.project/`, `.agents/*.json`, `.nono.json`, `.piton.toml`, `.piton/`'s separate JSON files, and piton's files in pi's agent folder) are no longer read; move their settings into these tables by hand.
 
-- **Each folder** (a repository's `.piton/`, a parent folder's, and the global folder `$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) has one `config.toml` and a `config.local.toml` for this machine's values. `mcp.json` and `policies.md` stay separate.
+- **Each folder** (a repository's `.piton/`, a parent folder's, and the global folder `$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) has one `config.toml` and a `config.local.toml` that isn't committed. `mcp.json` and `policies.md` stay separate.
+- **The global folder also has** `config.host.toml` (with `config.host.local.toml`) for how the daemon runs, this host's preferences, and `[development]`, and `config.client.toml` for the apps' preferences.
 - **Keys are snake_case:** `default_mode`, `mcp_server`, `owner_type`, `in_progress`, `self_review`, `api_key`. Label keys you chose, like `pi-workflows`, stay as written.
-- **Personal keys:** `branches.username` is accepted only in `config.local.toml`; `keybindings` and `[development]` only in the global folder.
+- **Where keys may go:** `web_search.api_key` only in a `config.local.toml`; `branches.username` only in a project's `config.local.toml` (either file in the global folder); `[tracker]` and `[forge]` only in a project or parent folder.
+- **Removed:** `[permissions.keybindings]`. Use `/permissions-toggle-auto-accept`.
 - **Removed:** `workflowProject` and `sessionAnalysis`. Workflow reports open a pre-filled GitHub issue for you to submit; a development install (the package running from a git checkout of piton) files them in that checkout's tracker and runs session analysis.
 - **Parent folders** strictly below home can hold their own `.piton/` and `.agents/`, shared by every repository below them.
 - **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line. Project setup writes them.

@@ -4,8 +4,10 @@
  *
  * The Rust resolver in the daemon's binary is the only implementation of the chains and merge rules: the global tier
  * (`$XDG_CONFIG_HOME/piton/`), parent folders, and the repository's `.piton/` and `.agents/`, each level's settings in
- * one `config.toml` (and `config.local.toml`). This client runs it, caches the result, and runs it again only when a
- * file or folder it depends on changed, so per-tool-call loads cost a few `stat` calls.
+ * one `config.toml` (and `config.local.toml`). The global tier's own files (`config.host.toml`, `config.client.toml`)
+ * belong to the daemon and the apps; the pi package reads only `[development]` from the host file, through
+ * {@link resolveGlobalSettings}. This client runs the resolver, caches the result, and runs it again only when a file
+ * or folder it depends on changed, so per-tool-call loads cost a few `stat` calls.
  *
  * The file's keys are snake_case (`default_mode`, `mcp_server`); the pi package's own types are camelCase.
  * {@link camelKeys} and {@link snakeKeys} translate at this boundary, so the rest of the package keeps its names.
@@ -33,7 +35,6 @@ export interface ResolvedPermissions {
     allow: string[]
     ask: string[]
     deny: string[]
-    keybindings?: { auto_accept_edits?: string }
 }
 
 export interface ResolvedMcpServer {
@@ -83,7 +84,6 @@ const PARTS = [
     "branches",
     "tracker",
     "forge",
-    "development",
     "policies",
     "instructions",
 ] as const satisfies readonly (keyof ResolvedSettings)[]
@@ -130,8 +130,6 @@ export interface ResolvedSettings {
     tracker: Section<FileValue<unknown> | null>
     /** The nearest `[forge]`, likewise. */
     forge: Section<FileValue<unknown> | null>
-    /** `[development]`, global tier only: switches for a development install. */
-    development: Section<{ session_analysis?: boolean }>
     /** Every `policies.md`, farthest first. */
     policies: Section<FileValue<string>[]>
     instructions: Section<{
@@ -144,17 +142,27 @@ export interface ResolvedSettings {
     watch: string[]
 }
 
+/** `piton config resolve --global`: the global tier's settings for the pi package, from `config.host.toml`. */
+export interface GlobalSettings {
+    format: typeof RESOLVE_FORMAT
+    global: string
+    /** `[development]`: switches for a development install of piton. */
+    development: Section<{ session_analysis?: boolean }>
+    watch: string[]
+}
+
 interface ResolveError {
     format: number
     error: { kind: "invalid" | "workspace"; message: string }
 }
 
-interface CacheEntry {
-    settings: ResolvedSettings
+interface CacheEntry<T> {
+    settings: T
     fingerprint: string
 }
 
-const cache = new Map<string, CacheEntry>()
+const cache = new Map<string, CacheEntry<ResolvedSettings>>()
+let globalCache: CacheEntry<GlobalSettings> | undefined
 
 /** The binary that resolves configuration. */
 export function pitonBinary(env: NodeJS.ProcessEnv = process.env): string {
@@ -177,19 +185,18 @@ export function resolveSettings(cwd: string, runtime: Runtime = requireRuntime()
     return settings
 }
 
-/** Only the global tier: settings that never depend on the current project (`[development]`). */
-export function resolveGlobalSettings(): ResolvedSettings {
-    const key = "global"
-    const cached = cache.get(key)
-    if (cached && fingerprint(cached.settings.watch) === cached.fingerprint) return cached.settings
-    const settings = runResolve(["config", "resolve", "--global"])
-    cache.set(key, { settings, fingerprint: fingerprint(settings.watch) })
+/** The global tier's settings for the pi package, which never depend on the current project. */
+export function resolveGlobalSettings(): GlobalSettings {
+    if (globalCache && fingerprint(globalCache.settings.watch) === globalCache.fingerprint) return globalCache.settings
+    const settings = runPiton(["config", "resolve", "--global"], "piton config resolve") as GlobalSettings
+    globalCache = { settings, fingerprint: fingerprint(settings.watch) }
     return settings
 }
 
 /** Forgets cached results, for tests that change files faster than the file system's timestamps. */
 export function clearSettingsCache(): void {
     cache.clear()
+    globalCache = undefined
 }
 
 /** The folder piton's tools read in a repository or parent folder; a repository's also holds workflow artifacts. */

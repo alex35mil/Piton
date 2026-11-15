@@ -68,9 +68,6 @@ export interface PermissionSettings {
     allow?: string[]
     deny?: string[]
     ask?: string[]
-    keybindings?: {
-        autoAcceptEdits?: string
-    }
 }
 
 interface ParsedRule {
@@ -130,8 +127,6 @@ export default function (pi: ExtensionAPI) {
         mcpCatalog = data instanceof Map ? new Map(data as McpToolCatalog) : new Map()
     })
 
-    const initSettings = tryLoadPermissionSettings(() => loadSettings(process.cwd()))
-    const keybindings = "settings" in initSettings ? (initSettings.settings.keybindings ?? {}) : {}
     let displayedSettingsError: string | undefined
 
     const updatePermissionSettingsErrorDisplay = (result: SettingsResult, ctx: ExtensionContext): void => {
@@ -188,13 +183,6 @@ export default function (pi: ExtensionAPI) {
         disposeMcpCatalogListener()
         mcpCatalog = new Map()
     })
-
-    if (keybindings.autoAcceptEdits) {
-        pi.registerShortcut(keybindings.autoAcceptEdits as any, {
-            description: "Toggle auto-accept edits",
-            handler: toggleAutoAcceptEdits,
-        })
-    }
 
     pi.registerCommand(`${EXTENSION}-toggle-auto-accept`, {
         description: "Toggle auto-accept edits",

@@ -42,14 +42,15 @@ export function writeGlobalSetting(name: string, value: unknown): string {
 }
 
 /**
- * Writes settings to a `config.toml` through the binary, as the pi package does. `changes` has dotted keys as the file
- * names them (`"permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
- * repository (its source checkout's `.piton/`), or `"global"` for the test's global tier. `local` writes
- * `config.local.toml`. Returns the file.
+ * Writes settings to a configuration file through the binary, as the pi package does. `changes` has dotted keys as the
+ * file names them (`"permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
+ * repository (its source checkout's `.piton/config.toml`), `"global"` for the test's global `config.toml`, or `"host"`
+ * for its `config.host.toml` (`[development]`). `local` writes the pair's `.local` file. Returns the file.
  */
 export function writeConfig(dir: string, changes: Record<string, unknown>, local = false): string {
     const args = ["config", "set", JSON.stringify(changes), "--changes"]
     if (dir === "global") args.push("--global")
+    else if (dir === "host") args.push("--scope", "host")
     else args.push("--workspace", dir)
     if (local) args.push("--local")
     try {
@@ -59,6 +60,7 @@ export function writeConfig(dir: string, changes: Record<string, unknown>, local
         throw new Error(`writeConfig: ${failure.stdout || failure.stderr}`)
     }
     clearSettingsCache()
+    if (dir === "host") return path.join(TEST_CONFIG_HOME, local ? "config.host.local.toml" : "config.host.toml")
     const folder = dir === "global" ? TEST_CONFIG_HOME : path.join(fs.realpathSync(dir), ".piton")
     return path.join(folder, local ? "config.local.toml" : "config.toml")
 }

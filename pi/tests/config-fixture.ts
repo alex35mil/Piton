@@ -22,7 +22,6 @@ export interface PermissionsFixture {
     allow?: string[]
     ask?: string[]
     deny?: string[]
-    keybindings?: { autoAcceptEdits?: string }
 }
 
 /** The fixture's settings as `piton config set --changes` takes them. */
@@ -42,13 +41,10 @@ function changes(config: ProjectConfigFixture): { shared: Record<string, unknown
 }
 
 export function permissionsTable(rules: PermissionsFixture): Record<string, unknown> {
-    const { defaultMode, keybindings, ...lists } = rules
+    const { defaultMode, ...lists } = rules
     return {
         ...(defaultMode !== undefined ? { default_mode: defaultMode } : {}),
         ...lists,
-        ...(keybindings?.autoAcceptEdits !== undefined
-            ? { keybindings: { auto_accept_edits: keybindings.autoAcceptEdits } }
-            : {}),
     }
 }
 

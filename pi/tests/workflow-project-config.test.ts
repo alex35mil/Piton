@@ -66,7 +66,7 @@ describe("workflow project configuration", () => {
             writeSettings(root, { "branches.username": "local-user" }, true)
             assert.equal(loadProjectConfig(root).branches.username, "local-user")
             // A shared file can't hold it.
-            assert.throws(() => writeSettings(root, { "branches.username": "x" }), /personal/)
+            assert.throws(() => writeSettings(root, { "branches.username": "x" }), /config\.local\.toml/)
         } finally {
             resetGlobalSettings()
             fs.rmSync(root, { recursive: true, force: true })
@@ -102,12 +102,12 @@ describe("workflow project configuration", () => {
         try {
             setInstallationForTests({ kind: "development", checkout: root })
             assert.equal(loadSessionAnalysis(), "enabled")
-            writeSettings("global", { "development.session_analysis": false })
+            writeSettings("host", { "development.session_analysis": false })
             assert.equal(loadSessionAnalysis(), "disabled")
-            // Only the global tier may set it.
-            assert.throws(() => writeSettings(root, { "development.session_analysis": true }), /global tier/)
+            // It's a host setting: a project's config.toml has no such table.
+            assert.throws(() => writeSettings(root, { "development.session_analysis": true }), /development/)
             setInstallationForTests({ kind: "app" })
-            writeSettings("global", { "development.session_analysis": true })
+            writeSettings("host", { "development.session_analysis": true })
             assert.equal(loadSessionAnalysis(), "disabled")
         } finally {
             setInstallationForTests(undefined)
@@ -352,7 +352,7 @@ describe("workflow project configuration", () => {
                     missing: [],
                     existing: [],
                     incompatible: ["branches"],
-                    malformed: ["permissions", "web_search", "branches", "tracker", "forge", "development"],
+                    malformed: ["permissions", "web_search", "branches", "tracker", "forge"],
                 }
                 assert.deepEqual(
                     broken.map((error) => error.part),

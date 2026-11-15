@@ -316,7 +316,7 @@ export default function (pi: ExtensionAPI): void {
         name: "inspect_session_analysis",
         label: "inspect_session_analysis",
         description:
-            "Read whether a finished Task, Gig, Epic, or incoming PR ends with the in-chat session analysis: on in a development install (the pi package running from a git checkout of piton) unless the global `[development] session_analysis = false`, off otherwise. Reads local settings only; never calls providers or changes configuration.",
+            "Read whether a finished Task, Gig, Epic, or incoming PR ends with the in-chat session analysis: on in a development install (the pi package running from a git checkout of piton) unless `[development] session_analysis = false` in the global config.host.toml, off otherwise. Reads local settings only; never calls providers or changes configuration.",
         parameters: Type.Object({}, { additionalProperties: false }),
         async execute() {
             const result = { sessionAnalysis: loadSessionAnalysis() }
