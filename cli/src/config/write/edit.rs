@@ -387,10 +387,12 @@ fn remove(doc: &mut DocumentMut, key: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::model::paths::Scope;
     use toml_edit::Value;
 
-    fn pair(dir: &Path) -> FilePair {
-        FilePair::project(dir)
+    /// `config.host.toml` and its local file: top-level keys as well as tables.
+    fn host_pair(dir: &Path) -> FilePair {
+        FilePair::of(dir, Scope::Host)
     }
 
     fn local(files: &FilePair) -> &Path {
@@ -464,32 +466,28 @@ mod tests {
     #[test]
     fn keeps_comments_order_and_formatting() {
         let dir = tempfile::tempdir().unwrap();
-        let files = pair(dir.path());
+        let files = host_pair(dir.path());
         std::fs::write(
             &files.shared,
-            "# my settings\n[host]\n# where I work\nroots = [\"~/a\"]   # trailing\nlogging = \"info\"\n\n[client]\ntext_font = \"X\"\n",
+            "# my settings\n# where I work\nroots = [\"~/a\"]   # trailing\nlogging = \"info\"\n\n[tailnet]\nport = 8\n",
         )
         .unwrap();
         files
-            .set(&["host", "roots"], Some(strings(&["~/b"])), Placement::Current, &ok)
+            .set(&["roots"], Some(strings(&["~/b"])), Placement::Current, &ok)
             .unwrap();
         files
-            .set(&["host", "favorites"], Some(strings(&["~/c"])), Placement::Current, &ok)
+            .set(&["favorites"], Some(strings(&["~/c"])), Placement::Current, &ok)
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "# my settings\n[host]\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\nfavorites = [\"~/c\"]\n\n[client]\ntext_font = \"X\"\n"
+            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\nfavorites = [\"~/c\"]\n\n[tailnet]\nport = 8\n"
         );
         // Back to the default: the key goes, the rest stays.
-        files
-            .set(&["host", "favorites"], None, Placement::Current, &ok)
-            .unwrap();
-        files
-            .set(&["client", "text_font"], None, Placement::Current, &ok)
-            .unwrap();
+        files.set(&["favorites"], None, Placement::Current, &ok).unwrap();
+        files.set(&["tailnet", "port"], None, Placement::Current, &ok).unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "# my settings\n[host]\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\n"
+            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\n"
         );
     }
 
@@ -500,60 +498,60 @@ mod tests {
         let global = dir.path().join("global");
         std::fs::create_dir_all(&dotfiles).unwrap();
         std::fs::create_dir_all(&global).unwrap();
-        std::fs::write(dotfiles.join("config.toml"), "[host]\nroots = []\n").unwrap();
-        std::os::unix::fs::symlink(dotfiles.join("config.toml"), global.join("config.toml")).unwrap();
-        let files = pair(&global);
+        std::fs::write(dotfiles.join("config.host.toml"), "roots = []\n").unwrap();
+        std::os::unix::fs::symlink(dotfiles.join("config.host.toml"), global.join("config.host.toml")).unwrap();
+        let files = host_pair(&global);
         files
-            .set(&["host", "roots"], Some(strings(&["~/p"])), Placement::Current, &ok)
+            .set(&["roots"], Some(strings(&["~/p"])), Placement::Current, &ok)
             .unwrap();
         assert!(
             global
-                .join("config.toml")
+                .join("config.host.toml")
                 .symlink_metadata()
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
         assert_eq!(
-            std::fs::read_to_string(dotfiles.join("config.toml")).unwrap(),
-            "[host]\nroots = [\"~/p\"]\n"
+            std::fs::read_to_string(dotfiles.join("config.host.toml")).unwrap(),
+            "roots = [\"~/p\"]\n"
         );
     }
 
     #[test]
     fn a_hand_edit_during_a_write_is_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let files = pair(dir.path());
-        std::fs::write(&files.shared, "[host]\nroots = []\n").unwrap();
+        let files = host_pair(dir.path());
+        std::fs::write(&files.shared, "roots = []\n").unwrap();
         let mut edited = false;
         let shared = files.shared.clone();
         let debug = Item::Value(Value::from("debug"));
         write_key_with(
             &files.shared,
             &[Change {
-                key: &["host", "logging"],
+                key: &["logging"],
                 value: Some(&debug),
             }],
             &|_, _| Ok(()),
             &mut || {
                 if !edited {
                     edited = true;
-                    std::fs::write(&shared, "[host]\nroots = [\"~/hand\"]\n").unwrap();
+                    std::fs::write(&shared, "roots = [\"~/hand\"]\n").unwrap();
                 }
             },
         )
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "[host]\nroots = [\"~/hand\"]\nlogging = \"debug\"\n"
+            "roots = [\"~/hand\"]\nlogging = \"debug\"\n"
         );
     }
 
     #[test]
     fn an_invalid_result_or_file_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let files = pair(dir.path());
-        std::fs::write(&files.shared, "[host]\nroots = []\n").unwrap();
+        let files = host_pair(dir.path());
+        std::fs::write(&files.shared, "roots = []\n").unwrap();
         let refuse = |_: &str, path: &Path, _: Sharing| {
             Err(ConfigError::Invalid {
                 path: path.to_path_buf(),
@@ -561,19 +559,14 @@ mod tests {
             })
         };
         assert!(matches!(
-            files.set(
-                &["host", "x"],
-                Some(Item::Value(Value::from(1))),
-                Placement::Current,
-                &refuse
-            ),
+            files.set(&["x"], Some(Item::Value(Value::from(1))), Placement::Current, &refuse),
             Err(EditError::Invalid(_))
         ));
-        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "[host]\nroots = []\n");
+        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "roots = []\n");
 
         std::fs::write(&files.shared, "[host\n").unwrap();
         assert!(matches!(
-            files.set(&["host", "roots"], Some(strings(&[])), Placement::Current, &ok),
+            files.set(&["roots"], Some(strings(&[])), Placement::Current, &ok),
             Err(EditError::Parse { .. })
         ));
         assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "[host\n");
@@ -583,9 +576,9 @@ mod tests {
     #[test]
     fn a_failed_move_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let files = pair(dir.path());
-        std::fs::write(&files.shared, "[host]\nlogging = \"info\"\n").unwrap();
-        std::fs::write(local(&files), "[host]\nroots = [\"~/here\"]\n").unwrap();
+        let files = host_pair(dir.path());
+        std::fs::write(&files.shared, "logging = \"info\"\n").unwrap();
+        std::fs::write(local(&files), "roots = [\"~/here\"]\n").unwrap();
         // Removing the key from the local file is refused (validation of the local file's new text).
         let local_path = local(&files).to_path_buf();
         let refuse_local = move |_: &str, path: &Path, _: Sharing| {
@@ -601,29 +594,26 @@ mod tests {
         assert!(
             files
                 .set(
-                    &["host", "roots"],
+                    &["roots"],
                     Some(strings(&["~/all"])),
                     Placement::Move(Sharing::Shared),
                     &refuse_local
                 )
                 .is_err()
         );
-        assert_eq!(
-            std::fs::read_to_string(&files.shared).unwrap(),
-            "[host]\nlogging = \"info\"\n"
-        );
+        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "logging = \"info\"\n");
         assert_eq!(
             std::fs::read_to_string(local(&files)).unwrap(),
-            "[host]\nroots = [\"~/here\"]\n"
+            "roots = [\"~/here\"]\n"
         );
     }
 
     #[test]
     fn local_moves_a_key_between_the_files() {
         let dir = tempfile::tempdir().unwrap();
-        let files = pair(dir.path());
-        std::fs::write(&files.shared, "[host]\nroots = [\"~/a\"]\nlogging = \"info\"\n").unwrap();
-        let roots = ["host", "roots"];
+        let files = host_pair(dir.path());
+        std::fs::write(&files.shared, "roots = [\"~/a\"]\nlogging = \"info\"\n").unwrap();
+        let roots = ["roots"];
         assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Shared));
 
         files
@@ -631,12 +621,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(local(&files)).unwrap(),
-            "[host]\nroots = [\"~/here\"]\n"
+            "roots = [\"~/here\"]\n"
         );
-        assert_eq!(
-            std::fs::read_to_string(&files.shared).unwrap(),
-            "[host]\nlogging = \"info\"\n"
-        );
+        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "logging = \"info\"\n");
         assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Local));
         // A later write without a placement stays where the key is.
         files
@@ -644,7 +631,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(local(&files)).unwrap(),
-            "[host]\nroots = [\"~/there\"]\n"
+            "roots = [\"~/there\"]\n"
         );
 
         files
@@ -653,7 +640,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(local(&files)).unwrap(), "");
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "[host]\nlogging = \"info\"\nroots = [\"~/all\"]\n"
+            "logging = \"info\"\nroots = [\"~/all\"]\n"
         );
     }
 }

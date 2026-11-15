@@ -8,10 +8,14 @@
 
 mod awake;
 mod control;
-pub mod protocol;
+mod protocol;
 mod rpc;
 mod socket;
 mod watch;
+
+pub use protocol::{
+    AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello, PROTOCOL_VERSION,
+};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -108,7 +108,7 @@ public struct LoggingSettings: View {
                 case nil:
                     "Not connected to piton."
                 case .some(let mode):
-                    "Applies to this Mac's app, daemon, and phone-log collector, until it expires or the daemon restarts. The default is \(mode.rawValue.capitalized), set by host.logging (Settings > Host). No sessions restart."
+                    "Applies to this Mac's app, daemon, and phone-log collector, until it expires or the daemon restarts. The default is \(mode.rawValue.capitalized), set by logging in config.host.toml (Settings > Host). No sessions restart."
                 }
             }
         switch policy {

@@ -66,7 +66,7 @@ enum Gate {
 
 /// Asks the daemon; also applies its policy to this process's own log.
 async fn ask(socket: &Path) -> Gate {
-    match crate::commands::logging_state(socket, crate::daemon::protocol::ControlRequest::Logging).await {
+    match crate::commands::logging_state(socket, crate::daemon::ControlRequest::Logging).await {
         Ok(state) => {
             policy::set(state.clone());
             Gate::Policy(state.policy)

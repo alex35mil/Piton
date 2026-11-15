@@ -64,7 +64,7 @@ pub struct PiConfig {
 
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
-    /// The sandbox executable. Its policy comes from each launch's `[sandbox]` chain (sandbox.rs).
+    /// The sandbox executable. Its policy comes from each launch's `[sandbox]` chain (`launch/sandbox.rs`).
     pub command: Vec<String>,
 }
 
@@ -160,7 +160,7 @@ impl DaemonConfig {
         self.state_dir().join(crate::state::FILE)
     }
 
-    /// The socket sandboxed pis reach the daemon on (see agent.rs).
+    /// The socket sandboxed pis reach the daemon on (see `agent/`).
     pub fn agent_socket(&self) -> PathBuf {
         self.state_dir().join(crate::agent::FILE)
     }

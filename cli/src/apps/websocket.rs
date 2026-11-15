@@ -14,8 +14,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::apps::tailnet::{self, SelfNode};
 use crate::config::TailnetConfig;
 use crate::daemon::Daemon;
-use crate::daemon::protocol::Hello;
-use crate::daemon::protocol::PROTOCOL_VERSION;
+use crate::daemon::Hello;
+use crate::daemon::PROTOCOL_VERSION;
 use crate::session::lock;
 
 /// A client that answers none of this many pings in a row is dropped.

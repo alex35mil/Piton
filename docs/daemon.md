@@ -144,7 +144,7 @@ the daemon without restarting sessions, until the switch expires or the daemon r
 
 ```sh
 mise run cli:test                                 # unit tests + e2e against real pi (faux model, host mode)
-cd daemon && node tests/probe/probe.mjs <scenario>   # pi RPC probes, see pi-findings.md
+cd cli && node tests/probe/probe.mjs <scenario>      # pi RPC probes, see pi-findings.md
 ```
 
 The e2e tests use pi's faux provider through `cli/tests/fixtures/faux-extension.ts`, so they need no credentials.

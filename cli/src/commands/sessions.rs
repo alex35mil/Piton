@@ -5,8 +5,8 @@ use std::process::ExitCode;
 
 use super::control::{control, report};
 use crate::config::DaemonConfig;
-use crate::daemon::protocol::ControlRequest;
-use crate::daemon::protocol::ControlResponse;
+use crate::daemon::ControlRequest;
+use crate::daemon::ControlResponse;
 use crate::launch::LaunchMode;
 use crate::session::SessionInfo;
 

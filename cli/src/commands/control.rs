@@ -6,11 +6,11 @@ use std::process::ExitCode;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::daemon::protocol::AttachControl;
-use crate::daemon::protocol::ControlRequest;
-use crate::daemon::protocol::ControlResponse;
-use crate::daemon::protocol::FRAME_CONTROL;
-use crate::daemon::protocol::Hello;
+use crate::daemon::AttachControl;
+use crate::daemon::ControlRequest;
+use crate::daemon::ControlResponse;
+use crate::daemon::FRAME_CONTROL;
+use crate::daemon::Hello;
 
 /// Sends one control request to the daemon and returns its response.
 pub async fn control(socket: &Path, request: ControlRequest) -> Result<ControlResponse, String> {
@@ -19,7 +19,7 @@ pub async fn control(socket: &Path, request: ControlRequest) -> Result<ControlRe
         .map_err(|e| format!("daemon not reachable at {}: {e}", socket.display()))?;
     let (read, mut write) = stream.into_split();
     let hello = Hello::Control {
-        version: crate::daemon::protocol::PROTOCOL_VERSION,
+        version: crate::daemon::PROTOCOL_VERSION,
     };
     write_line(&mut write, &serde_json::to_vec(&hello).unwrap_or_default())
         .await

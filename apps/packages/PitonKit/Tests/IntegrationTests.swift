@@ -470,7 +470,7 @@ struct IntegrationTests {
             mac.stop()
             phone.stop()
         }
-        // The test daemon's state database has keep-awake off.
+        // The test daemon's config.host.toml sets keep_awake = false.
         try await eventually { mac.daemon?.keepAwake == false && phone.daemon?.keepAwake == false }
         #expect(await mac.setKeepAwake(true))
         try await eventually { phone.daemon?.keepAwake == true && phone.daemon?.awake == false }

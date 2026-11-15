@@ -24,7 +24,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
 use crate::config::DaemonConfig;
-use crate::daemon::protocol::{AttachControl, EndReason};
+use crate::daemon::{AttachControl, EndReason};
 use crate::launch::LaunchMode;
 use crate::launch::{self, Env, LaunchError, SessionArg};
 use prompts::PromptQueue;
