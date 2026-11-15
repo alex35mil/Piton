@@ -67,6 +67,20 @@ iPhone / iPad ─────────── WebSocket over the tailnet ─�
 - **`piton-sleepd`:** privileged helper with exactly two operations (prevent sleep, restore sleep). Language decided
   during implementation (Swift is simplest for XPC).
 
+The binary's crate is one module per concept. Each module's `mod.rs` is its API, and its files are private:
+
+- `cli/`: the command line, one file per command.
+- `config/`: configuration files (see "Configuration and state"). `state/`: the state database.
+- `daemon/`: the running daemon: startup, the session registry, the Unix socket (`rpc`, `control`, and the apps'
+  `view` connections), keep-awake, reloading the global files, and the local socket's messages (`protocol`).
+- `session/`: one pi process, and the conversation model the apps render (`view`).
+- `launch/`: pi's environment and command line, and the nono profile (`sandbox`, the only code that knows nono).
+- `apps/`: serving the native apps: the `view` protocol, the tailnet WebSocket, browsing roots, the Settings list.
+- `agent/`: `agent.sock`, the bridge from a sandboxed agent to the daemon. `protected/`: which files are protected,
+  and a protected write asked of the user.
+- `project/`: a workspace's source or worker relation, and worker clones.
+- `setup/`: `piton setup` and the launchd agent. `logging/`: piton's own logs, the logging policy, the collector.
+
 ### Packaging
 
 One signed `Piton.app`, distributed outside the App Store (a sandboxed app can't spawn processes or install a helper):
@@ -179,7 +193,7 @@ versions that shaped piton:
 
 ### Workspace roots
 
-piton's config lists workspace roots (`roots`; `daemon/src/workspaces.rs`). There are none by default: until the owner
+piton's config lists workspace roots (`roots`; `daemon/src/apps/workspaces.rs`). There are none by default: until the owner
 lists some, `workspaces.browse` and `session.start` from a `view` client refuse with "no workspace roots configured",
 and the apps say so. A root is a tree of grouping folders with repositories at varying depth, e.g. `~/Projects/personal/apps/app` and its worker clone `~/Projects/personal/apps/app--fix-login`
 next to it. A **workspace** is a folder under a root that
@@ -327,7 +341,7 @@ there is no "response in progress" placeholder and no invisible dialog.
 
 ### Session view (Swift clients)
 
-Swift clients don't get raw RPC. The daemon keeps a structured model of each live session (`daemon/src/view.rs`) and
+Swift clients don't get raw RPC. The daemon keeps a structured model of each live session (`daemon/src/session/view.rs`) and
 sends a snapshot plus numbered changes. It's built from pi's entries (`get_entries`, active branch) at launch and after
 `switch_session`/`new_session`/`fork`/`clone` and successful compactions, and kept current from the event stream.
 
@@ -410,8 +424,8 @@ A view client counts as a session client (writer rule, empty-pi cleanup). Not ye
 ### Remote access (tailnet WebSocket)
 
 The `view` protocol also runs over WebSocket on this Mac's tailnet addresses (`[tailnet] port`, default 7357), one
-text frame per message, plain `ws://` (Tailscale encrypts the traffic). `daemon/src/tailnet.rs`,
-`daemon/src/websocket.rs`.
+text frame per message, plain `ws://` (Tailscale encrypts the traffic). `daemon/src/apps/tailnet.rs`,
+`daemon/src/apps/websocket.rs`.
 
 - **Client transport:** the apps use the system proxy settings, as any app does (diagnostics log which proxy iOS
   picks; see `docs/logging.md`). Traffic still uses Tailscale's VPN routing/encryption; it isn't ordinary public web
@@ -680,10 +694,10 @@ the line. A host or client file has one schema and is read whole.
     and a JSON value, checked before writing) for `piton config set` and the apps.
   - `check/`: read-only diagnostics such as the portability warnings.
 
-  Outside it, and using its API: `cli/config.rs` (the `piton config` command), `app_settings.rs` (the apps' settings
-  list), `watch.rs` and `daemon.rs` (reload the global files: the daemon's options from the host file alone, so a
-  broken client file stops only the apps' list), `sandbox.rs` (`[sandbox]` into a nono profile), and `state/` (the
-  state database).
+  Outside it, and using its API: `cli/config.rs` (the `piton config` command), `apps/settings.rs` (the apps' settings
+  list), `daemon/` (reloading the global files: the daemon's options from the host file alone, so a broken client
+  file stops only the apps' list), `launch/sandbox.rs` (`[sandbox]` into a nono profile), and `state/` (the state
+  database).
 
 #### Config and state together
 
@@ -762,7 +776,7 @@ next tool call. Changes are gated where they're written:
    default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
    shell commands, scripts, `git checkout`, MCP servers, pi itself. nono's typed rules can't express a read-only
    folder inside a writable one; its raw-rule field (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the
-   allows so the deny wins. `protected.rs` is the one definition; `piton config protected --seatbelt-rules` prints
+   allows so the deny wins. `protected/` is the one definition; `piton config protected --seatbelt-rules` prints
    the rules, and `daemon/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames, hard
    links, symlinks, other cases).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in

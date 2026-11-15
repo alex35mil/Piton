@@ -155,7 +155,7 @@ pub fn daemon_lenient(config_home: Option<&Path>) -> DaemonConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::LaunchMode;
+    use crate::launch::LaunchMode;
 
     #[test]
     fn the_host_file_overrides_defaults() {
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(config.sandbox.command, ["/bin/nono"]);
         assert_eq!(config.roots, ["~/p"]);
         assert_eq!(config.default_attach_mode, LaunchMode::Host);
-        assert_eq!(config.logging.mode, crate::diagnostics::Mode::Debug);
+        assert_eq!(config.logging.mode, crate::logging::Mode::Debug);
         assert!(!config.keep_awake);
         assert_eq!(config.pi.command, ["pi"]);
         assert_eq!(config.empty_grace_ms, 10_000);

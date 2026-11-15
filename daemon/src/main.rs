@@ -1,32 +1,15 @@
 mod agent;
-mod app_settings;
-mod awake;
+mod apps;
 mod cli;
-mod collector;
 mod config;
 mod daemon;
-mod diagnostics;
 mod launch;
-mod log;
+mod logging;
 mod project;
-mod prompts;
 mod protected;
-mod protected_write;
-mod replay;
-mod rolling;
-mod sandbox;
-mod service;
 mod session;
 mod setup;
 mod state;
-mod tailnet;
-mod view;
-mod viewconn;
-mod watch;
-mod websocket;
-mod wire;
-mod worker;
-mod workspaces;
 
 use std::process::ExitCode;
 

@@ -1,5 +1,5 @@
 //! The `piton` command line: its arguments, and each command as the user runs it. `daemon` hands over to the daemon
-//! (daemon.rs). `config`, `setup`, `state`, `service`, and `completion` work on files and the system directly; the
+//! (crate::daemon). `config`, `setup`, `state`, `service`, and `completion` work on files and the system directly; the
 //! rest are clients of the daemon over its Unix socket.
 
 mod attach;
@@ -315,7 +315,7 @@ pub fn main() -> ExitCode {
             config
         }
         Err(e) => {
-            crate::log::startup_error("configuration_failed");
+            crate::logging::startup_error("configuration_failed");
             eprintln!("piton: {e}");
             return ExitCode::from(2);
         }
@@ -323,13 +323,13 @@ pub fn main() -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(e) => {
-            crate::log::startup_error("runtime_initialization_failed");
+            crate::logging::startup_error("runtime_initialization_failed");
             eprintln!("piton: {e}");
             return ExitCode::from(2);
         }
     };
     let code = runtime.block_on(run(cli.command, config));
-    crate::log::flush();
+    crate::logging::flush();
     // `piton attach` may still be blocked reading stdin on a blocking thread; don't wait for it.
     runtime.shutdown_background();
     code
@@ -381,7 +381,7 @@ async fn setup(action: SetupAction, json: bool, config: &crate::config::DaemonCo
         binary,
         link,
         daemon_running: tokio::net::UnixStream::connect(&config.socket).await.is_ok(),
-        tailnet: crate::tailnet::self_node(&tailscale).await,
+        tailnet: crate::apps::tailnet_self_node(&tailscale).await,
     };
     match action {
         SetupAction::Check { .. } => {
@@ -451,13 +451,13 @@ async fn state(action: StateAction, config: &crate::config::DaemonConfig) -> Exi
 
 fn service(action: &ServiceAction, config: Option<&Path>) -> ExitCode {
     let result = match action {
-        ServiceAction::Install => crate::service::install(config).map(|path| {
-            println!("installed {} ({})", crate::service::LABEL, path.display());
+        ServiceAction::Install => crate::setup::install_service(config).map(|path| {
+            println!("installed {} ({})", crate::setup::SERVICE_LABEL, path.display());
         }),
-        ServiceAction::Uninstall => crate::service::uninstall().map(|path| {
-            println!("removed {} ({})", crate::service::LABEL, path.display());
+        ServiceAction::Uninstall => crate::setup::uninstall_service().map(|path| {
+            println!("removed {} ({})", crate::setup::SERVICE_LABEL, path.display());
         }),
-        ServiceAction::Status => crate::service::status().map(|text| print!("{text}")),
+        ServiceAction::Status => crate::setup::service_status().map(|text| print!("{text}")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

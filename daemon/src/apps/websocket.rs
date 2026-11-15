@@ -1,6 +1,6 @@
 //! The `view` protocol over WebSocket on the tailnet addresses, for the phone and other remote devices. One text frame
 //! per message; the first is the hello, as on the Unix socket. Every connection is checked against Tailscale before
-//! the WebSocket handshake (see tailnet.rs).
+//! the WebSocket handshake (see `tailnet`).
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -11,11 +11,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::apps::tailnet::{self, SelfNode};
 use crate::config::TailnetConfig;
 use crate::daemon::Daemon;
+use crate::daemon::protocol::Hello;
+use crate::daemon::protocol::PROTOCOL_VERSION;
 use crate::session::lock;
-use crate::tailnet::{self, SelfNode};
-use crate::wire::{Hello, PROTOCOL_VERSION};
 
 /// A client that answers none of this many pings in a row is dropped.
 const MISSED_PINGS: u32 = 3;
@@ -234,7 +235,7 @@ async fn serve(daemon: Arc<Daemon>, cli: &str, me: &SelfNode, stream: TcpStream,
         stop_reading.abort();
         let _ = sink.close().await;
     });
-    crate::viewconn::serve(daemon, in_rx, out_tx).await;
+    crate::apps::serve(daemon, in_rx, out_tx).await;
     reader.abort();
     let _ = writer.await;
     crate::log!("view client disconnected from the tailnet: {}", who.name);

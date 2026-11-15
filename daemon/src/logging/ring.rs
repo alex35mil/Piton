@@ -15,7 +15,7 @@ impl Rolling {
     pub fn open(path: &Path, limit: usize, files: usize) -> io::Result<Self> {
         assert!(limit > 0 && files > 0);
         if let Some(parent) = path.parent() {
-            crate::diagnostics::private_dir(parent)?;
+            crate::logging::private_dir(parent)?;
         }
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let bytes = file.metadata()?.len() as usize;

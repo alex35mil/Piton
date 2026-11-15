@@ -1,13 +1,21 @@
 //! Bounded asynchronous logs. Session tasks never wait on file IO; overload drops records rather than growing memory.
-//! Detailed records are kept only while `diagnostics::current()` (set in memory by the daemon or collector) allows them.
+//! Detailed records are kept only while `policy::current()` (set in memory by the daemon or collector) allows them.
+
+mod collector;
+mod policy;
+mod ring;
+
+pub use collector::run as run_collector;
+pub use policy::{
+    Expiration, Mode, Policy, State, current as current_policy, now_ms, private_dir, root, set as set_policy,
+};
 
 use std::io::Write;
 use std::path::Path;
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::diagnostics::{self, Policy};
-use crate::rolling::Rolling;
+use ring::Rolling;
 
 #[derive(Clone, Copy)]
 pub enum Detail {
@@ -23,7 +31,7 @@ enum Record {
 static FILE: OnceLock<mpsc::SyncSender<Record>> = OnceLock::new();
 
 pub fn init(path: &Path) -> std::io::Result<()> {
-    let mut ring = Rolling::open(path, diagnostics::FILE_BYTES, diagnostics::FILES)?;
+    let mut ring = Rolling::open(path, policy::FILE_BYTES, policy::FILES)?;
     let (tx, rx) = mpsc::sync_channel::<Record>(256);
     let _ = FILE.set(tx);
     std::thread::Builder::new()
@@ -45,7 +53,7 @@ pub fn init(path: &Path) -> std::io::Result<()> {
                     total = 0;
                     window = Instant::now();
                 }
-                match (diagnostics::current().policy, detail) {
+                match (policy::current().policy, detail) {
                     (Policy::Info, Detail::Debug) => continue,
                     (Policy::Info, Detail::Info) | (Policy::Debug { .. }, Detail::Info) => {}
                     (Policy::Debug { .. }, Detail::Debug) => {
@@ -100,9 +108,9 @@ pub fn startup_error(event: &str) {
         return;
     }
     if let Ok(mut ring) = Rolling::open(
-        &diagnostics::root().join("daemon/current.log"),
-        diagnostics::FILE_BYTES,
-        diagnostics::FILES,
+        &policy::root().join("daemon/current.log"),
+        policy::FILE_BYTES,
+        policy::FILES,
     ) {
         let _ = ring.append(format!("{} startup.{event}\n", timestamp()).as_bytes());
     }
@@ -149,12 +157,12 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 #[macro_export]
 macro_rules! log {
-    ($($arg:tt)*) => { $crate::log::write(format_args!($($arg)*)) };
+    ($($arg:tt)*) => { $crate::logging::write(format_args!($($arg)*)) };
 }
 
 #[macro_export]
 macro_rules! debug {
-    ($($arg:tt)*) => { $crate::log::record($crate::log::Detail::Debug, format_args!($($arg)*)) };
+    ($($arg:tt)*) => { $crate::logging::record($crate::logging::Detail::Debug, format_args!($($arg)*)) };
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::host::HostFile;
 use super::paths::{Paths, expand_home};
-use crate::wire::LaunchMode;
+use crate::launch::LaunchMode;
 
 /// How the daemon runs: the host file with defaults applied.
 #[derive(Debug, Clone)]
@@ -52,7 +52,7 @@ pub struct TailnetConfig {
 /// until the daemon restarts; this is what it starts with and returns to when a timed switch expires.
 #[derive(Debug, Clone, Default)]
 pub struct LoggingConfig {
-    pub mode: crate::diagnostics::Mode,
+    pub mode: crate::logging::Mode,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +97,7 @@ impl DaemonConfig {
             log: Some(
                 host.log
                     .map(|l| expand_home(&l, &home))
-                    .unwrap_or_else(|| crate::diagnostics::root().join("daemon/current.log")),
+                    .unwrap_or_else(|| crate::logging::root().join("daemon/current.log")),
             ),
             default_attach_mode: host.default_attach_mode.unwrap_or(LaunchMode::Sandbox),
             keep_awake: host.keep_awake.unwrap_or(true),

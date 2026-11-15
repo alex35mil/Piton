@@ -18,7 +18,7 @@ private func payload(_ object: [String: Any]) throws -> String {
 }
 
 @Test func readsTheDaemonsProtectedWrite() throws {
-    // The daemon's dialog (daemon/src/protected_write.rs): a write of the whole file.
+    // The daemon's dialog (daemon/src/protected/write.rs): a write of the whole file.
     let title = try payload([
         "prompt": "write (protected): /r/.piton/config.toml",
         "toolName": "write",

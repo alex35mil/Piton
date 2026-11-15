@@ -7,7 +7,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use super::control::write_line;
-use crate::wire::{AttachControl, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello};
+use crate::daemon::protocol::AttachControl;
+use crate::daemon::protocol::EndReason;
+use crate::daemon::protocol::FRAME_CONTROL;
+use crate::daemon::protocol::FRAME_RECORD;
+use crate::daemon::protocol::Hello;
 
 /// pi ended (terminated or crashed): the client must not reconnect.
 pub const EXIT_PI_ENDED: u8 = 3;
@@ -33,7 +37,7 @@ pub async fn run(socket: &Path) -> ExitCode {
     };
     let (read, mut write) = stream.into_split();
     let hello = Hello::Rpc {
-        version: crate::wire::PROTOCOL_VERSION,
+        version: crate::daemon::protocol::PROTOCOL_VERSION,
         workspace,
         client: Some("attach".into()),
     };

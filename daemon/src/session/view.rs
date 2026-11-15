@@ -19,7 +19,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::wire::{LaunchMode, SessionStatus};
+use crate::launch::LaunchMode;
+use crate::session::SessionStatus;
 
 /// Changes kept for resuming clients.
 const LOG_CAPACITY: usize = 5000;
@@ -1391,7 +1392,9 @@ mod tests {
     /// stale; regenerate with `PITON_WRITE_FIXTURES=1 cargo test fixtures`.
     #[test]
     fn fixtures() {
-        use crate::wire::{LaunchMode, SessionInfo, SessionStatus};
+        use crate::launch::LaunchMode;
+        use crate::session::SessionInfo;
+        use crate::session::SessionStatus;
         let mut view = View::new(7);
         let mut lines: Vec<String> = Vec::new();
         let state = |status, dialogs| StateInput {
@@ -1428,7 +1431,7 @@ mod tests {
             id: Some("01a1-session".into()),
             file: Some("/Users/me/.config/pi/agent/sessions/--app--/s.jsonl".into()),
             workspace: "/Users/me/Projects/app--fix-login".into(),
-            checkout: crate::wire::Checkout::Worker {
+            checkout: crate::session::Checkout::Worker {
                 source: "/Users/me/Projects/app".into(),
                 name: "fix-login".into(),
             },
@@ -1458,21 +1461,21 @@ mod tests {
             ),
             (
                 "daemon.json",
-                json!({"type": "daemon", "state": crate::wire::DaemonState {
+                json!({"type": "daemon", "state": crate::apps::DaemonState {
                     // Fixed: the real one changes with every commit.
                     version: "0.1.0 (abc1234567)".into(),
                     host_id: "0123456789abcdef0123456789abcdef".into(),
                     keep_awake: true,
                     awake: true,
                     sessions: 2,
-                    logging: crate::diagnostics::State {
-                        policy: crate::diagnostics::Policy::Debug {
-                            expiration: crate::diagnostics::Expiration::Until { unix_ms: 1234 },
+                    logging: crate::logging::State {
+                        policy: crate::logging::Policy::Debug {
+                            expiration: crate::logging::Expiration::Until { unix_ms: 1234 },
                         },
-                        default: crate::diagnostics::Mode::Info,
+                        default: crate::logging::Mode::Info,
                     },
                     settings: {
-                        use crate::app_settings::{AppliesInfo, SettingInfo, ValueType};
+                        use crate::apps::{AppliesInfo, SettingInfo, ValueType};
                         use crate::config::{Scope, Sharing};
                         let setting = |scope, key, value, placement, value_type, applies, editable| SettingInfo {
                             key,

@@ -21,10 +21,10 @@ pub struct HostFile {
     pub favorites: Option<Vec<String>>,
     /// Host logging default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logging: Option<crate::diagnostics::Mode>,
+    pub logging: Option<crate::logging::Mode>,
     /// Launch mode for `piton attach` when none is given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_attach_mode: Option<crate::wire::LaunchMode>,
+    pub default_attach_mode: Option<crate::launch::LaunchMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_grace_ms: Option<u64>,
     /// Hold the Mac awake while sessions are live.

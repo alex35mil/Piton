@@ -138,7 +138,7 @@ pub static CATALOG: &[Entry] = &[
     host("tailnet.retry_ms", Integer, Restart, |c| json!(c.tailnet.retry_ms)),
     entry_of(Scope::Client, "text_font", Text, Live, null),
     entry_of(Scope::Client, "code_font", Text, Live, null),
-    project("sandbox.base", Text, |_| json!(crate::sandbox::DEFAULT_BASE)),
+    project("sandbox.base", Text, |_| json!(crate::launch::DEFAULT_SANDBOX_BASE)),
     project("sandbox.groups", TextList, empty),
     project("sandbox.allow", TextList, empty),
     project("sandbox.read", TextList, empty),

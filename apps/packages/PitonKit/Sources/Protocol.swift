@@ -1,6 +1,6 @@
 import Foundation
 
-// The `view` protocol, mirrored from the daemon (daemon/src/view.rs, daemon/src/wire.rs; spec in docs/design.md,
+// The `view` protocol, mirrored from the daemon (daemon/src/apps/protocol.rs, daemon/src/session/view.rs; spec in docs/design.md,
 // "Session view" and "The `view` protocol"). Kept in sync by fixtures the daemon's tests write
 // (Tests/Fixtures) and PitonKitTests decode.
 

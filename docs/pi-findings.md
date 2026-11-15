@@ -54,7 +54,7 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
   a second prompt written right behind the first still finds the run active. From 1.5 (checked on 1.5.2,
   2026-11-11) it can arrive during that preparation: pi answers `"started"` to both and then drops the second, with
   no message, no `queue_update`, and no error (pi #10606 was the same bug on 1.0.4). With a gap of 1 ms or more it's
-  queued as before. So piton writes a `prompt` only after pi answered the previous one (`daemon/src/prompts.rs`).
+  queued as before. So piton writes a `prompt` only after pi answered the previous one (`daemon/src/session/prompts.rs`).
   The probe writes its prompts straight to pi, without that queue, so on 1.5 it times out waiting for the dropped
   ones: every prompt is answered `"started"` and only the first runs. `daemon/tests/e2e/attach.mjs` ("prompts sent
   together all run") checks the queue and passes on 1.5.2.

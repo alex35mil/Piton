@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::diagnostics::{self, Policy};
+use super::policy::{self, Policy};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CollectError {
@@ -51,7 +51,7 @@ enum Status {
 }
 
 fn status(root: &Path, value: Status) -> std::io::Result<()> {
-    diagnostics::private_dir(&root.join("iphone"))?;
+    policy::private_dir(&root.join("iphone"))?;
     let temporary = root.join("iphone/status.tmp");
     std::fs::write(&temporary, serde_json::to_vec(&value)?)?;
     std::fs::rename(temporary, root.join("iphone/status.json"))
@@ -66,9 +66,9 @@ enum Gate {
 
 /// Asks the daemon; also applies its policy to this process's own log.
 async fn ask(socket: &Path) -> Gate {
-    match crate::cli::logging_state(socket, crate::wire::ControlRequest::Logging).await {
+    match crate::cli::logging_state(socket, crate::daemon::protocol::ControlRequest::Logging).await {
         Ok(state) => {
-            diagnostics::set(state.clone());
+            policy::set(state.clone());
             Gate::Policy(state.policy)
         }
         Err(_) => Gate::NoDaemon,
@@ -98,11 +98,11 @@ pub async fn run(root: &Path, socket: &Path, device: &str) -> Result<(), Collect
         let prior = previous.replace(current.clone());
         let idle = match &current {
             Gate::NoDaemon => Some(Status::NoDaemon {
-                checked_ms: diagnostics::now_ms(),
+                checked_ms: policy::now_ms(),
                 last_success_ms: last_success,
             }),
             Gate::Policy(Policy::Info) => Some(Status::Disabled {
-                checked_ms: diagnostics::now_ms(),
+                checked_ms: policy::now_ms(),
                 last_success_ms: last_success,
             }),
             Gate::Policy(Policy::Debug { .. }) => None,
@@ -120,7 +120,7 @@ pub async fn run(root: &Path, socket: &Path, device: &str) -> Result<(), Collect
                 if tokio::time::Instant::now() >= next_attempt {
                     match copy(root, device, "/usr/bin/xcrun", &gate).await {
                         Ok(CopyOutcome::Published) => {
-                            last_success = Some(diagnostics::now_ms());
+                            last_success = Some(policy::now_ms());
                             status(
                                 root,
                                 Status::Collected {
@@ -135,7 +135,7 @@ pub async fn run(root: &Path, socket: &Path, device: &str) -> Result<(), Collect
                             status(
                                 root,
                                 Status::Unavailable {
-                                    attempted_ms: diagnostics::now_ms(),
+                                    attempted_ms: policy::now_ms(),
                                     last_success_ms: last_success,
                                     error: error.to_string(),
                                 },
@@ -165,8 +165,8 @@ async fn copy(
     }
     let incoming = root.join("iphone/incoming");
     remove_dir(&incoming)?;
-    diagnostics::private_dir(&root.join("iphone"))?;
-    diagnostics::private_dir(&incoming)?;
+    policy::private_dir(&root.join("iphone"))?;
+    policy::private_dir(&incoming)?;
     let operation = async {
         let mut child = Command::new(xcrun)
             .args([
@@ -248,7 +248,7 @@ fn publish(root: &Path, incoming: &Path) -> Result<(), CollectError> {
         let limit = if name == "settings.json" {
             4096
         } else {
-            diagnostics::FILE_BYTES as u64
+            policy::FILE_BYTES as u64
         };
         if !allowed.contains(&name) || !metadata.is_file() || metadata.len() > limit {
             return Err(CollectError::InvalidSnapshot);
@@ -315,11 +315,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let gate = async || {
             Gate::Policy(Policy::Debug {
-                expiration: diagnostics::Expiration::Manual,
+                expiration: policy::Expiration::Manual,
             })
         };
         let executable = root.path().join("fake-devicectl");
-        std::fs::write(&executable, include_str!("../tests/fixtures/fake-devicectl.sh")).unwrap();
+        std::fs::write(
+            &executable,
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake-devicectl.sh")),
+        )
+        .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(matches!(
             copy(root.path(), "a phone with spaces", executable.to_str().unwrap(), &gate)
@@ -365,7 +369,7 @@ mod tests {
             Err(CollectError::InvalidSnapshot)
         ));
         std::fs::remove_file(incoming.join("current.log")).unwrap();
-        std::fs::write(incoming.join("current.log"), vec![0; diagnostics::FILE_BYTES + 1]).unwrap();
+        std::fs::write(incoming.join("current.log"), vec![0; policy::FILE_BYTES + 1]).unwrap();
         assert!(matches!(
             publish(root.path(), &incoming),
             Err(CollectError::InvalidSnapshot)

@@ -48,7 +48,7 @@ docs/              confirmed documentation
 
 - `mise run test` runs the suites one after another: the e2e suites stream real pi and flake when they share the CPU.
 - Protocol fixtures (`apps/packages/PitonKit/Tests/Fixtures`) are written by the daemon test `fixtures`
-  (`daemon/src/view.rs`), which fails when they're stale. After a protocol change, run
+  (`daemon/src/session/view.rs`), which fails when they're stale. After a protocol change, run
   `PITON_WRITE_FIXTURES=1 cargo test fixtures` in `daemon/`, then fix PitonKit until `mise run apps:test` passes.
 
 ## Apps

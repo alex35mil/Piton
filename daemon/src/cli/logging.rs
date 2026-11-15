@@ -4,11 +4,12 @@ use std::process::ExitCode;
 
 use super::LoggingAction;
 use crate::config::DaemonConfig;
-use crate::diagnostics::{Expiration, Policy};
-use crate::wire::{ControlRequest, ControlResponse};
+use crate::daemon::protocol::ControlRequest;
+use crate::daemon::protocol::ControlResponse;
+use crate::logging::{Expiration, Policy};
 
 pub async fn run(action: LoggingAction, config: &DaemonConfig) -> ExitCode {
-    let root = crate::diagnostics::root();
+    let root = crate::logging::root();
     let result: Result<(), String> = match action {
         LoggingAction::Status => logging_state(&config.socket, ControlRequest::Logging)
             .await
@@ -31,20 +32,20 @@ pub async fn run(action: LoggingAction, config: &DaemonConfig) -> ExitCode {
         }
         LoggingAction::Collect { device } => match host_only("device collection") {
             Ok(()) => {
-                let _ = crate::log::init(&root.join("collector/current.log"));
-                crate::collector::run(&root, &config.socket, &device)
+                let _ = crate::logging::init(&root.join("collector/current.log"));
+                crate::logging::run_collector(&root, &config.socket, &device)
                     .await
                     .map_err(|e| e.to_string())
             }
             Err(e) => Err(e),
         },
         LoggingAction::Install { device } => host_only("installing the collector").and_then(|()| {
-            crate::service::install_collector(&device)
+            crate::setup::install_collector_service(&device)
                 .map(|p| println!("installed {}", p.display()))
                 .map_err(|e| e.to_string())
         }),
         LoggingAction::Uninstall => host_only("uninstalling the collector").and_then(|()| {
-            crate::service::uninstall_collector()
+            crate::setup::uninstall_collector_service()
                 .map(|p| println!("removed {}", p.display()))
                 .map_err(|e| e.to_string())
         }),
@@ -54,7 +55,7 @@ pub async fn run(action: LoggingAction, config: &DaemonConfig) -> ExitCode {
         Err(error) => {
             if std::env::var_os("PITON_SERVICE").is_some() {
                 crate::log!("logging command failed: {error}");
-                crate::log::flush();
+                crate::logging::flush();
             }
             eprintln!("piton logging: {error}");
             ExitCode::from(1)
@@ -80,10 +81,7 @@ async fn set(config: &DaemonConfig, policy: Policy) -> Result<(), String> {
 }
 
 /// The daemon's logging state after `request` (`Logging` reads it, `SetLogging` switches it). Also the collector's gate.
-pub async fn logging_state(
-    socket: &std::path::Path,
-    request: ControlRequest,
-) -> Result<crate::diagnostics::State, String> {
+pub async fn logging_state(socket: &std::path::Path, request: ControlRequest) -> Result<crate::logging::State, String> {
     match super::control(socket, request).await? {
         ControlResponse::Logging { logging } => Ok(logging),
         ControlResponse::Error { message } => Err(message),

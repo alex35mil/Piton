@@ -7,7 +7,8 @@ use std::process::ExitCode;
 use super::WorkerAction;
 use super::control::{control, report};
 use crate::config::DaemonConfig;
-use crate::wire::{ControlRequest, ControlResponse};
+use crate::daemon::protocol::ControlRequest;
+use crate::daemon::protocol::ControlResponse;
 
 /// Exit code for a refused worker operation, so callers can tell it from a failure.
 const EXIT_REFUSED: u8 = 4;
@@ -20,7 +21,7 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
             from,
             label,
             issue,
-        } => ControlRequest::WorkerCreate(crate::worker::CreateRequest {
+        } => ControlRequest::WorkerCreate(crate::project::CreateRequest {
             from: from.unwrap_or_else(here),
             name,
             label,
@@ -72,8 +73,8 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
         }
         ControlResponse::WorkerRefused { refusal } => {
             eprintln!("piton: {refusal}");
-            if let crate::worker::WorkerRefusal::Leftovers { lines, .. }
-            | crate::worker::WorkerRefusal::SourceDirty { status: lines, .. } = &refusal
+            if let crate::project::WorkerRefusal::Leftovers { lines, .. }
+            | crate::project::WorkerRefusal::SourceDirty { status: lines, .. } = &refusal
             {
                 for line in lines {
                     eprintln!("  {line}");

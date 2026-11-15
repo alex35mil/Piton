@@ -1,6 +1,14 @@
 //! One task per pi process. It owns pi's stdin and stdout, routes responses to the client that asked, broadcasts
 //! events, keeps the replay state that neither `get_state` nor `get_entries` contains, and runs the stop sequence.
 
+mod info;
+mod prompts;
+mod replay;
+mod view;
+
+pub use info::{Checkout, SessionInfo, SessionStatus};
+pub use view::DEFAULT_WINDOW as DEFAULT_VIEW_WINDOW;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -16,11 +24,12 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
 use crate::config::DaemonConfig;
+use crate::daemon::protocol::{AttachControl, EndReason};
+use crate::launch::LaunchMode;
 use crate::launch::{self, Env, LaunchError, SessionArg};
-use crate::prompts::PromptQueue;
-use crate::replay::Replay;
-use crate::view::{self, Change, StateInput, View};
-use crate::wire::{AttachControl, EndReason, LaunchMode, SessionInfo, SessionStatus};
+use prompts::PromptQueue;
+use replay::Replay;
+use view::{Change, StateInput, View};
 
 pub type ClientId = u64;
 pub type SessionKey = u64;
@@ -157,8 +166,8 @@ pub enum SessionCmd {
     },
     /// A protected write the agent asked for (agent.sock): asked of the user in every client, written on approval.
     ProtectedWrite {
-        request: crate::protected_write::Request,
-        reply: oneshot::Sender<crate::protected_write::Outcome>,
+        request: crate::protected::Request,
+        reply: oneshot::Sender<crate::protected::Outcome>,
     },
     /// The agent stopped waiting for a protected write (or got its answer): settle it if it's still pending.
     SettleProtectedWrite,
@@ -181,7 +190,7 @@ pub struct StopOutcome {
 pub struct Shared {
     pub key: SessionKey,
     pub workspace: PathBuf,
-    pub checkout: crate::wire::Checkout,
+    pub checkout: crate::session::Checkout,
     pub mode: LaunchMode,
     pub id: Option<String>,
     pub file: Option<String>,
@@ -308,8 +317,8 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         })?;
 
     let checkout = match &spec.workspace.relation {
-        crate::project::Relation::Source => crate::wire::Checkout::Source,
-        crate::project::Relation::Worker { source, name } => crate::wire::Checkout::Worker {
+        crate::project::Relation::Source => crate::session::Checkout::Source,
+        crate::project::Relation::Worker { source, name } => crate::session::Checkout::Worker {
             source: source.clone(),
             name: name.clone(),
         },
@@ -423,7 +432,7 @@ struct PendingWrite {
     root: PathBuf,
     path: PathBuf,
     content: String,
-    reply: oneshot::Sender<crate::protected_write::Outcome>,
+    reply: oneshot::Sender<crate::protected::Outcome>,
 }
 
 /// How many message ids a session remembers for repeats.
@@ -650,10 +659,10 @@ impl SessionTask {
     /// other is pending; otherwise asked of the user with a dialog every client shows. Every protected write asks.
     fn protected_write(
         &mut self,
-        request: crate::protected_write::Request,
-        reply: oneshot::Sender<crate::protected_write::Outcome>,
+        request: crate::protected::Request,
+        reply: oneshot::Sender<crate::protected::Outcome>,
     ) {
-        use crate::protected_write::{Outcome, dialog};
+        use crate::protected::{Outcome, write_dialog as dialog};
         let refuse = |reason: String| Outcome::Refused { reason };
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
         let path = crate::protected::canonical_target(&request.path);
@@ -692,7 +701,7 @@ impl SessionTask {
 
     /// A client's answer to the pending protected write's dialog: write or not, and tell the agent.
     fn answer_protected_write(&mut self, answer: &Map<String, Value>) {
-        use crate::protected_write::{Decision, Outcome, write};
+        use crate::protected::{Decision, Outcome, write_approved as write};
         let Some(pending) = self.protected_write.take() else {
             return;
         };
@@ -1015,7 +1024,7 @@ impl SessionTask {
             pending.path.display()
         );
         if gone {
-            let _ = pending.reply.send(crate::protected_write::Outcome::Refused {
+            let _ = pending.reply.send(crate::protected::Outcome::Refused {
                 reason: "the run ended before the user answered; ask again if it's still needed".into(),
             });
         } else {

@@ -6,6 +6,10 @@
 //! denied) and the daemon's check of a write an agent asks for over `agent.sock` (written only after the user approves
 //! it). See "Protected files" in docs/design.md.
 
+mod write;
+
+pub use write::{Decision, Outcome, Request, dialog as write_dialog, write as write_approved};
+
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{LOCAL_DIR, PITON_DIR};

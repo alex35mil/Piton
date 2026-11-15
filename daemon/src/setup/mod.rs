@@ -6,6 +6,13 @@
 //! prerequisite among others. Daemon registration belongs to the Mac app (`SMAppService` with the bundle's
 //! LaunchAgent), so setup only reports it; `piton service install` is the development path.
 
+mod service;
+
+pub use service::{
+    LABEL as SERVICE_LABEL, install as install_service, install_collector as install_collector_service,
+    status as service_status, uninstall as uninstall_service, uninstall_collector as uninstall_collector_service,
+};
+
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -114,7 +121,7 @@ pub struct Host<'a> {
     /// Whether the daemon answers on its socket.
     pub daemon_running: bool,
     /// This host's tailnet identity, or why it's unknown.
-    pub tailnet: Result<crate::tailnet::SelfNode, crate::tailnet::TailnetError>,
+    pub tailnet: Result<crate::apps::SelfNode, crate::apps::TailnetError>,
 }
 
 /// A tool a host needs.
@@ -545,7 +552,7 @@ mod tests {
             binary: f.root.join("Piton.app/Contents/MacOS/piton"),
             link: f.root.join(".local/bin/piton"),
             daemon_running: false,
-            tailnet: Err(crate::tailnet::TailnetError::NotRunning("Stopped".into())),
+            tailnet: Err(crate::apps::TailnetError::NotRunning("Stopped".into())),
         }
     }
 
@@ -625,7 +632,7 @@ mod tests {
         // An invalid global file.
         std::fs::create_dir_all(&f.config.paths.global).unwrap();
         std::fs::write(f.config.paths.global.join("config.toml"), "[host\n").unwrap();
-        host.tailnet = Ok(crate::tailnet::SelfNode {
+        host.tailnet = Ok(crate::apps::SelfNode {
             user: 1,
             node: "n".into(),
             addresses: vec!["100.64.0.1".parse().unwrap()],

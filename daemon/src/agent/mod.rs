@@ -3,7 +3,7 @@
 //!
 //! One request per connection, one JSON line each way. A request names its session by the token the daemon gave that
 //! pi (`PITON_SESSION_TOKEN`): a request can act only for the session it came from, and only in the ways listed here.
-//! Today that's one: a protected write (see protected_write.rs), answered only by the user through a client.
+//! Today that's one: a protected write (see crate::protected), answered only by the user through a client.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -62,7 +62,7 @@ enum Request {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Response {
-    ProtectedWrite(crate::protected_write::Outcome),
+    ProtectedWrite(crate::protected::Outcome),
     Error { message: String },
 }
 
@@ -128,7 +128,7 @@ async fn respond(daemon: &Daemon, request: Request) -> Response {
                 return unknown();
             };
             let (reply, outcome) = tokio::sync::oneshot::channel();
-            let request = crate::protected_write::Request { path, content };
+            let request = crate::protected::Request { path, content };
             if handle.tx.send(SessionCmd::ProtectedWrite { request, reply }).is_err() {
                 return unknown();
             }

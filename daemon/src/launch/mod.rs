@@ -1,5 +1,11 @@
 //! Building pi's environment and command line for a launch.
 
+mod mode;
+mod sandbox;
+
+pub use mode::LaunchMode;
+pub use sandbox::DEFAULT_BASE as DEFAULT_SANDBOX_BASE;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +14,6 @@ use tokio::process::Command;
 use crate::config::DaemonConfig;
 use crate::config::{ConfigError, LaunchConfig};
 use crate::project::{self, ProjectError, Workspace};
-use crate::wire::LaunchMode;
 
 pub type Env = BTreeMap<String, String>;
 
@@ -27,7 +32,7 @@ pub enum LaunchError {
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
-    Sandbox(#[from] crate::sandbox::SandboxError),
+    Sandbox(#[from] crate::launch::sandbox::SandboxError),
 }
 
 /// Which session pi starts with.
@@ -185,7 +190,7 @@ pub fn command_line(
     }
 }
 
-/// Writes the launch's sandbox profile (see sandbox.rs) to a file of its own (`key`), removed when the session ends
+/// Writes the launch's sandbox profile (see `sandbox`) to a file of its own (`key`), removed when the session ends
 /// ([`ProfileFile`]). The folder is the daemon's private state, which no sandbox reads; nono reads the profile before
 /// it applies the sandbox.
 /// `base` is the daemon's base environment (the login shell's): `$VAR` grants are expanded from it.
@@ -195,10 +200,10 @@ pub fn write_profile(
     base: &Env,
     key: u64,
 ) -> Result<ProfileFile, LaunchError> {
-    let profile = crate::sandbox::profile(resolved, &config.paths.home, base, &config.agent_socket())?;
+    let profile = crate::launch::sandbox::profile(resolved, &config.paths.home, base, &config.agent_socket())?;
     let dir = profiles_dir(config);
     let write = || -> std::io::Result<PathBuf> {
-        crate::diagnostics::private_dir(&dir)?;
+        crate::logging::private_dir(&dir)?;
         let path = dir.join(format!("{key}.json"));
         std::fs::write(&path, serde_json::to_vec_pretty(&profile).unwrap_or_default())?;
         Ok(path)

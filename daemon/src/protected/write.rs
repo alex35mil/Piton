@@ -1,5 +1,5 @@
 //! A protected write an agent asks for: the daemon asks the user (a dialog in every client), then writes the file
-//! itself. The agent can ask (over `agent.sock`, see agent.rs) but never answer: answers come only from clients.
+//! itself. The agent can ask (over `agent.sock`, see crate::agent) but never answer: answers come only from clients.
 //!
 //! The dialog is pi's file review format, so pi.nvim opens its diff view and the apps their review sheet: a `select`
 //! whose title is `{"prompt", "toolName", "toolInput"}` with `toolName` `write` and `toolInput {path, content}`, plus

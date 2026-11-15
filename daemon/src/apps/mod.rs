@@ -1,10 +1,28 @@
-//! A `view` connection: the native clients' protocol over any line transport (the Unix socket or the tailnet
-//! WebSocket). Requests carry an `id` and get one `reply`; session lists and session views are pushed.
+//! Serving the native apps (the Mac app, the iPhone and iPad apps): their `view` protocol ([`protocol`]) over any line
+//! transport, the Unix socket or the tailnet WebSocket ([`websocket`], admitting only the owner's devices through
+//! [`tailnet`]); browsing the workspace roots ([`workspaces`]); and the Settings list ([`settings`]).
 //!
-//! Requests are taken in order: whatever a request does to a session (queue a message for pi, watch, unwatch) happens
+//! This file is one connection. Requests carry an `id` and get one `reply`; session lists and session views are
+//! pushed. Requests are taken in order: whatever a request does to a session (queue a message for pi, watch, unwatch) happens
 //! before the next request is read, so a client's messages reach pi in the order it sent them. Waiting for the outcome
 //! (pi's response, a launch, a stop) happens off the connection's loop, so a slow request never holds up the others or
 //! the pushed session list.
+
+mod protocol;
+mod settings;
+mod tailnet;
+mod websocket;
+mod workspaces;
+
+pub use protocol::{DaemonState, SendModeWire, ViewEnvelope, ViewRequest};
+#[cfg(test)]
+pub use settings::{AppliesInfo, ValueType};
+pub use settings::{
+    Change as SettingChange, SetError as SettingError, SettingInfo, Snapshot as SettingsSnapshot,
+    validate as validate_setting, write as write_setting,
+};
+pub use tailnet::{SelfNode, TailnetError, self_node as tailnet_self_node};
+pub use websocket::serve_tailnet;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -15,10 +33,10 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::daemon::Daemon;
+use crate::launch::LaunchMode;
 use crate::launch::SessionArg;
+use crate::session::DEFAULT_VIEW_WINDOW;
 use crate::session::{ClientId, Internal, SendMode, SessionCmd, SessionHandle, StopReason, ViewCommand, WatchFrom};
-use crate::view::DEFAULT_WINDOW;
-use crate::wire::{LaunchMode, SendModeWire, ViewEnvelope, ViewRequest};
 
 /// Serves one view connection: `lines` are its requests, `out` its outgoing lines. Returns when `lines` ends.
 pub async fn serve(
@@ -119,7 +137,7 @@ fn handle(
             Handled::Later(
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        crate::app_settings::validate(scope, &key, &value, local)
+                        crate::apps::validate_setting(scope, &key, &value, local)
                             .and_then(|change| daemon.set_app_setting(change))
                             .map(|()| json!({"state": daemon.state()}))
                             .map_err(|e| e.to_string())
@@ -138,8 +156,8 @@ fn handle(
         // The connection pushes the list after the reply (see `serve`).
         ViewRequest::SessionsSubscribe => Ok(json!({})).into(),
         ViewRequest::WorkspacesBrowse { path } => {
-            let roots = crate::workspaces::roots(&daemon.config().roots);
-            crate::workspaces::browse(&roots, path.as_deref())
+            let roots = crate::apps::workspaces::roots(&daemon.config().roots);
+            crate::apps::workspaces::browse(&roots, path.as_deref())
                 .map(|entries| json!({"entries": entries}))
                 .map_err(|e| e.to_string())
                 .into()
@@ -153,8 +171,9 @@ fn handle(
             Handled::Later(
                 async move {
                     // Native apps start sessions only in checkouts under the configured roots.
-                    let roots = crate::workspaces::roots(&daemon.config().roots);
-                    let workspace = crate::workspaces::check_start(&roots, &workspace).map_err(|e| e.to_string())?;
+                    let roots = crate::apps::workspaces::roots(&daemon.config().roots);
+                    let workspace =
+                        crate::apps::workspaces::check_start(&roots, &workspace).map_err(|e| e.to_string())?;
                     let handle = daemon
                         .launch_in(&workspace, mode.unwrap_or(LaunchMode::Sandbox), SessionArg::New)
                         .await
@@ -193,7 +212,7 @@ fn handle(
             if let Some(previous) = watching.remove(&session) {
                 let _ = previous.tx.send(SessionCmd::Unwatch { watcher });
             }
-            let limit = limit.unwrap_or(DEFAULT_WINDOW);
+            let limit = limit.unwrap_or(DEFAULT_VIEW_WINDOW);
             let from = match from {
                 Some(seq) => WatchFrom::Seq { seq, limit },
                 None => WatchFrom::Snapshot { limit },
@@ -215,7 +234,7 @@ fn handle(
         }
         ViewRequest::SessionHistory { session, before, limit } => ask(find(session), |reply| SessionCmd::History {
             before,
-            limit: limit.unwrap_or(DEFAULT_WINDOW),
+            limit: limit.unwrap_or(DEFAULT_VIEW_WINDOW),
             reply,
         }),
         ViewRequest::SessionToolOutput { session, call_id } => {

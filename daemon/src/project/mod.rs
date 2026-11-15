@@ -5,6 +5,13 @@
 //! the worker's local git config (`agent.source`), which lives in `.git/` and is checked against the folder layout
 //! (`<parent>/<repo>--<name>` next to `<parent>/<repo>`).
 
+mod worker;
+
+pub use worker::{
+    CreateRequest, Mise, WorkerInfo, WorkerRefusal, create as create_worker, info as worker_info,
+    leftovers as worker_leftovers, list as list_workers, remove as remove_worker,
+};
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

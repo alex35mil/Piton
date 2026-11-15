@@ -5,7 +5,10 @@ use std::process::ExitCode;
 
 use super::control::{control, report};
 use crate::config::DaemonConfig;
-use crate::wire::{ControlRequest, ControlResponse, LaunchMode, SessionInfo};
+use crate::daemon::protocol::ControlRequest;
+use crate::daemon::protocol::ControlResponse;
+use crate::launch::LaunchMode;
+use crate::session::SessionInfo;
 
 pub async fn ls(config: &DaemonConfig, json: bool) -> ExitCode {
     match control(&config.socket, ControlRequest::List).await {

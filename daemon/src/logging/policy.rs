@@ -155,7 +155,10 @@ mod tests {
 
     #[test]
     fn swift_wire_shapes() {
-        let fixture = include_str!("../../apps/packages/PitonKit/Tests/Fixtures/logging-policies.json");
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../apps/packages/PitonKit/Tests/Fixtures/logging-policies.json"
+        ));
         for value in serde_json::from_str::<Vec<serde_json::Value>>(fixture).unwrap() {
             let policy: Policy = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(serde_json::to_value(policy).unwrap(), value);
