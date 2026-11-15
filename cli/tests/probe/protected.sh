@@ -2,7 +2,7 @@
 # Host-only check of the protected-file Seatbelt rules (docs/design.md, "Protected files"): runs a shell in a nono
 # sandbox with the rules the daemon generates (`piton config protected --seatbelt-rules`), in a scratch checkout, and
 # reports what each write attempt did. Run from a host shell (not a sandboxed session: nono doesn't nest), after
-# `mise run daemon:build`: `sh daemon/tests/probe/protected.sh`. Prints one line per attempt and exits 1 when any
+# `mise run cli:build`: `sh cli/tests/probe/protected.sh`. Prints one line per attempt and exits 1 when any
 # result differs from the expectation.
 set -eu
 

@@ -97,7 +97,7 @@ Requirements: Xcode and its command-line tools, a paired/trusted iPhone, access 
 container access on other distribution/signing variants must be verified rather than assumed.
 
 ```sh
-mise run daemon:install       # install updated binary; this step ends live sessions
+mise run cli:install       # install updated binary; this step ends live sessions
 mise run apps:phone
 mise run apps:mac
 mise run logs:install         # uses the installed piton; does NOT restart the daemon

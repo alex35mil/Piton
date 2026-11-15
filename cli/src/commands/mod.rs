@@ -219,7 +219,7 @@ enum ConfigAction {
     /// Whether PATH is a protected file of the workspace, as JSON with `protected: true|false`. Every write to one asks
     /// the user: through the daemon in sessions it launched, in pi itself outside piton. With --seatbelt-rules, prints
     /// the sandbox rules a launch in the workspace gets instead (one per line; the host check
-    /// daemon/tests/probe/protected.sh uses them).
+    /// cli/tests/probe/protected.sh uses them).
     Protected {
         path: Option<PathBuf>,
         #[usage(long)]

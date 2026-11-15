@@ -1,5 +1,5 @@
 // End-to-end tests of the piton daemon and `piton attach` against real pi with the faux extension.
-// Usage (in daemon/): cargo build && node tests/e2e/attach.mjs [test-name...], or `mise run daemon:test`
+// Usage (in cli/): cargo build && node tests/e2e/attach.mjs [test-name...], or `mise run cli:test`
 // Host mode (nono can't nest inside a nono sandbox); mise and the login-shell environment are off.
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";

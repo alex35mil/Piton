@@ -3,14 +3,14 @@
 ## Running it
 
 ```sh
-mise run daemon:build
-daemon/target/debug/piton daemon                # foreground; ctrl-c stops every pi
-daemon/target/debug/piton start ~/Projects/foo  # new session in the nono sandbox (profile piton)
-daemon/target/debug/piton start ~/Projects/foo --host --prompt "hello"
-daemon/target/debug/piton ls
-daemon/target/debug/piton stop --session <pi session id | session file | piton key>
+mise run cli:build
+cli/target/debug/piton daemon                # foreground; ctrl-c stops every pi
+cli/target/debug/piton start ~/Projects/foo  # new session in the nono sandbox (profile piton)
+cli/target/debug/piton start ~/Projects/foo --host --prompt "hello"
+cli/target/debug/piton ls
+cli/target/debug/piton stop --session <pi session id | session file | piton key>
 
-mise run daemon:install                         # stable binary in ~/.cargo/bin + launchd agent (host only)
+mise run cli:install                         # stable binary in ~/.cargo/bin + launchd agent (host only)
 piton service status | piton service uninstall
 piton --version                                 # package version and the git commit it was built from
 piton setup check                               # what this host needs, each step with its fix (--json: the Mac app's)
@@ -143,9 +143,9 @@ the daemon without restarting sessions, until the switch expires or the daemon r
 ## Tests
 
 ```sh
-mise run daemon:test                                 # unit tests + e2e against real pi (faux model, host mode)
+mise run cli:test                                 # unit tests + e2e against real pi (faux model, host mode)
 cd daemon && node tests/probe/probe.mjs <scenario>   # pi RPC probes, see pi-findings.md
 ```
 
-The e2e tests use pi's faux provider through `daemon/tests/fixtures/faux-extension.ts`, so they need no credentials.
+The e2e tests use pi's faux provider through `cli/tests/fixtures/faux-extension.ts`, so they need no credentials.
 They run in host mode because nono can't start inside a nono sandbox.

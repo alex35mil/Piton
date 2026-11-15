@@ -72,15 +72,14 @@ const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 
 let installation: { packageDir: string; value: Installation } | undefined
 
-/** Where the pi package runs from, detected once: a git checkout whose root holds this package as `pi/` and the daemon. */
+/** Where the pi package runs from, detected once: a git checkout whose root holds this package as `pi/` and the `piton` crate as `cli/`. */
 export function detectInstallation(packageDir: string = PACKAGE_DIR): Installation {
     if (installation?.packageDir === packageDir) return installation.value
     let value: Installation = { kind: "app" }
     try {
         const root = fs.realpathSync(Git.run(packageDir, ["rev-parse", "--show-toplevel"]))
         const isPiton =
-            fs.realpathSync(packageDir) === path.join(root, "pi") &&
-            fs.existsSync(path.join(root, "daemon", "Cargo.toml"))
+            fs.realpathSync(packageDir) === path.join(root, "pi") && fs.existsSync(path.join(root, "cli", "Cargo.toml"))
         if (isPiton) value = { kind: "development", checkout: root }
     } catch {
         // Not in a git checkout: an app install.

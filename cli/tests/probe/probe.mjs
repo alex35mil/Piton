@@ -1,4 +1,4 @@
-// Probes pi RPC behavior that piton's contract relies on. Usage (in daemon/): node tests/probe/probe.mjs <scenario>
+// Probes pi RPC behavior that piton's contract relies on. Usage (in cli/): node tests/probe/probe.mjs <scenario>
 // Runs real `pi --mode rpc` with the faux extension in a scratch workspace and agent dir.
 import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, readdirSync, existsSync, statSync, writeFileSync } from "node:fs";

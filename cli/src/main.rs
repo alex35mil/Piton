@@ -1,6 +1,6 @@
 mod agent;
 mod apps;
-mod cli;
+mod commands;
 mod config;
 mod daemon;
 mod launch;
@@ -17,5 +17,5 @@ use std::process::ExitCode;
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("PITON_BUILD"), ")");
 
 fn main() -> ExitCode {
-    cli::main()
+    commands::main()
 }

@@ -755,7 +755,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap_or_default(),
             json,
-            "stale setup fixture: run `PITON_WRITE_FIXTURES=1 cargo test json_fixture` in daemon/"
+            "stale setup fixture: run `PITON_WRITE_FIXTURES=1 cargo test json_fixture` in cli/"
         );
     }
 }

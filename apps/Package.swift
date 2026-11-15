@@ -22,7 +22,7 @@ let package = Package(
             name: "PitonKitTests",
             dependencies: ["PitonKit"],
             path: "packages/PitonKit/Tests",
-            // Protocol fixtures written by the daemon's tests (`fixtures` in daemon/src/view.rs).
+            // Protocol fixtures written by the daemon's tests (`fixtures` in cli/src/session/view.rs).
             resources: [.copy("Fixtures")]
         ),
         // SwiftUI views shared by the iOS and macOS apps.

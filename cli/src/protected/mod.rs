@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    /// The rules `daemon/tests/probe/protected.sh` checks on the host (it builds them the same way).
+    /// The rules `cli/tests/probe/protected.sh` checks on the host (it builds them the same way).
     fn rules_are_the_ones_the_host_check_proves() {
         let r = Roots {
             source: "/u/p/re.po".into(),

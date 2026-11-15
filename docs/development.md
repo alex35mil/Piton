@@ -15,7 +15,7 @@ mise trust && mise install
 
 ```
 pi/                pi package (TypeScript): extensions, skills, workflows; tests in pi/tests
-daemon/            Rust crate: daemon + CLI (`piton`)
+cli/               Rust crate: the `piton` binary (daemon + CLI)
   src/
   tests/e2e/       daemon + attach against real pi (faux model)
   tests/fixtures/  faux-extension.ts: credential-free scripted model for pi
@@ -34,10 +34,10 @@ docs/              confirmed documentation
 
 | Command | What it does |
 | --- | --- |
-| `mise run daemon:build` | Build the daemon and CLI (debug) |
-| `mise run daemon:test` | Unit tests, then the e2e tests against real pi |
-| `mise run daemon:lint` | `cargo fmt --check`, clippy with warnings as errors |
-| `mise run daemon:install` | Install the stable binary and (re)load its launchd agent (host only; ends all sessions) |
+| `mise run cli:build` | Build the daemon and CLI (debug) |
+| `mise run cli:test` | Unit tests, then the e2e tests against real pi |
+| `mise run cli:lint` | `cargo fmt --check`, clippy with warnings as errors |
+| `mise run cli:install` | Install the stable binary and (re)load its launchd agent (host only; ends all sessions) |
 | `mise run apps:generate` | Generate `apps/Piton.xcodeproj` from `apps/project.yml` |
 | `mise run apps:build` | Build the iOS (simulator) and macOS apps into `apps/.build/xcode` |
 | `mise run apps:test` | Swift package tests (protocol fixtures; integration tests skipped) |
@@ -48,8 +48,8 @@ docs/              confirmed documentation
 
 - `mise run test` runs the suites one after another: the e2e suites stream real pi and flake when they share the CPU.
 - Protocol fixtures (`apps/packages/PitonKit/Tests/Fixtures`) are written by the daemon test `fixtures`
-  (`daemon/src/session/view.rs`), which fails when they're stale. After a protocol change, run
-  `PITON_WRITE_FIXTURES=1 cargo test fixtures` in `daemon/`, then fix PitonKit until `mise run apps:test` passes.
+  (`cli/src/session/view.rs`), which fails when they're stale. After a protocol change, run
+  `PITON_WRITE_FIXTURES=1 cargo test fixtures` in `cli/`, then fix PitonKit until `mise run apps:test` passes.
 
 ## Apps
 
@@ -163,7 +163,7 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
 ## Workflow reports and session analysis
 
 The pi package knows it's a development install when it runs from a git checkout of piton (its folder is the
-checkout's `pi/`, next to `daemon/`). Then:
+checkout's `pi/`, next to `cli/`). Then:
 
 - "Report this workflow issue" files Todo work in this checkout's tracker (`[tracker]` of `.piton/config.toml`)
   instead of handing the user a pre-filled GitHub issue.

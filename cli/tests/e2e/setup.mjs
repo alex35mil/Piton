@@ -1,6 +1,6 @@
 // End-to-end tests of `piton setup` as the Mac app runs it: JSON from the real CLI over a fixture home, including a
 // global configuration the strict loader would refuse (setup's job is to report it).
-// Usage (in daemon/): cargo build && node tests/e2e/setup.mjs, or `mise run daemon:test`.
+// Usage (in cli/): cargo build && node tests/e2e/setup.mjs, or `mise run cli:test`.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";

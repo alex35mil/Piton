@@ -8,7 +8,7 @@ Adds Area and Provider selection rules to the label step of Epic, Task, Gig, Bac
   - `pi-workflows`: `pi/workflows/` and tests or instruction budgets that cover workflow code or guidance.
   - `pi-context`, `pi-fetch`, `pi-mcp`, `pi-permissions`, `pi-rules`, `pi-status`, `pi-web-search`: the matching `pi/extensions/<name>/`.
   - `pi-package`: pi package plumbing: `pi/package.json` and its lockfile, Pi upgrades, `pi/tsconfig.json`, `pi/extensions/__lib/`, the `pi/tests` harness itself, and `pi/skills/commit`.
-  - `daemon`: `daemon/` and `docs/daemon.md`.
+  - `daemon`: `cli/` and `docs/daemon.md`.
   - `apps-kit`: `apps/packages/PitonKit/`.
   - `apps-ui`: `apps/packages/PitonUI/`.
   - `apps-ios`, `apps-macos`: the matching app target (`apps/ios/`, `apps/macos/`, its target in `apps/project.yml`) and platform-specific behavior in the shared packages, such as `#if os(...)` branches. iPadOS is `apps-ios`.

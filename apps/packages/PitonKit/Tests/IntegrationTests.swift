@@ -4,7 +4,7 @@ import Testing
 @testable import PitonKit
 
 // PitonKit's Connection against a real daemon and real pi (faux model, host mode). Runs when PITON_BIN names a built piton
-// binary: `mise run apps:e2e` (or `PITON_BIN=$PWD/daemon/target/debug/piton swift test` in apps/).
+// binary: `mise run apps:e2e` (or `PITON_BIN=$PWD/../cli/target/debug/piton swift test` in apps/).
 
 private let pitonBin = ProcessInfo.processInfo.environment["PITON_BIN"]
 
@@ -35,7 +35,7 @@ private final class Daemon: @unchecked Sendable {
             .deletingLastPathComponent()  // packages
             .deletingLastPathComponent()  // apps
             .deletingLastPathComponent()  // repo
-            .appendingPathComponent("daemon/tests/fixtures")
+            .appendingPathComponent("cli/tests/fixtures")
         let ext = fixtures.appendingPathComponent("faux-extension.ts").path
         // The tailnet listener on loopback, with a fake `tailscale` that says the client is the owner's phone.
         let tailscale = fixtures.appendingPathComponent("fake-tailscale.sh").path

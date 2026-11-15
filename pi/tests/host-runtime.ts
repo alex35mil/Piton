@@ -22,8 +22,8 @@ delete process.env.PITON_AGENT_SOCKET
 delete process.env.PITON_SESSION_TOKEN
 
 // Always this checkout's build: a session's PITON_BIN is the installed piton, which may be older than the code tested.
-const built = path.resolve(import.meta.dirname, "../../daemon/target/debug/piton")
-if (!fs.existsSync(built)) throw new Error(`build piton first (mise run daemon:build): ${built} is missing`)
+const built = path.resolve(import.meta.dirname, "../../cli/target/debug/piton")
+if (!fs.existsSync(built)) throw new Error(`build piton first (mise run cli:build): ${built} is missing`)
 process.env[BIN_ENV] = built
 
 /** The test process's own global tier and pi agent folder. */

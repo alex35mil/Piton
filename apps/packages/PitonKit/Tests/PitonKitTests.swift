@@ -3,7 +3,7 @@ import Testing
 
 @testable import PitonKit
 
-// The fixtures are written by the daemon's tests (`fixtures` in daemon/src/session/view.rs). A protocol change the Swift types
+// The fixtures are written by the daemon's tests (`fixtures` in cli/src/session/view.rs). A protocol change the Swift types
 // don't follow fails here.
 
 private func fixture(_ name: String) throws -> Data {

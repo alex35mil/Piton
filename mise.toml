@@ -18,7 +18,7 @@ run = "npm ci"
 [tasks."pi:test"]
 description = "Test the pi package (configuration resolves through the debug piton binary)"
 dir = "pi"
-depends = ["daemon:build"]
+depends = ["cli:build"]
 run = "npm test"
 
 [tasks."pi:typecheck"]
@@ -31,16 +31,16 @@ description = "Format the given pi package files with oxfmt (paths relative to p
 dir = "pi"
 run = "npm run fmt --"
 
-# Daemon (Rust)
+# The piton binary (Rust): daemon and CLI
 
-[tasks."daemon:build"]
+[tasks."cli:build"]
 description = "Build the piton daemon and CLI (debug)"
-dir = "daemon"
+dir = "cli"
 run = "cargo build"
 
-[tasks."daemon:test"]
+[tasks."cli:test"]
 description = "Unit tests, then the e2e tests against real pi (faux model, host mode)"
-dir = "daemon"
+dir = "cli"
 run = '''
 set -eu
 logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-test-logs.XXXXXX")
@@ -56,19 +56,19 @@ node tests/e2e/logging.mjs
 node tests/e2e/setup.mjs
 '''
 
-[tasks."daemon:lint"]
+[tasks."cli:lint"]
 description = "Check formatting and clippy"
-dir = "daemon"
+dir = "cli"
 run = ["cargo fmt --check", "cargo clippy --all-targets --quiet -- -D warnings"]
 
-[tasks."daemon:format"]
+[tasks."cli:format"]
 description = "Format Rust sources"
-dir = "daemon"
+dir = "cli"
 run = "cargo fmt"
 
-[tasks."daemon:install"]
+[tasks."cli:install"]
 description = "Install the stable piton binary into ~/.cargo/bin and (re)load its launchd agent (host only; ends all sessions)"
-dir = "daemon"
+dir = "cli"
 run = '''
 set -euo pipefail
 [ "${PITON_RUNTIME:-}" != sandbox ] || { echo "error: installing the daemon is host-only" >&2; exit 1; }
@@ -113,13 +113,13 @@ swift test --quiet\
 [tasks."apps:e2e"]
 description = "PitonKit against a real daemon and pi (faux model, host mode)"
 dir = "apps"
-depends = ["daemon:build"]
+depends = ["cli:build"]
 run = """
 set -eu
 logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-e2e-logs.XXXXXX")
 trap 'rm -rf "$logs"' EXIT
 export PITON_LOGS_DIR="$logs"
-PITON_BIN="$MISE_PROJECT_ROOT/daemon/target/debug/piton" swift test --quiet --filter IntegrationTests\
+PITON_BIN="$MISE_PROJECT_ROOT/cli/target/debug/piton" swift test --quiet --filter IntegrationTests\
 {% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} --disable-sandbox{% endif %}
 """
 
@@ -256,17 +256,17 @@ NVIM_LOG_FILE="$log" nvim --headless -u NONE -i NONE -n -l nvim/tests/run.lua
 
 [tasks.build]
 description = "Build the daemon and the apps"
-depends = ["daemon:build", "apps:build"]
+depends = ["cli:build", "apps:build"]
 
 [tasks.test]
 description = "Run every test suite"
 # One after another: the e2e suites run real pi with timing-sensitive streaming, and flake when they share the CPU.
-run = [{ task = "daemon:test" }, { task = "apps:test" }, { task = "apps:e2e" }, { task = "nvim:test" }, { task = "pi:test" }]
+run = [{ task = "cli:test" }, { task = "apps:test" }, { task = "apps:e2e" }, { task = "nvim:test" }, { task = "pi:test" }]
 
 [tasks.lint]
 description = "Run every static check"
-depends = ["pi:typecheck", "daemon:lint", "apps:lint"]
+depends = ["pi:typecheck", "cli:lint", "apps:lint"]
 
 [tasks.format]
 description = "Format the daemon and the apps (pi package files: `mise run pi:format <files>`)"
-depends = ["daemon:format", "apps:format"]
+depends = ["cli:format", "apps:format"]

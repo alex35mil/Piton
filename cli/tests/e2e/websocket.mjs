@@ -1,6 +1,6 @@
 // End-to-end tests of the `view` protocol over the tailnet WebSocket, with a fake `tailscale` CLI that puts this "Mac"
 // on 127.0.0.1 and answers `whois` from a file the test writes. Real pi with the faux extension, host mode.
-// Usage (in daemon/): cargo build && node tests/e2e/websocket.mjs, or `mise run daemon:test`.
+// Usage (in cli/): cargo build && node tests/e2e/websocket.mjs, or `mise run cli:test`.
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, readFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

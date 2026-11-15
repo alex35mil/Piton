@@ -126,7 +126,7 @@ public enum SetupFix: Decodable, Sendable, Hashable {
             public var description: String {
                 switch self {
                 case .missingBinary(let looked):
-                    "Can't find piton (looked in \(looked.joined(separator: ", "))). A development build needs `mise run daemon:install`."
+                    "Can't find piton (looked in \(looked.joined(separator: ", "))). A development build needs `mise run cli:install`."
                 case .unknownFormat(let format):
                     "this piton reports setup format \(format); the app understands \(SetupReport.format)"
                 case .exited(let status, let stderr):
@@ -144,7 +144,7 @@ public enum SetupFix: Decodable, Sendable, Hashable {
             self.binary = binary ?? Self.defaultBinary
         }
 
-        /// Where a development build looks for `piton`: the CLI link, then `mise run daemon:install`'s.
+        /// Where a development build looks for `piton`: the CLI link, then `mise run cli:install`'s.
         static let installed = [".local/bin/piton", ".cargo/bin/piton"]
 
         public static var defaultBinary: URL? {

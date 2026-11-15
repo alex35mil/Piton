@@ -1549,7 +1549,7 @@ mod tests {
         }
         assert!(
             stale.is_empty(),
-            "stale protocol fixtures {stale:?}: run `PITON_WRITE_FIXTURES=1 cargo test fixtures` in daemon/ and update PitonKit"
+            "stale protocol fixtures {stale:?}: run `PITON_WRITE_FIXTURES=1 cargo test fixtures` in cli/ and update PitonKit"
         );
     }
 

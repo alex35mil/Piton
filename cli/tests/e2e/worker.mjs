@@ -1,5 +1,5 @@
 // End-to-end tests of `piton worker` and worker-aware sandbox launches, through the daemon.
-// Usage (in daemon/): cargo build && node tests/e2e/worker.mjs, or `mise run daemon:test`.
+// Usage (in cli/): cargo build && node tests/e2e/worker.mjs, or `mise run cli:test`.
 //
 // nono doesn't nest: the sandbox test records the actual argv at a fake `nono` boundary, then execs real pi.
 import { spawn, execFileSync } from "node:child_process";

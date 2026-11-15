@@ -1,5 +1,5 @@
 // End-to-end tests of the `view` protocol (native clients) against real pi with the faux extension.
-// Usage (in daemon/): cargo build && node tests/e2e/view.mjs, or `mise run daemon:test`.
+// Usage (in cli/): cargo build && node tests/e2e/view.mjs, or `mise run cli:test`.
 import { execFileSync, spawn } from "node:child_process";
 import { lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -67,9 +67,9 @@ iPhone / iPad ─────────── WebSocket over the tailnet ─�
 - **`piton-sleepd`:** privileged helper with exactly two operations (prevent sleep, restore sleep). Language decided
   during implementation (Swift is simplest for XPC).
 
-The binary's crate is one module per concept. Each module's `mod.rs` is its API, and its files are private:
+The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is its API, and its files are private:
 
-- `cli/`: the command line, one file per command.
+- `commands/`: the command line, one file per command.
 - `config/`: configuration files (see "Configuration and state"). `state/`: the state database.
 - `daemon/`: the running daemon: startup, the session registry, the Unix socket (`rpc`, `control`, and the apps'
   `view` connections), keep-awake, reloading the global files, and the local socket's messages (`protocol`).
@@ -193,7 +193,7 @@ versions that shaped piton:
 
 ### Workspace roots
 
-piton's config lists workspace roots (`roots`; `daemon/src/apps/workspaces.rs`). There are none by default: until the owner
+piton's config lists workspace roots (`roots`; `cli/src/apps/workspaces.rs`). There are none by default: until the owner
 lists some, `workspaces.browse` and `session.start` from a `view` client refuse with "no workspace roots configured",
 and the apps say so. A root is a tree of grouping folders with repositories at varying depth, e.g. `~/Projects/personal/apps/app` and its worker clone `~/Projects/personal/apps/app--fix-login`
 next to it. A **workspace** is a folder under a root that
@@ -341,7 +341,7 @@ there is no "response in progress" placeholder and no invisible dialog.
 
 ### Session view (Swift clients)
 
-Swift clients don't get raw RPC. The daemon keeps a structured model of each live session (`daemon/src/session/view.rs`) and
+Swift clients don't get raw RPC. The daemon keeps a structured model of each live session (`cli/src/session/view.rs`) and
 sends a snapshot plus numbered changes. It's built from pi's entries (`get_entries`, active branch) at launch and after
 `switch_session`/`new_session`/`fork`/`clone` and successful compactions, and kept current from the event stream.
 
@@ -424,8 +424,8 @@ A view client counts as a session client (writer rule, empty-pi cleanup). Not ye
 ### Remote access (tailnet WebSocket)
 
 The `view` protocol also runs over WebSocket on this Mac's tailnet addresses (`[tailnet] port`, default 7357), one
-text frame per message, plain `ws://` (Tailscale encrypts the traffic). `daemon/src/apps/tailnet.rs`,
-`daemon/src/apps/websocket.rs`.
+text frame per message, plain `ws://` (Tailscale encrypts the traffic). `cli/src/apps/tailnet.rs`,
+`cli/src/apps/websocket.rs`.
 
 - **Client transport:** the apps use the system proxy settings, as any app does (diagnostics log which proxy iOS
   picks; see `docs/logging.md`). Traffic still uses Tailscale's VPN routing/encryption; it isn't ordinary public web
@@ -450,12 +450,12 @@ text frame per message, plain `ws://` (Tailscale encrypts the traffic). `daemon/
 - Without Tailscale (not installed, not running) the daemon logs it once and serves local clients only, trying again
   every `[tailnet] retry_ms` (default 10 s): at login launchd can start it before Tailscale is up. Once listening, it
   checks every minute whether this Mac's tailnet addresses changed and listens on the new ones.
-- Tests use a fake `tailscale` CLI (`daemon/tests/fixtures/fake-tailscale.sh`) that puts the listener on loopback.
-- macOS firewalls (Little Snitch) hold incoming connections until allowed. `mise run daemon:install` signs
+- Tests use a fake `tailscale` CLI (`cli/tests/fixtures/fake-tailscale.sh`) that puts the listener on loopback.
+- macOS firewalls (Little Snitch) hold incoming connections until allowed. `mise run cli:install` signs
   `~/.cargo/bin/piton` with the team's Apple Development certificate (identifier `com.alex35mil.piton.daemon`), so its
   code identity stays the same across rebuilds and a rule for that path keeps matching. Allow incoming TCP on port
   7357 from the tailnet ranges (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`); the identity check (Tailscale `whois`) is
-  piton's own, the firewall rule only lets the connection reach it. Debug builds (`daemon/target/debug/piton`, tests)
+  piton's own, the firewall rule only lets the connection reach it. Debug builds (`cli/target/debug/piton`, tests)
   aren't signed and don't need the rule (tests listen on loopback).
 
 ### Protocols
@@ -684,7 +684,7 @@ the line. A host or client file has one schema and is read whole.
   result and calls again only when a watched file changed. The result is per part: one per table of `config.toml`,
   named as the table, plus MCP, the global tier's MCP alone, policies, and rule and skill folders. Each is its value or
   its error, so a broken table fails only the tools that read it. `--global` returns the host file's `[development]`.
-- **Code layout.** `daemon/src/config/` is the only code that reads or writes these files. Its `mod.rs` is the API;
+- **Code layout.** `cli/src/config/` is the only code that reads or writes these files. Its `mod.rs` is the API;
   the four layers are private:
   - `model/`: what configuration is, with no I/O: paths and scopes, levels and chains, one file per project table
     (its schema, where its keys may be set, checks, merge rule), the host and client files, and the daemon's options
@@ -694,7 +694,7 @@ the line. A host or client file has one schema and is read whole.
     and a JSON value, checked before writing) for `piton config set` and the apps.
   - `check/`: read-only diagnostics such as the portability warnings.
 
-  Outside it, and using its API: `cli/config.rs` (the `piton config` command), `apps/settings.rs` (the apps' settings
+  Outside it, and using its API: `commands/config.rs` (the `piton config` command), `apps/settings.rs` (the apps' settings
   list), `daemon/` (reloading the global files: the daemon's options from the host file alone, so a broken client
   file stops only the apps' list), `launch/sandbox.rs` (`[sandbox]` into a nono profile), and `state/` (the state
   database).
@@ -777,7 +777,7 @@ next tool call. Changes are gated where they're written:
    shell commands, scripts, `git checkout`, MCP servers, pi itself. nono's typed rules can't express a read-only
    folder inside a writable one; its raw-rule field (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the
    allows so the deny wins. `protected/` is the one definition; `piton config protected --seatbelt-rules` prints
-   the rules, and `daemon/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames, hard
+   the rules, and `cli/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames, hard
    links, symlinks, other cases).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
    the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
@@ -804,7 +804,7 @@ security work with no upstream sharing it.
 
 ### Deploying from a sandbox
 
-Status: planned. Today installs are host-only (`mise run daemon:install`, `apps:mac`, `apps:phone`, `apps:ipad`).
+Status: planned. Today installs are host-only (`mise run cli:install`, `apps:mac`, `apps:phone`, `apps:ipad`).
 
 An agent in a sandboxed session may deploy what it built: the daemon, the Mac app, or the iOS app on the iPhone or
 iPad. This doesn't widen what the agent can do: the code it wrote runs on the host once deployed, whoever runs the
@@ -856,7 +856,7 @@ per target:
   paired and reachable; otherwise the request is refused (`device_unavailable`). Gated like the Mac app when that
   device is connected to the daemon.
 
-The gates apply to every deploy, the user's included: on the host, `mise run daemon:install` goes through the same
+The gates apply to every deploy, the user's included: on the host, `mise run cli:install` goes through the same
 request while a daemon is running (and installs directly when none is). `--now` is the user's override, never an
 agent's.
 
