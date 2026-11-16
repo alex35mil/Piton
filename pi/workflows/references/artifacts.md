@@ -199,12 +199,13 @@ Each `reviews/<phase>-NNN/` directory holds:
 
 ## Persistence and authority
 
-The shared guard validates the branch configuration and persistence safety, reusing a successful check while the relevant local inputs are unchanged. `prepare_artifacts` forces a full check during setup or repair, adds only the permitted exclusions below, and creates an empty `.piton/.local` when it's missing. Neither changes the Git index.
+The shared guard validates the branch configuration and persistence safety, reusing a successful check while the relevant local inputs are unchanged. `prepare_artifacts` forces a full check during setup or repair, adds only the permitted exclusions below, and, in a source checkout, creates an empty `.piton/.local` when it's missing. Neither changes the Git index.
 
 - **In Git:** only `.piton/config.toml`, `mcp.json`, and `policies.md`; nothing in a private setup.
 - **Kept out by:** the `/.piton/.local` rule in `.gitignore`, which setup writes, and `/.piton/*.local.*` in `.git/info/exclude`. A private setup instead puts `/.piton` in `.git/info/exclude`. Without a trailing slash, either rule also covers a worker's `.piton/.local` symlink to its source checkout.
 - **Preparation stops when** no repository rule (not the global excludes file) ignores `.piton/.local`, or any path under `.piton/.local/` or any `.piton/*.local.*` file is in Git or staged.
-- **In a sandboxed worker** (`PITON_RUNTIME=sandbox`), starting or resuming an entity, and recording incoming-PR evidence, stop unless `.piton/.local` is a symlink to the source checkout's folder; otherwise the artifacts would be lost with the worker. Run setup in the source checkout and recreate the worker. Project inspection and queue intake create no artifacts, so they aren't guarded, including against the workflow source project.
+- **A source checkout** keeps a real `.piton/.local`, in the sandbox runtime too.
+- **In a worker** (a clone Piton made, with `agent.source` and the `<repo>--<name>` layout), in either runtime, `.piton/.local` must be a symlink to its source checkout's folder; otherwise the artifacts would be lost with the worker. `prepare_artifacts`, starting or resuming an entity, and recording incoming-PR evidence stop without it. Run setup in the source checkout and recreate the worker. Project inspection and queue intake create no artifacts, so they aren't guarded.
 - Never stage, commit, or push a path under `.piton/.local/`, or link to one from published text.
 - Removing a path from Git needs separate user approval and is never automatic.
 

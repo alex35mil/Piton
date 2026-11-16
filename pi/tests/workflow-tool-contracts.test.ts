@@ -341,20 +341,24 @@ describe("workflow model-facing contracts", () => {
         }
     })
 
-    // "linked" is a sandboxed worker whose .piton/.local is a symlink to its source checkout's directory;
-    // "unlinked" is a sandboxed worker without that link, where the workflow must refuse to start.
-    for (const layout of ["directory", "linked", "unlinked"] as const)
+    // "directory" and "sandboxed directory" are the source checkout itself, whose .piton/.local is a real directory in
+    // either runtime. "linked" is a sandboxed worker (`<repo>--w` with agent.source) whose .piton/.local is a symlink to
+    // its source checkout's directory; "unlinked" is a sandboxed worker without it, where setup must refuse.
+    for (const layout of ["directory", "sandboxed directory", "linked", "unlinked"] as const)
         it(`keeps discovery, setup, real initialization and Phase transitions working through reload and resume (${layout} local root)`, async () => {
-            const source = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-contract-source-"))
+            const worker = layout === "linked" || layout === "unlinked"
             const previousRuntime = process.env.PITON_RUNTIME
             if (layout === "directory") delete process.env.PITON_RUNTIME
             else process.env.PITON_RUNTIME = "sandbox"
             const h = await nativeSessionFixture({
                 extensions: [...codingFactories, memoryMcp("github", ["projects_get"]), ...workflowFactories],
                 tools: ["+codemode"],
-                setup(root) {
+                workspace: worker ? "app--w" : "app",
+                setup(fixture) {
+                    const root = path.join(fixture, "app")
+                    fs.mkdirSync(root)
                     fs.writeFileSync(
-                        path.join(root, "config/mcp.json"),
+                        path.join(fixture, "config/mcp.json"),
                         JSON.stringify({
                             mcpServers: { github: { url: "https://github.invalid/mcp", exposure: "codemode" } },
                         }),
@@ -363,7 +367,8 @@ describe("workflow model-facing contracts", () => {
                     git(root, "config", "user.name", "Fixture")
                     git(root, "config", "user.email", "fixture@example.invalid")
                     fs.writeFileSync(path.join(root, "seed.txt"), "fixture")
-                    git(root, "add", "seed.txt")
+                    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
+                    git(root, "add", "seed.txt", ".gitignore")
                     git(root, "commit", "-qm", "Initial fixture")
                     writePermissions("global", { defaultMode: "allow" })
                     const repository = { owner: "fixture", repo: "app" }
@@ -397,29 +402,40 @@ describe("workflow model-facing contracts", () => {
                         },
                         forge: { provider: "github", mcpServer: "github", repository },
                     })
-                    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
-                    if (layout === "linked") fs.symlinkSync(source, path.join(root, ".piton/.local"))
+                    if (!worker) return
+                    fs.mkdirSync(path.join(root, ".piton/.local"))
+                    const clone = path.join(fixture, "app--w")
+                    git(fixture, "clone", "-q", root, clone)
+                    git(clone, "config", "--local", "agent.source", root)
+                    fs.mkdirSync(path.join(clone, ".piton"))
+                    if (layout === "linked")
+                        fs.symlinkSync(path.join(root, ".piton/.local"), path.join(clone, ".piton/.local"))
                 },
             })
+            const source = path.join(path.dirname(h.root), "app")
             async function invoke(code: string) {
                 h.respond(call({ name: "codemode", arguments: { code } }), answer("Done."))
                 await h.prompt("Continue the workflow fixture.")
             }
             try {
+                if (layout === "unlinked") {
+                    // Setup refuses up front instead of creating a folder the worker would lose.
+                    await invoke("text(await tools.prepare_artifacts({}));")
+                    assert.equal(fs.existsSync(path.join(h.root, ".piton/.local")), false)
+                    assert.match(JSON.stringify(h.requests.at(-1)), /isn't linked to its source checkout/)
+                    return
+                }
+                // Project setup runs only in the source checkout; a worker uses the source's.
                 await invoke(
-                    'text(await tools.inspect_project_setup({})); text(await tools.prepare_artifacts({})); text(await describeTool("init_github_gig"));',
+                    worker
+                        ? 'text(await tools.prepare_artifacts({})); text(await describeTool("init_github_gig"));'
+                        : 'text(await tools.inspect_project_setup({})); text(await tools.prepare_artifacts({})); text(await describeTool("init_github_gig"));',
                 )
                 await invoke(
                     'text(await tools.preflight_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor"})); text(await tools.init_github_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor",object:{issueId:900,issueNumber:9,issueUrl:"https://github.com/fixture/app/issues/9"}}));',
                 )
                 const directory = ".piton/.local/gigs/9-fixture-work"
-                if (layout === "unlinked") {
-                    // prepare_artifacts created a real .piton/.local, which a sandbox must not write entities into.
-                    assert.ok(fs.statSync(path.join(h.root, ".piton/.local")).isDirectory())
-                    assert.equal(fs.existsSync(path.join(h.root, directory)), false)
-                    assert.match(JSON.stringify(h.requests.at(-1)), /isn't linked to its source checkout/)
-                    return
-                }
+                if (!worker) assert.ok(fs.lstatSync(path.join(h.root, ".piton/.local")).isDirectory())
                 assert.ok(fs.existsSync(path.join(h.root, directory, "metadata.json")))
                 const metadataPath = path.join(h.root, directory, "metadata.json")
                 const initial = JSON.parse(fs.readFileSync(metadataPath, "utf8"))
@@ -460,7 +476,7 @@ describe("workflow model-facing contracts", () => {
                 assert.deepEqual(JSON.parse(fs.readFileSync(metadataPath, "utf8")).tracker, initial.tracker)
                 assert.equal(fs.existsSync(path.join(h.root, directory, "status.md")), false)
                 if (layout === "linked") {
-                    assert.ok(fs.existsSync(path.join(source, "gigs/9-fixture-work/metadata.json")))
+                    assert.ok(fs.existsSync(path.join(source, directory, "metadata.json")))
                     assert.equal(
                         git(h.root, "status", "--porcelain", "--untracked-files=all", "--", ".piton/.local"),
                         "",
@@ -468,7 +484,6 @@ describe("workflow model-facing contracts", () => {
                 }
             } finally {
                 await h.cleanup()
-                fs.rmSync(source, { recursive: true, force: true })
                 if (previousRuntime === undefined) delete process.env.PITON_RUNTIME
                 else process.env.PITON_RUNTIME = previousRuntime
             }

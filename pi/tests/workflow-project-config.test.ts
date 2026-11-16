@@ -18,7 +18,7 @@ import { configureProjectMcp } from "../workflows/extensions/project-setup/mcp.t
 import { configureProjectPermissions } from "../workflows/extensions/project-setup/permissions.ts"
 import {
     assertArtifactPersistencePrepared,
-    assertSandboxArtifactsLinked,
+    assertWorkerArtifactsLinked,
     detectInstallation,
     developmentCheckout,
     loadProjectConfig,
@@ -774,36 +774,77 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("requires a linked project-local folder only in the sandbox runtime", () => {
-        const root = repository()
-        const source = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-local-source-"))
-        const previous = process.env.PITON_RUNTIME
-        try {
-            writeConfig(root, config())
-            fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
-            const local = path.join(root, ".piton", ".local")
+    for (const runtime of ["host", "sandbox"] as const)
+        for (const setup of ["gitignore", "private"] as const)
+            it(`keeps a real project-local folder in a source checkout (${runtime} runtime, ${setup} setup)`, () => {
+                const root = repository()
+                const previous = process.env.PITON_RUNTIME
+                try {
+                    if (runtime === "sandbox") process.env.PITON_RUNTIME = "sandbox"
+                    else delete process.env.PITON_RUNTIME
+                    writeConfig(root, config())
+                    if (setup === "gitignore")
+                        fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
+                    else fs.appendFileSync(path.join(root, ".git", "info", "exclude"), "/.piton\n")
+                    const local = path.join(root, ".piton", ".local")
+                    assertWorkerArtifactsLinked(root)
+                    assert.equal(prepareArtifactPersistence(root).state, "ready")
+                    assert.ok(fs.lstatSync(local).isDirectory())
+                    assertWorkerArtifactsLinked(root)
+                    assertArtifactPersistencePrepared(root)
+                } finally {
+                    if (previous === undefined) delete process.env.PITON_RUNTIME
+                    else process.env.PITON_RUNTIME = previous
+                    fs.rmSync(root, { recursive: true, force: true })
+                }
+            })
 
-            delete process.env.PITON_RUNTIME
-            assertSandboxArtifactsLinked(root)
-            fs.mkdirSync(local)
-            assertSandboxArtifactsLinked(root)
+    for (const runtime of ["host", "sandbox"] as const)
+        it(`requires a worker's project-local folder to link to its source's (${runtime} runtime)`, () => {
+            const root = fs.realpathSync(repository())
+            const worker = `${root}--w`
+            const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-local-elsewhere-"))
+            const previous = process.env.PITON_RUNTIME
+            try {
+                if (runtime === "sandbox") process.env.PITON_RUNTIME = "sandbox"
+                else delete process.env.PITON_RUNTIME
+                writeConfig(root, config())
+                fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
+                git(root, ["add", ".gitignore", ".piton/config.toml"])
+                git(root, ["commit", "-m", "config"])
+                prepareArtifactPersistence(root)
+                git(path.dirname(root), ["clone", "-q", root, worker])
+                git(worker, ["config", "--local", "agent.source", root])
+                clearSettingsCache()
+                const local = path.join(worker, ".piton", ".local")
+                const unlinked = /isn't linked to its source checkout's/
 
-            process.env.PITON_RUNTIME = "sandbox"
-            assert.throws(() => assertSandboxArtifactsLinked(root), /isn't linked to its source checkout/)
-            fs.rmSync(local, { recursive: true })
-            assert.throws(() => assertSandboxArtifactsLinked(root), /isn't linked to its source checkout/)
-            fs.symlinkSync(path.join(source, "missing"), local)
-            assert.throws(() => assertSandboxArtifactsLinked(root), /isn't linked to its source checkout/)
-            fs.rmSync(local)
-            fs.symlinkSync(source, local)
-            assertSandboxArtifactsLinked(root)
-        } finally {
-            if (previous === undefined) delete process.env.PITON_RUNTIME
-            else process.env.PITON_RUNTIME = previous
-            fs.rmSync(root, { recursive: true, force: true })
-            fs.rmSync(source, { recursive: true, force: true })
-        }
-    })
+                // Missing: setup refuses rather than creating a folder the worker would lose.
+                assert.throws(() => assertWorkerArtifactsLinked(worker), unlinked)
+                assert.throws(() => prepareArtifactPersistence(worker), unlinked)
+                assert.equal(fs.existsSync(local), false)
+
+                fs.mkdirSync(local)
+                assert.throws(() => assertWorkerArtifactsLinked(worker), unlinked)
+                assert.throws(() => prepareArtifactPersistence(worker), unlinked)
+                fs.rmSync(local, { recursive: true })
+                for (const target of [path.join(root, "missing"), elsewhere]) {
+                    fs.symlinkSync(target, local)
+                    assert.throws(() => assertWorkerArtifactsLinked(worker), unlinked)
+                    fs.rmSync(local)
+                }
+
+                fs.symlinkSync(path.join(root, ".piton", ".local"), local)
+                assertWorkerArtifactsLinked(worker)
+                assert.equal(prepareArtifactPersistence(worker).state, "ready")
+            } finally {
+                if (previous === undefined) delete process.env.PITON_RUNTIME
+                else process.env.PITON_RUNTIME = previous
+                fs.rmSync(root, { recursive: true, force: true })
+                fs.rmSync(worker, { recursive: true, force: true })
+                fs.rmSync(elsewhere, { recursive: true, force: true })
+            }
+        })
 
     it("refuses project setup in a worker clone, whose files piton never reads", async () => {
         const root = repository()
