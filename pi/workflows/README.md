@@ -51,9 +51,9 @@ See the [configuration reference](references/setup.md) for exact schemas, exampl
 
 ## Report a workflow problem
 
-Say **“Report this workflow issue.”** The Todo skill prepares a minimal sanitized report. After you approve it, the agent gives you a link to a pre-filled GitHub issue on piton; you open it and submit. Nothing is sent without you, and unsafe project details stay local. See [report preparation](references/queue.md#report-a-workflow-problem).
+Say **“Report this workflow issue.”** The Todo skill prepares a minimal sanitized report. After you approve it, the agent gives you a link to a pre-filled GitHub issue on Piton; you open it and submit. Nothing is sent without you, and unsafe project details stay local. See [report preparation](references/queue.md#report-a-workflow-problem).
 
-In a development install (the pi package running from a git checkout of piton), reports go to that checkout's tracker as Todo work instead, and every shipped Task or Gig, completed Epic, and shipped incoming PR ends with an analysis of the session for workflow problems. See [docs/development.md](../../docs/development.md#workflow-reports-and-session-analysis).
+In a development install (the pi package running from a git checkout of Piton), reports go to that checkout's tracker as Todo work instead, and every shipped Task or Gig, completed Epic, and shipped incoming PR ends with an analysis of the session for workflow problems. See [docs/development.md](../../docs/development.md#workflow-reports-and-session-analysis).
 
 ## Working lifecycle
 

@@ -34,7 +34,7 @@ public struct KeepAwakeToggle: View {
     }
 
     private var detail: String {
-        guard let state = store.daemon else { return "Not connected to piton" }
+        guard let state = store.daemon else { return "Not connected to Piton" }
         switch (state.keepAwake, state.awake) {
         case (true, true): return "Awake for \(state.sessions) session\(state.sessions == 1 ? "" : "s")"
         case (true, false): return "Will stay awake while sessions run"

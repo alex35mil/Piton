@@ -26,7 +26,7 @@ public actor Connection {
         public var description: String {
             switch self {
             case .refused(let message): message
-            case .disconnected: "disconnected from piton"
+            case .disconnected: "disconnected from Piton"
             case .badReply(let detail): "unexpected reply: \(detail)"
             }
         }

@@ -1,4 +1,4 @@
-# piton for Neovim
+# Piton for Neovim
 
 Agent workers, a tracker queue, and source/worker tabs over `piton worker`. The daemon owns cloning, source updates,
 sandbox settings, pi processes, and deletion. This plugin owns the editor UI, not a second implementation of that work.
@@ -8,9 +8,9 @@ sandbox settings, pi processes, and deletion. This plugin owns the editor UI, no
 - Neovim 0.12 (the tested version).
 - `piton` on Neovim's PATH and the daemon running.
 - [snacks.nvim](https://github.com/folke/snacks.nvim), with its picker enabled.
-- [pi.nvim](https://github.com/alex35mil/pi.nvim), configured to attach through piton (see
+- [pi.nvim](https://github.com/alex35mil/pi.nvim), configured to attach through Piton (see
   [daemon setup](../docs/daemon.md#pinvim)).
-- For the queue: a GitHub or Linear tracker, the nearest `[tracker]` of piton's configuration chain (`config.toml` in
+- For the queue: a GitHub or Linear tracker, the nearest `[tracker]` of Piton's configuration chain (`config.toml` in
   the source's `.piton/` or its parent folders'; never the global folder), read through `piton config get`; the plugin reads
   no configuration file itself. Its MCP registration must specify `Authorization: Bearer ${ENV_VAR}`; the credential
   is resolved through `mise exec -C <source>`, never read into Neovim. Without tracker configuration, named agents
@@ -23,7 +23,7 @@ The plugin root is `nvim/` in this repository, **not** the repository root. For 
 ```lua
 {
     name = "piton",
-    dir = vim.fn.expand("~/Projects/personal/tooling/piton/nvim"),
+    dir = vim.fn.expand("~/Projects/personal/tooling/Piton/nvim"),
     dependencies = { "folke/snacks.nvim", "alex35mil/pi.nvim" },
     config = function()
         require("piton").setup()
@@ -43,7 +43,7 @@ vim.keymap.set({ "n", "i", "v", "t" }, "<C-S-t>", piton.pick, { desc = "Agent pi
 ```
 
 Loading modules and calling `setup()` do not load pi.nvim or Snacks. Those dependencies are used when an action needs
-them. All notifications use `vim.notify` with title `piton`.
+them. All notifications use `vim.notify` with title `Piton`.
 
 ## Public API
 
@@ -90,7 +90,7 @@ require("piton").setup({
 - **`confirm(message)`** synchronously returns **true** to proceed or **false** to keep the worker. Adapt a dialog
   wrapper here. Do not pass `vim.fn.confirm` directly: its numeric result is rejected, not treated as truthy.
 
-After opening a worker and its corresponding file (when present), piton calls pi.nvim's existing public API:
+After opening a worker and its corresponding file (when present), Piton calls pi.nvim's existing public API:
 `require("pi").show({ layout = "float", draft = draft })`. Opening a source tab doesn't open chat. Reusing an existing
 tab doesn't rename it or reopen chat. No hooks for copying or recreating pi.nvim, tabline, or dialog implementations
 are needed.

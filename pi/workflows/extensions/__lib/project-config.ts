@@ -114,7 +114,7 @@ export function loadSessionAnalysis(): SessionAnalysis {
 }
 
 /** Where users report piton problems in an app install: a new issue on GitHub, opened by the user. */
-export const PITON_NEW_ISSUE_URL = "https://github.com/alex35mil/piton/issues/new"
+export const PITON_NEW_ISSUE_URL = "https://github.com/alex35mil/Piton/issues/new"
 
 /**
  * The development checkout: in a development install, the checkout the pi package runs from, whose tracker takes
@@ -127,7 +127,7 @@ export function developmentCheckout(): string {
             return install.checkout
         case "app":
             throw new Error(
-                `The workflow source is only available in a development install (the pi package running from a git checkout of piton). Report piton problems as a pre-filled GitHub issue for the user to open: ${PITON_NEW_ISSUE_URL}`,
+                `The workflow source is only available in a development install (the pi package running from a git checkout of Piton). Report Piton problems as a pre-filled GitHub issue for the user to open: ${PITON_NEW_ISSUE_URL}`,
             )
     }
 }

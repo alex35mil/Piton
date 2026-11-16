@@ -89,7 +89,7 @@ describe("workflow project configuration", () => {
             setInstallationForTests({ kind: "development", checkout: root })
             assert.equal(developmentCheckout(), root)
             setInstallationForTests({ kind: "app" })
-            assert.throws(() => developmentCheckout(), /github\.com\/alex35mil\/piton\/issues\/new/)
+            assert.throws(() => developmentCheckout(), /github\.com\/alex35mil\/Piton\/issues\/new/)
         } finally {
             setInstallationForTests(undefined)
             fs.rmSync(root, { recursive: true, force: true })

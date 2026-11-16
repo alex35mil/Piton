@@ -16,7 +16,7 @@ omitted. The collector makes **no device calls** at Info.
 **until disabled**. Expiration is an absolute timestamp, so re-reading or reconnecting never extends the hour. Switching
 back to Info preserves existing files.
 
-**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `logging` in piton's
+**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `logging` in Piton's
 `config.host.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
 app or the CLI is **temporary**: it lasts until it expires or the daemon restarts, which returns to the config. Nothing
 else stores it. The daemon pushes the policy to the apps (including when a timed switch expires), the Mac app's own

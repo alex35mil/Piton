@@ -4,7 +4,7 @@ Controls tool execution with configurable allow/deny/ask rules. Prompts the user
 
 ## Configuration
 
-Settings: `[permissions]` and `[permissions.<runtime>]` of `config.toml` (then `config.local.toml`) in every level of piton's `.piton/` chain, farthest first: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, then `<repo-root>/.piton/`. `piton config resolve` reads them.
+Settings: `[permissions]` and `[permissions.<runtime>]` of `config.toml` (then `config.local.toml`) in every level of Piton's `.piton/` chain, farthest first: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, then `<repo-root>/.piton/`. `piton config resolve` reads them.
 
 ### Runtime
 

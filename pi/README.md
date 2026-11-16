@@ -1,6 +1,6 @@
-# piton: pi package
+# Piton: pi package
 
-The [pi](https://pi.dev) package of [piton](../README.md): extensions, skills, and coding agent workflows.
+The [pi](https://pi.dev) package of [Piton](../README.md): extensions, skills, and coding agent workflows.
 
 > [!IMPORTANT]
 > This setup is built for [pi.nvim](https://github.com/alex35mil/pi.nvim). Some extensions (notably [permissions](./extensions/permissions/)) rely on the Neovim plugin for UI interactions like edit reviews. Using this package with the pi TUI will most likely require adjustments.
@@ -40,10 +40,10 @@ Workflow operations are discovered on demand through the existing permission-awa
 - `/todo` — ready-work intake of Epics and Gigs into the tracker;
 - `/pr` — privately review an incoming PR. You approve a checkout only after seeing a safety score, and each fix, push, publication, and merge needs its own approval. See [incoming PR handling](workflows/references/pr/incoming.md).
 
-Say “Report this workflow issue” to prepare a sanitized report of a piton problem. The agent drafts it, you approve it, and it gives you a link that opens a pre-filled GitHub issue on piton for you to submit. See [workflow reporting](workflows/README.md#report-a-workflow-problem).
+Say “Report this workflow issue” to prepare a sanitized report of a Piton problem. The agent drafts it, you approve it, and it gives you a link that opens a pre-filled GitHub issue on Piton for you to submit. See [workflow reporting](workflows/README.md#report-a-workflow-problem).
 
 Every project uses a tracker (GitHub or Linear) and a GitHub forge. The tracker object is each Epic, Task, and Gig's identity, and every Deliverable ships through a merged PR. Workflow artifacts live under `.piton/.local/` and never enter Git. Runtime provider operations use Pi-registered MCP tools through the same permission extension as every other agent. Guided setup may additionally inspect Linear and provision an explicitly approved GitHub Project through credential-isolated direct APIs. See the [workflow setup and artifact guide](workflows/README.md).
 
 ## Parallel workers
 
-Run several Gigs or Tasks at once, each in its own copy-on-write copy of the repository with Pi inside a nono sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and `PITON_RUNTIME=sandbox` lets them use separate `[permissions.sandbox]` rules. piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).
+Run several Gigs or Tasks at once, each in its own copy-on-write copy of the repository with Pi inside a nono sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and `PITON_RUNTIME=sandbox` lets them use separate `[permissions.sandbox]` rules. Piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).

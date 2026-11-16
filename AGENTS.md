@@ -1,6 +1,6 @@
 # AGENTS.md
 
-piton: the user's setup for running pi coding agents on macOS.
+Piton: the user's setup for running pi coding agents on macOS.
 
 ## Areas
 
@@ -16,9 +16,9 @@ piton: the user's setup for running pi coding agents on macOS.
 
 ## Docs
 
-- `docs/design.md`: problem, principles, architecture, scope, and what piton relies on from pi.nvim. Read before
+- `docs/design.md`: problem, principles, architecture, scope, and what Piton relies on from pi.nvim. Read before
   changing architecture or protocols.
-- `docs/pi-findings.md`: pi RPC behavior piton relies on, verified against real pi. Re-verify before relying on
+- `docs/pi-findings.md`: pi RPC behavior Piton relies on, verified against real pi. Re-verify before relying on
   anything not listed.
 - `docs/development.md`: layout, tasks, sandbox, signing.
 - `docs/daemon.md`: running the daemon and CLI, configuration.
@@ -31,7 +31,7 @@ piton: the user's setup for running pi coding agents on macOS.
   `mise tasks` lists them.
 - `apps/Piton.xcodeproj` and `apps/*/Info.plist` are generated from `apps/project.yml` by XcodeGen. Never edit or
   commit them; Info.plist keys go in the target's `info.properties`.
-- piton must not change how pi works: the daemon runs `pi --mode rpc` as the user would and never touches pi's
+- Piton must not change how pi works: the daemon runs `pi --mode rpc` as the user would and never touches pi's
   settings, agent directory, session files, or extensions.
 - Domain modeling: sum types matched exhaustively, no wildcard arms over domain enums (enforced by clippy lints in
   `cli/Cargo.toml`), typed errors.

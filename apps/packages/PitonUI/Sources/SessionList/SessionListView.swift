@@ -128,7 +128,7 @@ public struct SessionListView: View {
     private var emptyDescription: String {
         switch store.link {
         case .connected: "Start one here, or with :Pi in Neovim."
-        case .connecting: "Connecting to piton on \(store.endpoint.label)…"
+        case .connecting: "Connecting to Piton on \(store.endpoint.label)…"
         case .retrying(let error, _): error
         }
     }

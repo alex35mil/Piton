@@ -27,7 +27,7 @@ pub enum StateError {
         "{path} has schema version {found}, newer than this piton understands ({supported}); update piton, or move the file aside to start over"
     )]
     Newer { path: PathBuf, found: i64, supported: i64 },
-    #[error("{path} isn't a piton state database (no host identity)")]
+    #[error("{path} isn't a Piton state database (no host identity)")]
     NotAState { path: PathBuf },
     #[error("{path} already holds state ({tables}); import over it with --force, which replaces it")]
     HasState { path: PathBuf, tables: String },

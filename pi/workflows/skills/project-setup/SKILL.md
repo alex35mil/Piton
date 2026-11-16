@@ -290,7 +290,7 @@ GitHub provisioning has its own preview and hash approval and must finish first.
 
 Require explicit approval. Configuration contains no credentials. Never infer missing product rules, lifecycle mappings, field scopes, provider identities, or policy text.
 
-The configuration files are protected: under piton, each write shows the user its diff to approve again. Never edit `.piton/config.toml` or `.piton/config.local.toml` by hand; the tools write them.
+The configuration files are protected: under Piton, each write shows the user its diff to approve again. Never edit `.piton/config.toml` or `.piton/config.local.toml` by hand; the tools write them.
 
 ## Write and validate
 

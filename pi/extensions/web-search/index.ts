@@ -68,7 +68,7 @@ export default async function (pi: ExtensionAPI) {
                     content: [
                         {
                             type: "text" as const,
-                            text: "Web search is not configured. Set BRAVE_SEARCH_API_KEY as an environment variable, or set api_key in [web_search] of piton's config.local.toml.",
+                            text: "Web search is not configured. Set BRAVE_SEARCH_API_KEY as an environment variable, or set api_key in [web_search] of Piton's config.local.toml.",
                         },
                     ],
                 }

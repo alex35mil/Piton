@@ -20,7 +20,7 @@ prompt (`slow <n>`, `tool`, `ask`, otherwise an echo). `PITON_FAUX_TPS` sets the
 - `pi --session <file>` resumes the same file and the same `sessionId`; `get_entries` returns the saved entries.
 - `pi --session-id <id>` starts an empty session with that id; the file name ends in `_<id>.jsonl`.
 - The session folder is per workspace under `$PI_CODING_AGENT_DIR/sessions/--<escaped cwd>--/`. On macOS the cwd is
-  the resolved path (`/private/var/...` for `/var/...`), so piton must resolve symlinks the same way when it compares
+  the resolved path (`/private/var/...` for `/var/...`), so Piton must resolve symlinks the same way when it compares
   workspaces.
 
 ## Event stream (`events`)
@@ -39,7 +39,7 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
 
 - Mid-stream, `get_state.isStreaming` is true and `get_entries` has the user message but not the streaming assistant
   message (`messageCount` counts system + user). The in-progress message exists only in the event stream, which is
-  why piton's replay is needed.
+  why Piton's replay is needed.
 - `prompt` while streaming needs `streamingBehavior` (`"steer"` or `"followUp"`); the response has
   `disposition: "queued"`, followed by `queue_update` with `{steering: [], followUp: [...]}`.
 
@@ -54,7 +54,7 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
   a second prompt written right behind the first still finds the run active. From 1.5 (checked on 1.5.2,
   2026-11-11) it can arrive during that preparation: pi answers `"started"` to both and then drops the second, with
   no message, no `queue_update`, and no error (pi #10606 was the same bug on 1.0.4). With a gap of 1 ms or more it's
-  queued as before. So piton writes a `prompt` only after pi answered the previous one (`cli/src/session/prompts.rs`).
+  queued as before. So Piton writes a `prompt` only after pi answered the previous one (`cli/src/session/prompts.rs`).
   The probe writes its prompts straight to pi, without that queue, so on 1.5 it times out waiting for the dropped
   ones: every prompt is answered `"started"` and only the first runs. `cli/tests/e2e/attach.mjs` ("prompts sent
   together all run") checks the queue and passes on 1.5.2.
@@ -80,7 +80,7 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
 - `ctx.ui.setStatus(key, text)` arrives as `extension_ui_request` with `method: "setStatus"`, `statusKey`,
   `statusText`; `setWidget(key, lines)` as `method: "setWidget"`, `widgetKey`, `widgetLines`. Each has its own `id`
   and needs no answer.
-- Clearing (`undefined`) sends the same record without `statusText` / `widgetLines`. piton's replay keeps the latest
+- Clearing (`undefined`) sends the same record without `statusText` / `widgetLines`. Piton's replay keeps the latest
   per key and drops a key on a record without its value.
 
 ## Compaction (`compaction`)
@@ -97,12 +97,12 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
 
 - pi aborts the run first: the streaming message ends with `stopReason: "aborted"` (`message_end`, `turn_end`,
   `agent_end`, `agent_settled`), and only then comes the `switch_session` response (`cancelled: false`). The
-  aborted run's events precede the response, so piton's rebuild after the response starts from a settled pi.
+  aborted run's events precede the response, so Piton's rebuild after the response starts from a settled pi.
 
 ## Stopping (`stop`, `killed`)
 
 - Closing stdin exits pi with code 0: idle within ~5 ms; mid-stream within ~10 ms on 1.3.0 and ~200–270 ms on 1.5.2
-  (faux provider; a real provider with pending work may take longer). Either is far inside piton's stop grace
+  (faux provider; a real provider with pending work may take longer). Either is far inside Piton's stop grace
   (`grace_ms`, 15 s). Mid-stream, the stream simply stops: no `message_end`, `agent_end`, or `agent_settled`.
 - SIGKILL mid-stream: the session file has the earlier turns only; the interrupted turn is lost entirely, its user
   message included, although that message's `message_end` had already been emitted. Resuming works, and a new prompt
@@ -112,8 +112,8 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
 ## nono
 
 - Running `nono run` from inside a nono sandbox fails: nono writes session state to `~/.local/state/nono`, which the
-  `piton` profile doesn't allow. The piton daemon runs outside any sandbox (launchd), so this only affects running
-  piton's sandbox mode from a sandboxed agent session. Tests of sandbox mode run on the host.
+  `piton` profile doesn't allow. The Piton daemon runs outside any sandbox (launchd), so this only affects running
+  Piton's sandbox mode from a sandboxed agent session. Tests of sandbox mode run on the host.
 
 ## Not yet verified
 

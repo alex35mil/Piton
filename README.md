@@ -1,4 +1,4 @@
-# piton
+# Piton
 
 My coding agents setup.
 

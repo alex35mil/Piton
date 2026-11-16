@@ -138,7 +138,7 @@ struct MenuBarContent: View {
             }
             .font(.callout)
             if let version = store.daemon?.version {
-                Text("piton \(version)")
+                Text("Piton \(version)")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)

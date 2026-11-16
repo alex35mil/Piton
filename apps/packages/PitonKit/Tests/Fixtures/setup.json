@@ -25,7 +25,7 @@
       ],
       "fix": {
         "kind": "app",
-        "summary": "Start piton at login"
+        "summary": "Start Piton at login"
       }
     },
     {

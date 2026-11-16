@@ -10,7 +10,7 @@ Step files, read when the step is reached:
 - When the tracker is Linear, read [Linear tracker configuration](./setup/linear-tracker.md).
 ## General rules
 
-- Settings live in `.piton/config.toml`; personal values in `.piton/config.local.toml`, which stays outside Git. Parent folders and piton's global folder (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) have the same pair.
+- Settings live in `.piton/config.toml`; personal values in `.piton/config.local.toml`, which stays outside Git. Parent folders and Piton's global folder (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) have the same pair.
 - The setup tools write them: `configure_project`, `configure_permissions`. They keep the files' other settings, comments, and layout. Never edit them by hand or with a script.
 - Every table rejects unlisted keys and contains no credentials. Store only operational fields.
 - Omit optional settings instead of writing empty, disabled, or placeholder configuration.

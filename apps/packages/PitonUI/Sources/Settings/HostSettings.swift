@@ -35,7 +35,7 @@ public struct HostSettings: View {
                     }
                 }
             } else {
-                Text("Not connected to piton.").foregroundStyle(.secondary)
+                Text("Not connected to Piton.").foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

@@ -24,7 +24,7 @@ pub enum Entry {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkspaceError {
     /// The config lists no roots (or none of them exists), so the apps can't browse or start sessions anywhere.
-    #[error("no workspace roots configured: set `roots` in piton's config.toml")]
+    #[error("no workspace roots configured: set `roots` in Piton's config.toml")]
     NoRoots,
     #[error("{0} isn't under a configured root")]
     OutsideRoots(PathBuf),

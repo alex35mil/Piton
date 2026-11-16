@@ -54,14 +54,14 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        # piton's WebSocket is plain ws:// inside the tailnet (Tailscale encrypts it). Allowed for MagicDNS names
+        # Piton's WebSocket is plain ws:// inside the tailnet (Tailscale encrypts it). Allowed for MagicDNS names
         # (*.ts.net); a 100.x address isn't subject to ATS's domain rules.
         NSAppTransportSecurity:
           NSExceptionDomains:
             ts.net:
               NSIncludesSubdomains: true
               NSExceptionAllowsInsecureHTTPLoads: true
-        NSLocalNetworkUsageDescription: Piton connects to piton on your Mac over Tailscale.
+        NSLocalNetworkUsageDescription: Piton connects to your Mac over Tailscale.
         # Only Apple's standard encryption (HTTPS/TLS stacks): no export-compliance questions on each TestFlight upload.
         ITSAppUsesNonExemptEncryption: false
     settings:

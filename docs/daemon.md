@@ -42,7 +42,7 @@ process = {
 ```
 
 `piton attach` launches a fresh pi in the tab's workspace (sandboxed), relays pi RPC, and exits 0 on detach, 3 when pi
-ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a session that's live in piton attach to it.
+ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a session that's live in Piton attach to it.
 
 ## Configuration
 

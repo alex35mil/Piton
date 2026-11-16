@@ -1,4 +1,4 @@
-# piton: design
+# Piton: design
 
 Status: draft. Decisions below were settled in discussion; open questions are listed at the end.
 
@@ -8,14 +8,14 @@ A pi RPC process lives exactly as long as the client that started it: Pi 1.3.0 R
 client owns pi's stdin, and closing stdin shuts pi down (still true on 1.5.2). Today that client is pi.nvim inside Neovide, so every session
 dies with the editor and is unreachable away from the laptop.
 
-piton separates where pi runs from who is looking at it:
+Piton separates where pi runs from who is looking at it:
 
 - pi processes run under a daemon on the laptop and outlive any client;
 - pi.nvim becomes a client that connects and disconnects without interrupting a session;
 - an iOS/iPadOS app (and a macOS menu bar app) connects over Tailscale to read and steer sessions;
 - the user is notified by push when an agent needs them.
 
-piton is personal tooling for one user on one MacBook Pro. pi.nvim is a public, provider-neutral library; piton is one
+Piton is personal tooling for one user on one MacBook Pro. pi.nvim is a public, provider-neutral library; Piton is one
 implementation of its generic connector contract and gets no special treatment there.
 
 ## Use cases
@@ -33,14 +33,14 @@ From the laptop: keep working in pi.nvim exactly as today, and pick up a session
 
 ## Principles
 
-- **Transparent to pi.** piton runs `pi --mode rpc` in the workspace with the environment the user's shell would give
+- **Transparent to pi.** Piton runs `pi --mode rpc` in the workspace with the environment the user's shell would give
   it. It never changes pi's settings, agent directory, session files, or extensions, and never computes pi's session
-  folder itself. Per-folder agent directories (set through mise) keep working because piton makes no assumption about
+  folder itself. Per-folder agent directories (set through mise) keep working because Piton makes no assumption about
   them.
-- **Build on pi's protocol, don't replace it.** pi.nvim gets raw pi RPC. piton types only the fields it acts on
+- **Build on pi's protocol, don't replace it.** pi.nvim gets raw pi RPC. Piton types only the fields it acts on
   (command ids and types, event types, extension UI requests); everything else passes through as JSON.
 - **One live pi per session file.** pi doesn't lock session files; two processes appending to one file corrupt its
-  tree. piton enforces the rule for every pi it owns. A pi started outside piton (a terminal) is out of scope.
+  tree. Piton enforces the rule for every pi it owns. A pi started outside Piton (a terminal) is out of scope.
 - **Single writer, many readers.** The last client to send a prompt, steer, follow-up, abort, or dialog answer becomes
   the session's writer. Everyone sees everything. No locks, no take-control step.
 - **Exhaustive domain types.** Session lifecycle, connection, attention, and writer state are Rust enums matched
@@ -79,7 +79,7 @@ The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is
 - `agent/`: the bridge between a sandboxed agent and the daemon: which files are protected and their Seatbelt rules
   (`protected`), `agent.sock` (`socket`), and a protected write asked of the user (`write`).
 - `project/`: a workspace's source or worker relation, and worker clones.
-- `setup/`: `piton setup` and the launchd agent. `logging/`: piton's own logs, the logging policy, the collector.
+- `setup/`: `piton setup` and the launchd agent. `logging/`: Piton's own logs, the logging policy, the collector.
 
 ### Packaging
 
@@ -104,13 +104,13 @@ be changed in Settings > Connection. A host's onboarding lists the steps from `p
 the bundled binary: tools (pi, mise, nono, tailscale), the global configuration, the CLI link
 (`~/.local/bin/piton` to the bundled `piton`), start at login, the state database, and remote access (this host's
 tailnet name and port). Each is ok, missing with its fix, or failed: `piton setup apply <step>` does the steps
-piton can (create the global folder, link the CLI, create the database), the app registers the daemon, and the rest
+Piton can (create the global folder, link the CLI, create the database), the app registers the daemon, and the rest
 are instructions. A development build has no bundled binary and uses the linked CLI; its daemon comes from `piton
 service install`. DMG packaging, signing, and notarization are tracked separately.
 
 ### Launching pi
 
-For every pi it starts, piton:
+For every pi it starts, Piton:
 
 1. builds the environment: the user's login-shell environment captured at daemon start (launchd's environment is
    minimal), plus `mise env -C <workspace> --json`, computed once per launch;
@@ -124,7 +124,7 @@ environment (today a `:tcd` worker inherits the Neovide launch folder's environm
 
 The mode is chosen per launch, not per workspace. nono is the only sandbox.
 
-- **Sandbox (default):** `nono run -s --profile <generated> --allow-cwd -- pi --mode rpc [...]`, with piton's
+- **Sandbox (default):** `nono run -s --profile <generated> --allow-cwd -- pi --mode rpc [...]`, with Piton's
   environment passed through. The daemon generates the profile for each launch from the configuration chain's
   `[sandbox]` tables (see "Configuration and state"); it grants the source's `.piton/.local` and keeps protected files
   read-only. See "Workers" for what "source" means.
@@ -150,13 +150,13 @@ with `.piton/.local` linked to the source's.
 - **`[workers] skip`** in `.piton/config.toml` lists paths not copied into new workers, such as editor indexes that
   break tooling in a clone (`apps/.build/index-build` here). It only removes things from the copy.
 - **`piton worker create <name> [--from <checkout>] [--label] [--issue]`:** the source must be clean on its default
-  branch; piton fast-forwards it, clones everything except the skip list and `.piton/.local` (one `clonefile(2)` per
+  branch; Piton fast-forwards it, clones everything except the skip list and `.piton/.local` (one `clonefile(2)` per
   entry), links `.piton/.local`, and sets `agent.source`, `agent.label`, `agent.issue`. When mise trusts the
-  source's own config, piton trusts the worker's too (`mise trust <worker>`): its config files are the source's,
+  source's own config, Piton trusts the worker's too (`mise trust <worker>`): its config files are the source's,
   cloned, so this grants nothing the user hasn't. An untrusted source gives an untrusted worker, and a launch there
   reports it (see "Launching pi"). It writes no pi.nvim
-  descriptor: pi.nvim's global spec attaches through piton, and a workspace descriptor would override that and bypass
-  piton (no phone access, no keep-awake). The worker's sandbox comes from piton at launch (see "Launch mode").
+  descriptor: pi.nvim's global spec attaches through Piton, and a workspace descriptor would override that and bypass
+  Piton (no phone access, no keep-awake). The worker's sandbox comes from Piton at launch (see "Launch mode").
 - **`piton worker ls`:** the source's workers with their live sessions.
 - **`piton worker delete <path> [--force]`:** refuses with the uncommitted changes and unpushed commits unless forced;
   stops the worker's sessions, drops mise's trust in the folder, unlinks `.piton/.local`, deletes the folder, and
@@ -169,22 +169,22 @@ The editor keeps its UI (tabs, picker, tracker queue, dialogs) and calls `piton 
 
 ### pi version
 
-piton targets pi 1.5.2. pi is pinned in the user's global mise config and bumped centrally across tools, so this
-repository doesn't pin pi itself (piton launches whatever `pi` the workspace's environment resolves); the pi package's
+Piton targets pi 1.5.2. pi is pinned in the user's global mise config and bumped centrally across tools, so this
+repository doesn't pin pi itself (Piton launches whatever `pi` the workspace's environment resolves); the pi package's
 minimum is in `pi/README.md`. The RPC protocol docs (`rpc-commands.md`, `json.md`, `rpc-extension-ui.md`) are
 identical on 1.3.0, 1.5.0, 1.5.2, and `main` (checked 2026-11-07, 1.5.2 on 2026-11-11). Differences between
-versions that shaped piton:
+versions that shaped Piton:
 
 - **Stopping pi.** On 1.3.0, a signal that arrives while pi is shutting down after stdin EOF cuts its cleanup short
-  (for example a pending OAuth token save). So piton stops a pi by closing its stdin only, waiting the grace period, and
+  (for example a pending OAuth token save). So Piton stops a pi by closing its stdin only, waiting the grace period, and
   only then sending SIGTERM, and SIGKILL after a further short wait. The default grace is longer than pi.nvim's 5 s
   (proposed 15 s) because pi waits for pending work. This sequence is also correct on newer pi, where SIGTERM starts an
   orderly shutdown too.
 - **Unrequested exits.** Newer pi exits at once when an extension calls `ctx.shutdown()` while idle (1.3.0 waits for
-  the next command). Either way piton must treat an exit it didn't request with code 0 as "pi ended" (connections exit
+  the next command). Either way Piton must treat an exit it didn't request with code 0 as "pi ended" (connections exit
   3), not as a crash, in status and notifications.
 - **Session writes.** 1.5.0 fixed failed session writes leaving entries in memory that never reached disk. On 1.3.0 a
-  failed write can still make the live pi and its file disagree; piton doesn't depend on the file matching the live pi
+  failed write can still make the live pi and its file disagree; Piton doesn't depend on the file matching the live pi
   except when resuming after a daemon restart.
 - **Prompts sent together.** From 1.5, pi drops a `prompt` that arrives while the previous one is still being
   prepared, after answering it `"started"` (docs/pi-findings.md, "Queued prompts"). So the session task writes one
@@ -193,11 +193,11 @@ versions that shaped piton:
 
 ### Workspace roots
 
-piton's config lists workspace roots (`roots`; `cli/src/apps/workspaces.rs`). There are none by default: until the owner
+Piton's config lists workspace roots (`roots`; `cli/src/apps/workspaces.rs`). There are none by default: until the owner
 lists some, `workspaces.browse` and `session.start` from a `view` client refuse with "no workspace roots configured",
 and the apps say so. A root is a tree of grouping folders with repositories at varying depth, e.g. `~/Projects/personal/apps/app` and its worker clone `~/Projects/personal/apps/app--fix-login`
 next to it. A **workspace** is a folder under a root that
-contains `.git`; piton doesn't descend into a workspace, so subfolders of a repository aren't shown. Hidden folders are
+contains `.git`; Piton doesn't descend into a workspace, so subfolders of a repository aren't shown. Hidden folders are
 skipped.
 
 - `workspaces.browse {path?}` returns one level as `{entries}`: the direct children of `path` (the roots when
@@ -205,7 +205,7 @@ skipped.
   `{kind: "workspace", name, path, source?}` (`source` for a worker). Groups first, by name. The phone loads a level
   when you open it, so there is no depth limit and no full scan. Paths outside the roots are refused (canonicalized
   first, so `..` can't climb out).
-- Not yet: `workspaces.recent` (workspaces piton launched pi in, newest first), `workspaces.search {query}`, and live
+- Not yet: `workspaces.recent` (workspaces Piton launched pi in, newest first), `workspaces.search {query}`, and live
   session counts per workspace.
 - Worker clones are ordinary workspaces in that tree. Grouping them under their main repository is a later refinement.
 - `session.start` from a `view` client rejects a path that isn't a git checkout under a root.
@@ -213,7 +213,7 @@ skipped.
 
 ### Session registry
 
-piton keeps one record per live pi: workspace, pi process, session id and file (from `get_state`, refreshed after
+Piton keeps one record per live pi: workspace, pi process, session id and file (from `get_state`, refreshed after
 `switch_session`, `new_session`, `fork`, `clone`), status, connected clients, writer, pending dialogs, and the session
 view (below).
 
@@ -222,12 +222,12 @@ with no live pi is part of the session creation redesign (#208).
 
 ### Attaching from pi.nvim
 
-pi.nvim knows nothing about piton: it supports any attached connector (its README, "Attached pi"), and piton is one.
-piton relies on that generic contract:
+pi.nvim knows nothing about Piton: it supports any attached connector (its README, "Attached pi"), and Piton is one.
+Piton relies on that generic contract:
 
 - **Restore:** after connecting, after an automatic reconnect, and after every successful `switch_session` and
   `new_session`, pi.nvim rebuilds the chat from `get_state` and `get_entries`, holding back records that arrive before
-  the `get_entries` response and dropping the ones the snapshot already has. piton's replay (below) fills in what
+  the `get_entries` response and dropping the ones the snapshot already has. Piton's replay (below) fills in what
   those two don't contain.
 - **Reconnect:** a connector exit other than 3, when pi.nvim didn't ask for it, is a lost connection, retried with the
   same command. When the reached conversation is empty and idle and the previous one had messages, pi.nvim sends
@@ -247,19 +247,19 @@ process = {
 
 `piton attach` runs in the tab's workspace (its working directory, symlinks resolved), connects to the daemon's Unix
 socket, sends a hello, and then relays pi RPC records in both directions. Its stdout carries protocol records only;
-diagnostics go to stderr. The connector's environment is not passed to pi; piton builds pi's environment itself.
+diagnostics go to stderr. The connector's environment is not passed to pi; Piton builds pi's environment itself.
 
-| pi.nvim action | What pi.nvim sends | What piton does |
+| pi.nvim action | What pi.nvim sends | What Piton does |
 | --- | --- | --- |
 | `:Pi` | runs the connector | launches a new pi in the workspace |
-| `:PiContinue`, `:PiResume` | `switch_session <path>` | see "Commands piton intercepts" |
-| `:PiNewSession` | `new_session` (no `abort`) | see "Commands piton intercepts" |
+| `:PiContinue`, `:PiResume` | `switch_session <path>` | see "Commands Piton intercepts" |
+| `:PiNewSession` | `new_session` (no `abort`) | see "Commands Piton intercepts" |
 | `:PiAbort` | `abort` | passes through, even on a shared pi |
 | `:PiDetach`, tab close, Neovim exit | closes the connector's stdin | drops the client, exits 0; pi keeps running |
 | `:PiStop` | confirms, runs `terminate` | `piton stop --session <id>`: see below |
 | automatic reconnect | runs the connector, then `switch_session <previous file>` | new pi, then the move rule brings it back |
 
-#### Commands piton intercepts
+#### Commands Piton intercepts
 
 A pi is **shared** when more than one client is connected to it.
 
@@ -285,7 +285,7 @@ Nothing from the old pi is delivered after step 2. pi.nvim runs its restore afte
 and `new_session`, so it rebuilds the chat from whatever pi it now talks to. Limitation: the old pi's
 `session_before_switch` hook doesn't run on a move, because that pi isn't switching.
 
-Not interceptable: an extension's `switch_session` or pi's own `/new` and `/resume` handled inside pi. piton doesn't
+Not interceptable: an extension's `switch_session` or pi's own `/new` and `/resume` handled inside pi. Piton doesn't
 detect a resulting collision today; whether it can is open question 1 (#210).
 
 #### Ending connections
@@ -305,7 +305,7 @@ shutdown stops every pi the same way, in parallel.
 
 #### Empty pis
 
-When the last client leaves a pi that has no messages, no run, and no pending dialog, piton stops it after about 10 s
+When the last client leaves a pi that has no messages, no run, and no pending dialog, Piton stops it after about 10 s
 (so a quick reconnect lands on it). This covers `:Pi` then closing the tab, a cancelled `:PiResume` in a fresh tab,
 the pi left behind by a move, and the same cases from Swift clients.
 
@@ -316,15 +316,15 @@ Pi has one stdin, so the daemon multiplexes:
 - **Command ids:** each client's ids are rewritten to unique ids on the way to pi and restored on the way back, so
   responses reach only the client that asked. Events go to everyone.
 - **Writer:** updated on every steering command from any client.
-- **Dialogs:** piton tracks every pending `extension_ui_request` (dialog methods) until a client answers, its timeout
-  passes, or pi exits. Answers after the first are dropped by piton (pi ignores them anyway). A dialog answered on
+- **Dialogs:** Piton tracks every pending `extension_ui_request` (dialog methods) until a client answers, its timeout
+  passes, or pi exits. Answers after the first are dropped by Piton (pi ignores them anyway). A dialog answered on
   another client stays open in pi.nvim until dismissed, since pi sends nothing when a dialog resolves.
 - **Order:** each pi's stdout has one reader; every connection gets records in pi's order. Responses to other clients'
   commands are filtered out, never reordered.
 
 #### Replay
 
-piton keeps the temporary state that neither `get_state` nor `get_entries` contains, and sends it to an `rpc` client as
+Piton keeps the temporary state that neither `get_state` nor `get_entries` contains, and sends it to an `rpc` client as
 pi's original records, unchanged, as the first records on the connector's stdout (or right after the success response
 of a move), before any live record. Taking the snapshot and switching to live relaying is one step in the session's
 task, so no live record is skipped or sent twice. Order:
@@ -336,7 +336,7 @@ task, so no live record is skipped or sent twice. Order:
 5. pending dialogs, each `extension_ui_request` with its original `id`;
 6. the latest `setStatus` and `setWidget` per key.
 
-pi.nvim holds these back until its `get_entries` response and deduplicates them against the snapshot, so with piton
+pi.nvim holds these back until its `get_entries` response and deduplicates them against the snapshot, so with Piton
 there is no "response in progress" placeholder and no invisible dialog.
 
 ### Session view (Swift clients)
@@ -455,7 +455,7 @@ text frame per message, plain `ws://` (Tailscale encrypts the traffic). `cli/src
   `~/.cargo/bin/piton` with the team's Apple Development certificate (identifier `com.alex35mil.piton.daemon`), so its
   code identity stays the same across rebuilds and a rule for that path keeps matching. Allow incoming TCP on port
   7357 from the tailnet ranges (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`); the identity check (Tailscale `whois`) is
-  piton's own, the firewall rule only lets the connection reach it. Debug builds (`cli/target/debug/piton`, tests)
+  Piton's own, the firewall rule only lets the connection reach it. Debug builds (`cli/target/debug/piton`, tests)
   aren't signed and don't need the rule (tests listen on loopback).
 
 ### Protocols
@@ -471,7 +471,7 @@ Every connection starts with a hello declaring its protocol:
 ```
 
 - **`rpc`:** after the hello, raw pi RPC for one session. Used by `piton attach`. Possible later over the tailnet.
-- **`view`:** piton's control and view protocol. Draft operations:
+- **`view`:** Piton's control and view protocol. Draft operations:
   - `sessions.list` (live and saved, with status), `sessions.subscribe` (list changes);
   - `session.start {workspace}`, `session.open {sessionPath}` (attach if live, else launch pi on it),
     `session.stop {id}`;
@@ -600,7 +600,7 @@ Four stores, each with one job; every value has exactly one home.
 | Client storage | each app's container | hosts it connects to, a device's own preference values, imported fonts, log capture, unsent work | that app |
 | Memory | the daemon | live pis, session views, temporary switches, pending protected writes | the daemon |
 
-piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, trust).
+Piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, trust).
 
 #### Config files
 
@@ -648,8 +648,8 @@ the line. A host or client file has one schema and is read whole.
   configuration.
 - **Locating the global tier** can't depend on the workspace, whose `mise.toml` can set `HOME` or `XDG_CONFIG_HOME`.
   The daemon resolves it once from its login-shell environment and sets `PITON_CONFIG_HOME` for every pi after the
-  mise environment; a pi started outside piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
-- **Where a key may be set** is fixed by piton, declared next to each table's type, and enforced by the reader (a
+  mise environment; a pi started outside Piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
+- **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
   - `sandbox.base`, `groups`, `bypass`, `network.profile`: the global `config.toml` only.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
@@ -724,7 +724,7 @@ the line. A host or client file has one schema and is read whole.
 #### State database
 
 SQLite (`rusqlite`, bundled), WAL, owned by the daemon alone, in its `0700` state folder. Tables, each added by the
-work that needs it: `host` (`host_id`); later `projects` (canonical source path, last used); `sessions` (piton's
+work that needs it: `host` (`host_id`); later `projects` (canonical source path, last used); `sessions` (Piton's
 session identity and its state `draft`, `creating`, `live`, `failed`, title, pi session file); `drafts` and
 `draft_attachments` (size-bounded). Rows decode into Rust sum types at the boundary.
 
@@ -788,17 +788,17 @@ next tool call. Changes are gated where they're written:
    its run ends. Every protected write asks. The dialog carries the file's current content, so the
    apps show a diff without reading the file. On approval the daemon walks the path from the checkout without
    following any symlink, so a folder the agent swapped for a link while the user decided can't redirect the write.
-   Only a pi running outside piton (no session token) has the permissions extension ask itself and write directly,
+   Only a pi running outside Piton (no session token) has the permissions extension ask itself and write directly,
    whatever `defaultMode` or auto-accept says.
 
 A rejected change never reaches disk. Limits: shell writes in host sessions aren't gated (as in Claude Code without
 its sandbox); the rule is macOS-only. Codex and Claude Code don't need step 2 because they sandbox each shell command and run their
-edit tools unsandboxed; piton sandboxes the whole pi process.
+edit tools unsandboxed; Piton sandboxes the whole pi process.
 
 **Sandbox backend.** The nono CLI on PATH for development. The `nono` Rust crate (the sandbox core: `CapabilitySet`,
 `Sandbox::apply_auto`, `add_platform_rule`) could be linked into the daemon through a `piton sandbox-exec` helper,
 removing the PATH dependency and the profile file; but nono's policy groups and profile inheritance live in its CLI,
-so the daemon would carry and sync about 120 path entries itself. That's the step to take before piton is
+so the daemon would carry and sync about 120 path entries itself. That's the step to take before Piton is
 distributed (#224). A typed write-deny with nested re-allow, which would replace the raw rules, is requested upstream
 ([nono#2310](https://github.com/nolabs-ai/nono/issues/2310)). A custom Seatbelt launcher is rejected: keeping system and credential path lists correct across macOS releases is
 security work with no upstream sharing it.
@@ -815,7 +815,7 @@ that's what gates it: the daemon decides when a deploy may take effect, and an a
 The sandbox keeps every restriction it has. A deploy is a request, and the host does the work:
 
 - **Deploy socket.** The daemon listens on a second Unix socket (`~/.local/state/piton/deploy.sock`, `0600`), the
-  only piton path the `piton` nono profile allows. It speaks one request, `{deploy: daemon | mac | iphone | ipad,
+  only Piton path the `piton` nono profile allows. It speaks one request, `{deploy: daemon | mac | iphone | ipad,
   checkout}`, and nothing else: no session control, no host-mode launches, no paths or arguments to run. The control
   socket stays out of the sandbox.
 - **Checkout.** The daemon builds from the checkout the request names, accepted only when it's a source or a worker
@@ -880,7 +880,7 @@ tracked in the tracker, not here.
 ### Deferred
 
 - Sessions surviving daemon restarts (a shim process per session owning pi's stdio). v1 keeps per-session state
-  self-contained so moving it into a shim is mechanical. Until then, restarting piton ends all sessions; they continue
+  self-contained so moving it into a shim is mechanical. Until then, restarting Piton ends all sessions; they continue
   from their files (an in-progress turn is lost).
 - A "dialog resolved" record so other clients close a dialog answered elsewhere.
 - Diff review on the phone (needs workspace file access, cf. pi.nvim #29).
@@ -890,31 +890,31 @@ tracked in the tracker, not here.
 
 Upstream pi has been building multi-client support: a "server mode" (badlogic in pi#4737) and PR pi#7409 (merged
 2026-07-31, `packages/client`/`packages/server` with shared/exclusive session leases; those packages are no longer on
-`main`). None of it is in pi 1.5.2. Keep piton's pi-facing side behind one adapter so a future server mode replaces it
+`main`). None of it is in pi 1.5.2. Keep Piton's pi-facing side behind one adapter so a future server mode replaces it
 rather than the daemon.
 
 `pi-durable` (experimental, in the same repository) is a library for building your own agent harness in your own
-process, with its own storage; it doesn't use the pi coding agent's sessions, settings, extensions, or RPC. piton
+process, with its own storage; it doesn't use the pi coding agent's sessions, settings, extensions, or RPC. Piton
 stays on the pi coding agent for now (2026-11-13), but a later switch to a pi-durable runner is a real option: it
-would bring restart-durable runs, piton-owned provider login, and a piton-owned Neovim client. So piton's interfaces
+would bring restart-durable runs, Piton-owned provider login, and a Piton-owned Neovim client. So Piton's interfaces
 are designed for the runtime to be replaced:
 
-- **Clients never see pi.** The `view` protocol, `settings.set`, and `daemon.state` speak piton's own model
+- **Clients never see pi.** The `view` protocol, `settings.set`, and `daemon.state` speak Piton's own model
   (sessions, items, dialogs, settings); no pi RPC record, pi setting name, or pi file path crosses to a client.
   `piton attach` (pi.nvim's raw RPC) is the one pi-shaped surface, and it's kept separate.
 - **One runtime boundary in the daemon.** Launching, the session task's pi I/O, and the RPC-to-view translation
   stay together behind one adapter; nothing else in the daemon reads pi records.
-- **Configuration is piton's.** The resolver's parts (permissions, MCP, rules, skills, policies, workflows,
+- **Configuration is Piton's.** The resolver's parts (permissions, MCP, rules, skills, policies, workflows,
   settings) are runtime-neutral; only their delivery is pi-specific (a pi extension today, hooks and sections in a
-  pi-durable runner). Settings piton adds (daemon, sandbox, host and client preferences, and what piton's
-  extensions read) live in piton's files, never in pi's `settings.json`. pi's own configuration (its
+  pi-durable runner). Settings Piton adds (daemon, sandbox, host and client preferences, and what Piton's
+  extensions read) live in Piton's files, never in pi's `settings.json`. pi's own configuration (its
   `settings.json`: default model, theme, packages; `auth.json`, keybindings, sessions, a project's `.pi/`) stays
-  pi's, and piton doesn't write it. If the apps ever change something pi owns (the default model, say), it's a
-  piton setting the adapter applies to pi.
+  pi's, and Piton doesn't write it. If the apps ever change something pi owns (the default model, say), it's a
+  Piton setting the adapter applies to pi.
 - **pi-specific pieces are named as such:** the protected `.pi/` folder, skill discovery through
   `resources_discover`, `PI_CODING_AGENT_DIR`, and pi's session files. They're the parts a switch removes.
 
 ## Open questions
 
-1. A collision caused by a `switch_session` piton can't see (extension, pi's `/resume`): can piton detect it, and
+1. A collision caused by a `switch_session` Piton can't see (extension, pi's `/resume`): can Piton detect it, and
    should it report only or also stop one side? Researched in #210.

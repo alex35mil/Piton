@@ -28,7 +28,7 @@ public final class WebSocketTransport: NSObject, Transport, URLSessionWebSocketD
 
         public var description: String {
             switch self {
-            case .refused(let detail): "piton refused the connection: \(detail)"
+            case .refused(let detail): "Piton refused the connection: \(detail)"
             case .closed: "connection closed"
             }
         }

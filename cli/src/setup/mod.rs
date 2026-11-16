@@ -193,7 +193,7 @@ fn check_step(host: &Host, step: Step) -> Status {
             false => Status::Missing {
                 problems: vec!["the daemon isn't running".into()],
                 fix: Fix::App {
-                    summary: "Start piton at login (the Mac app registers it)".into(),
+                    summary: "Start Piton at login (the Mac app registers it)".into(),
                 },
             },
         },
@@ -725,7 +725,7 @@ mod tests {
                     status: Status::Missing {
                         problems: vec!["the daemon isn't running".into()],
                         fix: Fix::App {
-                            summary: "Start piton at login".into(),
+                            summary: "Start Piton at login".into(),
                         },
                     },
                 },

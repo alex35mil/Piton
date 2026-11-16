@@ -51,7 +51,7 @@ public struct GeneralSettings: View {
             Section {
                 KeepAwakeToggle(store: store)
             }
-            Section("piton") {
+            Section("Piton") {
                 LabeledContent("Connection", value: connection)
                 if let version = store.daemon?.version {
                     LabeledContent("Version") {
@@ -210,7 +210,7 @@ struct SettingsSplit<Content: View>: View {
                     Text("Your Mac on Tailscale")
                 } footer: {
                     Text(
-                        "Its MagicDNS name or 100.x address. piton on the Mac accepts only devices on your Tailscale account."
+                        "Its MagicDNS name or 100.x address. Piton on the Mac accepts only devices on your Tailscale account."
                     )
                 }
                 Button(host.isEmpty ? "Connect" : "Save") {

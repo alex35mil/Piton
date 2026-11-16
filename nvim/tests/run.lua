@@ -373,7 +373,7 @@ test("get delegates lookup and notifications use vim.notify", function()
     end)
     require("piton.notify").info("info")
     util.async(function() util.refuse("no") end)
-    equal({ { "info", vim.log.levels.INFO, "piton" }, { "no", vim.log.levels.WARN, "piton" } }, calls)
+    equal({ { "info", vim.log.levels.INFO, "Piton" }, { "no", vim.log.levels.WARN, "Piton" } }, calls)
 end)
 
 local failed = 0

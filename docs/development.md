@@ -166,7 +166,7 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
 
 ## Workflow reports and session analysis
 
-The pi package knows it's a development install when it runs from a git checkout of piton (its folder is the
+The pi package knows it's a development install when it runs from a git checkout of Piton (its folder is the
 checkout's `pi/`, next to `cli/`). Then:
 
 - "Report this workflow issue" files Todo work in this checkout's tracker (`[tracker]` of `.piton/config.toml`)

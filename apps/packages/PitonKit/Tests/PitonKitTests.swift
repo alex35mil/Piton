@@ -185,7 +185,7 @@ private let decoder = JSONDecoder()
     #expect(problems.count == 1)
     #expect(
         report.steps[2].status
-            == .missing(problems: ["the daemon isn't running"], fix: .app(summary: "Start piton at login")))
+            == .missing(problems: ["the daemon isn't running"], fix: .app(summary: "Start Piton at login")))
     #expect(
         report.steps[3].status
             == .missing(problems: ["tailscale isn't running"], fix: .manual(instructions: ["Start Tailscale"])))

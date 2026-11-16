@@ -106,7 +106,7 @@ public struct LoggingSettings: View {
             case .host(let store):
                 switch store.daemon?.logging.default {
                 case nil:
-                    "Not connected to piton."
+                    "Not connected to Piton."
                 case .some(let mode):
                     "Applies to this Mac's app, daemon, and phone-log collector, until it expires or the daemon restarts. The default is \(mode.rawValue.capitalized), set by logging in config.host.toml (Settings > Host). No sessions restart."
                 }
@@ -151,7 +151,7 @@ public struct LoggingSettings: View {
     private func perform(_ action: Action) async -> Activity {
         switch (action, scope) {
         case (.configure(let policy), .host(let store)):
-            return await store.setHostLogging(policy) ? .ready : .failed("Couldn't reach piton.")
+            return await store.setHostLogging(policy) ? .ready : .failed("Couldn't reach Piton.")
         case (.configure(let policy), .device):
             return await storage { () async throws(AppLogging.LoggingError) in
                 try await AppLogging.shared.setPolicy(policy)
@@ -168,7 +168,7 @@ public struct LoggingSettings: View {
         } catch {
             switch error {
             case .storage(let code): return .failed("Couldn't update log files (error \(code)).")
-            case .hostControlled: return .failed("Logging on this Mac is switched through piton.")
+            case .hostControlled: return .failed("Logging on this Mac is switched through Piton.")
             }
         }
     }
