@@ -284,17 +284,15 @@ function formatUsesUsername(format: BranchFormat): boolean {
     return format.startsWith("username")
 }
 
-// Ask Git, so the answer matches what Git will actually stage. Only the committed root .gitignore
-// counts: .git/info/exclude and global excludes are local to one clone.
+// Ask Git, so the answer matches what Git will actually stage. Any repository rule counts: a committed setup's
+// .gitignore or a private setup's .git/info/exclude. The global excludes file doesn't: it's outside the repository.
 function assertProjectLocalIgnored(root: string): void {
     const linked = isSymbolicLink(path.join(root, PROJECT_LOCAL_ROOT))
     // A symlink is a file to Git; query a missing or real directory in directory form.
     const query = linked ? PROJECT_LOCAL_ROOT : `${PROJECT_LOCAL_ROOT}/`
-    const match = Git.tryRun(root, ["check-ignore", "--verbose", "--no-index", "--", query])
-    const source = match.split("\t")[0]?.split(":")[0]
-    if (source === ".gitignore") return
+    if (Git.succeeds(root, ["-c", "core.excludesFile=", "check-ignore", "--quiet", "--no-index", "--", query])) return
     throw new Error(
-        `workflow artifacts require ${PROJECT_LOCAL_IGNORE} (no trailing slash) in .gitignore; add it through project setup before continuing`,
+        `workflow artifacts require ${PROJECT_LOCAL_IGNORE} (no trailing slash) in .gitignore, or /${PITON_DIR} in .git/info/exclude for a private setup; add it through project setup before continuing`,
     )
 }
 

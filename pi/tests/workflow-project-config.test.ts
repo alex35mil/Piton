@@ -704,15 +704,22 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("ignores local excludes when checking for the committed ignore rule", () => {
+    it("accepts a private setup's exclude but not the global excludes file or a negation", () => {
         const root = repository()
         try {
             writeConfig(root, config())
-            fs.appendFileSync(path.join(root, ".git", "info", "exclude"), `${PROJECT_LOCAL_IGNORE}\n`)
-            assert.throws(() => prepareArtifactPersistence(root), /in \.gitignore/)
             fs.writeFileSync(path.join(root, "global-ignore"), `${PROJECT_LOCAL_IGNORE}\n`)
             git(root, ["config", "core.excludesFile", path.join(root, "global-ignore")])
             assert.throws(() => prepareArtifactPersistence(root), /in \.gitignore/)
+            const exclude = path.join(root, ".git", "info", "exclude")
+            const before = fs.readFileSync(exclude, "utf-8")
+            fs.appendFileSync(exclude, `${PROJECT_LOCAL_IGNORE}\n`)
+            fs.writeFileSync(path.join(root, ".gitignore"), `!${PROJECT_LOCAL_IGNORE}\n`)
+            assert.throws(() => prepareArtifactPersistence(root), /in \.gitignore/)
+            fs.rmSync(path.join(root, ".gitignore"))
+            fs.writeFileSync(exclude, `${before}/.piton\n`)
+            assert.equal(prepareArtifactPersistence(root).state, "ready")
+            assert.equal(git(root, ["status", "--porcelain", "--untracked-files=all", "--", ".piton"]), "")
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }

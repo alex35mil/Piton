@@ -26,6 +26,7 @@ allowed-tools:
     - "edit(.piton/*)"
     - "read(.gitignore)"
     - "read(.git/info/exclude)"
+    - "edit(.git/info/exclude)"
 ---
 
 # Project setup
@@ -89,7 +90,7 @@ For example:
 5. Provider configuration for the selected roles. Once GitHub forge and Project are both known, offer fork-only incoming PR intake.
 6. Project Policies, then convenience permissions.
 
-Workflow work always stays local under `.piton/.local/`; there's no persistence choice. When applying the ignore rule, read [artifacts](../../references/artifacts.md#persistence-and-authority). Removing files from Git needs separate approval and is outside setup.
+Workflow work always stays local under `.piton/.local/`. When the user asks for a private setup (no tracked file changes), and `projectPathsInGit` and `stagedProjectPaths` are empty, append `/.piton` (no trailing slash) to `.git/info/exclude` before any other `.piton/` write, skip the `.gitignore` change, and don't offer fork-only intake, whose workflow file must be committed. When applying the ignore rule, read [artifacts](../../references/artifacts.md#persistence-and-authority). Removing files from Git needs separate approval and is outside setup.
 
 ## Decisions
 
