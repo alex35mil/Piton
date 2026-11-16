@@ -805,7 +805,7 @@ security work with no upstream sharing it.
 
 ### Deploying from a sandbox
 
-Status: planned. Today installs are host-only (`mise run cli:install`, `apps:mac`, `apps:phone`, `apps:ipad`).
+Status: planned. Today installs are host-only (`mise run cli:install`, `apps:mac`, `apps:iphone`, `apps:ipad`).
 
 An agent in a sandboxed session may deploy what it built: the daemon, the Mac app, or the iOS app on the iPhone or
 iPad. This doesn't widen what the agent can do: the code it wrote runs on the host once deployed, whoever runs the

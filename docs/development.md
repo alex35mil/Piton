@@ -74,13 +74,13 @@ docs/              confirmed documentation
 Two ways to install the same app, both host-only (signing uses the login keychain; installs and uploads need the
 network):
 
-| | `mise run apps:phone` | `mise run apps:testflight` |
+| | `mise run apps:iphone` | `mise run apps:testflight` |
 | --- | --- | --- |
 | Reaches the phone | directly, cable or same Wi-Fi | TestFlight, from anywhere |
 | Time | ~1 min | ~1 min upload + 5-15 min Apple processing |
 | Lasts | 1 year (paid team) | 90 days per build |
 
-Both install Piton (Release). `apps:phone` is the normal way; TestFlight is only for updating away from the Mac.
+Both install Piton (Release). `apps:iphone` is the normal way; TestFlight is only for updating away from the Mac.
 
 ### One-time setup
 
@@ -118,7 +118,7 @@ Both install Piton (Release). `apps:phone` is the normal way; TestFlight is only
 
 ### Each update
 
-- iPhone: `mise run apps:phone` builds, installs, and launches Piton. iPad: `mise run apps:ipad`, the same (both run
+- iPhone: `mise run apps:iphone` builds, installs, and launches Piton. iPad: `mise run apps:ipad`, the same (both run
   `apps/scripts/install-device.sh`).
 - Away from the Mac: commit, then `mise run apps:testflight`. The build number is the commit count (always
   increasing, maps back to a commit); the marketing version (`MARKETING_VERSION` in `apps/project.yml`) changes only
@@ -126,13 +126,13 @@ Both install Piton (Release). `apps:phone` is the normal way; TestFlight is only
   TestFlight app, it installs by itself.
 - macOS: `mise run apps:mac` builds Piton (Release), quits the running one, installs it in `/Applications`, and opens
   it.
-- All: `mise run apps` runs `apps:mac`, `apps:phone`, then `apps:ipad` when `PITON_IPAD` is set.
+- All: `mise run apps` runs `apps:mac`, `apps:iphone`, then `apps:ipad` when `PITON_IPAD` is set.
 
 ### Crashes
 
 `mise run apps:crashes` copies Piton's crash logs (`Piton-<date>.ips`) from the phone into `apps/.build/crashes`. The
 log's stack frames point into Piton's code once symbolicated against the build's dSYM
-(`apps/.build/xcode/Build/Products/Release-iphoneos/Piton.app.dSYM`, kept until the next `apps:phone`); Xcode's
+(`apps/.build/xcode/Build/Products/Release-iphoneos/Piton.app.dSYM`, kept until the next `apps:iphone`); Xcode's
 Devices window (Window → Devices and Simulators → View Device Logs) symbolicates them automatically. On macOS the
 logs are in `~/Library/Logs/DiagnosticReports`.
 

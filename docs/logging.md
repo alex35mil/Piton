@@ -93,12 +93,12 @@ root unless their launchd environment is explicitly configured otherwise.
 ## Install the independent phone collector (host only)
 
 Requirements: Xcode and its command-line tools, a paired/trusted iPhone, access to Piton's app data container, and
-`PITON_IPHONE` configured as for `apps:phone`. Start with the development-signed installation from `apps:phone`;
+`PITON_IPHONE` configured as for `apps:iphone`. Start with the development-signed installation from `apps:iphone`;
 container access on other distribution/signing variants must be verified rather than assumed.
 
 ```sh
 mise run cli:install       # install updated binary; this step ends live sessions
-mise run apps:phone
+mise run apps:iphone
 mise run apps:mac
 mise run logs:install         # uses the installed piton; does NOT restart the daemon
 piton logging debug

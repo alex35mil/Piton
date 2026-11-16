@@ -149,12 +149,12 @@ piton logging install --device "$PITON_IPHONE"
 
 # Device and TestFlight (host only: signing needs the login keychain, installs and uploads need the network and
 # LaunchServices, which a sandboxed worker doesn't have). Configure in mise.local.toml, see docs/development.md:
-#   PITON_IPHONE   device name or UDID for `apps:phone` (`xcrun devicectl list devices`)
+#   PITON_IPHONE   device name or UDID for `apps:iphone` (`xcrun devicectl list devices`)
 #   ASC_KEY_ID     App Store Connect API key id
 #   ASC_ISSUER_ID  its issuer id
 #   ASC_KEY_PATH   the .p8 file, outside the repo (e.g. ~/.appstoreconnect/AuthKey_<id>.p8)
 
-[tasks."apps:phone"]
+[tasks."apps:iphone"]
 description = "Build Piton (Release) and install it on $PITON_IPHONE (host only)"
 dir = "apps"
 depends = ["apps:generate"]
@@ -207,7 +207,7 @@ description = "Install Piton on this Mac, $PITON_IPHONE, and $PITON_IPAD when se
 # One after another: they all build into apps/.build/xcode. The iPad is optional: skipped when PITON_IPAD isn't set.
 run = [
   { task = "apps:mac" },
-  { task = "apps:phone" },
+  { task = "apps:iphone" },
   '[ -z "${PITON_IPAD:-}" ] && echo "apps: PITON_IPAD not set; skipping the iPad" || mise run apps:ipad',
 ]
 
