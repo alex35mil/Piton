@@ -86,6 +86,21 @@ describe("workflow project configuration", () => {
             assert.deepEqual(detectInstallation(outside), { kind: "app" })
             fs.rmSync(outside, { recursive: true, force: true })
 
+            // A package path whose case differs from the checkout's real name is still a development install.
+            const cased = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "PitonCase-")))
+            try {
+                cp.execFileSync("git", ["init", "-q", cased])
+                fs.mkdirSync(path.join(cased, "pi"))
+                fs.mkdirSync(path.join(cased, "cli"))
+                fs.writeFileSync(path.join(cased, "cli", "Cargo.toml"), "")
+                const lowered = path.join(path.dirname(cased), path.basename(cased).toLowerCase(), "pi")
+                if (fs.existsSync(lowered)) {
+                    assert.deepEqual(detectInstallation(lowered), { kind: "development", checkout: cased })
+                }
+            } finally {
+                fs.rmSync(cased, { recursive: true, force: true })
+            }
+
             setInstallationForTests({ kind: "development", checkout: root })
             assert.equal(developmentCheckout(), root)
             setInstallationForTests({ kind: "app" })

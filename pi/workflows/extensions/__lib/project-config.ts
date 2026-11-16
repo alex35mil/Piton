@@ -77,9 +77,11 @@ export function detectInstallation(packageDir: string = PACKAGE_DIR): Installati
     if (installation?.packageDir === packageDir) return installation.value
     let value: Installation = { kind: "app" }
     try {
-        const root = fs.realpathSync(Git.run(packageDir, ["rev-parse", "--show-toplevel"]))
-        const isPiton =
-            fs.realpathSync(packageDir) === path.join(root, "pi") && fs.existsSync(path.join(root, "cli", "Cargo.toml"))
+        // Ask Git where the package sits instead of comparing paths: on a case-insensitive file system the package
+        // path can differ in case from the checkout's real name, which `fs.realpathSync` doesn't canonicalize.
+        const prefix = Git.run(packageDir, ["rev-parse", "--show-prefix"])
+        const root = Git.run(packageDir, ["rev-parse", "--show-toplevel"])
+        const isPiton = prefix === "pi/" && fs.existsSync(path.join(root, "cli", "Cargo.toml"))
         if (isPiton) value = { kind: "development", checkout: root }
     } catch {
         // Not in a git checkout: an app install.
