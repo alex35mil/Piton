@@ -117,11 +117,15 @@ pub fn write_dialog(id: &str, path: &Path, current: Option<&str>, content: &str)
 /// followed), and the temporary file and the rename happen relative to the last folder's descriptor. A path that no
 /// longer leads where the user saw it fails here instead of writing elsewhere.
 pub fn write_approved(root: &Path, path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::fd::{AsFd, OwnedFd};
+    use std::{
+        io::Write,
+        os::fd::{AsFd, OwnedFd},
+    };
 
-    use nix::fcntl::{AtFlags, OFlag, open, openat, renameat};
-    use nix::sys::stat::{Mode, fstatat, mkdirat};
+    use nix::{
+        fcntl::{AtFlags, OFlag, open, openat, renameat},
+        sys::stat::{Mode, fstatat, mkdirat},
+    };
 
     let refused = |why: String| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why);
     let relative = path

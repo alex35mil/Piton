@@ -3,8 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use super::host::HostFile;
-use super::paths::{Paths, expand_home};
+use super::{
+    host::HostFile,
+    paths::{Paths, expand_home},
+};
 use crate::launch::LaunchMode;
 
 /// How the daemon runs: the host file with defaults applied.

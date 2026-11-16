@@ -9,8 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::launch::LaunchMode;
-use crate::session::SessionInfo;
+use crate::{launch::LaunchMode, session::SessionInfo};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 

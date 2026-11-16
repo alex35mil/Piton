@@ -1,19 +1,26 @@
 //! `rpc` connections (`piton attach`): raw pi RPC relayed to one pi, with the few commands piton answers itself
 //! intercepted, and the connection moved to another pi on `new_session` or `switch_session`.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::Ordering},
+};
 
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc;
+use tokio::{
+    io::{AsyncWriteExt, BufReader},
+    net::unix::{OwnedReadHalf, OwnedWriteHalf},
+    sync::mpsc,
+};
 
-use super::Daemon;
-use super::protocol::{AttachControl, FRAME_CONTROL, FRAME_RECORD};
-use crate::launch::SessionArg;
-use crate::session::{Frame, Outstanding, SessionCmd, SessionHandle};
+use super::{
+    Daemon,
+    protocol::{AttachControl, FRAME_CONTROL, FRAME_RECORD},
+};
+use crate::{
+    launch::SessionArg,
+    session::{Frame, Outstanding, SessionCmd, SessionHandle},
+};
 
 impl Daemon {
     pub(super) async fn serve_rpc(

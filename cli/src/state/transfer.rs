@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
-use super::db::{MIGRATIONS, State};
-use super::{StateError, io, set_owner_only, sqlite};
+use super::{
+    StateError,
+    db::{MIGRATIONS, State},
+    io, set_owner_only, sqlite,
+};
 
 /// Writes a consistent copy of the database at `from` to `to`, which must not exist. Opens it read-only and never
 /// migrates: a running daemon may hold it, at a version this binary would migrate.

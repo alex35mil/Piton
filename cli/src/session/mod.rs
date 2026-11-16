@@ -6,28 +6,40 @@ mod prompts;
 mod replay;
 mod view;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::Pid;
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::time::{Instant, sleep_until};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, Command},
+    sync::{Notify, mpsc, oneshot},
+    time::{Instant, sleep_until},
+};
 
-pub use self::info::{Checkout, SessionInfo, SessionStatus};
-use self::prompts::PromptQueue;
-use self::replay::Replay;
-pub use self::view::DEFAULT_WINDOW as DEFAULT_VIEW_WINDOW;
-use self::view::{Change, StateInput, View};
-use crate::config::DaemonConfig;
-use crate::daemon::{AttachControl, EndReason};
-use crate::launch::{self, Env, LaunchError, LaunchMode, SessionArg};
+pub use self::{
+    info::{Checkout, SessionInfo, SessionStatus},
+    view::DEFAULT_WINDOW as DEFAULT_VIEW_WINDOW,
+};
+use self::{
+    prompts::PromptQueue,
+    replay::Replay,
+    view::{Change, StateInput, View},
+};
+use crate::{
+    config::DaemonConfig,
+    daemon::{AttachControl, EndReason},
+    launch::{self, Env, LaunchError, LaunchMode, SessionArg},
+};
 
 pub type ClientId = u64;
 pub type SessionKey = u64;

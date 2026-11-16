@@ -13,21 +13,29 @@ mod rpc;
 mod socket;
 mod watch;
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
-use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Notify;
+use tokio::{
+    net::{UnixListener, UnixStream},
+    sync::Notify,
+};
 
 pub use self::protocol::{
     AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello, PROTOCOL_VERSION,
 };
-use crate::config::DaemonConfig;
-use crate::launch::{self, Env, LaunchError, LaunchMode, SessionArg};
-use crate::project::{Relation, Workspace};
-use crate::session::{self, Hooks, LaunchSpec, SessionHandle, SessionKey, StopReason, lock};
+use crate::{
+    config::DaemonConfig,
+    launch::{self, Env, LaunchError, LaunchMode, SessionArg},
+    project::{Relation, Workspace},
+    session::{self, Hooks, LaunchSpec, SessionHandle, SessionKey, StopReason, lock},
+};
 
 pub struct Daemon {
     /// The configuration in effect: replaced when the global files change. Each launch, session, and request takes

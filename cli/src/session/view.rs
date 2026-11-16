@@ -12,15 +12,16 @@
 //!   fresh snapshot when they're no longer kept. A conversation change (switch, new session, compaction) is a `reset`:
 //!   clients replace everything with a new snapshot.
 
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::launch::LaunchMode;
-use crate::session::SessionStatus;
+use crate::{launch::LaunchMode, session::SessionStatus};
 
 /// Changes kept for resuming clients.
 const LOG_CAPACITY: usize = 5000;
@@ -1392,8 +1393,10 @@ mod tests {
     /// stale; regenerate with `PITON_WRITE_FIXTURES=1 cargo test fixtures`.
     #[test]
     fn fixtures() {
-        use crate::launch::LaunchMode;
-        use crate::session::{SessionInfo, SessionStatus};
+        use crate::{
+            launch::LaunchMode,
+            session::{SessionInfo, SessionStatus},
+        };
         let mut view = View::new(7);
         let mut lines: Vec<String> = Vec::new();
         let state = |status, dialogs| StateInput {

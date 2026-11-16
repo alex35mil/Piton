@@ -8,14 +8,18 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigError;
-use crate::config::model::client::ClientFile;
-use crate::config::model::host::HostFile;
-use crate::config::model::level::LevelKind;
-use crate::config::model::paths::{Scope, Sharing, global_tier};
-use crate::config::model::tables::{
-    BranchesTable, Files, Integration, Levels, PermissionsTable, Rule, SandboxTable, Table, TableValue, WebSearchTable,
-    WorkersTable,
+use crate::config::{
+    ConfigError,
+    model::{
+        client::ClientFile,
+        host::HostFile,
+        level::LevelKind,
+        paths::{Scope, Sharing, global_tier},
+        tables::{
+            BranchesTable, Files, Integration, Levels, PermissionsTable, Rule, SandboxTable, Table, TableValue,
+            WebSearchTable, WorkersTable,
+        },
+    },
 };
 
 /// Where a file came from, for messages and for `piton config check`.

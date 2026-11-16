@@ -10,11 +10,13 @@ pub mod sandbox;
 pub mod web_search;
 pub mod workers;
 
-pub use self::branches::BranchesTable;
-pub use self::permissions::{PermissionSettings, PermissionsTable};
-pub use self::sandbox::{NetworkProfile, SandboxTable};
-pub use self::web_search::WebSearchTable;
-pub use self::workers::WorkersTable;
+pub use self::{
+    branches::BranchesTable,
+    permissions::{PermissionSettings, PermissionsTable},
+    sandbox::{NetworkProfile, SandboxTable},
+    web_search::WebSearchTable,
+    workers::WorkersTable,
+};
 
 /// The tables of `config.toml`. Each is parsed on its own, so a broken `[tracker]` never stops permission checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

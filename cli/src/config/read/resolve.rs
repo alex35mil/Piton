@@ -6,14 +6,20 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::parse::{ConfigDoc, FileOrigin, load_mcp, read_config, read_text};
-use crate::config::ConfigError;
-use crate::config::model::level::{Chain, Level, LevelKind};
-use crate::config::model::paths::{FilePair, Paths, Sharing};
-use crate::config::model::tables::{
-    BranchesTable, Integration, Merge, PermissionSettings, PermissionsTable, SandboxTable, Table, TableValue,
-    WebSearchTable, WorkersTable,
+use crate::{
+    config::{
+        ConfigError,
+        model::{
+            level::{Chain, Level, LevelKind},
+            paths::{FilePair, Paths, Sharing},
+            tables::{
+                BranchesTable, Integration, Merge, PermissionSettings, PermissionsTable, SandboxTable, Table,
+                TableValue, WebSearchTable, WorkersTable,
+            },
+        },
+    },
+    project::Workspace,
 };
-use crate::project::Workspace;
 
 /// Where pi's permission rules apply: everywhere, or only in one launch mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -555,9 +561,10 @@ fn add_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::model::tables::branches::BranchFormat;
-    use crate::config::model::tables::permissions::PermissionMode;
-    use crate::project::Relation;
+    use crate::{
+        config::model::tables::{branches::BranchFormat, permissions::PermissionMode},
+        project::Relation,
+    };
 
     struct Tree {
         _dir: tempfile::TempDir,

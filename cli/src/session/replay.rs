@@ -2,9 +2,7 @@
 //! original records so a client that attaches mid-run gets it replayed (see "Replay" in docs/design.md). Also what
 //! the session's status is derived from: a run, a compaction, a pending dialog.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use serde_json::{Map, Value};
 use tokio::time::Instant;

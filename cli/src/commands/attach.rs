@@ -1,10 +1,11 @@
 //! `piton attach`: pi.nvim's connector. Relays pi RPC between stdio and a fresh pi in the daemon.
 
-use std::path::Path;
-use std::process::ExitCode;
+use std::{path::Path, process::ExitCode};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+};
 
 use super::control::write_line;
 use crate::daemon::{AttachControl, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello};

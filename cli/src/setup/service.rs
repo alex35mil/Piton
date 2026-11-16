@@ -1,7 +1,9 @@
 //! `piton service install|uninstall|status`: the daemon as a launchd user agent (starts at login, restarts on crash).
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use crate::config::home;
 

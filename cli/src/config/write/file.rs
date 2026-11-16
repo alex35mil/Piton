@@ -6,12 +6,16 @@ use std::path::{Path, PathBuf};
 
 pub use super::edit::Placement;
 use super::edit::{Change, EditError, edited, item_from_json, write_changes};
-use crate::config::ConfigError;
-use crate::config::model::client::ClientFile;
-use crate::config::model::host::HostFile;
-use crate::config::model::level::LevelKind;
-use crate::config::model::paths::{FilePair, PITON_DIR, Paths, Scope, Sharing};
-use crate::config::read::parse::{ConfigDoc, parse_global};
+use crate::config::{
+    ConfigError,
+    model::{
+        client::ClientFile,
+        host::HostFile,
+        level::LevelKind,
+        paths::{FilePair, PITON_DIR, Paths, Scope, Sharing},
+    },
+    read::parse::{ConfigDoc, parse_global},
+};
 
 /// The files a write goes to: a project's (the global tier's `config.toml`, or a repository's source checkout's
 /// `.piton/`; a worker's own copy is never read), or one of the global tier's own files.

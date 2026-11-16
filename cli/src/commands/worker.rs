@@ -1,13 +1,16 @@
 //! `piton worker create|ls|delete`: workers through the daemon. With `--json` it prints the daemon's response for
 //! scripts and editor tooling (nvim's `cli.lua`); refusals exit 4 so callers can tell them from failures.
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
-use super::WorkerAction;
-use super::control::{control, report};
-use crate::config::DaemonConfig;
-use crate::daemon::{ControlRequest, ControlResponse};
+use super::{
+    WorkerAction,
+    control::{control, report},
+};
+use crate::{
+    config::DaemonConfig,
+    daemon::{ControlRequest, ControlResponse},
+};
 
 /// Exit code for a refused worker operation, so callers can tell it from a failure.
 const EXIT_REFUSED: u8 = 4;

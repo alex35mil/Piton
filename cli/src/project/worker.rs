@@ -2,15 +2,19 @@
 //! where agents work in isolation. Everything is cloned except `.piton/.local`, which is linked to the source's, and
 //! the `[workers] skip` paths of the source's configuration. See "Workers" in docs/design.md.
 
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    ffi::CString,
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::launch::Env;
-use crate::project::{self, ProjectError, Relation, SHARED_PATH, WORKER_SEPARATOR};
+use crate::{
+    launch::Env,
+    project::{self, ProjectError, Relation, SHARED_PATH, WORKER_SEPARATOR},
+};
 
 /// How piton runs mise for workers: the resolved program and the environment it runs with (the daemon's base
 /// environment, so mise sees the user's `MISE_*` settings).

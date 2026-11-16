@@ -1,7 +1,9 @@
 //! A bounded ring, used by daemon and collector. File work runs off the session/UI paths.
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 pub struct Rolling {
     path: PathBuf,

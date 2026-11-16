@@ -3,9 +3,11 @@
 //! temporary: it lasts until it expires or the daemon restarts. The collector and the Mac app follow the daemon's policy.
 //! The sandbox gets read-only access to `logs/`, never to the control socket next to it.
 
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 

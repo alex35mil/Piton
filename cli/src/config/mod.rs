@@ -17,17 +17,25 @@ mod write;
 
 use std::path::PathBuf;
 
-pub use self::check::portability::warnings as portability_warnings;
-pub use self::model::daemon::{DaemonConfig, TailnetConfig};
-pub use self::model::paths::{LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home};
-pub use self::model::tables::{NetworkProfile, SandboxTable};
-pub use self::read::global::{
-    GlobalConfig, GlobalResolved, client, daemon, daemon_lenient, global, global_candidates, host, own_files,
-    resolve_global,
+pub use self::{
+    check::portability::warnings as portability_warnings,
+    model::{
+        daemon::{DaemonConfig, TailnetConfig},
+        paths::{LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
+        tables::{NetworkProfile, SandboxTable},
+    },
+    read::{
+        global::{
+            GlobalConfig, GlobalResolved, client, daemon, daemon_lenient, global, global_candidates, host, own_files,
+            resolve_global,
+        },
+        resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_launch},
+    },
+    write::{
+        edit::{EditError, Placement},
+        file::{ConfigFile, KeyChange, WriteLevel, set_global},
+    },
 };
-pub use self::read::resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_launch};
-pub use self::write::edit::{EditError, Placement};
-pub use self::write::file::{ConfigFile, KeyChange, WriteLevel, set_global};
 
 /// Why configuration can't be used.
 #[derive(Debug, thiserror::Error)]

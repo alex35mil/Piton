@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::config::{LOCAL_DIR, LaunchConfig, SandboxTable, expand_home};
-use crate::launch::Env;
+use crate::{
+    config::{LOCAL_DIR, LaunchConfig, SandboxTable, expand_home},
+    launch::Env,
+};
 
 /// The base profile when the global tier names none.
 pub const DEFAULT_BASE: &str = "piton";
@@ -185,8 +187,10 @@ fn chain_dirs(resolved: &LaunchConfig) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Paths;
-    use crate::project::{Relation, Workspace};
+    use crate::{
+        config::Paths,
+        project::{Relation, Workspace},
+    };
 
     fn resolved(home: &Path, repo: &Path) -> LaunchConfig {
         let paths = Paths {

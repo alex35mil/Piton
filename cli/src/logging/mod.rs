@@ -5,16 +5,20 @@ mod collector;
 mod policy;
 mod ring;
 
-use std::io::Write;
-use std::path::Path;
-use std::sync::{OnceLock, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-pub use self::collector::run as run_collector;
-pub use self::policy::{
-    Expiration, Mode, Policy, State, current as current_policy, now_ms, private_dir, root, set as set_policy,
+use std::{
+    io::Write,
+    path::Path,
+    sync::{OnceLock, mpsc},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
 use self::ring::Rolling;
+pub use self::{
+    collector::run as run_collector,
+    policy::{
+        Expiration, Mode, Policy, State, current as current_policy, now_ms, private_dir, root, set as set_policy,
+    },
+};
 
 #[derive(Clone, Copy)]
 pub enum Detail {

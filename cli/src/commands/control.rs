@@ -1,10 +1,11 @@
 //! The control-socket client every command but `attach` uses, and how commands report failures.
 
-use std::path::Path;
-use std::process::ExitCode;
+use std::{path::Path, process::ExitCode};
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+};
 
 use crate::daemon::{AttachControl, ControlRequest, ControlResponse, FRAME_CONTROL, Hello};
 

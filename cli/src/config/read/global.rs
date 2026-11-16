@@ -6,14 +6,20 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::parse::{FileOrigin, GlobalFile, read_global};
-use super::resolve::{Resolved, Section, resolve_global_project, section};
-use crate::config::ConfigError;
-use crate::config::model::client::ClientFile;
-use crate::config::model::daemon::DaemonConfig;
-use crate::config::model::host::{DevelopmentTable, HostFile};
-use crate::config::model::level::LevelKind;
-use crate::config::model::paths::{Paths, Scope};
+use super::{
+    parse::{FileOrigin, GlobalFile, read_global},
+    resolve::{Resolved, Section, resolve_global_project, section},
+};
+use crate::config::{
+    ConfigError,
+    model::{
+        client::ClientFile,
+        daemon::DaemonConfig,
+        host::{DevelopmentTable, HostFile},
+        level::LevelKind,
+        paths::{Paths, Scope},
+    },
+};
 
 /// A global file read as a whole, with its own file and its local one merged (the local one wins per key).
 pub fn read_scope<T: GlobalFile>(paths: &Paths) -> Result<T, ConfigError> {

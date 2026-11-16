@@ -5,16 +5,22 @@
 //! pi (`PITON_SESSION_TOKEN`): a request can act only for the session it came from, and only in the ways listed here.
 //! Today that's one: a protected write (see `write.rs`), answered only by the user through a client.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
+};
 
-use crate::daemon::Daemon;
-use crate::session::{SessionCmd, SessionKey, lock};
+use crate::{
+    daemon::Daemon,
+    session::{SessionCmd, SessionKey, lock},
+};
 
 /// The socket file, in the daemon's state folder.
 pub const FILE: &str = "agent.sock";

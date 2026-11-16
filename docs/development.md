@@ -4,7 +4,7 @@
 
 - macOS 27, Xcode 27 (Swift 6.4), Rust 1.99 (installed by mise).
 - rustfmt from a pinned nightly, for formatting only: `rustup toolchain install nightly-2026-11-13 --profile minimal
-  --component rustfmt`. The import rules in `cli/rustfmt.toml` (one `use` per module; std, external crates, then this
+  --component rustfmt`. The import rules in `cli/rustfmt.toml` (one `use` per crate; std, external crates, then this
   crate) are unstable options. Builds, tests, and clippy stay on stable; `cli:lint` and `cli:format` name the date.
 - [mise](https://mise.jdx.dev): installs Rust and XcodeGen from `mise.toml` and runs every task.
 - pi on the `PATH` (the user's global mise config pins it; this repository doesn't).

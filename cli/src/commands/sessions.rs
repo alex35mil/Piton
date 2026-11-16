@@ -1,13 +1,14 @@
 //! `piton ls`, `piton start`, `piton stop`: live sessions.
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 use super::control::{control, report};
-use crate::config::DaemonConfig;
-use crate::daemon::{ControlRequest, ControlResponse};
-use crate::launch::LaunchMode;
-use crate::session::SessionInfo;
+use crate::{
+    config::DaemonConfig,
+    daemon::{ControlRequest, ControlResponse},
+    launch::LaunchMode,
+    session::SessionInfo,
+};
 
 pub async fn ls(config: &DaemonConfig, json: bool) -> ExitCode {
     match control(&config.socket, ControlRequest::List).await {

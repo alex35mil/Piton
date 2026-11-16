@@ -3,13 +3,16 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::sync::mpsc;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{UnixStream, unix::OwnedWriteHalf},
+    sync::mpsc,
+};
 
-use super::Daemon;
-use super::protocol::{AttachControl, ControlRequest, ControlResponse, FRAME_CONTROL, Hello, PROTOCOL_VERSION};
+use super::{
+    Daemon,
+    protocol::{AttachControl, ControlRequest, ControlResponse, FRAME_CONTROL, Hello, PROTOCOL_VERSION},
+};
 
 impl Daemon {
     pub(super) async fn serve(self: Arc<Self>, stream: UnixStream) {

@@ -2,19 +2,25 @@
 //! per message; the first is the hello, as on the Unix socket. Every connection is checked against Tailscale before
 //! the WebSocket handshake (see `tailnet`).
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::apps::tailnet::{self, SelfNode};
-use crate::config::TailnetConfig;
-use crate::daemon::{Daemon, Hello, PROTOCOL_VERSION};
-use crate::session::lock;
+use crate::{
+    apps::tailnet::{self, SelfNode},
+    config::TailnetConfig,
+    daemon::{Daemon, Hello, PROTOCOL_VERSION},
+    session::lock,
+};
 
 /// A client that answers none of this many pings in a row is dropped.
 const MISSED_PINGS: u32 = 3;

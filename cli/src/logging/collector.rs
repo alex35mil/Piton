@@ -2,9 +2,7 @@
 //! independent of Tailscale and the apps' connection. It follows the daemon's logging policy (asked over the control
 //! socket): Info mode, or no daemon, performs no device IO. All retained data lives under logs/.
 
-use std::path::Path;
-use std::process::Stdio;
-use std::time::Duration;
+use std::{path::Path, process::Stdio, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;

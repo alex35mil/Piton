@@ -9,13 +9,14 @@ mod logging;
 mod sessions;
 mod worker;
 
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use usage_rs::Subcommands;
 
-pub use self::control::control;
-pub use self::logging::logging_state;
+pub use self::{control::control, logging::logging_state};
 
 /// Owns pi processes so sessions outlive their clients
 #[derive(usage_rs::Cli)]

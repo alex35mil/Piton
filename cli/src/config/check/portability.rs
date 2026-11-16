@@ -2,8 +2,10 @@
 //! another user's home (write `~` or `$HOME`), and no secret in a file Git tracks (use the environment or a `.local`
 //! file). Both are warnings: the files still work on this Mac.
 
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use serde_json::Value;
 

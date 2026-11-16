@@ -1,12 +1,15 @@
 //! Control requests: one request and one response per connection (`piton ls`, `start`, `stop`, `worker`, `logging`).
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use super::Daemon;
-use super::protocol::{ControlRequest, ControlResponse, WorkerEntry};
-use crate::launch::SessionArg;
-use crate::session::{Internal, SessionCmd, StopReason, lock};
+use super::{
+    Daemon,
+    protocol::{ControlRequest, ControlResponse, WorkerEntry},
+};
+use crate::{
+    launch::SessionArg,
+    session::{Internal, SessionCmd, StopReason, lock},
+};
 
 impl Daemon {
     pub(super) async fn control(self: &Arc<Self>, request: ControlRequest) -> ControlResponse {

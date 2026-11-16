@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
-use crate::config::ConfigError;
-use crate::config::model::paths::{FilePair, Sharing};
+use crate::config::{
+    ConfigError,
+    model::paths::{FilePair, Sharing},
+};
 
 /// Where a write puts the key: the file that sets it now, or one of the pair (moving it out of the other).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

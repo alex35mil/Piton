@@ -7,8 +7,10 @@
 
 mod worker;
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub use self::worker::{
     CreateRequest, Mise, WorkerInfo, WorkerRefusal, create as create_worker, info as worker_info,

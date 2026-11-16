@@ -1,8 +1,10 @@
 //! `piton config resolve|get|set|check`: the resolved configuration for a workspace, for the pi package, the Neovim
 //! plugin, and the user, and changes to it. Reads and writes files only; the daemon needn't run.
 
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use serde::Serialize;
 

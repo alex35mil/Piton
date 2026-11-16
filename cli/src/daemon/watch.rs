@@ -5,15 +5,11 @@
 //! creation is noticed) and the folder of each file's symlink target. They're recomputed after every change, so a
 //! folder created later or a file linked into dotfiles later is picked up.
 
-use std::collections::BTreeSet;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::config::Paths;
-use crate::daemon::Daemon;
+use crate::{config::Paths, daemon::Daemon};
 
 /// Changes closer together than this are one reread (an editor's save is several events).
 const SETTLE: Duration = Duration::from_millis(200);

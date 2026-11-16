@@ -14,27 +14,30 @@ mod tailnet;
 mod websocket;
 mod workspaces;
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use futures_util::FutureExt;
-use futures_util::future::BoxFuture;
+use futures_util::{FutureExt, future::BoxFuture};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
-pub use self::protocol::{DaemonState, SendModeWire, ViewEnvelope, ViewRequest};
 #[cfg(test)]
 pub use self::settings::{AppliesInfo, ValueType};
-pub use self::settings::{
-    Change as SettingChange, SetError as SettingError, SettingInfo, Snapshot as SettingsSnapshot,
-    validate as validate_setting, write as write_setting,
+pub use self::{
+    protocol::{DaemonState, SendModeWire, ViewEnvelope, ViewRequest},
+    settings::{
+        Change as SettingChange, SetError as SettingError, SettingInfo, Snapshot as SettingsSnapshot,
+        validate as validate_setting, write as write_setting,
+    },
+    tailnet::{SelfNode, TailnetError, self_node as tailnet_self_node},
+    websocket::serve_tailnet,
 };
-pub use self::tailnet::{SelfNode, TailnetError, self_node as tailnet_self_node};
-pub use self::websocket::serve_tailnet;
-use crate::daemon::Daemon;
-use crate::launch::{LaunchMode, SessionArg};
-use crate::session::{
-    ClientId, DEFAULT_VIEW_WINDOW, Internal, SendMode, SessionCmd, SessionHandle, StopReason, ViewCommand, WatchFrom,
+use crate::{
+    daemon::Daemon,
+    launch::{LaunchMode, SessionArg},
+    session::{
+        ClientId, DEFAULT_VIEW_WINDOW, Internal, SendMode, SessionCmd, SessionHandle, StopReason, ViewCommand,
+        WatchFrom,
+    },
 };
 
 /// Serves one view connection: `lines` are its requests, `out` its outgoing lines. Returns when `lines` ends.
