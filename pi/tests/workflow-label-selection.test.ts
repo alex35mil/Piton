@@ -207,6 +207,20 @@ describe("Linear label update", () => {
         assert.equal(update.changed, true)
     })
 
+    it("treats Phase-named labels as ordinary ones when Phase isn't configured", () => {
+        const update = planLinearLabelUpdate(
+            linearLabels,
+            undefined,
+            "Engineering",
+            "deliverable",
+            "bugfix",
+            { area: ["fe"] },
+            { catalog, applied: ["k-f", "planning", "other"] },
+        )
+        assert.deepEqual([...update.labels].sort(), ["fe", "k-b", "other", "planning"])
+        assert.deepEqual(update.unknown, ["Planning", "Customer"])
+    })
+
     it("doesn't report a child of a kept native group, the same rule setup uses", () => {
         const kept = {
             ...linearLabels,

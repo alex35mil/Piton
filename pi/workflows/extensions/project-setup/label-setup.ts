@@ -95,7 +95,8 @@ const GitHubDesired = {
 const LinearDesired = {
     target: LinearTargetSchema,
     labels: LinearLabelsSchema,
-    phase: LinearPhaseGroupsSchema,
+    // Absent when the project doesn't track Phase.
+    phase: Type.Optional(LinearPhaseGroupsSchema),
     remap: Type.Optional(Type.Array(LinearRemapSchema)),
     answers: Type.Optional(AnswersSchema),
 }
@@ -319,7 +320,7 @@ function desiredFor(input: DesiredInput) {
     const { labels, phase, remap } = input as LinearPreviewInput
     assertLinearLabels(withoutManagedListEntries(labels, linearManagedEntries(labels, phase)), phase)
     return {
-        raw: { labels, phase },
+        raw: { labels, ...(phase ? { phase } : {}) },
         entries: linearManagedEntries(labels, phase),
         keep: linearListEntries(labels.unmanaged?.keep),
         retired: linearListEntries(labels.retired),
@@ -485,7 +486,7 @@ function configurationFor(input: DesiredInput, plan: CatalogPlan) {
     const { phase, labels: desired } = input as LinearPreviewInput
     const labels = withLists(desired, linear(plan.keep), linear(plan.retired))
     assertLinearLabels(labels, phase)
-    return { labels, phase }
+    return { labels, ...(phase ? { phase } : {}) }
 }
 
 function adapterFor(target: LabelSetupToolInput["target"], options: LabelSetupOptions): ProviderAdapter {

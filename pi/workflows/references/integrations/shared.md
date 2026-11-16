@@ -75,7 +75,7 @@ The tracker object comes first; the local entity is named from it. New work and 
    - New work: create only the tracker object, with the approved title and Request, as the provider reference describes. No search first.
    - Adoption: use the explicitly selected object after its provider preflight.
 3. **Initialize.** Call `init_github_<entity>` or `init_linear_<entity>` with the object's identity as `object`. It names the directory and branch from the object, creates the local entity with a ready branch, and records the object's Resource IDs.
-4. **Set up the board.** Call `initialize_integration`, then apply the provider reference's board steps: Project membership, In Progress, Priority, Planning Phase, Task hierarchy, labels when configured, and the assignee. These are ordinary absolute updates; a failure is reconciled on resume, except assignment.
+4. **Set up the board.** Call `initialize_integration`, then apply the provider reference's board steps: Project membership, In Progress, Priority, Planning Phase when configured, Task hierarchy, labels when configured, and the assignee. These are ordinary absolute updates; a failure is reconciled on resume, except assignment.
 
 **Assignment:** whoever starts the work owns it. Initialization assigns the authenticated user to the tracker item, new or adopted, replacing existing assignees. Set it once and trust a clear success; never read it back or reconcile it later. Queue intake and Task issue processing assign nobody.
 

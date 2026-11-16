@@ -8,7 +8,7 @@ Related files, read when the step is reached:
 - When planning, read [planning](./planning.md).
 - When running or adjudicating any review, read [review](./review.md).
 - When writing human-facing text or prose artifacts, read [communication](./communication.md).
-- When changing Phase or lifecycle, read [Phase](./phase.md).
+- When changing Phase or lifecycle, read [Phase](./phase.md). Every Phase step applies only when Phase is configured.
 
 ## Resume
 
@@ -70,13 +70,13 @@ Every plan, interim, and final review follows [review](./review.md).
 
 ## Implementation and verification
 
-1. When implementation begins, set Execution through the Phase tool for the configured tracker. Lifecycle stays `inProgress`.
+1. When implementation begins, set Execution through the Phase tool for the configured tracker, when Phase is configured. Lifecycle stays `inProgress`.
 2. Implement the complete change at its owning abstraction. Leave unrelated working-tree changes untouched.
 3. Run focused checks while developing. Run all plan and Project Policy verification before final review.
 4. A Task runs its skill's parent synchronization. A Gig has none.
 5. Write or update the [completion artifact](#completion-artifact): `result.md` for feature, bugfix, refactor, and chore; `report.md` for research and audit. Never claim verification that didn't run.
 6. Resolve every unchecked `pending.md` entry, or move it to separately queued work. A missing file counts as empty.
-7. Set Self-Review, then call `review_task` or `review_gig` with `phase: "final"` and handle the cycle. The reviewer sees the completion artifact and every change on the branch.
+7. Set Self-Review when Phase is configured, then call `review_task` or `review_gig` with `phase: "final"` and handle the cycle. The reviewer sees the completion artifact and every change on the branch.
 8. **Stop with one message:**
    - the completion artifact's Overview;
    - any open concerns from the review, one line each;

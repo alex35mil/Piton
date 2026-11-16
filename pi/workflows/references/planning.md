@@ -44,10 +44,10 @@ A Task or Gig takes one of two paths. Say which in one line before continuing. "
 
 The plan informs the user. It waits for approval only when the item is marked (below).
 
-1. Set Planning with the Phase tool for the configured tracker, then call `review_task` or `review_gig` with `phase: "plan"`. Handle the cycle as described in [review](./review.md).
+1. Set Planning with the Phase tool for the configured tracker when Phase is configured, then call `review_task` or `review_gig` with `phase: "plan"`. Handle the cycle as described in [review](./review.md).
 2. Publish the plan, as described in [provider bodies](./integrations/shared.md#provider-bodies).
 3. Check [plan approval](#plan-approval). When the plan waits, keep Planning and stop with about five highlights, any open concerns from the review, any questions, and a request to approve.
-4. Otherwise set Execution and send one message: about five highlights, any open concerns, and any questions. With no question, continue into implementation in the same turn. The user can interrupt at any time.
+4. Otherwise set Execution (when Phase is configured) and send one message: about five highlights, any open concerns, and any questions. With no question, continue into implementation in the same turn. The user can interrupt at any time.
 
 ### Plan approval
 
@@ -55,14 +55,14 @@ A Task or Gig plan waits for the user's approval when its tracker item carries t
 
 - **Check:** when `inspect_integrations` shows a `gate` group with a `plan` value, read the item's labels fresh and call `inspect_gate` with `gate: "plan"`. Check before choosing the path and again after publication, so a label added during planning counts.
 - **Chat wins:** "wait for my approval" makes any plan wait; "just do it" lets a marked plan continue. Both apply to this run only.
-- **While waiting:** set Execution and implement only after the user approves, or after a chat decision changes the plan. Republish that change as usual.
-- **On resume** in Planning with a published plan, check again and ask for approval while the plan still waits.
+- **While waiting:** set Execution (when Phase is configured) and implement only after the user approves, or after a chat decision changes the plan. Republish that change as usual.
+- **On resume** with a published plan and implementation not started, check again and ask for approval while the plan still waits.
 
 ## Epic plans
 
 Accepting an Epic plan creates tracker issues, so it waits for the user.
 
-1. Set Planning, then call `review_epic` with `phase: "plan"` and handle the cycle as described in [review](./review.md).
+1. Set Planning when Phase is configured, then call `review_epic` with `phase: "plan"` and handle the cycle as described in [review](./review.md).
 2. Summarize the plan and its Task list in chat, with any open concerns, and wait for the user's acceptance.
 3. On acceptance, call `accept_epic_tasks`, then continue as the Epic skill describes.
 

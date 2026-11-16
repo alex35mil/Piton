@@ -83,7 +83,7 @@ The workflow asks you only for clarifications and decisions. It reports everythi
 
 - Planning, Execution, and Self-Review show where the work is. Phase is for visibility only; nothing waits on it.
 - Status stays In Progress through all of these.
-- Phase shows as a GitHub Project field or a Linear label group. See [Phase](references/phase.md).
+- Phase is optional. When configured, it shows as a GitHub Project field or a Linear label group. See [Phase](references/phase.md).
 
 **Submitting and shipping:**
 

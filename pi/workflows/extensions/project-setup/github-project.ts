@@ -140,9 +140,9 @@ export const GitHubProjectSpecificationSchema = Type.Object(
                     { field: OneLineSchema, options: StatusOptionsSchema },
                     { additionalProperties: false },
                 ),
-                phase: Type.Object(
-                    { field: OneLineSchema, options: PhaseOptionsSchema },
-                    { additionalProperties: false },
+                // Absent when the project doesn't track Phase.
+                phase: Type.Optional(
+                    Type.Object({ field: OneLineSchema, options: PhaseOptionsSchema }, { additionalProperties: false }),
                 ),
                 priority: Type.Union([ProjectPrioritySchema, IssuePrioritySchema]),
             },
@@ -1600,9 +1600,17 @@ function desiredView(specification: GitHubProjectSpecification): DesiredView {
         layout: specification.presentation.layout,
         fields: specification.presentation.visibleFields.map((field) => {
             if (field.kind === "field") return { name: field.name, source: "any" }
-            return {
-                name: specification.fields[field.field].field,
-                source: field.field === "priority" ? specification.fields.priority.scope : "project",
+            switch (field.field) {
+                case "status":
+                    return { name: specification.fields.status.field, source: "project" }
+                case "priority":
+                    return { name: specification.fields.priority.field, source: specification.fields.priority.scope }
+                case "phase":
+                    if (!specification.fields.phase)
+                        throw new Error(
+                            "the Phase visible field requires a Phase field; drop it when Phase isn't tracked",
+                        )
+                    return { name: specification.fields.phase.field, source: "project" }
             }
         }),
     }
@@ -2045,11 +2053,15 @@ function desiredProjectFields(specification: GitHubProjectSpecification): Projec
             dataType: "SINGLE_SELECT",
             options: Object.values(specification.fields.status.options),
         },
-        {
-            name: specification.fields.phase.field,
-            dataType: "SINGLE_SELECT",
-            options: Object.values(specification.fields.phase.options),
-        },
+        ...(specification.fields.phase
+            ? [
+                  {
+                      name: specification.fields.phase.field,
+                      dataType: "SINGLE_SELECT" as const,
+                      options: Object.values(specification.fields.phase.options),
+                  },
+              ]
+            : []),
         ...(specification.fields.priority.scope === "project"
             ? [
                   {
@@ -2078,7 +2090,7 @@ function assertSpecification(specification: GitHubProjectSpecification): void {
         throw new Error("board/table views require an explicit visible-field selection")
     const statusNames = Object.values(specification.fields.status.options).map((option) => option.name)
     if (new Set(statusNames).size !== statusNames.length) throw new Error("GitHub Status option names must be distinct")
-    const phaseNames = Object.values(specification.fields.phase.options).map((option) => option.name)
+    const phaseNames = Object.values(specification.fields.phase?.options ?? {}).map((option) => option.name)
     if (new Set(phaseNames).size !== phaseNames.length) throw new Error("GitHub Phase option names must be distinct")
     const priorityNames = specification.fields.priority.options.map((option) => option.name)
     if (new Set(priorityNames).size !== priorityNames.length)
@@ -2169,12 +2181,19 @@ function trackerConfigFor(specification: GitHubProjectSpecification, projectNumb
                     Object.entries(specification.fields.status.options).map(([key, option]) => [key, option.name]),
                 ),
             },
-            phase: {
-                field: specification.fields.phase.field,
-                values: Object.fromEntries(
-                    Object.entries(specification.fields.phase.options).map(([key, option]) => [key, option.name]),
-                ),
-            },
+            ...(specification.fields.phase
+                ? {
+                      phase: {
+                          field: specification.fields.phase.field,
+                          values: Object.fromEntries(
+                              Object.entries(specification.fields.phase.options).map(([key, option]) => [
+                                  key,
+                                  option.name,
+                              ]),
+                          ),
+                      },
+                  }
+                : {}),
             priority: {
                 scope: specification.fields.priority.scope,
                 field: specification.fields.priority.field,

@@ -29,6 +29,7 @@ import {
     LinearPhaseInputSchema,
     LinearPhaseInputValidator,
     linearPhaseFacts,
+    linearPhaseGroup,
     phaseProjectionContract,
     planPhaseMutation,
 } from "./phase.js"
@@ -687,7 +688,7 @@ function planLabelMutation(
     if (current.provider !== "linear") throw new Error("label facts don't match the configured Linear tracker")
     const update = planLinearLabelUpdate(
         tracker.labels,
-        itemType === "epic" ? tracker.phase.projects : tracker.phase.issues,
+        linearPhaseGroup(tracker.phase, status.entity),
         tracker.team,
         itemType,
         kind,

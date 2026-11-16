@@ -35,6 +35,7 @@ import {
 } from "../__lib/entity.js"
 import { type EpicTask, readEpicRouting, readEpicTasks } from "../__lib/epic-tasks.js"
 import type { ResourceIds } from "../integrations/resource-ids.js"
+import { initialPhase } from "../integrations/phase.js"
 import { resourceIdsFromTrackerObject } from "./resource-ids.js"
 import * as Git from "../__lib/git.js"
 import {
@@ -262,7 +263,7 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
             slug,
             title: input.title.trim(),
             createdAt: (options.now ?? new Date()).toISOString(),
-            phase: "planning" as const,
+            ...initialPhase(environment.tracker, "planning"),
             branch: contract,
             tracker,
         }

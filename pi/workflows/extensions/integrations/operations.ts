@@ -40,7 +40,7 @@ async function updateEntity<T extends { status: EntityStatus; changed: boolean }
         const result = operation(readEntityStatus(directory), environment, directory)
         if (result.changed) writeEntityStatus(directory, result.status)
         const { status, ...outcome } = result
-        return { entity: path.basename(directory), phase: status.phase, ...outcome }
+        return { entity: path.basename(directory), ...(status.phase ? { phase: status.phase } : {}), ...outcome }
     })
 }
 

@@ -145,10 +145,12 @@ export default function (pi: ExtensionAPI): void {
 
 export function formatInitializedEntity(initialized: Pick<InitializedEntity, "directory" | "status">): string {
     const branch = initialized.status.branch
+    // A new entity starts with a metadata Phase exactly when the tracker configures Phase.
+    const phase = initialized.status.phase === undefined ? "" : " Phase,"
     return [
         `Initialized ${initialized.directory}.`,
         `Branch: ${branch.name}`,
         `Start/target: ${branch.start}`,
-        "Next: set up the board (Project membership, Status, Priority, Phase, Assignee, labels when configured). Switch to the stored branch before implementation. Do not push it automatically.",
+        `Next: set up the board (Project membership, Status, Priority,${phase} Assignee, labels when configured). Switch to the stored branch before implementation. Do not push it automatically.`,
     ].join("\n")
 }
