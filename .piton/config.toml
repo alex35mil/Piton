@@ -34,8 +34,15 @@ format = "identifier-title"
 [tracker]
 provider = "github"
 mcp_server = "github"
-repository = { owner = "alex35mil", repo = "piton" }
-project = { owner = "alex35mil", owner_type = "user", number = 2 }
+
+[tracker.repository]
+owner = "alex35mil"
+repo = "Piton"
+
+[tracker.project]
+owner = "alex35mil"
+owner_type = "user"
+number = 2
 
 [tracker.labels.groups.kind]
 applies_to = ["epic", "deliverable"]
@@ -183,8 +190,10 @@ name = "Gate: Plan"
 color = "#FBCA04"
 description = "Wait for the user's plan approval before implementing."
 
-[tracker.fields]
-priority = { scope = "project", field = "Priority", values = ["Urgent", "High", "Medium", "Low"] }
+[tracker.fields.priority]
+scope = "project"
+field = "Priority"
+values = ["Urgent", "High", "Medium", "Low"]
 
 [tracker.fields.status]
 field = "Status"
@@ -199,9 +208,16 @@ canceled = "Canceled"
 
 [tracker.fields.phase]
 field = "Phase"
-values = { planning = "Planning", execution = "Execution", self_review = "Self-Review" }
+
+[tracker.fields.phase.values]
+planning = "Planning"
+execution = "Execution"
+self_review = "Self-Review"
 
 [forge]
 provider = "github"
 mcp_server = "github"
-repository = { owner = "alex35mil", repo = "piton" }
+
+[forge.repository]
+owner = "alex35mil"
+repo = "Piton"
