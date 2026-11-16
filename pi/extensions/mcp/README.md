@@ -6,7 +6,7 @@ Composes Pi 1.5.2's native MCP support with this package's tool metadata and dec
 
 `mcp[.local].json` (root key `mcpServers`) in every level of Piton's `.piton/` chain: the global tier `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, and `<repo-root>/.piton/`.
 
-`piton config resolve` merges them farthest first by exact server name; a nearer entry replaces the whole entry. Global servers load independently of project trust; every other level requires trust. Names differing only by `-` and `_` conflict rather than overriding one another. Keep private project registrations outside Git; setup ensures a repository rule ignores them, adding the shared `/.piton/*.local.*` line to `.git/info/exclude` when none does. They are never moved into global configuration.
+`piton config resolve` merges them farthest first by exact server name; a nearer entry replaces the whole entry. Global servers load independently of project trust; every other level requires trust. Names differing only by `-` and `_` conflict rather than overriding one another. Keep private project registrations outside Git; setup ensures the shared `/.piton/*.local.*` line in `.git/info/exclude`. They are never moved into global configuration.
 
 Every effective server is registered through `pi.registerMcpServer()`. The composed native extension consumes those registrations without discovering another set of project files. `/mcp` retains native connection management; enabled/exposure changes to registered servers last for the session. Native `pi mcp` shell commands do not load this adapter or manage its project tiers.
 

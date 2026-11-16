@@ -201,12 +201,9 @@ Each `reviews/<phase>-NNN/` directory holds:
 
 The shared guard validates the branch configuration and persistence safety, reusing a successful check while the relevant local inputs are unchanged. `prepare_artifacts` forces a full check during setup or repair, adds only the permitted exclusions below, and creates an empty `.piton/.local` when it's missing. Neither changes the Git index.
 
-- **In Git:** in a shared setup, only `.piton/config.toml`, `mcp.json`, and `policies.md`; in a private setup, nothing.
-- **Kept out by:** any repository rule that Git applies, never the user's global excludes file. Setup writes one of two ([sharing](./setup.md#sharing)):
-  - shared: `/.piton/.local` in `.gitignore`. Without a trailing slash, it also covers a worker's `.piton/.local` symlink to its source checkout;
-  - private: `/.piton/` in `.git/info/exclude`, which also covers that symlink and every local settings file.
-- **Local settings** get `/.piton/*.local.*` in `.git/info/exclude` only when no rule already ignores them.
-- **Preparation stops when** no repository rule ignores `.piton/.local`, or any path under `.piton/.local/` or any `.piton/*.local.*` file is in Git or staged.
+- **In Git:** only `.piton/config.toml`, `mcp.json`, and `policies.md`; nothing in a private setup.
+- **Kept out by:** the `/.piton/.local` rule in `.gitignore`, which setup writes, and `/.piton/*.local.*` in `.git/info/exclude`. A private setup instead puts `/.piton` in `.git/info/exclude`. Without a trailing slash, either rule also covers a worker's `.piton/.local` symlink to its source checkout.
+- **Preparation stops when** no repository rule (not the global excludes file) ignores `.piton/.local`, or any path under `.piton/.local/` or any `.piton/*.local.*` file is in Git or staged.
 - **In a sandboxed worker** (`PITON_RUNTIME=sandbox`), starting or resuming an entity, and recording incoming-PR evidence, stop unless `.piton/.local` is a symlink to the source checkout's folder; otherwise the artifacts would be lost with the worker. Run setup in the source checkout and recreate the worker. Project inspection and queue intake create no artifacts, so they aren't guarded, including against the workflow source project.
 - Never stage, commit, or push a path under `.piton/.local/`, or link to one from published text.
 - Removing a path from Git needs separate user approval and is never automatic.

@@ -618,7 +618,7 @@ $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
     config.toml                  # committed: [sandbox] [workers] [permissions] [branches] [tracker] [forge]
     config.local.toml            # not committed: the same tables, plus [branches] username and [web_search] api_key
     mcp[.local].json, policies.md
-    .local/                      # workflow artifacts (ignored); a worker links its source's
+    .local/                      # workflow artifacts (gitignored); a worker links its source's
   .agents/rules/, skills/
   AGENTS.md
 ```
@@ -628,8 +628,7 @@ Three families of files, each read by its own consumer:
 - **`config.toml` / `config.local.toml`, every level:** a project's settings, read along the chain by launches, pi,
   and workflows. The global pair is the chain's farthest level, appended from its fixed location. `.local` means "not
   committed": this machine's values, secrets, or anything you don't want in a diff (`/.piton/*.local.*` keeps it out
-  of Git). A private project setup ignores all of `.piton/` through `.git/info/exclude`, so even `config.toml` stays
-  in the clone.
+  of Git).
 - **`config.host.toml` / `config.host.local.toml`, global only:** read by the daemon. Top-level keys: `socket`, `log`,
   `roots`, `favorites`, `logging`, `default_attach_mode`, `empty_grace_ms`, `keep_awake`; tables `[pi]`, `[sandbox]`
   (only `command`, the sandbox program), `[env]`, `[stop]`, `[tailnet]`, and `[development]` (switches for a

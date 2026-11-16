@@ -25,12 +25,9 @@ import {
     loadSessionAnalysis,
     LOCAL_SETTINGS_EXCLUDE,
     prepareArtifactPersistence,
-    PRIVATE_PROJECT_EXCLUDE,
     PROJECT_LOCAL_IGNORE,
     setInstallationForTests,
 } from "../workflows/extensions/__lib/project-config.ts"
-import { configureArtifactIgnore } from "../workflows/extensions/project-setup/artifact-sharing.ts"
-import { ensureLocalSettingsExclusion } from "../workflows/extensions/project-setup/local-settings.ts"
 import registerProjectSetup, { inspectProjectSetup } from "../workflows/extensions/project-setup/index.ts"
 
 function repository(): string {
@@ -225,96 +222,13 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("reports the effective sharing state from the repository's ignore rules", () => {
+    it("tells setup whether to append or keep the project-local ignore rule", () => {
         const root = repository()
         try {
-            const sharing = () => inspectProjectSetup(root, true).artifactSharing
-            assert.deepEqual(sharing(), { kind: "unset" })
+            const ignore = () => inspectProjectSetup(root, true).projectLocalIgnore
+            assert.deepEqual(ignore(), { state: "append", rule: PROJECT_LOCAL_IGNORE })
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
-            assert.deepEqual(sharing(), { kind: "shared", source: ".gitignore" })
-            fs.writeFileSync(path.join(root, ".gitignore"), "")
-            fs.appendFileSync(path.join(root, ".git", "info", "exclude"), `${PRIVATE_PROJECT_EXCLUDE}\n`)
-            assert.deepEqual(sharing(), { kind: "private", source: ".git/info/exclude" })
-        } finally {
-            fs.rmSync(root, { recursive: true, force: true })
-        }
-    })
-
-    it("applies the shared or private ignore rule once, without changing the index", () => {
-        for (const sharing of ["shared", "private"] as const) {
-            const root = repository()
-            try {
-                const index = git(root, ["ls-files", "--stage"])
-                const first = configureArtifactIgnore(root, { sharing })
-                assert.equal(first.sharing.kind, sharing)
-                assert.deepEqual(
-                    first.changed,
-                    sharing === "shared"
-                        ? { file: ".gitignore", rule: PROJECT_LOCAL_IGNORE }
-                        : { file: ".git/info/exclude", rule: PRIVATE_PROJECT_EXCLUDE },
-                )
-                const file = path.join(root, first.changed!.file)
-                const after = fs.readFileSync(file, "utf-8")
-                assert.equal(configureArtifactIgnore(root, { sharing }).changed, null)
-                assert.equal(fs.readFileSync(file, "utf-8"), after)
-                assert.equal(git(root, ["ls-files", "--stage"]), index)
-                if (sharing === "private") assert.equal(fs.existsSync(path.join(root, ".gitignore")), false)
-            } finally {
-                fs.rmSync(root, { recursive: true, force: true })
-            }
-        }
-    })
-
-    it("refuses a private setup while Piton files are in Git, and a shared one over a private setup", () => {
-        const root = repository()
-        try {
-            writeConfig(root, config())
-            git(root, ["add", ".piton/config.toml"])
-            const exclude = path.join(root, ".git", "info", "exclude")
-            const before = fs.readFileSync(exclude, "utf-8")
-            assert.throws(() => configureArtifactIgnore(root, { sharing: "private" }), /\.piton\/config\.toml/)
-            git(root, ["commit", "-m", "config"])
-            assert.throws(() => configureArtifactIgnore(root, { sharing: "private" }), /\.piton\/config\.toml/)
-            assert.equal(fs.readFileSync(exclude, "utf-8"), before)
-
-            git(root, ["rm", "-q", "--cached", ".piton/config.toml"])
-            git(root, ["commit", "-m", "untrack"])
-            assert.equal(configureArtifactIgnore(root, { sharing: "private" }).sharing.kind, "private")
-            assert.throws(() => configureArtifactIgnore(root, { sharing: "shared" }), /private setup/)
-            assert.equal(fs.existsSync(path.join(root, ".gitignore")), false)
-        } finally {
-            fs.rmSync(root, { recursive: true, force: true })
-        }
-    })
-
-    it("refuses an appended rule that a negation keeps from taking effect", () => {
-        const root = repository()
-        try {
-            fs.writeFileSync(path.join(root, ".gitignore"), "!/.piton/\n")
-            assert.throws(() => configureArtifactIgnore(root, { sharing: "private" }), /negation/)
-        } finally {
-            fs.rmSync(root, { recursive: true, force: true })
-        }
-    })
-
-    it("adds no local-settings exclusion when a private setup already covers it", async () => {
-        const root = repository()
-        try {
-            const exclude = path.join(root, ".git", "info", "exclude")
-            configureArtifactIgnore(root, { sharing: "private" })
-            const before = fs.readFileSync(exclude, "utf-8")
-            assert.equal(ensureLocalSettingsExclusion(root, ".piton/config.local.toml").changed, false)
-            await configureProjectMcp(root, {
-                target: "local",
-                registrations: [{ name: "linear", provider: "linear", credentialEnv: "LINEAR_API_KEY" }],
-            })
-            assert.ok(fs.existsSync(path.join(root, ".piton", "mcp.local.json")))
-            writeConfig(root, config({ format: "username/identifier-title" }))
-            writeSettings(root, { "branches.username": "alex" }, true)
-            prepareArtifactPersistence(root)
-            assert.equal(fs.readFileSync(exclude, "utf-8"), before)
-            assert.doesNotMatch(before, /\*\.local\.\*/)
-            assert.equal(git(root, ["status", "--porcelain", "--untracked-files=all"]), "")
+            assert.deepEqual(ignore(), { state: "present", rule: PROJECT_LOCAL_IGNORE })
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }
@@ -739,13 +653,19 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("requires the project-local folder to be ignored without changing the index", () => {
+    it("requires the project-local gitignore rule without changing the index", () => {
         const root = repository()
         try {
             writeConfig(root, config())
             const indexBefore = git(root, ["ls-files", "--stage"])
-            assert.throws(() => prepareArtifactPersistence(root), /to be ignored/)
-            assert.throws(() => assertArtifactPersistencePrepared(root), /to be ignored/)
+            assert.throws(
+                () => prepareArtifactPersistence(root),
+                /\/\.piton\/\.local \(no trailing slash\) in \.gitignore/,
+            )
+            assert.throws(
+                () => assertArtifactPersistencePrepared(root),
+                /\/\.piton\/\.local \(no trailing slash\) in \.gitignore/,
+            )
             assert.equal(git(root, ["ls-files", "--stage"]), indexBefore)
 
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
@@ -784,39 +704,22 @@ describe("workflow project configuration", () => {
         }
     })
 
-    it("accepts a private exclude for a missing, real, or linked local root", () => {
-        for (const rule of [PRIVATE_PROJECT_EXCLUDE, PROJECT_LOCAL_IGNORE]) {
-            for (const shape of ["missing", "directory", "symlink"] as const) {
-                const root = repository()
-                const source = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-local-source-"))
-                try {
-                    writeConfig(root, config())
-                    fs.appendFileSync(path.join(root, ".git", "info", "exclude"), `${rule}\n`)
-                    const local = path.join(root, ".piton", ".local")
-                    if (shape === "directory") fs.mkdirSync(local)
-                    if (shape === "symlink") fs.symlinkSync(source, local)
-                    assert.equal(prepareArtifactPersistence(root).state, "ready", `${rule} ${shape}`)
-                    assert.equal(fs.existsSync(path.join(root, ".gitignore")), false)
-                } finally {
-                    fs.rmSync(root, { recursive: true, force: true })
-                    fs.rmSync(source, { recursive: true, force: true })
-                }
-            }
-        }
-    })
-
-    it("ignores the global excludes file and negated rules when checking coverage", () => {
+    it("accepts a private setup's exclude but not the global excludes file or a negation", () => {
         const root = repository()
         try {
             writeConfig(root, config())
             fs.writeFileSync(path.join(root, "global-ignore"), `${PROJECT_LOCAL_IGNORE}\n`)
             git(root, ["config", "core.excludesFile", path.join(root, "global-ignore")])
-            assert.throws(() => prepareArtifactPersistence(root), /to be ignored/)
-            fs.appendFileSync(path.join(root, ".git", "info", "exclude"), `${PROJECT_LOCAL_IGNORE}\n`)
+            assert.throws(() => prepareArtifactPersistence(root), /in \.gitignore/)
+            const exclude = path.join(root, ".git", "info", "exclude")
+            const before = fs.readFileSync(exclude, "utf-8")
+            fs.appendFileSync(exclude, `${PROJECT_LOCAL_IGNORE}\n`)
             fs.writeFileSync(path.join(root, ".gitignore"), `!${PROJECT_LOCAL_IGNORE}\n`)
-            assert.throws(() => prepareArtifactPersistence(root), /to be ignored/)
-            fs.writeFileSync(path.join(root, ".gitignore"), "")
+            assert.throws(() => prepareArtifactPersistence(root), /in \.gitignore/)
+            fs.rmSync(path.join(root, ".gitignore"))
+            fs.writeFileSync(exclude, `${before}/.piton\n`)
             assert.equal(prepareArtifactPersistence(root).state, "ready")
+            assert.equal(git(root, ["status", "--porcelain", "--untracked-files=all", "--", ".piton"]), "")
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }
@@ -845,7 +748,7 @@ describe("workflow project configuration", () => {
         try {
             writeConfig(root, config())
             const local = path.join(root, ".piton", ".local")
-            assert.throws(() => prepareArtifactPersistence(root), /to be ignored/)
+            assert.throws(() => prepareArtifactPersistence(root), /in \.gitignore/)
             assert.equal(fs.existsSync(local), false)
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
             prepareArtifactPersistence(root)

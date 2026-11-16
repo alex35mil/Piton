@@ -10,7 +10,7 @@ Step files, read when the step is reached:
 - When the tracker is Linear, read [Linear tracker configuration](./setup/linear-tracker.md).
 ## General rules
 
-- Settings live in `.piton/config.toml`; personal values in `.piton/config.local.toml`, which stays outside Git. In a [private setup](#sharing), every `.piton/` file stays outside Git. Parent folders and Piton's global folder (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) have the same pair.
+- Settings live in `.piton/config.toml`; personal values in `.piton/config.local.toml`, which stays outside Git. Parent folders and Piton's global folder (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) have the same pair.
 - The setup tools write them: `configure_project`, `configure_permissions`. They keep the files' other settings, comments, and layout. Never edit them by hand or with a script.
 - Every table rejects unlisted keys and contains no credentials. Store only operational fields.
 - Omit optional settings instead of writing empty, disabled, or placeholder configuration.
@@ -200,26 +200,9 @@ Example returned configuration for a Project-contained tracker (use the actual o
 
 Pass the tracker and forge to `configure_project` together. Their servers and repositories follow the user's choices.
 
-## Sharing
-
-The snapshot's `artifactSharing` reports how Git currently keeps Piton files out, derived from the repository's ignore rules each time; nothing stores it.
-
-| State | Meaning |
-| --- | --- |
-| `unset` | `.piton/.local` isn't ignored; workflows can't run. |
-| `shared` | `.piton/.local` is ignored; configuration and policies can be committed. |
-| `private` | all of `.piton/` is ignored; no tracked file changes. |
-
-`configure_artifact_ignore` applies the approved choice by appending one rule, and is a no-op when it's already in effect:
-
-- `shared`: `/.piton/.local` in `.gitignore`. Refused over a private setup; the user removes its `/.piton/` exclude by hand first.
-- `private`: `/.piton/` in `.git/info/exclude`. Refused while any `.piton/` path is in Git or staged.
-
-A private setup lasts only for this clone and its workers. A new clone needs setup again.
-
 ## Artifact persistence
 
-The persistence and authority contract is in [artifacts](./artifacts.md#persistence-and-authority), including the ignore and exclude rules and Git-membership checks. For manual setup, call `configure_artifact_ignore`, create the configuration above, then call `prepare_artifacts`. Call it again after configuration changes.
+The persistence and authority contract is in [artifacts](./artifacts.md#persistence-and-authority), including the ignore and exclude rules and Git-membership checks. For manual setup, create the configuration above, apply that contract's setup rule, then call `prepare_artifacts`. Call it again after configuration changes.
 
 ## MCP registrations
 
@@ -227,7 +210,7 @@ MCP servers stay JSON, the format other harnesses read, in their own files. Use 
 
 | Target | File | Notes |
 | --- | --- | --- |
-| Local | `.piton/mcp.local.json`, with `mcpServers` | adds `/.piton/*.local.*` to `.git/info/exclude` unless a rule already ignores it |
+| Local | `.piton/mcp.local.json`, with `mcpServers` | add `/.piton/*.local.*` to `.git/info/exclude` |
 | Project | `.piton/mcp.json`, with `mcpServers` | committed |
 | Global | the global tier's `mcp.json`, with `mcpServers` | never the target for a private project registration |
 

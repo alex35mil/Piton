@@ -12,7 +12,7 @@ The package no longer reads configuration itself: it asks `piton config resolve`
 - **Skill grants are off by default:** a skill's `allowed-tools` grants nothing unless `skill_grants = true` in `[permissions]` (or `[permissions.host]` / `[permissions.sandbox]`). Without it, allow the tools you want by name. Skills are no longer protected files.
 - **Removed:** `workflowProject` and `sessionAnalysis`. Workflow reports open a pre-filled GitHub issue for you to submit; a development install (the package running from a git checkout of Piton) files them in that checkout's tracker and runs session analysis.
 - **Parent folders** strictly below home can hold their own `.piton/` and `.agents/`, shared by every repository below them.
-- **Ignore rules:** a repository rule must ignore `.piton/.local`: `/.piton/.local` in `.gitignore` (shared), or `/.piton/` in `.git/info/exclude` (private: no tracked file changes). `.git/info/exclude` gets one `/.piton/*.local.*` line when nothing else ignores local settings. Project setup writes them.
+- **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line. Project setup writes them.
 
 ## Simpler workflows: fewer gates, bounded reviews
 
