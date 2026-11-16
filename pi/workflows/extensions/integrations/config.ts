@@ -1,10 +1,14 @@
-import * as fs from "node:fs"
-import * as path from "node:path"
-
 import { type Static, Type } from "typebox"
 
-import { compile, describeErrors } from "../../../extensions/__lib/schema.js"
-import * as project from "../../../extensions/__lib/project.js"
+import { compile } from "../../../extensions/__lib/schema.js"
+import {
+    camelKeys,
+    type DataKeys,
+    repositoryConfigFile,
+    resolveSettings,
+    section,
+    snakeKeys,
+} from "../../../extensions/__lib/settings.js"
 import { PRIORITY_NOT_SET } from "../__lib/domain.js"
 import {
     assertGitHubLabels,
@@ -14,8 +18,6 @@ import {
     LinearPhaseGroupsSchema,
 } from "./labels.js"
 import { linearPriorityNumber } from "./records.js"
-
-export const INTEGRATION_CONFIG_PATH = ".project/integrations.json"
 
 const FieldNameSchema = Type.String({ minLength: 1 })
 
@@ -132,6 +134,7 @@ export const LinearTrackerValidator = compile(LinearTrackerSchema)
 export type LinearTracker = Static<typeof LinearTrackerSchema>
 
 export const TrackerConfigSchema = Type.Union([GitHubTrackerSchema, LinearTrackerSchema])
+export const TrackerConfigValidator = compile(TrackerConfigSchema)
 export type TrackerConfig = Static<typeof TrackerConfigSchema>
 
 export const GitHubForgeSchema = Type.Object(GitHubRoleProperties, { additionalProperties: false })
@@ -189,27 +192,82 @@ function assertGitHubTrackerInvariants(config: GitHubTracker): void {
     }
 }
 
-// Workflows need both a tracker and a GitHub forge.
-export function loadIntegrationConfig(cwd: string): IntegrationConfig {
-    const configPath = path.join(project.resolveRootDir(cwd), INTEGRATION_CONFIG_PATH)
-    if (!fs.existsSync(configPath))
-        throw new Error(`missing required ${INTEGRATION_CONFIG_PATH}: configure a tracker and a forge`)
-    return validateIntegrationConfig(readIntegrationConfig(configPath))
+/**
+ * Maps whose keys are names, not schema: label group keys, label value keys, and a GitHub label group's values. Their
+ * keys are kept as they are when translating between the file's snake_case and the code's camelCase.
+ */
+export const integrationDataKeys: DataKeys = (at) => {
+    const tail = at.slice(-2).join(".")
+    return tail === "labels.groups" || (at.length >= 2 && at[at.length - 2] === "*" && at[at.length - 1] === "values")
 }
 
-function readIntegrationConfig(configPath: string): unknown {
+/** `[tracker]` and `[forge]` as the code names their keys. */
+export function integrationsFromFile(value: unknown): unknown {
+    return camelKeys(value, integrationDataKeys)
+}
+
+/** `[tracker]` or `[forge]` as the file names their keys, for setup to write. */
+export function integrationsToFile(value: unknown): unknown {
+    return snakeKeys(value, integrationDataKeys)
+}
+
+// Workflows need both a tracker and a GitHub forge: the nearest `[tracker]` and `[forge]` in piton's configuration
+// chain, each whole.
+export function loadIntegrationConfig(cwd: string): IntegrationConfig {
+    const settings = resolveSettings(cwd)
+    const tracker = section(settings.tracker)
+    const forge = section(settings.forge)
+    if (!tracker || !forge) {
+        const missing = [!tracker && "[tracker]", !forge && "[forge]"].filter(Boolean).join(" and ")
+        throw new Error(
+            `missing required ${missing}: configure a tracker and a forge in ${repositoryConfigFile("shared")} or a parent folder's`,
+        )
+    }
+    const files = [...new Set([tracker.path, forge.path])].join(" and ")
+    return validateIntegrationConfig(integrationsFromFile({ tracker: tracker.value, forge: forge.value }), files)
+}
+
+export type IntegrationPresence = { kind: "configured" } | { kind: "absent" } | { kind: "unreadable"; error: string }
+
+/** Whether any level of the chain configures integrations, or why that can't be told. */
+export function integrationPresence(cwd: string): IntegrationPresence {
     try {
-        return JSON.parse(fs.readFileSync(configPath, "utf-8"))
+        const settings = resolveSettings(cwd)
+        const tracker = section(settings.tracker)
+        const forge = section(settings.forge)
+        return tracker || forge ? { kind: "configured" } : { kind: "absent" }
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`invalid ${INTEGRATION_CONFIG_PATH}: ${message}`)
+        return { kind: "unreadable", error: error instanceof Error ? error.message : String(error) }
     }
 }
 
-function validateIntegrationConfig(value: unknown): IntegrationConfig {
+/** A validator path (`/tracker/fields/status/values/inProgress`) as the file's dotted key. */
+function filePath(pointer: string): string {
+    // `at` is the path as integrationDataKeys sees it: schema names, `*` for a data key; list indexes don't count.
+    const at: string[] = []
+    const named: string[] = []
+    for (const part of pointer.split("/").filter(Boolean)) {
+        if (/^\d+$/.test(part)) {
+            named.push(part)
+        } else if (integrationDataKeys(at)) {
+            named.push(part)
+            at.push("*")
+        } else {
+            named.push(part.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`))
+            at.push(part)
+        }
+    }
+    return named.length > 0 ? named.join(".") : "(top level)"
+}
+
+/** Validates the merged `[tracker]` and `[forge]`; errors name `files`, where they came from. */
+function validateIntegrationConfig(value: unknown, files: string): IntegrationConfig {
     if (!IntegrationConfigValidator.check(value)) {
-        const details = describeErrors(IntegrationConfigValidator.errors(value)).join("; ")
-        throw new Error(`invalid ${INTEGRATION_CONFIG_PATH}: ${details}`)
+        // Errors name keys as the file has them: `tracker.fields.status.values.in_progress`.
+        const details = IntegrationConfigValidator.errors(value)
+            .map((error) => `${filePath(error.path)}: ${error.message}`)
+            .join("; ")
+        throw new Error(`invalid ${files}: ${details}`)
     }
     try {
         if (value.tracker.provider === "github") assertGitHubTrackerInvariants(value.tracker)
@@ -220,7 +278,7 @@ function validateIntegrationConfig(value: unknown): IntegrationConfig {
         }
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`invalid ${INTEGRATION_CONFIG_PATH}: ${message}`)
+        throw new Error(`invalid ${files}: ${message}`)
     }
 
     return value

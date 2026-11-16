@@ -3,14 +3,14 @@
 **Verified on pi 1.5.2 (every scenario, 2026-11-11).** Earlier: pi 1.3.0 (2026-11-07 to 2026-11-10). After a pi
 upgrade, re-run the probes and update this line.
 
-The probes are `daemon/tests/probe/probe.mjs`: real `pi --mode rpc` with the faux extension in
-`daemon/tests/fixtures/faux-extension.ts`, a scratch workspace and `PI_CODING_AGENT_DIR`. Run a scenario with
-`node tests/probe/probe.mjs <scenario>` in `daemon/`.
+The probes are `cli/tests/probe/probe.mjs`: real `pi --mode rpc` with the faux extension in
+`cli/tests/fixtures/faux-extension.ts`, a scratch workspace and `PI_CODING_AGENT_DIR`. Run a scenario with
+`node tests/probe/probe.mjs <scenario>` in `cli/`.
 
 ## Test model without credentials
 
 `fauxProvider()` from `@earendil-works/pi-ai`, registered by an extension through `pi.registerProvider(faux.provider)`,
-works in RPC mode: `pi --mode rpc -e daemon/tests/fixtures/faux-extension.ts --model faux/faux-1`. Replies are scripted per
+works in RPC mode: `pi --mode rpc -e cli/tests/fixtures/faux-extension.ts --model faux/faux-1`. Replies are scripted per
 prompt (`slow <n>`, `tool`, `ask`, otherwise an echo). `PITON_FAUX_TPS` sets the streaming speed.
 
 ## Session files (`session-file`, `resume`)
@@ -54,9 +54,9 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
   a second prompt written right behind the first still finds the run active. From 1.5 (checked on 1.5.2,
   2026-11-11) it can arrive during that preparation: pi answers `"started"` to both and then drops the second, with
   no message, no `queue_update`, and no error (pi #10606 was the same bug on 1.0.4). With a gap of 1 ms or more it's
-  queued as before. So piton writes a `prompt` only after pi answered the previous one (`daemon/src/prompts.rs`).
+  queued as before. So piton writes a `prompt` only after pi answered the previous one (`cli/src/session/prompts.rs`).
   The probe writes its prompts straight to pi, without that queue, so on 1.5 it times out waiting for the dropped
-  ones: every prompt is answered `"started"` and only the first runs. `daemon/tests/e2e/attach.mjs` ("prompts sent
+  ones: every prompt is answered `"started"` and only the first runs. `cli/tests/e2e/attach.mjs` ("prompts sent
   together all run") checks the queue and passes on 1.5.2.
 - Follow-ups queued together become user messages with the same `timestamp` as the run's first prompt (one
   millisecond). A message's timestamp doesn't identify it.

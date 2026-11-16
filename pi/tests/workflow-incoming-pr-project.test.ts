@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -125,14 +126,10 @@ function fixture() {
     const git = (...args: string[]) =>
         cp.execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim()
     git("init", "-q", "-b", "main")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     git("add", ".")
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
-    fs.mkdirSync(path.join(root, ".project"))
-    fs.writeFileSync(
-        path.join(root, ".project/config.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
+    fs.mkdirSync(path.join(root, ".piton"))
     const config = {
         forge: { provider: "github", mcpServer: "forge", repository },
         tracker: {
@@ -151,7 +148,7 @@ function fixture() {
             },
         },
     }
-    fs.writeFileSync(path.join(root, ".project/integrations.json"), JSON.stringify(config))
+    writeProjectConfig(root, { branchFormat: "identifier-title", ...config })
     prepareArtifactPersistence(root)
     const request = (extra: object = {}) => ({
         operation: "incomingPullRequestProject",
@@ -215,7 +212,7 @@ describe("maintainer-controlled incoming PR Project", () => {
                 }).state,
                 "blocked",
             )
-            assert.equal(fs.existsSync(path.join(f.root, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/gigs")), false)
         } finally {
             f.close()
         }
@@ -564,10 +561,7 @@ describe("maintainer-controlled incoming PR Project", () => {
             f.plan()
             assert.equal(f.git("status", "--porcelain"), before)
             assert.deepEqual(fs.readFileSync(path.join(f.root, ".git/index")), index)
-            fs.writeFileSync(
-                path.join(f.root, ".project/integrations.json"),
-                JSON.stringify({ tracker: minimalTracker(), forge: f.config.forge }),
-            )
+            writeProjectConfig(f.root, { tracker: minimalTracker(), forge: f.config.forge })
             assert.equal(f.plan().state, "blocked")
             const context = buildIntegrationContext(
                 { cwd: f.root } as never,

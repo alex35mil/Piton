@@ -1,4 +1,7 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
+import { resolveSettings, section } from "../extensions/__lib/settings.ts"
+import { integrationsFromFile } from "../workflows/extensions/integrations/config.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -43,44 +46,41 @@ function temporaryRepository(tracker: "github" | "linear" = "github", format = "
     git(directory, ["config", "user.email", "test@example.com"])
     git(directory, ["config", "user.name", "Test"])
     fs.writeFileSync(path.join(directory, "README.md"), "test\n")
-    fs.writeFileSync(path.join(directory, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(directory, ".gitignore"), "/.piton/.local\n")
     git(directory, ["add", "README.md", ".gitignore"])
     git(directory, ["commit", "-m", "initial"])
-    fs.mkdirSync(path.join(directory, ".project"), { recursive: true })
-    fs.writeFileSync(path.join(directory, ".project", "config.json"), JSON.stringify({ branches: { format } }))
-    fs.writeFileSync(
-        path.join(directory, ".project", "integrations.json"),
-        JSON.stringify({
-            tracker:
-                tracker === "github"
-                    ? {
-                          provider: "github",
-                          mcpServer: "github",
-                          repository,
-                          project: { owner: "example", ownerType: "user", number: 3 },
-                          fields: {
-                              status: { field: "Status", values: statuses },
-                              phase: { field: "Phase", values: { ...phaseValues } },
-                              priority: {
-                                  scope: "project",
-                                  field: "Priority",
-                                  values: ["High", "Low"],
-                              },
-                          },
-                      }
-                    : {
-                          provider: "linear",
-                          mcpServer: "linear",
-                          team: "Engineering",
-                          phase: linearPhases(),
-                          statuses: {
-                              issues: statuses,
-                              projects: { ...statuses, done: "Completed" },
+    fs.mkdirSync(path.join(directory, ".piton"), { recursive: true })
+    writeProjectConfig(directory, {
+        branchFormat: format,
+        tracker:
+            tracker === "github"
+                ? {
+                      provider: "github",
+                      mcpServer: "github",
+                      repository,
+                      project: { owner: "example", ownerType: "user", number: 3 },
+                      fields: {
+                          status: { field: "Status", values: statuses },
+                          phase: { field: "Phase", values: { ...phaseValues } },
+                          priority: {
+                              scope: "project",
+                              field: "Priority",
+                              values: ["High", "Low"],
                           },
                       },
-            forge,
-        }),
-    )
+                  }
+                : {
+                      provider: "linear",
+                      mcpServer: "linear",
+                      team: "Engineering",
+                      phase: linearPhases(),
+                      statuses: {
+                          issues: statuses,
+                          projects: { ...statuses, done: "Completed" },
+                      },
+                  },
+        forge,
+    })
     prepareArtifactPersistence(directory)
     return directory
 }
@@ -233,7 +233,7 @@ describe("workflow domain", () => {
         const cwd = temporaryRepository()
         try {
             const created = init(cwd, epic("Shared workflow", issue(12)))
-            assert.equal(created.directory, ".project/.local/epics/12-shared-workflow")
+            assert.equal(created.directory, ".piton/.local/epics/12-shared-workflow")
             const epicStatus = created.status
             assert.equal(epicStatus.entity, "epic")
             if (epicStatus.entity !== "epic") assert.fail()
@@ -258,7 +258,7 @@ describe("workflow domain", () => {
                     ["github-project-item", "12-shared-workflow"],
                 ],
             )
-            assert.match(formatInitializedEntity(created), /Initialized \.project\/\.local\/epics\/12-shared-workflow/)
+            assert.match(formatInitializedEntity(created), /Initialized \.piton\/\.local\/epics\/12-shared-workflow/)
 
             const epicPath = path.join(epicDir, "epic.md")
             const plan = epicPlan(
@@ -277,7 +277,7 @@ describe("workflow domain", () => {
             assert.throws(() => init(cwd, task("Dropped", created.directory, issue(15))), /canceled/)
 
             const built = init(cwd, task("Build it", created.directory, issue(13)))
-            assert.equal(built.directory, ".project/.local/epics/12-shared-workflow/tasks/13-build-it")
+            assert.equal(built.directory, ".piton/.local/epics/12-shared-workflow/tasks/13-build-it")
             assert.equal(built.status.branch.name, "13-build-it")
             assert.equal(built.status.branch.start, "12-shared-workflow")
             // The plan section supplies the Kind; initialization never rewrites the plan.
@@ -382,7 +382,7 @@ describe("workflow domain", () => {
                 createdAt: "2026-10-01T23:30:00.000-02:00",
             }
             const linearEpic = init(cwd, epic("Rollout", project))
-            assert.equal(linearEpic.directory, ".project/.local/epics/20261002-rollout")
+            assert.equal(linearEpic.directory, ".piton/.local/epics/20261002-rollout")
             assert.equal(linearEpic.status.branch.name, "20261002-rollout")
             assert.equal(linearEpic.status.branch.source, "tracker")
             assert.deepEqual(linearEpic.status.tracker.external, {
@@ -451,7 +451,7 @@ describe("workflow domain", () => {
                     }),
                 ),
             )
-            assert.equal(wired.directory, ".project/.local/epics/20261002-rollout/tasks/ENG-8-wire-it")
+            assert.equal(wired.directory, ".piton/.local/epics/20261002-rollout/tasks/ENG-8-wire-it")
             assert.equal(wired.status.branch.name, "alex/eng-8-wire-it")
             assert.equal(wired.resourceIds[0].scope.entity, "ENG-8-wire-it")
         } finally {
@@ -490,15 +490,15 @@ describe("workflow domain", () => {
     it("returns the labels to create new work with, from its Kind and selection", () => {
         const cwd = temporaryRepository()
         try {
-            const integrationsPath = path.join(cwd, ".project/integrations.json")
-            const integrations = JSON.parse(fs.readFileSync(integrationsPath, "utf-8"))
+            const tracker = integrationsFromFile(section(resolveSettings(cwd).tracker)!.value) as {
+                labels?: unknown
+            }
             const area = {
                 appliesTo: ["epic", "deliverable"],
                 cardinality: "zeroOrMore",
                 values: { fe: { name: "Area: FE", color: "#1D76DB", description: "" } },
             }
-            integrations.tracker.labels = { groups: { ...kindLabels().groups, area } }
-            fs.writeFileSync(integrationsPath, JSON.stringify(integrations))
+            writeProjectConfig(cwd, { tracker: { ...tracker, labels: { groups: { ...kindLabels().groups, area } } } })
             const base = { title: "Work", slug: "work", request: "Work" }
             assert.deepEqual(
                 preflightEntity({ ...base, entity: "gig", kind: "chore", labels: { area: ["fe"] } }, { cwd }).labels,
@@ -527,7 +527,7 @@ describe("workflow domain", () => {
                 /slug must contain/,
             )
             assert.equal(git(cwd, ["for-each-ref", "--format=%(refname)"]), before)
-            assert.equal(fs.existsSync(path.join(cwd, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/gigs")), false)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -539,7 +539,7 @@ describe("workflow domain", () => {
             git(cwd, ["branch", "40-conflict", "main"])
             assert.throws(() => init(cwd, gig("Conflict", issue(40))), /workflow branch already exists: 40-conflict/)
             assert.ok(git(cwd, ["show-ref", "--verify", "refs/heads/40-conflict"]))
-            assert.equal(fs.existsSync(path.join(cwd, ".project/.local/gigs/40-conflict")), false)
+            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/gigs/40-conflict")), false)
 
             const first = init(cwd, gig("Kept", issue(41)))
             git(cwd, ["branch", "-D", "41-kept"])

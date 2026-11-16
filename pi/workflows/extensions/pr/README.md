@@ -12,7 +12,7 @@ The [PR skill](../../skills/pr/SKILL.md) and [incoming PR procedure](../../refer
 
 ## Private evidence layout
 
-Everything lives under `.project/.local/pull-requests/<number>/` and stays outside Git.
+Everything lives under `.piton/.local/pull-requests/<number>/` and stays outside Git.
 
 - `checkout/`: an approved independent nested Git repository with its own `.git`, HEAD and index. Only the named checkout tools operate on it.
 - `checkout.json`: original evidence and revision, merge-base, separately observed target/source tips, native rebase progress, pinned lease, publication outcome, and current working baseline.

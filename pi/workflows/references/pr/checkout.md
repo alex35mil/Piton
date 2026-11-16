@@ -147,7 +147,7 @@ The named checkout tools, registered by the PR extension, own:
 - working state: staged and unstaged state, native operation and unmerged stages, and untracked paths, including ignored additions;
 - the parent-verification outcome.
 
-Keep these files at `.project/.local/pull-requests/<number>/`, not inside review rounds:
+Keep these files at `.piton/.local/pull-requests/<number>/`, not inside review rounds:
 
 | File | Contents |
 | --- | --- |

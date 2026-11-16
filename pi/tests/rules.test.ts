@@ -1,4 +1,6 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
+import { writeConfig } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -17,7 +19,7 @@ const body = "Scoped fixture rule: name the contract before replacing its implem
 const untouched = "This unrelated scoped rule must stay out of initial context."
 function setup(root: string) {
     fs.mkdirSync(path.join(root, ".agents/rules"), { recursive: true })
-    fs.writeFileSync(path.join(root, ".agents/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+    writePermissions(root, { defaultMode: "allow" })
     fs.writeFileSync(path.join(root, ".agents/rules/always.md"), "Always-on fixture instruction.")
     scope(root, body)
     fs.writeFileSync(path.join(root, ".agents/rules/untouched.md"), `---\npaths: ["unrelated/**"]\n---\n${untouched}\n`)
@@ -66,15 +68,17 @@ describe("native rules model delivery", () => {
         }
     })
 
-    for (const configured of [true, false])
-        it(`sends rules ${configured ? "and" : "without"} the workflows section in the provider prompt`, async () => {
+    for (const integrations of ["configured", "absent", "unreadable"] as const)
+        it(`sends rules with the workflows section ${integrations === "absent" ? "left out" : `when integrations are ${integrations}`}`, async () => {
             const h = await nativeSessionFixture({
                 extensions: [...extensions, registerIntegrations],
                 setup(root) {
                     setup(root)
-                    if (configured) {
-                        fs.mkdirSync(path.join(root, ".project"), { recursive: true })
-                        fs.writeFileSync(path.join(root, ".project/integrations.json"), "{}")
+                    if (integrations === "configured") writeConfig(root, { tracker: {} })
+                    // A tracker that isn't a table fails only the integrations part (top-level, before any table).
+                    if (integrations === "unreadable") {
+                        const file = path.join(root, ".piton/config.toml")
+                        fs.writeFileSync(file, `tracker = 1\n${fs.readFileSync(file, "utf8")}`)
                     }
                 },
                 tools: ["read", "codemode"],
@@ -90,8 +94,19 @@ describe("native rules model delivery", () => {
                         /<project_rules>\n[\s\S]*Always-on fixture instruction\.[\s\S]*\n<\/project_rules>/,
                     )
                     assert.match(text, /<rules>\n/)
-                    if (configured) assert.ok(text.includes(`<workflows>\n${WORKFLOW_CONTEXT}\n</workflows>`))
-                    else assert.doesNotMatch(text, /<workflows>/)
+                    switch (integrations) {
+                        case "configured":
+                            assert.ok(text.includes(`<workflows>\n${WORKFLOW_CONTEXT}\n</workflows>`))
+                            break
+                        case "unreadable":
+                            // A broken file never silently drops the rule; the reason comes with it.
+                            assert.ok(text.includes(`<workflows>\n${WORKFLOW_CONTEXT}`))
+                            assert.match(text, /config\.toml/)
+                            break
+                        case "absent":
+                            assert.doesNotMatch(text, /<workflows>/)
+                            break
+                    }
                     return answer("Done")
                 })
                 await h.prompt("What should I know?")
@@ -332,11 +347,8 @@ for (const result of ["Accepted", "AcceptModified", "Rejected"] as const) {
         const h = await nativeSessionFixture({
             extensions: [registerPermission],
             setup(root) {
-                fs.mkdirSync(path.join(root, ".agents"))
-                fs.writeFileSync(
-                    path.join(root, ".agents/permissions.json"),
-                    JSON.stringify({ defaultMode: "ask", allow: ["codemode"] }),
-                )
+                fs.mkdirSync(path.join(root, ".piton"))
+                writePermissions(root, { defaultMode: "ask", allow: ["codemode"] })
                 fs.writeFileSync(path.join(root, "target.txt"), "before")
             },
             async review(root) {

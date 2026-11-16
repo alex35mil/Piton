@@ -5,15 +5,12 @@ Backlog and Todo save work in the configured tracker without starting an Epic, T
 - `backlog`: work we may do later but haven't committed to;
 - `todo`: work we've committed to and can pick up next.
 
-Both hold work that hasn't started. Adding work creates no `.project` entity, artifact, branch, or saved recovery state.
+Both hold work that hasn't started. Adding work creates no `.piton` entity, artifact, branch, or saved recovery state.
 
 ## Choose the project
 
 - `/backlog`, `/todo`, and natural-language queue requests use `target: "current"`.
-- An explicit request to report a workflow defect or recurring friction ("Report this workflow issue" is enough) uses the Todo skill, destination `todo`, and `target: "workflow"`.
-- The workflow target reads the global `workflowProject` source reference, plus that project's tracker configuration ([reporting source](./setup/reporting-source.md)).
-  - Use only the returned tracker and MCP server, never the consuming project's tracker.
-  - The returned `projectRoot` is local context, not report content.
+- An explicit request to report a workflow defect or recurring friction ("Report this workflow issue" is enough) follows [report a workflow problem](#report-a-workflow-problem).
 - Missing or invalid configuration ends the attempt with the tool's short corrective error. Don't start setup or repair configuration.
 
 ## Add work
@@ -42,6 +39,13 @@ Both hold work that hasn't started. Adding work creates no `.project` entity, ar
 - Reuse returned identities and outcome proof; read only missing required facts. No cache or recovery state is kept.
 
 Apart from those labels, adding work assigns no native issue Type, native Phase, assignee, branch, artifact, or pending record. Starting the work assigns it.
+
+## Report a workflow problem
+
+Call `inspect_integrations` with `target: "workflow"`, then prepare the report below.
+
+- **An error with a new-issue address:** give the user it with `?title=…&body=…`, URL-encoded. The user submits it; never create the issue.
+- **Success** ([development install](./setup/reporting-source.md)): add Todo work using only the returned tracker and server. `projectRoot` isn't report content.
 
 ## Prepare a workflow report
 

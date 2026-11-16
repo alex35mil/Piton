@@ -81,21 +81,21 @@ Results reflect persistent settings only; session overrides and skill-derived al
 **What the writer does:**
 
 - It rechecks current settings and live metadata, skips covered, blocked, or unavailable allows and exact ask duplicates, and merges only accepted additions.
-- It reports the actual `added`, `skipped`, and `inspection` results, and keeps unrelated keys, the default mode, keybindings, deny rules, and existing lists.
+- It reports the actual `added`, `skipped`, and `inspection` results, and keeps unrelated keys, the default mode, deny rules, and existing lists.
 - Invalid settings or rules fail before any change. A no-op leaves files and exclusions untouched.
 - Read-back validates the result. A skipped rule is not a new grant.
 
 **Targets:**
 
-- The target is committed `.agents/permissions.json` (`project`) or local `.agents/permissions.local.json` (`local`).
-- Before changing local settings, the tool checks the file is outside Git and ensures exact `/.agents/permissions.local.json` in `.git/info/exclude`. It never changes the index, and a no-op adds no exclusion.
+- The target is `[permissions]` of committed `.piton/config.toml` (`project`) or local `.piton/config.local.toml` (`local`).
+- Before changing local settings, the tool checks the file is outside Git and ensures `/.piton/*.local.*` in `.git/info/exclude`. It never changes the index, and a no-op adds no exclusion.
 
-Workflow skills allow routine `.project/` bookkeeping, including `epic.md`, `plan.md`, `result.md`, and `report.md`. Setup offers no `ask` gate for those files; the workflow stops for the user where it needs to.
+Workflow skills list routine `.piton/` bookkeeping in `allowed-tools`, including `epic.md`, `plan.md`, `result.md`, and `report.md`. The list grants them only with `skill_grants = true`. Setup offers no `ask` gate for those files; the workflow stops for the user where it needs to.
 
 ## Reviewer tools
 
 Workflow reviewers run headless under the user's permission settings. An `ask` result there blocks the call, because there's no UI to answer it.
 
 - Epic, Task, and Gig reviewers use `read`, `grep`, `find`, `ls`, and the read-only `git_read`. Incoming-PR reviewers use the first four.
-- When the effective `defaultMode` is `ask`, tell the user to allow those tools by name in their own settings, or reviewers can't inspect the repository.
+- When the effective `default_mode` is `ask`, tell the user to allow those tools by name in their own settings, or reviewers can't inspect the repository.
 - `configure_permissions` accepts only MCP selectors, so the user edits these rules by hand. Never add them without approval.

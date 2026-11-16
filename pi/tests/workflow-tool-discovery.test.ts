@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -106,17 +107,17 @@ describe("workflow tool discovery", () => {
         const task = tools.find((tool) => tool.name === "init_github_task")!.parameters
         const { kind: _kind, ...taskInput } = input
         assert.ok(!accepts(task, { ...taskInput, object: issue }))
-        assert.ok(accepts(task, { ...taskInput, object: issue, parentEpicDir: ".project/.local/epics/example" }))
+        assert.ok(accepts(task, { ...taskInput, object: issue, parentEpicDir: ".piton/.local/epics/example" }))
         // A Task takes its Kind from the plan section, never from initialization input.
-        assert.ok(!accepts(task, { ...input, object: issue, parentEpicDir: ".project/.local/epics/example" }))
+        assert.ok(!accepts(task, { ...input, object: issue, parentEpicDir: ".piton/.local/epics/example" }))
     })
 
     it("discovers initialization through native Codemode without declaring or inlining the catalog", async () => {
         const h = await nativeSessionFixture({
             extensions: [permissions, initialize],
             tools: ["+read"],
-            setup(root) {
-                fs.writeFileSync(path.join(root, "agent/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+            setup() {
+                writePermissions("global", { defaultMode: "allow" })
             },
         })
         try {

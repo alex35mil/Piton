@@ -1,4 +1,5 @@
-import "./host-runtime.ts"
+import { resetGlobalSettings } from "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -355,10 +356,7 @@ describe("reviewer provider loading", () => {
                     retry: { enabled: false },
                 }),
             )
-            fs.writeFileSync(
-                path.join(h.agentDir, "permissions.json"),
-                JSON.stringify({ defaultMode: "deny", allow: ["read"] }),
-            )
+            writePermissions("global", { defaultMode: "deny", allow: ["read"] })
             process.argv[1] = fs.realpathSync(path.resolve("node_modules/.bin/pi"))
             const result = await runReviewAgent({
                 environment: { ...h.environment, defaultProvider: "claude-code", defaultModel: fixtureModel.id },
@@ -384,6 +382,7 @@ describe("reviewer provider loading", () => {
             assert.equal(fs.existsSync(forbidden), false)
         } finally {
             process.argv[1] = previousScript
+            resetGlobalSettings()
             h.cleanup()
         }
     })

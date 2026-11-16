@@ -4,7 +4,7 @@ import Testing
 @testable import PitonKit
 
 // PitonKit's Connection against a real daemon and real pi (faux model, host mode). Runs when PITON_BIN names a built piton
-// binary: `mise run apps:e2e` (or `PITON_BIN=$PWD/daemon/target/debug/piton swift test` in apps/).
+// binary: `mise run apps:e2e` (or `PITON_BIN=$PWD/../cli/target/debug/piton swift test` in apps/).
 
 private let pitonBin = ProcessInfo.processInfo.environment["PITON_BIN"]
 
@@ -35,7 +35,7 @@ private final class Daemon: @unchecked Sendable {
             .deletingLastPathComponent()  // packages
             .deletingLastPathComponent()  // apps
             .deletingLastPathComponent()  // repo
-            .appendingPathComponent("daemon/tests/fixtures")
+            .appendingPathComponent("cli/tests/fixtures")
         let ext = fixtures.appendingPathComponent("faux-extension.ts").path
         // The tailnet listener on loopback, with a fake `tailscale` that says the client is the owner's phone.
         let tailscale = fixtures.appendingPathComponent("fake-tailscale.sh").path
@@ -44,14 +44,17 @@ private final class Daemon: @unchecked Sendable {
             #"{"Node":{"StableID":"iphone","Name":"iphone.tail.ts.net.","User":1},"UserProfile":{"ID":1,"LoginName":"me@example.com"}}"#
             .write(to: whois, atomically: true, encoding: .utf8)
         log = dir.appendingPathComponent("piton.log")
-        let config = dir.appendingPathComponent("config.toml")
+        // The global configuration folder's host file: how the daemon runs, and the host preferences. Keep-awake starts
+        // off, so no caffeinate runs.
+        let config = dir.appendingPathComponent("config")
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
         try """
         socket = "\(socket)"
         log = "\(log.path)"
-        attach_mode = "host"
+        default_attach_mode = "host"
         empty_grace_ms = 60000
-        keep_awake = false
         roots = ["\(root.path)"]
+        keep_awake = false
         [pi]
         args = ["-e", "\(ext)", "--model", "faux/faux-1"]
         [env]
@@ -63,9 +66,22 @@ private final class Daemon: @unchecked Sendable {
         [tailnet]
         port = 0
         cli = "\(tailscale)"
-        """.write(to: config, atomically: true, encoding: .utf8)
+        """.write(to: config.appendingPathComponent("config.host.toml"), atomically: true, encoding: .utf8)
+        // A fixed host identity in the daemon's database (next to its socket).
+        let seed = Process()
+        seed.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        seed.arguments = [
+            dir.appendingPathComponent("piton.db").path,
+            """
+            CREATE TABLE host (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL);
+            INSERT INTO host VALUES (1, 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0');
+            PRAGMA user_version = 1;
+            """,
+        ]
+        try seed.run()
+        seed.waitUntilExit()
         var env = ProcessInfo.processInfo.environment
-        env["PITON_CONFIG"] = config.path
+        env["PITON_CONFIG_HOME"] = config.path
         env["PI_CODING_AGENT_DIR"] = agent.path
         env["PITON_FAUX_TPS"] = "40"
         env["PITON_FAKE_WHOIS"] = whois.path
@@ -454,7 +470,7 @@ struct IntegrationTests {
             mac.stop()
             phone.stop()
         }
-        // The test daemon's config has keep-awake off.
+        // The test daemon's config.host.toml sets keep_awake = false.
         try await eventually { mac.daemon?.keepAwake == false && phone.daemon?.keepAwake == false }
         #expect(await mac.setKeepAwake(true))
         try await eventually { phone.daemon?.keepAwake == true && phone.daemon?.awake == false }

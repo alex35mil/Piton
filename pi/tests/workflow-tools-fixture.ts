@@ -78,6 +78,7 @@ export const expectedWorkflowTools = [
     "inspect_project_setup",
     "prepare_artifacts",
     "configure_mcp",
+    "configure_project",
     "inspect_permissions",
     "configure_permissions",
     "inspect_linear_workspace",

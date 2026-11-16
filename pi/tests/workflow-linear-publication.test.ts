@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -33,10 +34,10 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
     git("init", "-b", "main")
     git("config", "user.email", "test@example.com")
     git("config", "user.name", "Test")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     git("add", ".gitignore")
     git("commit", "-m", "initial")
-    fs.mkdirSync(path.join(root, ".project"))
+    fs.mkdirSync(path.join(root, ".piton"))
     const statuses = {
         backlog: "Backlog",
         todo: "Todo",
@@ -45,27 +46,21 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
         done: "Done",
         canceled: "Canceled",
     }
-    fs.writeFileSync(
-        path.join(root, ".project/config.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
-        JSON.stringify({
-            tracker: {
-                provider: "linear",
-                mcpServer: "linear",
-                team: "Engineering",
-                phase: linearPhases(),
-                statuses: { issues: statuses, projects: statuses },
-            },
-            forge: {
-                provider: "github",
-                mcpServer: "github",
-                repository: { owner: "example", repo: "project" },
-            },
-        }),
-    )
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker: {
+            provider: "linear",
+            mcpServer: "linear",
+            team: "Engineering",
+            phase: linearPhases(),
+            statuses: { issues: statuses, projects: statuses },
+        },
+        forge: {
+            provider: "github",
+            mcpServer: "github",
+            repository: { owner: "example", repo: "project" },
+        },
+    })
     prepareArtifactPersistence(root)
     const common = { title: "Work", slug: "work", request: "Original request." }
     const issue = {
@@ -239,7 +234,7 @@ describe("managed Linear plan documents", () => {
                 assert.ok(typeof args.content === "string")
                 assert.match(args.content, /^Keep the original request\.\n\n## Highlights/)
                 assert.match(args.content, /\n>>> Full plan\n[\s\S]*\n>>>$/)
-                assert.doesNotMatch(args.content, /GIG-|TASK-|EPIC-|\.project\/|<!--/)
+                assert.doesNotMatch(args.content, /GIG-|TASK-|EPIC-|\.piton\/|<!--/)
                 assert.equal(
                     args[kind === "epic" ? "project" : "issue"],
                     kind === "epic" ? "project-uuid" : "issue-uuid",

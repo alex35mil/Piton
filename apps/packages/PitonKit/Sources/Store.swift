@@ -294,10 +294,17 @@ public final class Store {
         await attempt { try await self.require().answer(session, dialog: dialog, with: answer) }
     }
 
-    /// Turns keep-awake on or off until the daemon restarts.
+    /// Turns keep-awake on or off: `keep_awake` in the host's `config.host.toml`, in whichever file of the pair sets it.
     public func setKeepAwake(_ on: Bool) async -> Bool {
+        await setSetting(.host, "keep_awake", to: .bool(on))
+    }
+
+    /// Changes one of the host's settings (see `Request.settingsSet`).
+    public func setSetting(_ scope: SettingScope, _ key: String, to value: JSON, local: Bool? = nil) async -> Bool {
         do {
-            daemon = try await require().setKeepAwake(on)
+            let state = try await require().setSetting(scope, key, to: value, local: local)
+            daemon = state
+            ClientPreferences().cache(state)
             return true
         } catch {
             lastError = String(describing: error)
@@ -463,6 +470,8 @@ public final class Store {
             models[model.session] = model
         case .daemon(let state):
             daemon = state
+            // The host's shared client preferences, for starting offline.
+            ClientPreferences().cache(state)
             #if os(macOS)
                 // The Mac app's own file capture follows the host policy.
                 AppLogging.shared.follow(state.logging.policy)

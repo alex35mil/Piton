@@ -58,7 +58,7 @@ function M.load(tracker)
     local epic_label = vim.tbl_get(config, "labels", "groups", "kind", "values", "epic", "name")
 
     local nodes = queue.paginate(function(cursor)
-        local response = queue.post(tracker, URL, "Bearer {{VAR}}", items_query(project.ownerType), {
+        local response = queue.post(tracker, URL, "Bearer {{VAR}}", items_query(project.owner_type), {
             owner = project.owner,
             number = project.number,
             status = status.field,

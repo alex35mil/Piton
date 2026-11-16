@@ -2,6 +2,7 @@
   "type": "daemon",
   "state": {
     "version": "0.1.0 (abc1234567)",
+    "host_id": "0123456789abcdef0123456789abcdef",
     "keep_awake": true,
     "awake": true,
     "sessions": 2,
@@ -14,6 +15,117 @@
         }
       },
       "default": "info"
-    }
+    },
+    "settings": [
+      {
+        "key": "keep_awake",
+        "scope": "host",
+        "value": true,
+        "placement": "local",
+        "local_choice": true,
+        "value_type": {
+          "kind": "bool"
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "roots",
+        "scope": "host",
+        "value": [
+          "~/Projects"
+        ],
+        "placement": "shared",
+        "local_choice": true,
+        "value_type": {
+          "kind": "text_list"
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "logging",
+        "scope": "host",
+        "value": "info",
+        "placement": null,
+        "local_choice": true,
+        "value_type": {
+          "kind": "choice",
+          "options": [
+            "info",
+            "debug"
+          ]
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "tailnet.port",
+        "scope": "host",
+        "value": 9000,
+        "placement": "shared",
+        "local_choice": true,
+        "value_type": {
+          "kind": "integer"
+        },
+        "applies": {
+          "kind": "restart",
+          "pending": true
+        },
+        "editable": true
+      },
+      {
+        "key": "socket",
+        "scope": "host",
+        "value": "/Users/me/.local/state/piton/piton.sock",
+        "placement": null,
+        "local_choice": true,
+        "value_type": {
+          "kind": "text"
+        },
+        "applies": {
+          "kind": "restart",
+          "pending": false
+        },
+        "editable": false
+      },
+      {
+        "key": "text_font",
+        "scope": "client",
+        "value": "Inter",
+        "placement": "shared",
+        "local_choice": false,
+        "value_type": {
+          "kind": "text"
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "workers.skip",
+        "scope": "project",
+        "value": [
+          ".build"
+        ],
+        "placement": null,
+        "local_choice": true,
+        "value_type": {
+          "kind": "text_list"
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      }
+    ],
+    "settings_error": null
   }
 }

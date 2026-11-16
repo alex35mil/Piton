@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { type PermissionsFixture, writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -23,8 +24,8 @@ import { fixtureToolName } from "./mcp-catalog-fixture.ts"
 
 const noOverrides = new Map<string, Mode>()
 
-function source(settings: PermissionSettings, tier: PermissionSource["tier"] = "global"): PermissionSource {
-    return { tier, scope: "shared", path: `/${tier}/permissions.json`, settings }
+function source(settings: PermissionSettings, level: PermissionSource["level"] = "global"): PermissionSource {
+    return { level, scope: "shared", sharing: "shared", path: `/${level}/config.toml`, settings }
 }
 
 function catalog(...tools: McpToolMetadata[]): McpToolCatalog {
@@ -38,8 +39,8 @@ describe("persistent MCP allow inspection", () => {
     const hint = "mcp(work, hint: readOnly)"
     const exact = "mcp(work, issue_read)"
 
-    it("proves equivalent and broader selector coverage across persistent tiers", () => {
-        for (const tier of ["global", "project", "local"] as const) {
+    it("proves equivalent and broader selector coverage across persistent levels", () => {
+        for (const level of ["global", "parent", "repository"] as const) {
             for (const allow of [
                 "*",
                 "mcp(*, *)",
@@ -47,9 +48,9 @@ describe("persistent MCP allow inspection", () => {
                 "mcp(*, hint: readOnly)",
                 "mcp(work,hint:readOnly)",
             ]) {
-                const result = inspectMcpAllowRules([hint], [source({ allow: [allow] }, tier)], live)[0]
+                const result = inspectMcpAllowRules([hint], [source({ allow: [allow] }, level)], live)[0]
                 assert.equal(result.status, "covered")
-                assert.equal(result.coveredBy[0].tier, tier)
+                assert.equal(result.coveredBy[0].level, level)
                 assert.equal(result.coveredBy[0].rule, allow)
             }
         }
@@ -74,15 +75,15 @@ describe("persistent MCP allow inspection", () => {
     })
 
     it("retains source evidence and deny-before-ask precedence despite an allow", async () => {
-        const sources = [source({ allow: [hint], ask: [exact] }), source({ deny: [exact] }, "local")]
+        const sources = [source({ allow: [hint], ask: [exact] }), source({ deny: [exact] }, "repository")]
         const result = inspectMcpAllowRules([exact], sources, live)[0]
         assert.equal(result.status, "covered")
         assert.equal(result.tools[0].mode, "deny")
         assert.deepEqual(
-            result.tools[0].blockers.map((blocker) => [blocker.mode, blocker.tier]),
+            result.tools[0].blockers.map((blocker) => [blocker.mode, blocker.level]),
             [
                 ["ask", "global"],
-                ["deny", "local"],
+                ["deny", "repository"],
             ],
         )
         assert.equal(await resolveMcp({ allow: [hint], ask: [exact], deny: [exact] }, read), result.tools[0].mode)
@@ -231,10 +232,18 @@ function createContext(cwd: string, approval = true) {
     return { ctx, notifications, widgets, aborts: () => aborts }
 }
 
+/** A project whose `[permissions]` holds `content` (the extension's JSON); text that isn't JSON is written as a broken
+ * config.toml. */
 function createProjectSettings(content: string) {
     const cwd = mkdtempSync(join(tmpdir(), "permission-mcp-"))
-    mkdirSync(join(cwd, ".agents"))
-    writeFileSync(join(cwd, ".agents", "permissions.json"), content)
+    let rules: PermissionsFixture | undefined
+    try {
+        rules = JSON.parse(content) as PermissionsFixture
+    } catch {
+        mkdirSync(join(cwd, ".piton"))
+        writeFileSync(join(cwd, ".piton", "config.toml"), "[permissions\n")
+    }
+    if (rules) writePermissions(cwd, rules)
     return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) }
 }
 
@@ -405,7 +414,7 @@ describe("MCP permission lifecycle", () => {
 
     it("keeps the turn on configured denial and aborts on user rejection", async () => {
         for (const testCase of [
-            { settings: { defaultMode: "deny" }, approval: true, reason: /Denied by defaultMode `deny`/, aborts: 0 },
+            { settings: { defaultMode: "deny" }, approval: true, reason: /Denied by default_mode `deny`/, aborts: 0 },
             {
                 settings: { deny: ["mcp(github, issue_write)"] },
                 approval: true,
@@ -539,10 +548,7 @@ describe("MCP permission lifecycle", () => {
                 assert.match(blocked.reason, /Invalid permission settings/)
                 assert.equal(context.aborts(), 1)
 
-                writeFileSync(
-                    join(project.cwd, ".agents", "permissions.json"),
-                    JSON.stringify({ defaultMode: "allow" }),
-                )
+                writePermissions(project.cwd, { defaultMode: "allow" })
                 assert.deepEqual(await harness.handler("input")({ text: "continue working" }, context.ctx), {
                     action: "continue",
                 })
@@ -587,9 +593,45 @@ describe("MCP permission lifecycle", () => {
         })
     })
 
+    it("grants skills' allowed-tools only with skill_grants", async () => {
+        await withIsolatedAgent(async () => {
+            for (const skillGrants of [undefined, false, true]) {
+                const project = createProjectSettings(JSON.stringify({ defaultMode: "deny", skillGrants }))
+                mkdirSync(join(project.cwd, ".agents"))
+                const skillPath = join(project.cwd, ".agents", "granting-skill.md")
+                writeFileSync(skillPath, "---\nname: granting\ndescription: granting\nallowed-tools:\n  - read\n---\n")
+                const commands = [
+                    {
+                        name: "skill:granting",
+                        source: "skill" as const,
+                        sourceInfo: {
+                            path: skillPath,
+                            source: "skill",
+                            scope: "project" as const,
+                            origin: "top-level" as const,
+                        },
+                    },
+                ]
+                try {
+                    const harness = createPermissionHarness(undefined, commands)
+                    const context = createContext(project.cwd)
+                    await harness.handler("session_start")({ reason: "startup" }, context.ctx)
+                    const result = (await harness.handler("tool_call")(
+                        { toolName: "read", toolCallId: "call-1", input: { path: "README.md" } },
+                        context.ctx,
+                    )) as { block: boolean } | undefined
+                    assert.equal(result?.block === true, skillGrants !== true, `skill_grants = ${skillGrants}`)
+                } finally {
+                    project.cleanup()
+                }
+            }
+        })
+    })
+
     it("validates skill-derived MCP rules through the same fail-closed boundary", async () => {
         await suppressErrors(async () => {
-            const project = createProjectSettings(JSON.stringify({ defaultMode: "allow" }))
+            const project = createProjectSettings(JSON.stringify({ defaultMode: "allow", skillGrants: true }))
+            mkdirSync(join(project.cwd, ".agents"))
             const skillPath = join(project.cwd, ".agents", "legacy-skill.md")
             writeFileSync(
                 skillPath,
@@ -629,7 +671,8 @@ describe("MCP permission lifecycle", () => {
     it("rejects MCP skill rules with leading or trailing whitespace", async () => {
         await suppressErrors(async () => {
             for (const rule of [" mcp(github, *)", "mcp(github, *) "]) {
-                const project = createProjectSettings(JSON.stringify({ defaultMode: "allow" }))
+                const project = createProjectSettings(JSON.stringify({ defaultMode: "allow", skillGrants: true }))
+                mkdirSync(join(project.cwd, ".agents"))
                 const skillPath = join(project.cwd, ".agents", "whitespace-skill.md")
                 writeFileSync(
                     skillPath,
@@ -672,7 +715,7 @@ describe("MCP permission lifecycle", () => {
                 const context = createContext(project.cwd)
 
                 await harness.handler("session_start")({ reason: "reload" }, context.ctx)
-                assert.match(context.notifications[0].message, /Invalid JSON/)
+                assert.match(context.notifications[0].message, /config\.toml/)
 
                 const blocked = (await harness.handler("tool_call")(
                     { toolName: "read", toolCallId: "call-1", input: { path: "README.md" } },

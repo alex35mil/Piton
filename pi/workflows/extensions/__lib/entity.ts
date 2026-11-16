@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { type Static, type TProperties, Type } from "typebox"
 
 import { compile, describeErrors } from "../../../extensions/__lib/schema.js"
+import { PITON_DIR } from "../../../extensions/__lib/settings.js"
 import {
     DeliverableKindSchema,
     ReadyBranchContractSchema,
@@ -11,7 +12,6 @@ import {
     entityName,
     GIG_ROOT,
     type LifecycleState,
-    PROJECT_ROOT,
     slugify,
     PhaseSchema,
     trackerReferenceLabel,
@@ -30,7 +30,7 @@ const OneLineSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
 export function resolveEntityPath(root: string, cwd: string, raw: string): string {
     const resolved = path.isAbsolute(raw)
         ? path.resolve(raw)
-        : raw === PROJECT_ROOT || raw.startsWith(`${PROJECT_ROOT}${path.sep}`)
+        : raw === PITON_DIR || raw.startsWith(`${PITON_DIR}${path.sep}`)
           ? path.resolve(root, raw)
           : path.resolve(cwd, raw)
     const allowedRoots = [path.join(root, EPIC_ROOT), path.join(root, GIG_ROOT)]

@@ -14,23 +14,16 @@ Requires a Brave Search API key. This can be provided via an environment variabl
 export BRAVE_SEARCH_API_KEY="..."
 ```
 
-### Settings File
+### Settings
 
-`web-search.json` (3-tier loading):
+`[web_search]` of `config.local.toml` (the key is a secret, so a `config.toml` that sets it is refused) in any level of piton's `.piton/` chain: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/`, and `<repo-root>/.piton/`. The nearest value wins; `piton config resolve` does the merging.
 
-| Tier    | Path                                        |
-| ------- | ------------------------------------------- |
-| Global  | `~/<agent-dir>/web-search.json`             |
-| Project | `<repo-root>/.agents/web-search.json`       |
-| Local   | `<repo-root>/.agents/web-search.local.json` |
-
-```json
-{
-    "apiKey": "..."
-}
+```toml
+[web_search]
+api_key = "..."
 ```
 
-The environment variable takes precedence over settings files.
+The environment variable takes precedence over settings.
 
 ## Behavior
 

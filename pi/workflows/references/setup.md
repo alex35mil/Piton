@@ -8,15 +8,13 @@ Step files, read when the step is reached:
 - When offering fork-only incoming PR intake, read [incoming PR intake](./setup/incoming-pr-intake.md).
 - When offering convenience permissions, read [setup permissions](./setup/permissions.md).
 - When the tracker is Linear, read [Linear tracker configuration](./setup/linear-tracker.md).
-- When configuring where workflow problems are reported, read [workflow reporting source](./setup/reporting-source.md).
-
 ## General rules
 
-- Every workflow-owned JSON object rejects unlisted properties, contains no credentials, and ends with a newline.
-- Workflow-owned JSON stores only operational fields.
-- Preserve unrelated keys when merging into shared Pi settings files.
-- Omit optional workflow files instead of writing empty, disabled, or placeholder configuration.
-- Preview exact file content and exact ignore or exclude additions before writing them.
+- Settings live in `.piton/config.toml`; personal values in `.piton/config.local.toml`, which stays outside Git. Parent folders and piton's global folder (`$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) have the same pair.
+- The setup tools write them: `configure_project`, `configure_permissions`. They keep the files' other settings, comments, and layout. Never edit them by hand or with a script.
+- Every table rejects unlisted keys and contains no credentials. Store only operational fields.
+- Omit optional settings instead of writing empty, disabled, or placeholder configuration.
+- Preview the exact settings and exact ignore or exclude additions before writing them.
 - Never stage files or alter the Git index.
 
 ## Read-only setup context
@@ -27,7 +25,7 @@ Step files, read when the step is reached:
 
 - `repositoryIdentity.githubCandidates`;
 - repository and setup-file contents;
-- global and local workflow settings;
+- the global `config.toml` and `config.local.toml` (`globalConfig`), for a global username;
 - exclusion and Git-membership facts;
 - shallow summaries of entities already bound to trackers;
 - credential-redacted MCP registrations. Recognized official registrations expose their credential environment-variable names, never token values or authorization headers.
@@ -50,16 +48,15 @@ It works before configuration exists or while it's invalid, and touches no files
 
 ## Project configuration
 
-`.project/config.json` is required:
+A branch format is required, `[branches]` in `.piton/config.toml`:
 
-```json
-{
-    "branches": { "format": "identifier-title" }
-}
+```toml
+[branches]
+format = "identifier-title"
 ```
 
 - Workflow work is always local; [artifacts](./artifacts.md#terminology) defines Git membership and local files.
-- `branches.format` is one format string for every Epic, Task, and Gig:
+- The format is one string for every Epic, Task, and Gig:
   - `identifier-title`: the entity's name in lowercase, the tracker's identifier then the slug, such as `12-fix-login`, `eng-12-fix-login`, or `20261026-billing-revamp` for a Linear Epic;
   - `username/identifier-title`: the same with a `<username>/` prefix;
   - `tracker`: Linear's own issue branch names.
@@ -67,22 +64,23 @@ It works before configuration exists or while it's invalid, and touches no files
 
 ### Username
 
-`username/identifier-title` needs `branches.username` in the global `~/<agent-dir>/workflows.json` or the local `.project/config.local.json`:
+`username/identifier-title` needs a username: in the repository's `.piton/config.local.toml`, or in the global `config.toml` or `config.local.toml`.
 
-```json
-{
-    "branches": { "username": "alex" }
-}
+```toml
+[branches]
+username = "alex"
 ```
 
-- The local value overrides the global one.
+- The repository's value overrides the global one.
 - A username is non-empty and can't contain `/`, carriage return, or newline.
-- Never put it in committed `.project/config.json` or infer it from Git or provider identity.
+- A repository's committed `config.toml` can't hold it; that file is refused. Never infer it from Git or provider identity.
 
 ## Integration configuration
 
-`.project/integrations.json` is required and holds both roles: `tracker` (GitHub or Linear) and `forge` (GitHub).
+Both roles are required: `[tracker]` (GitHub or Linear) and `[forge]` (GitHub) in `.piton/config.toml`.
 
+- `configure_project` writes them from the objects the setup tools return. The examples below show those objects; the file holds the same values, its keys in snake_case (`mcp_server`).
+- Each role is read whole from the nearest folder that sets it: a repository's `[tracker]` replaces a parent folder's.
 - Every role has a non-empty MCP server name made of letters, digits, `_`, `.`, or `-`.
 - A GitHub repository identity is a non-empty `owner` and `repo`.
 
@@ -200,7 +198,7 @@ Example returned configuration for a Project-contained tracker (use the actual o
 }
 ```
 
-Put both the tracker and forge role objects in the same integration object. Their servers and repositories follow the user's choices.
+Pass the tracker and forge to `configure_project` together. Their servers and repositories follow the user's choices.
 
 ## Artifact persistence
 
@@ -208,13 +206,13 @@ The persistence and authority contract is in [artifacts](./artifacts.md#persiste
 
 ## MCP registrations
 
-MCP settings are shared Pi configuration, not workflow JSON. Use `configure_mcp`; never compose transport entries by hand. It preserves unrelated settings, writes only environment-variable references, rejects conflicting names, never changes the Git index, and enables only the toolsets listed below.
+MCP servers stay JSON, the format other harnesses read, in their own files. Use `configure_mcp`; never compose transport entries by hand. It preserves unrelated settings, writes only environment-variable references, rejects conflicting names, never changes the Git index, and enables only the toolsets listed below.
 
 | Target | File | Notes |
 | --- | --- | --- |
-| Local | `.agents/mcp.local.json`, with `mcpServers` | add exact `/.agents/mcp.local.json` to `.git/info/exclude` |
-| Project | `.agents/mcp.json`, with `mcpServers` | committed |
-| Global | `<agent-dir>/mcp.json`, with `mcpServers` | never the target for a private project registration |
+| Local | `.piton/mcp.local.json`, with `mcpServers` | add `/.piton/*.local.*` to `.git/info/exclude` |
+| Project | `.piton/mcp.json`, with `mcpServers` | committed |
+| Global | the global tier's `mcp.json`, with `mcpServers` | never the target for a private project registration |
 
 **Credentials and toolsets:**
 
@@ -223,7 +221,7 @@ MCP settings are shared Pi configuration, not workflow JSON. Use `configure_mcp`
 
 **Merging and registration:**
 
-- The adapter merges global, committed project, then local entries by exact name; later entries replace earlier ones. Names differing only by `-` and `_` conflict.
+- Entries merge from the global tier to the repository, `.local` after the committed file, by exact name; nearer entries replace farther ones. Names differing only by `-` and `_` conflict.
 - Both project tiers require trust; untrusted-project inspection doesn't read project MCP files.
 - Every effective server is registered with `pi.registerMcpServer()`, and native Pi owns its transport. Native `/mcp` enable or exposure changes last for the session.
 - Keep private project scope; never move a local registration into global settings.
@@ -252,10 +250,10 @@ Example project registrations produced by `configure_mcp`:
 
 ## Project Policies
 
-`.project/policies.md` is optional Markdown with user-approved additions or overrides to these workflows for this repository.
+`.piton/policies.md` is optional Markdown with user-approved additions or overrides to these workflows for this repository.
 
 - Each policy names the stage or behavior it affects and says what it adds or replaces.
-- Generic repository instructions belong in `AGENTS.md` or the harness equivalent; provider configuration belongs in the setup JSON files.
+- Generic repository instructions belong in `AGENTS.md` or the harness equivalent; provider configuration belongs in `.piton/config.toml`.
 - Omit the file when the user declines. Precedence, overrides, and persistence are in [artifacts](./artifacts.md#project-policy-precedence).
 
 Example:

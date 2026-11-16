@@ -3,8 +3,8 @@
 # Node (pi/)
 node_modules/
 
-# Rust (daemon/)
-/daemon/target
+# Rust (cli/)
+/cli/target
 
 # Xcode / XcodeGen (apps/; the project and Info.plist files are generated from apps/project.yml)
 *.xcodeproj
@@ -18,5 +18,5 @@ DerivedData/
 
 # local, per-machine
 mise.local.toml
-/.nono.local.json
-/.project/.local
+/.piton/*.local.*
+/.piton/.local

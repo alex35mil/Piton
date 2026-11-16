@@ -1,4 +1,5 @@
-import "./host-runtime.ts"
+import { resetGlobalSettings, TEST_CONFIG_HOME, writeConfig, writeGlobalSetting } from "./host-runtime.ts"
+import { permissionsTable } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
@@ -6,18 +7,18 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { describe, it } from "node:test"
 
-import { getMcpSettingsPaths, readMcpConfiguration } from "../extensions/__lib/mcp.ts"
-import { getExtensionSettingsPaths } from "../extensions/__lib/project.ts"
+import { readMcpConfiguration } from "../extensions/__lib/mcp.ts"
 import { requireRuntime, resolveRuntime } from "../extensions/__lib/runtime.ts"
+import { clearSettingsCache, resolveSettings, section } from "../extensions/__lib/settings.ts"
 import { inspectPersistentPermissions } from "../extensions/permissions/index.ts"
 import registerWebSearch from "../extensions/web-search/index.ts"
-import { getWorkflowSettingsPaths } from "../workflows/extensions/__lib/project-config.ts"
 import { inspectProjectMcp, registeredCredentialEnvironment } from "../workflows/extensions/integrations/mcp.ts"
 import { nativeMcpFixture } from "./native-mcp-fixture.ts"
 
 function write(file: string, value: unknown) {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, JSON.stringify(value))
+    clearSettingsCache()
 }
 
 function fixture() {
@@ -25,7 +26,8 @@ function fixture() {
     execFileSync("git", ["init", "--quiet"], { cwd: h.root })
     const nested = path.join(h.root, "src/nested")
     fs.mkdirSync(nested, { recursive: true })
-    return { ...h, nested, repositoryRoot: fs.realpathSync(h.root) }
+    const repositoryRoot = fs.realpathSync(h.root)
+    return { ...h, nested, repositoryRoot, piton: path.join(repositoryRoot, ".piton") }
 }
 
 describe("runtime selection", () => {
@@ -47,28 +49,24 @@ describe("runtime selection", () => {
         const missing = files.filter((file) => {
             const source = fs.readFileSync(path.join(testsDir, file), "utf8")
             const firstImport = source.match(/^import\b.*$/m)?.[0]
-            return firstImport !== 'import "./host-runtime.ts"'
+            return !firstImport?.endsWith('from "./host-runtime.ts"') && firstImport !== 'import "./host-runtime.ts"'
         })
         assert.deepEqual(missing, [])
     })
 })
 
 describe("shared settings contract", () => {
-    it("uses literal global/project/local filenames from a nested repository directory", async () => {
+    it("resolves the repository's .piton/ from a nested folder, after the global tier", async () => {
         const h = fixture()
         try {
-            for (const name of ["mcp", "permissions", "web-search"]) {
-                assert.deepEqual(getExtensionSettingsPaths(name, h.nested), {
-                    global: path.join(h.root, "agent", `${name}.json`),
-                    project: path.join(h.repositoryRoot, ".agents", `${name}.json`),
-                    local: path.join(h.repositoryRoot, ".agents", `${name}.local.json`),
-                })
-            }
-            assert.deepEqual(getMcpSettingsPaths(h.nested), getExtensionSettingsPaths("mcp", h.nested))
-            assert.deepEqual(getWorkflowSettingsPaths(h.nested), {
-                global: path.join(h.root, "agent/workflows.json"),
-                local: path.join(h.repositoryRoot, ".project/config.local.json"),
-            })
+            const resolved = resolveSettings(h.nested, "host")
+            assert.equal(resolved.source, h.repositoryRoot)
+            assert.equal(resolved.global, TEST_CONFIG_HOME)
+            // A missing level is watched as a folder; an existing one also by its candidate files.
+            assert.ok(resolved.watch.includes(h.piton))
+            assert.ok(resolved.watch.includes(path.join(TEST_CONFIG_HOME, "config.toml")))
+            fs.mkdirSync(h.piton)
+            assert.ok(resolveSettings(h.nested, "host").watch.includes(path.join(h.piton, "mcp.local.json")))
         } finally {
             await h.cleanup()
         }
@@ -77,16 +75,15 @@ describe("shared settings contract", () => {
     it("shares exact-name MCP precedence and credential-reference provenance with inspection", async () => {
         const h = fixture()
         try {
-            const files = getMcpSettingsPaths(h.nested)
             const url = "https://api.githubcopilot.com/mcp/"
-            write(files.global, {
+            writeGlobalSetting("mcp.json", {
                 mcpServers: {
                     shared: { url, headers: { Authorization: "Bearer ${GLOBAL_TOKEN}" }, timeout: 12 },
                     global: { command: "fixture" },
                 },
                 autoEnableCodemode: false,
             })
-            write(files.project, {
+            write(path.join(h.piton, "mcp.json"), {
                 mcpServers: {
                     shared: { url, headers: { Authorization: "Bearer ${PROJECT_TOKEN}" }, timeout: 20 },
                     project: { command: "fixture" },
@@ -94,114 +91,69 @@ describe("shared settings contract", () => {
                 autoEnableCodemode: true,
             })
             const local = { url, headers: { Authorization: "Bearer ${LOCAL_TOKEN}", "X-MCP-Toolsets": "issues" } }
-            write(files.local, { mcpServers: { shared: local }, autoEnableCodemode: false })
+            write(path.join(h.piton, "mcp.local.json"), { mcpServers: { shared: local }, autoEnableCodemode: false })
             const loaded = readMcpConfiguration(h.nested, true)
-            assert.deepEqual(
-                loaded.servers.find(({ name }) => name === "shared"),
-                { name: "shared", config: local, tier: "local" },
-            )
+            const shared = loaded.servers.find(({ name }) => name === "shared")!
+            assert.deepEqual(shared.config, local)
+            assert.equal(shared.path, path.join(h.piton, "mcp.local.json"))
+            assert.equal(shared.level, "repository")
             assert.equal(loaded.autoEnableCodemode, false)
             assert.deepEqual(loaded.servers.map(({ name }) => name).sort(), ["global", "project", "shared"])
-            assert.deepEqual(
-                inspectProjectMcp(h.nested, true).effectiveServers.find(({ name }) => name === "shared"),
-                {
-                    name: "shared",
-                    source: "local",
-                    provider: "github",
-                    credentialEnv: "LOCAL_TOKEN",
-                },
-            )
+            const inspected = inspectProjectMcp(h.nested, true).effectiveServers.find(({ name }) => name === "shared")
+            assert.equal(inspected?.provider, "github")
+            assert.equal(inspected?.credentialEnv, "LOCAL_TOKEN")
             assert.equal(registeredCredentialEnvironment(h.nested, "shared", "github", true), "LOCAL_TOKEN")
             assert.equal(registeredCredentialEnvironment(h.nested, "shared", "github", false), "GLOBAL_TOKEN")
         } finally {
+            resetGlobalSettings()
             await h.cleanup()
         }
     })
 
-    it("never reads untrusted project settings and reports malformed trusted settings", async () => {
+    it("loads only the global tier's servers without project trust, and reports malformed settings", async () => {
         const h = fixture()
         try {
-            const files = getMcpSettingsPaths(h.nested)
-            write(files.global, { mcpServers: { global: { command: "fixture" } } })
-            for (const file of [files.project, files.local]) {
-                fs.mkdirSync(path.dirname(file), { recursive: true })
-                fs.writeFileSync(file, "not JSON")
-            }
+            writeGlobalSetting("mcp.json", { mcpServers: { global: { command: "fixture" } } })
+            write(path.join(h.piton, "mcp.json"), { mcpServers: { project: { command: "fixture" } } })
             assert.deepEqual(
                 readMcpConfiguration(h.nested, false).servers.map(({ name }) => name),
                 ["global"],
             )
             const untrusted = inspectProjectMcp(h.nested, false)
             assert.deepEqual(
-                untrusted.tiers.map(({ state }) => state),
-                ["valid", "untrusted", "untrusted"],
+                untrusted.untrustedServers.map(({ name }) => name),
+                ["project"],
             )
-            assert.equal(untrusted.error, undefined)
-            assert.throws(() => readMcpConfiguration(h.nested, true), /Invalid MCP JSON/)
-            assert.match(inspectProjectMcp(h.nested, true).error!, /Invalid MCP JSON/)
+            fs.writeFileSync(path.join(h.piton, "mcp.local.json"), "not JSON")
+            clearSettingsCache()
+            assert.throws(() => readMcpConfiguration(h.nested, true), /mcp\.local\.json/)
+            assert.match(inspectProjectMcp(h.nested, true).error!, /mcp\.local\.json/)
         } finally {
+            resetGlobalSettings()
             await h.cleanup()
         }
     })
 
-    it("reads the renamed permission files with runtime precedence and policy intact", async () => {
+    it("merges permission tables level by level, each file's shared table before its runtime table", async () => {
         const h = fixture()
         try {
-            const files = getExtensionSettingsPaths("permissions", h.nested)
-            write(files.global, { defaultMode: "deny", allow: ["read"] })
-            write(files.project, { allow: ["bash(npm test *)"], ask: ["write(plan.md)"] })
-            write(files.local, { defaultMode: "ask", deny: ["bash(rm *)"] })
-            const inspected = inspectPersistentPermissions(h.nested, "host")
-            const runtimeFile = (file: string) => file.replace(/(\.local)?\.json$/, ".host$1.json")
-            assert.deepEqual(
-                inspected.sources.map(({ path: file }) => file),
-                [
-                    files.global,
-                    runtimeFile(files.global),
-                    files.project,
-                    runtimeFile(files.project),
-                    files.local,
-                    runtimeFile(files.local),
-                ],
-            )
-            assert.deepEqual(inspected.settings, {
-                defaultMode: "ask",
-                allow: ["read", "bash(npm test *)"],
-                ask: ["write(plan.md)"],
-                deny: ["bash(rm *)"],
-                keybindings: {},
+            writeConfig("global", {
+                permissions: permissionsTable({ defaultMode: "ask", allow: ["read"] }),
+                "permissions.sandbox": permissionsTable({ defaultMode: "allow", allow: ["bash(npm *)"] }),
+                "permissions.host": permissionsTable({ deny: ["bash(host-only *)"] }),
             })
-        } finally {
-            await h.cleanup()
-        }
-    })
-
-    it("merges only the current runtime's files, each right after its tier's shared file", async () => {
-        const h = fixture()
-        try {
-            const files = getExtensionSettingsPaths("permissions", h.nested)
-            const runtimeFile = (file: string, runtime: string) =>
-                file.replace(/(\.local)?\.json$/, `.${runtime}$1.json`)
-            write(files.global, { defaultMode: "ask", allow: ["read"] })
-            write(runtimeFile(files.global, "sandbox"), { defaultMode: "allow", allow: ["bash(npm *)"] })
-            write(runtimeFile(files.global, "host"), { deny: ["bash(host-only *)"] })
-            write(files.project, { defaultMode: "deny" })
-            write(runtimeFile(files.local, "sandbox"), { ask: ["bash(git push *)"] })
+            writeConfig(h.repositoryRoot, { permissions: permissionsTable({ defaultMode: "deny" }) })
+            writeConfig(h.repositoryRoot, { "permissions.sandbox.ask": ["bash(git push *)"] }, true)
 
             const sandbox = inspectPersistentPermissions(h.nested, "sandbox")
             assert.equal(sandbox.runtime, "sandbox")
             assert.deepEqual(
-                sandbox.sources.map(({ tier, scope }) => `${tier}:${scope}`),
-                [
-                    "global:shared",
-                    "global:sandbox",
-                    "project:shared",
-                    "project:sandbox",
-                    "local:shared",
-                    "local:sandbox",
-                ],
+                sandbox.sources.map(
+                    ({ level, scope, sharing }) => `${level}:${scope}${sharing === "local" ? ":local" : ""}`,
+                ),
+                ["global:shared", "global:sandbox", "repository:shared", "repository:sandbox:local"],
             )
-            // The project's shared file is more specific than the global runtime file, so its defaultMode wins.
+            // The repository's shared file is nearer than the global runtime file, so its defaultMode wins.
             assert.equal(sandbox.settings.defaultMode, "deny")
             assert.deepEqual(sandbox.settings.allow, ["read", "bash(npm *)"])
             assert.deepEqual(sandbox.settings.ask, ["bash(git push *)"])
@@ -212,20 +164,39 @@ describe("shared settings contract", () => {
             assert.deepEqual(host.settings.deny, ["bash(host-only *)"])
             assert.deepEqual(host.settings.ask, [])
         } finally {
+            resetGlobalSettings()
             await h.cleanup()
         }
     })
 
-    it("uses the renamed web-search tiers through its real registered tool", async () => {
+    it("fails only the part whose table is broken", async () => {
+        const h = fixture()
+        try {
+            writeConfig(h.repositoryRoot, { "permissions.allow": ["read"] })
+            fs.appendFileSync(path.join(h.piton, "config.toml"), "[branches]\nformat = 1\n")
+            clearSettingsCache()
+            const resolved = resolveSettings(h.nested, "host")
+            assert.throws(() => section(resolved.branches), /config\.toml/)
+            assert.deepEqual(section(resolved.permissions).merged.allow, ["read"])
+            assert.doesNotThrow(() => section(resolved.mcp))
+        } finally {
+            await h.cleanup()
+        }
+    })
+
+    it("uses the nearest web-search key through its real registered tool", async () => {
         const h = fixture()
         const cwd = process.cwd()
         const fetch = globalThis.fetch
         const apiKey = process.env.BRAVE_SEARCH_API_KEY
         try {
-            const files = getExtensionSettingsPaths("web-search", h.nested)
-            write(files.global, { apiKey: "global-fixture" })
-            write(files.project, { apiKey: "project-fixture" })
-            write(files.local, { apiKey: "local-fixture" })
+            // A secret: only ever in a config.local.toml.
+            writeConfig("global", { "web_search.api_key": "global-fixture" }, true)
+            assert.throws(
+                () => writeConfig(h.repositoryRoot, { "web_search.api_key": "shared" }),
+                /config\.local\.toml/,
+            )
+            writeConfig(h.repositoryRoot, { "web_search.api_key": "local-fixture" }, true)
             delete process.env.BRAVE_SEARCH_API_KEY
             process.chdir(h.nested)
             let calls = 0
@@ -243,6 +214,7 @@ describe("shared settings contract", () => {
             globalThis.fetch = fetch
             if (apiKey === undefined) delete process.env.BRAVE_SEARCH_API_KEY
             else process.env.BRAVE_SEARCH_API_KEY = apiKey
+            resetGlobalSettings()
             await h.cleanup()
         }
     })

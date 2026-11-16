@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -59,19 +60,16 @@ function fixture() {
     const git = (...args: string[]) =>
         cp.execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim()
     git("init", "-q", "-b", "main")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     fs.writeFileSync(path.join(root, "README.md"), "Fixture\n")
     git("add", ".")
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
-    fs.mkdirSync(path.join(root, ".project"))
-    fs.writeFileSync(
-        path.join(root, ".project/config.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
-    fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
-        JSON.stringify({ tracker: minimalTracker(), forge: { provider: "github", mcpServer: "forge", repository } }),
-    )
+    fs.mkdirSync(path.join(root, ".piton"))
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker: minimalTracker(),
+        forge: { provider: "github", mcpServer: "forge", repository },
+    })
     prepareArtifactPersistence(root)
     const plan = (reviewed: ProviderEvidence = evidence(), current = reviewed) =>
         buildIntegrationContext(
@@ -106,7 +104,7 @@ describe("one repository merge operation", () => {
             assert.deepEqual(planGitHubMerge(subject, read, mcpTools), expected)
             assert.deepEqual(shippingReadDecision(scope, read, sha, 12, mcpTools), expected)
             assert.deepEqual(f.plan(read), expected)
-            assert.equal(fs.existsSync(path.join(f.root, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/gigs")), false)
             assert.deepEqual(f.snapshot(), before)
         } finally {
             f.close()

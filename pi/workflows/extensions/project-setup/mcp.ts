@@ -5,11 +5,13 @@ import { isDeepStrictEqual } from "node:util"
 import { Type } from "typebox"
 
 import { compile, parse } from "../../../extensions/__lib/schema.js"
-import { getMcpSettingsPaths, mcpServerKey, readMcpSettings, validateMcpName } from "../../../extensions/__lib/mcp.js"
-import { resolveRootDir } from "../../../extensions/__lib/project.js"
+import { mcpServerKey, readMcpSettings, validateMcpName } from "../../../extensions/__lib/mcp.js"
+import { clearSettingsCache, projectMcpPath, resolveSettings, section } from "../../../extensions/__lib/settings.js"
+import { writeProtected } from "../../../extensions/__lib/protected.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
+import { setupRoot } from "./root.js"
 
-export const LOCAL_MCP_SETTINGS_EXCLUDE = "/.agents/mcp.local.json"
+export const LOCAL_MCP_SETTINGS_FILE = ".piton/mcp.local.json"
 
 const EnvironmentNameSchema = Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]*$" })
 const ServerNameSchema = Type.String({ minLength: 1, pattern: "^[A-Za-z0-9_-]+$" })
@@ -55,19 +57,17 @@ export type ProjectMcpConfiguration = Type.Static<typeof ProjectMcpConfiguration
 type Registration = ProjectMcpConfiguration["registrations"][number]
 type SettingsTarget = ProjectMcpConfiguration["target"]
 
-export function configureProjectMcp(cwd: string, input: unknown, options: { globalSettingsPath?: string } = {}) {
+/**
+ * Registers provider MCP servers in the source checkout's `.piton/mcp.json` (`project`) or `.piton/mcp.local.json`
+ * (`local`). A server already registered anywhere in the configuration chain under the same name (or one differing
+ * only by `-`/`_`) is refused unless it's this exact entry in the target file.
+ */
+export async function configureProjectMcp(cwd: string, input: unknown) {
     const parsed = parse(ProjectMcpConfigurationValidator, input)
-    const root = resolveRootDir(cwd)
-    const resolvedPaths = getMcpSettingsPaths(root)
-    const paths = {
-        ...resolvedPaths,
-        global: options.globalSettingsPath ?? resolvedPaths.global,
-    }
-    const settings = {
-        global: readMcpSettings(paths.global),
-        project: readMcpSettings(paths.project),
-        local: readMcpSettings(paths.local),
-    }
+    const root = setupRoot(cwd)
+    const resolved = resolveSettings(cwd)
+    const targetPath = projectMcpPath(resolved, parsed.target === "local" ? "local" : "shared")
+    const target = readMcpSettings(targetPath)
     const names = new Set<string>()
     const additions: Array<{ registration: Registration; config: Record<string, unknown> }> = []
 
@@ -79,50 +79,50 @@ export function configureProjectMcp(cwd: string, input: unknown, options: { glob
         names.add(mcpServerKey(registration.name))
 
         const config = registrationConfig(registration)
-        for (const tier of ["global", "project", "local"] as const) {
-            const entries = settings[tier].mcpServers
-            const existing = Object.entries(entries ?? {}).find(
-                ([name]) => mcpServerKey(name) === mcpServerKey(registration.name),
-            )
-            if (existing === undefined) continue
-            if (tier === parsed.target && existing[0] === registration.name && isDeepStrictEqual(existing[1], config))
-                continue
+        const inTarget = Object.entries(target.mcpServers ?? {}).find(
+            ([name]) => mcpServerKey(name) === mcpServerKey(registration.name),
+        )
+        if (inTarget && inTarget[0] === registration.name && isDeepStrictEqual(inTarget[1], config)) continue
+        const existing = section(resolved.mcp).servers.find(
+            (server) => mcpServerKey(server.name) === mcpServerKey(registration.name),
+        )
+        if (existing !== undefined || inTarget !== undefined) {
             throw new Error(
-                `MCP server ${JSON.stringify(registration.name)} is already configured in the ${tier} settings; reuse it or choose another name`,
+                `MCP server ${JSON.stringify(registration.name)} is already configured in ${existing?.path ?? targetPath}; reuse it or choose another name`,
             )
         }
         additions.push({ registration, config })
     }
 
-    const changedTargets = new Set<SettingsTarget>()
+    let changed = false
     for (const { registration, config } of additions) {
-        const target = settings[parsed.target]
         target.mcpServers ??= {}
         if (target.mcpServers[registration.name] === undefined) {
             target.mcpServers[registration.name] = config
-            changedTargets.add(parsed.target)
+            changed = true
         }
     }
 
     if (parsed.target === "local") {
-        ensureLocalSettingsExclusion(root, ".agents/mcp.local.json", LOCAL_MCP_SETTINGS_EXCLUDE)
+        ensureLocalSettingsExclusion(root, LOCAL_MCP_SETTINGS_FILE)
     }
-    for (const target of ["project", "local"] as const) {
-        if (!changedTargets.has(target)) continue
-        fs.mkdirSync(path.dirname(paths[target]), { recursive: true })
-        fs.writeFileSync(paths[target], `${JSON.stringify(settings[target], null, 4)}\n`)
+    if (changed) {
+        // A protected file: under the daemon, the user sees the diff and approves it.
+        await writeProtected(targetPath, `${JSON.stringify(target, null, 4)}\n`)
+        clearSettingsCache()
     }
+    const changedTargets: SettingsTarget[] = changed ? [parsed.target] : []
 
     return {
-        changed: [...changedTargets],
-        files: [...changedTargets].map((target) => path.relative(root, paths[target])),
+        changed: changedTargets,
+        files: changed ? [path.relative(root, targetPath)] : [],
         servers: parsed.registrations.map(({ name, provider, credentialEnv }) => ({
             name,
             provider,
             target: parsed.target,
             credentialEnv,
         })),
-        restartRequired: changedTargets.size > 0,
+        restartRequired: changed,
     }
 }
 

@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -19,11 +20,7 @@ it("keeps a completed parallel edit when a different in-flight review returns no
     const h = await nativeSessionFixture({
         extensions: [registerPermission],
         setup(root) {
-            fs.mkdirSync(path.join(root, ".agents"))
-            fs.writeFileSync(
-                path.join(root, ".agents/permissions.json"),
-                JSON.stringify({ defaultMode: "ask", allow: ["codemode"] }),
-            )
+            writePermissions(root, { defaultMode: "ask", allow: ["codemode"] })
             for (const file of ["first.txt", "second.txt"]) fs.writeFileSync(path.join(root, file), "before")
         },
         async review(root, title) {

@@ -414,7 +414,7 @@ describe("shared workflow Phase", () => {
         try {
             for (const provider of ["github", "linear"] as const) {
                 const epicName = provider === "github" ? "1-example" : "20261001-example"
-                const epicDir = path.join(root, provider, ".project/.local/epics", epicName)
+                const epicDir = path.join(root, provider, ".piton/.local/epics", epicName)
                 const tracker = (entity: "epic" | "task" | "gig") =>
                     provider === "github"
                         ? {
@@ -450,7 +450,7 @@ describe("shared workflow Phase", () => {
                             ? epicDir
                             : entity === "task"
                               ? path.join(epicDir, "tasks", childName)
-                              : path.join(root, provider, ".project/.local/gigs", childName)
+                              : path.join(root, provider, ".piton/.local/gigs", childName)
                     fs.mkdirSync(directory, { recursive: true })
                     const metadata = {
                         ...common,

@@ -6,7 +6,7 @@ The map of workflow directories, what each file means, and how it's persisted. P
 
 - **Tracker:** an external work system, GitHub Projects or Linear. A **tracker item** is its native record for an entity: a GitHub issue for every entity; a Linear Project for an Epic, and a Linear issue for a Task or Gig.
 - **In Git** or **outside Git:** general Git membership. Use **staged**, **unstaged**, **gitignored**, and **committed** for those specific states.
-- **Local:** files that always stay outside Git: everything under `.project/.local/`, `.project/config.local.json`, and `.agents/*.local.json`. Every workflow entity is local.
+- **Local:** files that always stay outside Git: everything under `.piton/.local/` and every `.piton/*.local.*` settings file. Every workflow entity is local.
 - **Tracker reference:** an entity's identity on the tracker: `#12` for a GitHub issue, `ENG-12` for a Linear issue. A Linear Project has no number, so its Epic is dated by the Project's UTC creation date to keep Epics chronological.
 
 ## Initialization inputs
@@ -83,7 +83,7 @@ Use concise lowercase kebab-case, with a soft cap around 48 characters; shorten 
 - The `identifier-title` branch format uses that name in lowercase; `username/identifier-title` prefixes it with `<username>/`. Only initialized entities get directories and branches.
 - Epic and Gig start from and target the repository default branch. It's resolved, in order, from `origin/HEAD`, an existing workflow contract, the current attached local branch, or the sole local branch. A remote is optional.
 - A Task copies its parent Epic's current target. The Task skill owns its prerequisites and parent relation.
-- The initialization tool renders the one configured `branches.format` for every entity. Formats starting with `username` read `branches.username` from `.project/config.local.json` or global `workflows.json`; never infer it. The Linear `tracker` format uses exact issue branch names for Task and Gig, and the slug for an Epic (see [Linear tracker](./integrations/tracker/linear.md)). When configuring formats, read [setup](./setup.md#project-configuration).
+- The initialization tool renders the one configured `branches.format` for every entity. Formats starting with `username` read the username from `.piton/config.local.toml` or the global `config.local.toml`; never infer it. The Linear `tracker` format uses exact issue branch names for Task and Gig, and the slug for an Epic (see [Linear tracker](./integrations/tracker/linear.md)). When configuring formats, read [setup](./setup.md#project-configuration).
 - Approved repository operations remain lifecycle gates.
 
 ## Brief and local working state
@@ -104,11 +104,10 @@ Entity files sit directly in the entity directory.
 ## Project
 
 ```text
-.project/
-  config.json          # Required: branch format; committed.
-  config.local.json    # Optional username for static username formats; always local.
+.piton/
+  config.toml          # Required: branch format, tracker, and forge, non-secret; committed; never entity state.
+  config.local.toml    # Optional personal values, such as the username; always local.
   policies.md          # Optional repository-specific workflow additions or overrides; committed.
-  integrations.json    # Required tracker and forge configuration, non-secret; committed; never entity state.
   .local/              # All workflow work; never committed.
     epics/             # Initialized Epics and their Tasks.
     gigs/              # Initialized standalone Gigs.
@@ -117,14 +116,14 @@ Entity files sit directly in the entity directory.
 
 ### Incoming PR evidence
 
-[Incoming PRs](./pr/incoming.md) keep private evidence under `.project/.local/pull-requests/<number>/`, including an approved nested checkout at `checkout/` and review rounds under `reviews/<base-sha>-<head-sha>/review-NNN/inputs/`. The `/.project/.local/` ignore rule covers the whole area. These records are evidence, not approvals, and create no entity, lifecycle, or branch contract. Never stage, commit, or publish them. The file inventory is in the [PR extension README](../extensions/pr/README.md#private-evidence-layout).
+[Incoming PRs](./pr/incoming.md) keep private evidence under `.piton/.local/pull-requests/<number>/`, including an approved nested checkout at `checkout/` and review rounds under `reviews/<base-sha>-<head-sha>/review-NNN/inputs/`. The `/.piton/.local/` ignore rule covers the whole area. These records are evidence, not approvals, and create no entity, lifecycle, or branch contract. Never stage, commit, or publish them. The file inventory is in the [PR extension README](../extensions/pr/README.md#private-evidence-layout).
 
 ## Project Policy precedence
 
 Precedence is in [core approvals](./core.md#approvals).
 
 - Apply Project Policies unless the user explicitly overrides one in chat. Keep an active override for this work in `notes.md` until the plan or metadata reflects it.
-- Change `.project/policies.md` only with the user's approval, when they want a permanent change for this repository.
+- Change `.piton/policies.md` only with the user's approval, when they want a permanent change for this repository.
 - Use Project Policies to adapt the workflow for this repository, never by editing the reusable workflow files.
 
 ## Entity layouts
@@ -132,7 +131,7 @@ Precedence is in [core approvals](./core.md#approvals).
 ### Epic
 
 ```text
-.project/.local/epics/<reference>-<slug>/   # <YYYYMMDD>-<slug> for a Linear Project
+.piton/.local/epics/<reference>-<slug>/   # <YYYYMMDD>-<slug> for a Linear Project
   brief.md             # Approved Request.
   metadata.json        # Tracker identity, Phase, branch contract, accepted Task list.
   epic.md              # The initiative's current state and its `## Tasks` sections.
@@ -147,13 +146,13 @@ Precedence is in [core approvals](./core.md#approvals).
 - `epic.md` and review rounds appear only when their steps create them.
 - Each Task is a `### ` section in `epic.md`. Metadata keeps the Task list the user last accepted ([Epic Tasks](./epic-tasks.md#accepted-task-list)). Task issue processing tags it with its issue's stable marker, `[#N]` or `[ENG-N]`; starting the Task adds its child directory ([Epic Tasks](./epic-tasks.md)).
 - Metadata holds the immutable branch identity. Routing lives in `epic.md` as `Task target:` and `Epic branch:` lines, published with the plan ([Epic routing](./epic.md#routing)).
-- Every Epic file here is a per-checkout copy, shared only when a worker links `.project/.local` to its source checkout. A checkout without it [restores](./epic.md#restore-an-epic) the Epic from the tracker.
+- Every Epic file here is a per-checkout copy, shared only when a worker links `.piton/.local` to its source checkout. A checkout without it [restores](./epic.md#restore-an-epic) the Epic from the tracker.
 
 ### Task and Gig (Deliverables)
 
 ```text
-.project/.local/epics/<epic>/tasks/<reference>-<slug>/
-.project/.local/gigs/<reference>-<slug>/
+.piton/.local/epics/<epic>/tasks/<reference>-<slug>/
+.piton/.local/gigs/<reference>-<slug>/
   brief.md             # Approved Request.
   metadata.json        # Kind, tracker identity, Phase, branch contract, PR intent. A Task's parent comes from its directory.
   plan.md              # Work plan; absent on the direct path.
@@ -200,20 +199,20 @@ Each `reviews/<phase>-NNN/` directory holds:
 
 ## Persistence and authority
 
-The shared guard validates `.project/config.json` and persistence safety, reusing a successful check while the relevant local inputs are unchanged. `prepare_artifacts` forces a full check during setup or repair, adds only the permitted exclusions below, and creates an empty `.project/.local` when it's missing. Neither changes the Git index.
+The shared guard validates the branch configuration and persistence safety, reusing a successful check while the relevant local inputs are unchanged. `prepare_artifacts` forces a full check during setup or repair, adds only the permitted exclusions below, and creates an empty `.piton/.local` when it's missing. Neither changes the Git index.
 
-- **In Git:** only `.project/config.json`, `policies.md`, and non-secret `integrations.json`.
-- **Kept out by:** the `/.project/.local` rule in `.gitignore`, which setup writes, and `/.project/config.local.json` in `.git/info/exclude`. Without a trailing slash, the rule also covers a worker's `.project/.local` symlink to its source checkout. Setup replaces an older `/.project/.local/` line.
-- **Preparation stops when** the committed `.gitignore` doesn't ignore `.project/.local`, or any path under `.project/.local/` or `.project/config.local.json` is in Git or staged.
-- **In a sandboxed worker** (`PITON_RUNTIME=sandbox`), starting or resuming an entity, and recording incoming-PR evidence, stop unless `.project/.local` is a symlink to the source checkout's folder; otherwise the artifacts would be lost with the worker. Run setup in the source checkout and recreate the worker. Project inspection and queue intake create no artifacts, so they aren't guarded, including against the workflow source project.
-- Never stage, commit, or push a path under `.project/.local/`, or link to one from published text.
+- **In Git:** only `.piton/config.toml`, `mcp.json`, and `policies.md`.
+- **Kept out by:** the `/.piton/.local` rule in `.gitignore`, which setup writes, and `/.piton/*.local.*` in `.git/info/exclude`. Without a trailing slash, the rule also covers a worker's `.piton/.local` symlink to its source checkout.
+- **Preparation stops when** the committed `.gitignore` doesn't ignore `.piton/.local`, or any path under `.piton/.local/` or any `.piton/*.local.*` file is in Git or staged.
+- **In a sandboxed worker** (`PITON_RUNTIME=sandbox`), starting or resuming an entity, and recording incoming-PR evidence, stop unless `.piton/.local` is a symlink to the source checkout's folder; otherwise the artifacts would be lost with the worker. Run setup in the source checkout and recreate the worker. Project inspection and queue intake create no artifacts, so they aren't guarded, including against the workflow source project.
+- Never stage, commit, or push a path under `.piton/.local/`, or link to one from published text.
 - Removing a path from Git needs separate user approval and is never automatic.
 
 **Authority:**
 
 - Artifacts, tracker identity, relationships, branch contracts, Phase, and review rounds are authoritative. Every entity stores `phase` in `metadata.json`. When changing Phase, read [Phase](./phase.md).
 - Lifecycle and Priority are native tracker Status and Priority, read fresh; nothing local stores them.
-- Keep machine data valid and transient context in `notes.md`. Never store credentials in `.project/integrations.json`.
+- Keep machine data valid and transient context in `notes.md`. Never store credentials in `.piton/config.toml`.
 
 **Ownership:**
 

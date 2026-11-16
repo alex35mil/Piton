@@ -17,4 +17,4 @@ When the requested output is a UI mockup, layout, or visual concept:
 
 - Create and iterate on a self-contained HTML file under `designs/`. Inline CSS and JS; require no build, server, network, or CDN; make it openable directly from disk.
 - Present its repository-relative path alone on its own line, with no label, suffix, or trailing punctuation, so Neovim `gx` can open it. Give the description separately, ask for review, and resolve feedback before final review.
-- Designs stay local with the entity. When the user wants one in the repository, they choose where it belongs outside `.project/`, as a normal approved change.
+- Designs stay local with the entity. When the user wants one in the repository, they choose where it belongs outside `.piton/`, as a normal approved change.

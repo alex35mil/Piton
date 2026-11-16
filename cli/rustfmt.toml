@@ -1,0 +1,5 @@
+max_width = 120
+# Imports: one `use` per crate, grouped std, external crates, then this crate. Both options are unstable, so
+# formatting runs on the nightly rustfmt pinned in mise.toml (`mise run cli:format`); builds stay on stable.
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"

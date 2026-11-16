@@ -2,16 +2,13 @@ import PitonKit
 import SwiftUI
 
 /// Keep-awake on/off: while on, the daemon holds the Mac awake whenever sessions are live (idle ones too), so the phone
-/// can reach them. Reverts to the daemon's config when the daemon restarts.
+/// can reach them. The choice is `keep_awake` in the host's `config.host.toml`.
 public struct KeepAwakeToggle: View {
     let store: Store
-    /// Extra description under the status (Settings explains where the default comes from; the menu bar doesn't).
-    let note: String?
     @State private var pending: Bool?
 
-    public init(store: Store, note: String? = nil) {
+    public init(store: Store) {
         self.store = store
-        self.note = note
     }
 
     public var body: some View {
@@ -19,7 +16,7 @@ public struct KeepAwakeToggle: View {
         // the other settings rows.
         Toggle(isOn: binding) {
             Text("Keep Mac Awake")
-            Text(note.map { "\(detail). \($0)" } ?? detail)
+            Text(detail)
         }
         .disabled(store.daemon == nil || pending != nil)
     }

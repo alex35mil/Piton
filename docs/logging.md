@@ -16,8 +16,8 @@ omitted. The collector makes **no device calls** at Info.
 **until disabled**. Expiration is an absolute timestamp, so re-reading or reconnecting never extends the hour. Switching
 back to Info preserves existing files.
 
-**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `[logging] mode` in piton's
-`config.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
+**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `logging` in piton's
+`config.host.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
 app or the CLI is **temporary**: it lasts until it expires or the daemon restarts, which returns to the config. Nothing
 else stores it. The daemon pushes the policy to the apps (including when a timed switch expires), the Mac app's own
 capture follows it, and the collector asks the daemon before every poll and transfer.
@@ -39,11 +39,11 @@ disconnected. There, the expiration persists across app restarts; an expired or 
 
   These go through the daemon's control socket and fail when the daemon isn't running. No sessions are restarted. A
   transfer already in flight may finish (at most 15 seconds), but switching back or expiry prevents it from replacing
-  the published snapshot. To make debug the default, set it in `config.toml` and restart the daemon:
+  the published snapshot. To make debug the default, set it in `config.host.toml` (or `config.host.local.toml` to
+  keep it out of your dotfiles) and restart the daemon:
 
   ```toml
-  [logging]
-  mode = "debug"   # or "info" (the default)
+  logging = "debug"   # or "info" (the default)
   ```
 - **Clearing:** each app's Logging screen can clear its own file ring without changing the level. It does not clear
   collected copies. Files naturally age out by size as new records are written; no time-based retention is promised.
@@ -69,20 +69,21 @@ The phone stores its file ring and local `settings.json` at `Library/Logs/Piton/
 under `iphone/snapshot/`; status timestamps describe **collection time**, not when the last event occurred. Always
 check both the collector status and event timestamps before treating a capture as current.
 
-`config.toml`'s existing `log` setting still overrides the daemon's file path. Its default moved from
+The `log` key of `config.host.toml` overrides the daemon's file path. Its default moved from
 `~/.local/state/piton/piton.log` to `logs/daemon/current.log`. Old files are not migrated or deleted. New LaunchAgents
 use the bounded file writers instead of appending a duplicate unbounded `launchd.log`. A foreground daemon's info
 records still go to stderr. Early configuration failures leave a sanitized startup marker in the default daemon log.
 
-The shared sandbox profile should grant **read-only access to the logs directory**, not its parent (which contains the
-control socket). This project's `.nono.json` grants it locally. For agents in other projects, add this entry to the
-shared `piton` profile in the dotfiles:
+The sandbox should grant **read-only access to the logs directory**, not its parent (which contains the control
+socket). This project's `.piton/config.toml` grants it. For agents in other projects, add it to the global
+`config.toml` (`~/.config/piton/`) in the dotfiles:
 
-```json
-"read": ["$HOME/.local/state/piton/logs"]
+```toml
+[sandbox]
+read = ["~/.local/state/piton/logs"]
 ```
 
-Merge with existing grants; do not replace them. Grants apply to newly launched sandbox processes, not existing ones.
+Grant lists only add across levels. Grants apply to newly launched sandbox processes, not existing ones.
 Agents receive no CoreDevice access, settings write access, daemon control socket access, or host command execution.
 
 `PITON_LOGS_DIR` can select a different host root for development and tests; the Mac app and CLI understand it. All test
@@ -92,12 +93,12 @@ root unless their launchd environment is explicitly configured otherwise.
 ## Install the independent phone collector (host only)
 
 Requirements: Xcode and its command-line tools, a paired/trusted iPhone, access to Piton's app data container, and
-`PITON_IPHONE` configured as for `apps:phone`. Start with the development-signed installation from `apps:phone`;
+`PITON_IPHONE` configured as for `apps:iphone`. Start with the development-signed installation from `apps:iphone`;
 container access on other distribution/signing variants must be verified rather than assumed.
 
 ```sh
-mise run daemon:install       # install updated binary; this step ends live sessions
-mise run apps:phone
+mise run cli:install       # install updated binary; this step ends live sessions
+mise run apps:iphone
 mise run apps:mac
 mise run logs:install         # uses the installed piton; does NOT restart the daemon
 piton logging debug

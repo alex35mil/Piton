@@ -17,7 +17,8 @@ import {
     sameIncomingRevision,
     type IncomingRevision,
 } from "../integrations/forge/github/incoming-pr-context.js"
-import { fence, readOptional, REVIEW_AUTHORITY_INSTRUCTIONS } from "./context.js"
+import { readProjectPolicies } from "../__lib/project-config.js"
+import { fence, REVIEW_AUTHORITY_INSTRUCTIONS } from "./context.js"
 import { ReviewResponseFindingInputSchema, reviewResponseFindings, reviewAgentOutputInstructions } from "./findings.js"
 import { executeReviewRound, recordRoundResponse, renderReviewRoundResult } from "./round.js"
 import { reviewerEnvironment } from "./model.js"
@@ -174,7 +175,7 @@ export async function preparePullRequestReview(cwd: string, input: ReviewPullReq
     await fs.promises.writeFile(path.join(directory, "source-files.json"), `${JSON.stringify(sources, null, 4)}\n`, {
         flag: "wx",
     })
-    const policies = await readOptional(path.join(selected.root, ".project", "policies.md"))
+    const policies = readProjectPolicies(selected.root)
     const prompt = buildPullRequestReviewPrompt(
         selected.revision,
         savedDossierPath,

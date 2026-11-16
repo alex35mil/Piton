@@ -67,6 +67,20 @@ iPhone / iPad ─────────── WebSocket over the tailnet ─�
 - **`piton-sleepd`:** privileged helper with exactly two operations (prevent sleep, restore sleep). Language decided
   during implementation (Swift is simplest for XPC).
 
+The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is its API, and its files are private:
+
+- `commands/`: the command line, one file per command.
+- `config/`: configuration files (see "Configuration and state"). `state/`: the state database.
+- `daemon/`: the running daemon: startup, the session registry, the Unix socket (`rpc`, `control`, and the apps'
+  `view` connections), keep-awake, reloading the global files, and the local socket's messages (`protocol`).
+- `session/`: one pi process, and the conversation model the apps render (`view`).
+- `launch/`: pi's environment and command line, and the nono profile (`sandbox`, the only code that knows nono).
+- `apps/`: serving the native apps: the `view` protocol, the tailnet WebSocket, browsing roots, the Settings list.
+- `agent/`: the bridge between a sandboxed agent and the daemon: which files are protected and their Seatbelt rules
+  (`protected`), `agent.sock` (`socket`), and a protected write asked of the user (`write`).
+- `project/`: a workspace's source or worker relation, and worker clones.
+- `setup/`: `piton setup` and the launchd agent. `logging/`: piton's own logs, the logging policy, the collector.
+
 ### Packaging
 
 One signed `Piton.app`, distributed outside the App Store (a sandboxed app can't spawn processes or install a helper):
@@ -84,6 +98,16 @@ The app registers both through `SMAppService` and offers a "Start at login" togg
 daemon. Quitting the app leaves the daemon and sessions running. `piton service install|uninstall` writes the same
 LaunchAgent for development without the app. The CLI is symlinked onto `PATH`.
 
+**Onboarding.** On first launch the Mac app asks what this Mac does: host (runs the daemon; the app connects to its
+socket) or client (connects to another host over the tailnet, like the phone). The choice is kept on the Mac and can
+be changed in Settings > Connection. A host's onboarding lists the steps from `piton setup check --json`, run with
+the bundled binary: tools (pi, mise, nono, tailscale), the global configuration, the CLI link
+(`~/.local/bin/piton` to the bundled `piton`), start at login, the state database, and remote access (this host's
+tailnet name and port). Each is ok, missing with its fix, or failed: `piton setup apply <step>` does the steps
+piton can (create the global folder, link the CLI, create the database), the app registers the daemon, and the rest
+are instructions. A development build has no bundled binary and uses the linked CLI; its daemon comes from `piton
+service install`. DMG packaging, signing, and notarization are tracked separately.
+
 ### Launching pi
 
 For every pi it starts, piton:
@@ -100,10 +124,10 @@ environment (today a `:tcd` worker inherits the Neovide launch folder's environm
 
 The mode is chosen per launch, not per workspace. nono is the only sandbox.
 
-- **Sandbox (default):** `nono run -s <profile args> --allow-cwd [--allow <source>/.project/.local] [--allow <extra>]...
-  -- pi --mode rpc [...]`, with piton's environment passed through. The profile args are `--profile <source>/.nono.json
-  --extends <base>` when the source checkout has a `.nono.json` overlay, else `--profile <base>` (base from piton's
-  config, default `piton`). See "Workers" for what "source" means.
+- **Sandbox (default):** `nono run -s --profile <generated> --allow-cwd -- pi --mode rpc [...]`, with piton's
+  environment passed through. The daemon generates the profile for each launch from the configuration chain's
+  `[sandbox]` tables (see "Configuration and state"); it grants the source's `.piton/.local` and keeps protected files
+  read-only. See "Workers" for what "source" means.
 - **Host:** `pi --mode rpc [...]` directly. Only chosen explicitly: `piton start --host`, or the host toggle in the app.
 - `piton attach` (pi.nvim) always launches in sandbox mode. Choosing host from pi.nvim is out of scope for now.
 - A session's mode is recorded; resuming a saved session from the app or CLI defaults to its last mode; an attach to a
@@ -113,23 +137,21 @@ The mode is chosen per launch, not per workspace. nono is the only sandbox.
 ### Workers
 
 A worker is an APFS copy-on-write clone of a source checkout, `<parent>/<repo>--<name>` next to `<parent>/<repo>`,
-with `.project/.local` linked to the source's.
+with `.piton/.local` linked to the source's.
 
 - **Relation:** a workspace is a worker when its local git config has `agent.source` and the folder layout matches;
   otherwise it's a source. A claim without the layout is refused, so a stray config value can't point a sandbox
   elsewhere.
-- **Source-only settings:** the nono overlay (`.nono.json`, plus the gitignored `.nono.local.json` for this machine's
-  grants, which can only add to it), the shared artifacts folder, and the project config
-  (`.piton.toml`) are read from the source, never from the worker, so an agent can't widen its own sandbox or change
-  what new workers copy by editing its clone. (An agent running in the source checkout itself can still edit them.)
-  A workspace inside a checkout (pi started in a subfolder) belongs to that checkout: its settings come from the
-  checkout's source, and deleting a worker stops the sessions in its subfolders too.
-- **`.piton.toml`:** per-project piton settings. `[workers] skip = [...]` lists paths not copied into new workers, such
-  as editor indexes that break tooling in a clone (`apps/.build/index-build` here). It only removes things from the
-  copy.
+- **Source-only settings:** `.piton/` (sandbox grants, permissions, workflows, the shared artifacts folder) is read
+  from the source, never from the worker, so an agent can't widen its own sandbox or change what new workers copy by
+  editing its clone. An agent running in the source checkout itself is held back by the protected-file rules (see
+  "Configuration and state"). A workspace inside a checkout (pi started in a subfolder) belongs to that checkout: its
+  settings come from the checkout's source, and deleting a worker stops the sessions in its subfolders too.
+- **`[workers] skip`** in `.piton/config.toml` lists paths not copied into new workers, such as editor indexes that
+  break tooling in a clone (`apps/.build/index-build` here). It only removes things from the copy.
 - **`piton worker create <name> [--from <checkout>] [--label] [--issue]`:** the source must be clean on its default
-  branch; piton fast-forwards it, clones everything except the skip list and `.project/.local` (one `clonefile(2)` per
-  entry), links `.project/.local`, and sets `agent.source`, `agent.label`, `agent.issue`. When mise trusts the
+  branch; piton fast-forwards it, clones everything except the skip list and `.piton/.local` (one `clonefile(2)` per
+  entry), links `.piton/.local`, and sets `agent.source`, `agent.label`, `agent.issue`. When mise trusts the
   source's own config, piton trusts the worker's too (`mise trust <worker>`): its config files are the source's,
   cloned, so this grants nothing the user hasn't. An untrusted source gives an untrusted worker, and a launch there
   reports it (see "Launching pi"). It writes no pi.nvim
@@ -137,7 +159,7 @@ with `.project/.local` linked to the source's.
   piton (no phone access, no keep-awake). The worker's sandbox comes from piton at launch (see "Launch mode").
 - **`piton worker ls`:** the source's workers with their live sessions.
 - **`piton worker delete <path> [--force]`:** refuses with the uncommitted changes and unpushed commits unless forced;
-  stops the worker's sessions, drops mise's trust in the folder, unlinks `.project/.local`, deletes the folder, and
+  stops the worker's sessions, drops mise's trust in the folder, unlinks `.piton/.local`, deletes the folder, and
   fast-forwards the source.
 - **`--json`:** every `piton worker` command prints the daemon's response; refusals are typed (`kind`: `exists`,
   `source_dirty`, `source_off_default`, `unknown_default`, `invalid_name`, `not_a_repository`, `not_a_worker`,
@@ -171,7 +193,7 @@ versions that shaped piton:
 
 ### Workspace roots
 
-piton's config lists workspace roots (`roots`; `daemon/src/workspaces.rs`). There are none by default: until the owner
+piton's config lists workspace roots (`roots`; `cli/src/apps/workspaces.rs`). There are none by default: until the owner
 lists some, `workspaces.browse` and `session.start` from a `view` client refuse with "no workspace roots configured",
 and the apps say so. A root is a tree of grouping folders with repositories at varying depth, e.g. `~/Projects/personal/apps/app` and its worker clone `~/Projects/personal/apps/app--fix-login`
 next to it. A **workspace** is a folder under a root that
@@ -319,7 +341,7 @@ there is no "response in progress" placeholder and no invisible dialog.
 
 ### Session view (Swift clients)
 
-Swift clients don't get raw RPC. The daemon keeps a structured model of each live session (`daemon/src/view.rs`) and
+Swift clients don't get raw RPC. The daemon keeps a structured model of each live session (`cli/src/session/view.rs`) and
 sends a snapshot plus numbered changes. It's built from pi's entries (`get_entries`, active branch) at launch and after
 `switch_session`/`new_session`/`fork`/`clone` and successful compactions, and kept current from the event stream.
 
@@ -364,8 +386,8 @@ arrive out of request order.
 | --- | --- |
 | `sessions.list` | `{sessions}`: live sessions (key, id, file, workspace, checkout, mode, status, clients, pid, title) |
 | `sessions.subscribe` | `{}`; then pushes `sessions` and `daemon {state}` lines on change |
-| `daemon.state` | `{state}`: `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`) |
-| `daemon.keep_awake {on}` | `{state}`; until the daemon restarts |
+| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `scope` (`host`, `client`, `project`), `value`, `placement` (`shared`, `local`, or null), `local_choice`, `value_type`, `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
+| `settings.set {scope, key, value, local?}` | `{state}`; the key in the global file of `scope`; `value: null` resets; `local` moves the key between the shared and `.local` file (refused for `client`, which has no local file) |
 | `daemon.logging {policy}` | `{state}`; until it expires or the daemon restarts |
 | `workspaces.browse {path?}` | `{entries}`; see "Workspace roots" |
 | `session.start {workspace, mode?, prompt?}` | `{session}`; mode defaults to `sandbox`; `workspace` must be a checkout under a root |
@@ -402,8 +424,8 @@ A view client counts as a session client (writer rule, empty-pi cleanup). Not ye
 ### Remote access (tailnet WebSocket)
 
 The `view` protocol also runs over WebSocket on this Mac's tailnet addresses (`[tailnet] port`, default 7357), one
-text frame per message, plain `ws://` (Tailscale encrypts the traffic). `daemon/src/tailnet.rs`,
-`daemon/src/websocket.rs`.
+text frame per message, plain `ws://` (Tailscale encrypts the traffic). `cli/src/apps/tailnet.rs`,
+`cli/src/apps/websocket.rs`.
 
 - **Client transport:** the apps use the system proxy settings, as any app does (diagnostics log which proxy iOS
   picks; see `docs/logging.md`). Traffic still uses Tailscale's VPN routing/encryption; it isn't ordinary public web
@@ -428,12 +450,12 @@ text frame per message, plain `ws://` (Tailscale encrypts the traffic). `daemon/
 - Without Tailscale (not installed, not running) the daemon logs it once and serves local clients only, trying again
   every `[tailnet] retry_ms` (default 10 s): at login launchd can start it before Tailscale is up. Once listening, it
   checks every minute whether this Mac's tailnet addresses changed and listens on the new ones.
-- Tests use a fake `tailscale` CLI (`daemon/tests/fixtures/fake-tailscale.sh`) that puts the listener on loopback.
-- macOS firewalls (Little Snitch) hold incoming connections until allowed. `mise run daemon:install` signs
+- Tests use a fake `tailscale` CLI (`cli/tests/fixtures/fake-tailscale.sh`) that puts the listener on loopback.
+- macOS firewalls (Little Snitch) hold incoming connections until allowed. `mise run cli:install` signs
   `~/.cargo/bin/piton` with the team's Apple Development certificate (identifier `com.alex35mil.piton.daemon`), so its
   code identity stays the same across rebuilds and a rule for that path keeps matching. Allow incoming TCP on port
   7357 from the tailnet ranges (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`); the identity check (Tailscale `whois`) is
-  piton's own, the firewall rule only lets the connection reach it. Debug builds (`daemon/target/debug/piton`, tests)
+  piton's own, the firewall rule only lets the connection reach it. Debug builds (`cli/target/debug/piton`, tests)
   aren't signed and don't need the rule (tests listen on loopback).
 
 ### Protocols
@@ -487,9 +509,9 @@ Attention is derived from the event stream:
   assertion (`caffeinate -i`), so the phone can reach sessions it might want to steer; released when the last
   session ends. Idle sessions count: a Mac that slept with only idle sessions made the phone lose access
   (2026-11-08). The display may still sleep and the screen lock; the daemon and Tailscale keep running.
-- On/off: config `keep_awake` (default on) is the default; the apps toggle it at runtime (`daemon.keep_awake`,
-  the macOS menu bar item and Settings > General on both platforms). Not persisted: a daemon restart goes back to
-  the config.
+- On/off: `keep_awake` in `config.host.toml` (default on), or `config.host.local.toml` to keep frequent toggles out
+  of a dotfiles diff; the apps toggle it (`settings.set` on `host` `keep_awake`, the macOS menu bar item and Settings >
+  General on both platforms), and a hand edit applies at once.
 - Lid closed on battery without an external display sleeps regardless. For that, `piton-sleepd` toggles
   `pmset disablesleep` while agents work: it accepts XPC only from the signed daemon, restores normal sleep when the
   connection drops, and enforces a maximum duration and a low-battery/thermal cutoff.
@@ -499,14 +521,12 @@ Attention is derived from the event stream:
 
 The Info level records essential events; opt-in Debug adds detailed traces and expires after an hour by default unless
 explicitly kept on. The apps retain bounded files alongside Apple's unified logger. Host logging (the
-Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `[logging] mode` in `config.toml` is
-the default, and `daemon.logging` (the Mac app) or `piton logging` switches it until it expires or the daemon restarts,
-like keep-awake. The policy is part of the pushed daemon state. The phone's capture setting is a device setting, local
+Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `logging` in `config.host.toml`
+is the default, and `daemon.logging` (the Mac app) or `piton logging` switches it until it expires or the daemon restarts.
+The policy is part of the pushed daemon state. The phone's capture setting is a device setting, local
 to the phone, and works offline. No logging control changes pi's settings, uses its RPC channel, or restarts sessions.
 
-Settings ownership: each setting lives in exactly one place. Mac-wide settings are in the daemon's `config.toml` (the
-user's file, in their dotfiles), and app controls are temporary runtime switches on top of it, never a second stored
-value. Device settings (the phone's Mac address and capture) live on the device.
+Settings ownership: each setting lives in exactly one place; see "Configuration and state" below.
 
 Settings UI: one view per section, shared by both apps; only the container differs. The Mac has a Settings window (⌘,,
 also in the menu bar item) with a sidebar: General (keep-awake, daemon version), Appearance, Logging (host level). It
@@ -548,8 +568,10 @@ font, content in the text font. Views take colors, fonts, and shapes only from t
 the roomier reading line spacing apply to the session list and conversations, not to Settings. Liquid Glass stays on
 system chrome (bars, alerts, menus): iOS 27 has no opt-out.
 
-Fonts are a device setting (Settings > Appearance): a text font and a code font, each the system font or any family
-available to the app, scaled with Dynamic Type. The Mac lists its installed fonts. On the phone, fonts the user owns
+Fonts are client preferences (Settings > Appearance): a text font and a code font, each the system font or any family
+available to the app, scaled with Dynamic Type. Each is shared through the host (`config.client.toml`,
+the same on every device, cached for offline start) unless Local keeps a value on this device; a shared font a
+device lacks shows as the system font there. Settings > Host shows every host setting with where it comes from. The Mac lists its installed fonts. On the phone, fonts the user owns
 (a paid one like Berkeley Mono can't be bundled) are imported from .otf/.ttf files: copied into the app's Application
 Support and registered for the process at launch. Fonts installed system-wide through configuration-profile apps need
 the "Use Installed Fonts" entitlement, which the app doesn't have.
@@ -559,9 +581,231 @@ failed Piton connection when CoreDevice can still reach the phone. At Info it ma
 preserves the last good snapshot with explicit freshness metadata, and agents get read-only access to the log-only
 directory, never the control socket or device tooling. See [logging.md](logging.md) for limits and setup.
 
+### Configuration and state
+
+Status: implemented in #206. Earlier layouts were converted once with a migration command that has since been
+removed; files they left behind are simply not read.
+
+**Hosts and clients.** A host runs the daemon: it runs pi, holds the projects, and owns the state database. A client
+is an app connected to a host (the Mac app, the iPhone and iPad apps). A Mac can be a host, a client of another host,
+or both; the Mac app asks on first launch and installs the daemon and the sleep helper only on a host. Each host has
+a generated `host_id`, sent in `daemon.state` (pushed to every subscribed client).
+
+Four stores, each with one job; every value has exactly one home.
+
+| Store | Where | Owns | Written by |
+| --- | --- | --- | --- |
+| Config files | `.piton/` and `.agents/` in the repository and its parent folders; the global tier `$XDG_CONFIG_HOME/piton/` | what you decide, preferences included; travels through dotfiles and repositories | the user; the daemon for app edits to the global files and for approved protected writes |
+| State database | `~/.local/state/piton/piton.db` | facts about this host and what happened on it: `host_id`; later sessions, drafts, recent projects. No preferences | the daemon |
+| Client storage | each app's container | hosts it connects to, a device's own preference values, imported fonts, log capture, unsent work | that app |
+| Memory | the daemon | live pis, session views, temporary switches, pending protected writes | the daemon |
+
+piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, trust).
+
+#### Config files
+
+```
+$XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
+  config[.local].toml            # the chain's farthest level: defaults every project inherits
+  config.host[.local].toml       # how the daemon runs on this host, this host's preferences, [development]
+  config.client.toml             # the apps' preferences, served to every client (no local file)
+  mcp[.local].json               # MCP servers, in the format other harnesses read
+  policies.md
+  agents/rules/, agents/skills/  # global agent instructions
+<ancestor>/.piton/, .agents/     # shared by every repository below
+<repo>/
+  .piton/
+    config.toml                  # committed: [sandbox] [workers] [permissions] [branches] [tracker] [forge]
+    config.local.toml            # not committed: the same tables, plus [branches] username and [web_search] api_key
+    mcp[.local].json, policies.md
+    .local/                      # workflow artifacts (gitignored); a worker links its source's
+  .agents/rules/, skills/
+  AGENTS.md
+```
+
+Three families of files, each read by its own consumer:
+
+- **`config.toml` / `config.local.toml`, every level:** a project's settings, read along the chain by launches, pi,
+  and workflows. The global pair is the chain's farthest level, appended from its fixed location. `.local` means "not
+  committed": this machine's values, secrets, or anything you don't want in a diff (`/.piton/*.local.*` keeps it out
+  of Git).
+- **`config.host.toml` / `config.host.local.toml`, global only:** read by the daemon. Top-level keys: `socket`, `log`,
+  `roots`, `favorites`, `logging`, `default_attach_mode`, `empty_grace_ms`, `keep_awake`; tables `[pi]`, `[sandbox]`
+  (only `command`, the sandbox program), `[env]`, `[stop]`, `[tailnet]`, and `[development]` (switches for a
+  development install, in [development.md](development.md)), which the pi package reads through
+  `piton config resolve --global` on whichever machine pi runs.
+- **`config.client.toml`, global only:** the apps' preferences (`text_font`, `code_font`; themes and keybindings
+  later), served by the host to every client. It has no local file: a device keeps its own value in its app.
+
+Keys are snake_case. A project file's tables are each parsed on their own, so a bad value in `[tracker]` never stops
+permission checks; a syntax error, or an unknown top-level key, fails every table of that file, and the message names
+the line. A host or client file has one schema and is read whole.
+
+- **Chains.** `.piton/` is read from the source checkout (a worker's source; the checkout around a subfolder), then
+  each ancestor strictly below the home folder, then the global tier. `.agents/` starts from the workspace's own
+  checkout, as pi does, so instructions apply where they're edited, and ends at the global tier's `agents/`. The home
+  folder itself is not a level. A level that exists but can't be read is an error. `.piton/.local/` is never
+  configuration.
+- **Locating the global tier** can't depend on the workspace, whose `mise.toml` can set `HOME` or `XDG_CONFIG_HOME`.
+  The daemon resolves it once from its login-shell environment and sets `PITON_CONFIG_HOME` for every pi after the
+  mise environment; a pi started outside piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
+- **Where a key may be set** is fixed by piton, declared next to each table's type, and enforced by the reader (a
+  file that breaks it fails that table, naming the key):
+  - `sandbox.base`, `groups`, `bypass`, `network.profile`: the global `config.toml` only.
+  - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
+    repository's.
+  - `web_search.api_key`: a `config.local.toml` only (a secret).
+  - `branches.username`: a project's `config.local.toml`, where `config.toml` is committed; either file in the global
+    tier, which is yours alone.
+  - Everything else, keep-awake included: either file, any level.
+- **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
+  - `[sandbox]`: grant lists (`allow`, `read`, `read_file`, `allow_file`, `deny`, `unix_socket`) only add. The
+    daemon's `sandbox` module, the only code that knows the backend, translates the merged table and the
+    protected-file rules into a nono profile for each launch.
+  - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
+    and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
+  - `mcp.json`: the nearer entry replaces the whole entry of the same server.
+  - `[branches]`, `[web_search]`, the host file's keys: the nearer value per key.
+  - `[tracker]` and `[forge]`: each the nearest table, whole.
+  - `policies.md` and rules: combined, farthest first.
+- **Writes.** The apps and `piton config set` change keys with `toml_edit`, keeping comments and layout
+  (`--global` for the global `config.toml`, `--scope host|client` for the host and client files). The pi package
+  writes through `piton config set --dry-run`, which returns the file's new text; a protected file then goes through
+  the daemon's confirmation. Nothing else writes these files.
+- Paths in every file accept `~` and `$HOME`.
+- **When read.** The global files at daemon start and on every change (watched; keys that need a restart are
+  reported as pending); the project chain at every launch and `worker create`; the pi package's files at pi start and
+  `/reload`. `piton config check` validates the workspace's chain and the host and client files, lists the files
+  read, and warns about what doesn't travel (below); `piton config get` serves one resolved part to other tools (the
+  Neovim plugin's tracker queue).
+- **One resolver.** The daemon crate's `config` module is the only implementation (layout below). The pi package and
+  the Neovim plugin call `piton config resolve` / `piton config get`, which read files and don't need the daemon
+  running. The daemon passes the binary's path in `PITON_BIN` after the mise environment; the pi package caches the
+  result and calls again only when a watched file changed. The result is per part: one per table of `config.toml`,
+  named as the table, plus MCP, the global tier's MCP alone, policies, and rule and skill folders. Each is its value or
+  its error, so a broken table fails only the tools that read it. `--global` returns the host file's `[development]`.
+- **Code layout.** `cli/src/config/` is the only code that reads or writes these files. Its `mod.rs` is the API;
+  the four layers are private:
+  - `model/`: what configuration is, with no I/O: paths and scopes, levels and chains, one file per project table
+    (its schema, where its keys may be set, checks, merge rule), the host and client files, and the daemon's options
+    with defaults.
+  - `read/`: one file into its parts, a chain into one value or error per part, the global tier's own files.
+  - `write/`: key edits that keep comments and layout, and the one write path (which file, the change as a dotted key
+    and a JSON value, checked before writing) for `piton config set` and the apps.
+  - `check/`: read-only diagnostics such as the portability warnings.
+
+  Outside it, and using its API: `commands/config.rs` (the `piton config` command), `apps/settings.rs` (the apps' settings
+  list), `daemon/` (reloading the global files: the daemon's options from the host file alone, so a broken client
+  file stops only the apps' list), `launch/sandbox.rs` (`[sandbox]` into a nono profile), and `state/` (the state
+  database).
+
+#### Config and state together
+
+- **Config or state.** Config is what you decide, preferences included: roots, favorites, appearance, keep-awake,
+  the logging default, sandbox grants, permissions. State is facts and history on this host: its identity, and later
+  sessions, drafts, recent projects. The database holds no preferences.
+- **Shared unless Local.** Each preference has one Local checkbox where its file has a local one. Unchecked, a host
+  preference lives in `config.host.toml` (every host through dotfiles); checked, in `config.host.local.toml` (this
+  host). A client preference unchecked lives in `config.client.toml`, served to every client (which caches it for
+  offline start); checked, in that app (this device). A shared client choice a client can't honor (a font it lacks)
+  falls back there only.
+- **The apps' settings list** (`daemon.state` `settings`) shows global config keys, each with `key` as written in its
+  file, `scope` (`host`, `client`, or `project` for the global `config.toml`), `placement` (`shared`, `local`, or
+  unset), whether its scope has a local file, its type, whether it applies live or after a restart, and whether the
+  apps may change it. `settings.set {scope, key, value, local?}` writes it. The daemon edits with `toml_edit`, keeping
+  comments and order, writes through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. The
+  apps edit the host file's keys (`socket` shown read-only), the client file, and the global `[sandbox]` and
+  `[workers]`; `[development]`, `[permissions]`, `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited
+  in the file. The apps never write repository or parent-folder files. A change is checked against the schema before
+  it's written. The daemon watches the global folder (and a symlink's target folder): edits apply at once; `log`,
+  `[env]`, and `[tailnet]` wait for a restart and show as pending; a file that can't be used keeps its last good
+  values and `settings_error` says why.
+
+#### State database
+
+SQLite (`rusqlite`, bundled), WAL, owned by the daemon alone, in its `0700` state folder. Tables, each added by the
+work that needs it: `host` (`host_id`); later `projects` (canonical source path, last used); `sessions` (piton's
+session identity and its state `draft`, `creating`, `live`, `failed`, title, pi session file); `drafts` and
+`draft_attachments` (size-bounded). Rows decode into Rust sum types at the boundary.
+
+- `PRAGMA user_version` is the schema version; ordered migrations run at start in one transaction, after a
+  `VACUUM INTO` backup of the previous version. A database newer than the binary refuses to start.
+- Deleting it resets this Mac's state; configuration is unaffected.
+- `piton state export <file>` and `piton state import <file>` move it to a replacement Mac (Migration Assistant
+  copying `~/.local/state/piton/` does the same), keeping `host_id` so clients see the same host. Import refuses over a
+  database that already has sessions unless forced. Sessions reopen where pi's own session files were copied too.
+
+#### Client storage
+
+The hosts it connects to and local client preferences in `UserDefaults`; the cached shared client preferences;
+imported fonts in Application Support; the phone's log capture in its `settings.json`; durable unsent work (outbox,
+local drafts) as versioned Codable files in Application Support, moved aside when they don't decode.
+
+#### A new or second Mac
+
+A host: clone the dotfiles (the global tier) and repositories, then run `piton setup` (the Mac app runs it on first
+launch). It's idempotent: it checks `pi`, `nono`, `mise`, and `tailscale`; validates the global configuration and
+that its `.local` files stay out of Git; installs the `piton` command and creates the database; and reports the
+tailnet address for clients. Registering the daemon to run at login is the Mac app's step. A client needs only a host's address. What doesn't travel is by design: this host's
+state (a replacement Mac imports it, above), `.local` files (secrets, per-host values, local preferences; recreated
+by hand), and workflow artifacts, which resume from the tracker. `piton config check` warns about absolute paths
+under another user's home and secrets in tracked files.
+
+Several hosts in the clients are a later follow-up: a list of hosts keyed by `host_id`, with either a switch or one
+session list grouped by host. Hosts stay independent; nothing syncs between them.
+
+#### Agent access
+
+A sandboxed agent reads its whole chain (the daemon adds read grants for the source's `.piton/`, each parent level,
+and the global tier) and writes only its workspace and `<source>/.piton/.local/`. It never reaches the state folder
+except `logs/` and `agent.sock`. `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the
+daemon after the mise environment.
+
+**Protected files** are everything a later pi loads from the workspace that could widen what an agent may do without
+asking, or run code outside the sandbox: the source checkout's `.piton/` (except `.local/`); pi's project `.pi/`
+folders (settings, MCP servers, extensions, skills, system prompts), which pi reads from the working folder. `.pi/` is
+protected at any depth in the workspace's checkout, since a session can start in a subfolder. `AGENTS.md`, rules, and
+`.agents/skills/` aren't protected: they change what the agent is told, not what it may do. A skill's `allowed-tools`
+grants nothing unless the user opts in with `skill_grants = true` in `[permissions]`; with it on, an agent that edits a
+skill can grant itself the tools it lists. Without protection, a sandboxed agent in the source checkout could add `allow = ["bash(*)"]` to
+`[permissions.host]` in `.piton/config.toml`, and a host session in the same checkout would run any command without asking from its
+next tool call. Changes are gated where they're written:
+
+1. **OS sandbox.** The daemon adds raw Seatbelt rules to each sandboxed launch: `(deny file-write* ...)` with regexes
+   for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` at any depth in the checkout. Every
+   protected name matches in any case (`.PI`, `.PITON`), since APFS is case-insensitive by
+   default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
+   shell commands, scripts, `git checkout`, MCP servers, pi itself. nono's typed rules can't express a read-only
+   folder inside a writable one; its raw-rule field (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the
+   allows so the deny wins. `agent/protected.rs` is the one definition; `piton config protected --seatbelt-rules`
+   prints the rules, and `cli/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames,
+   hard links, symlinks, other cases).
+2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
+   the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
+   over `~/.local/state/piton/agent.sock` (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps
+   and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
+   approve: answers come only from clients. One pending request per session; it ends when the agent stops waiting or
+   its run ends. Every protected write asks. The dialog carries the file's current content, so the
+   apps show a diff without reading the file. On approval the daemon walks the path from the checkout without
+   following any symlink, so a folder the agent swapped for a link while the user decided can't redirect the write.
+   Only a pi running outside piton (no session token) has the permissions extension ask itself and write directly,
+   whatever `defaultMode` or auto-accept says.
+
+A rejected change never reaches disk. Limits: shell writes in host sessions aren't gated (as in Claude Code without
+its sandbox); the rule is macOS-only. Codex and Claude Code don't need step 2 because they sandbox each shell command and run their
+edit tools unsandboxed; piton sandboxes the whole pi process.
+
+**Sandbox backend.** The nono CLI on PATH for development. The `nono` Rust crate (the sandbox core: `CapabilitySet`,
+`Sandbox::apply_auto`, `add_platform_rule`) could be linked into the daemon through a `piton sandbox-exec` helper,
+removing the PATH dependency and the profile file; but nono's policy groups and profile inheritance live in its CLI,
+so the daemon would carry and sync about 120 path entries itself. That's the step to take before piton is
+distributed (#224). A typed write-deny with nested re-allow, which would replace the raw rules, is requested upstream
+([nono#2310](https://github.com/nolabs-ai/nono/issues/2310)). A custom Seatbelt launcher is rejected: keeping system and credential path lists correct across macOS releases is
+security work with no upstream sharing it.
+
 ### Deploying from a sandbox
 
-Status: planned. Today installs are host-only (`mise run daemon:install`, `apps:mac`, `apps:phone`, `apps:ipad`).
+Status: planned. Today installs are host-only (`mise run cli:install`, `apps:mac`, `apps:iphone`, `apps:ipad`).
 
 An agent in a sandboxed session may deploy what it built: the daemon, the Mac app, or the iOS app on the iPhone or
 iPad. This doesn't widen what the agent can do: the code it wrote runs on the host once deployed, whoever runs the
@@ -613,7 +857,7 @@ per target:
   paired and reachable; otherwise the request is refused (`device_unavailable`). Gated like the Mac app when that
   device is connected to the daemon.
 
-The gates apply to every deploy, the user's included: on the host, `mise run daemon:install` goes through the same
+The gates apply to every deploy, the user's included: on the host, `mise run cli:install` goes through the same
 request while a daemon is running (and installs directly when none is). `--now` is the user's override, never an
 agent's.
 
@@ -649,10 +893,26 @@ Upstream pi has been building multi-client support: a "server mode" (badlogic in
 `main`). None of it is in pi 1.5.2. Keep piton's pi-facing side behind one adapter so a future server mode replaces it
 rather than the daemon.
 
-`pi-durable` (experimental, in the same repository) is not an alternative: it's a library for building your own agent
-harness in your own process, with its own storage, and it doesn't use the pi coding agent's sessions, settings,
-extensions, or RPC. Using it would mean replacing pi. It is only a design reference: its `watch()` (windowed snapshot
-plus changes) has the session view's shape.
+`pi-durable` (experimental, in the same repository) is a library for building your own agent harness in your own
+process, with its own storage; it doesn't use the pi coding agent's sessions, settings, extensions, or RPC. piton
+stays on the pi coding agent for now (2026-11-13), but a later switch to a pi-durable runner is a real option: it
+would bring restart-durable runs, piton-owned provider login, and a piton-owned Neovim client. So piton's interfaces
+are designed for the runtime to be replaced:
+
+- **Clients never see pi.** The `view` protocol, `settings.set`, and `daemon.state` speak piton's own model
+  (sessions, items, dialogs, settings); no pi RPC record, pi setting name, or pi file path crosses to a client.
+  `piton attach` (pi.nvim's raw RPC) is the one pi-shaped surface, and it's kept separate.
+- **One runtime boundary in the daemon.** Launching, the session task's pi I/O, and the RPC-to-view translation
+  stay together behind one adapter; nothing else in the daemon reads pi records.
+- **Configuration is piton's.** The resolver's parts (permissions, MCP, rules, skills, policies, workflows,
+  settings) are runtime-neutral; only their delivery is pi-specific (a pi extension today, hooks and sections in a
+  pi-durable runner). Settings piton adds (daemon, sandbox, host and client preferences, and what piton's
+  extensions read) live in piton's files, never in pi's `settings.json`. pi's own configuration (its
+  `settings.json`: default model, theme, packages; `auth.json`, keybindings, sessions, a project's `.pi/`) stays
+  pi's, and piton doesn't write it. If the apps ever change something pi owns (the default model, say), it's a
+  piton setting the adapter applies to pi.
+- **pi-specific pieces are named as such:** the protected `.pi/` folder, skill discovery through
+  `resources_discover`, `PI_CODING_AGENT_DIR`, and pi's session files. They're the parts a switch removes.
 
 ## Open questions
 

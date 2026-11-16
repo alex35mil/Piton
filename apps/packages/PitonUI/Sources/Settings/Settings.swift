@@ -5,11 +5,13 @@ import SwiftUI
 /// Mac's Settings window (`SettingsSplit`) and in the iPad's app window (RootView's settings mode), a list that pushes
 /// sections in the phone's Settings tab. Declared in display order.
 public enum SettingsSection: String, CaseIterable, Identifiable, Hashable, Sendable {
-    /// Daemon state and keep-awake (the Mac).
+    /// Daemon state and keep-awake.
     case general
-    /// The phone's Mac address (device settings).
+    /// Where this device connects: the phone's host address; the Mac's role.
     case connection
-    /// Fonts (device settings).
+    /// Every setting of the host (its files and its state).
+    case host
+    /// Fonts: shared through the host, or local to this device.
     case appearance
     case logging
 
@@ -19,6 +21,7 @@ public enum SettingsSection: String, CaseIterable, Identifiable, Hashable, Senda
         switch self {
         case .connection: "Connection"
         case .general: "General"
+        case .host: "Host"
         case .appearance: "Appearance"
         case .logging: "Logging"
         }
@@ -28,6 +31,7 @@ public enum SettingsSection: String, CaseIterable, Identifiable, Hashable, Senda
         switch self {
         case .connection: "network"
         case .general: "gearshape"
+        case .host: "server.rack"
         case .appearance: "textformat"
         case .logging: "waveform.path.ecg"
         }
@@ -45,9 +49,7 @@ public struct GeneralSettings: View {
     public var body: some View {
         Form {
             Section {
-                KeepAwakeToggle(
-                    store: store,
-                    note: "A switch lasts until the daemon restarts; the default is keep_awake in piton's config.toml.")
+                KeepAwakeToggle(store: store)
             }
             Section("piton") {
                 LabeledContent("Connection", value: connection)
@@ -116,20 +118,26 @@ struct SettingsSplit<Content: View>: View {
     /// The Mac's Settings window (⌘,): a sidebar of sections, in System Settings' geometry.
     public struct MacSettings: View {
         let store: Store
+        @Binding var role: MacRole?
+        @Binding var hostAddress: String
         @Environment(\.dismiss) private var dismiss
 
-        public init(store: Store) {
+        public init(store: Store, role: Binding<MacRole?>, hostAddress: Binding<String>) {
             self.store = store
+            _role = role
+            _hostAddress = hostAddress
         }
 
         public var body: some View {
-            SettingsSplit(sections: [.general, .appearance, .logging], sidebarWidth: Self.sidebarWidth) { section in
+            SettingsSplit(
+                sections: [.general, .connection, .host, .appearance, .logging], sidebarWidth: Self.sidebarWidth
+            ) { section in
                 switch section {
                 case .general: GeneralSettings(store: store)
-                case .appearance: AppearanceSettings()
+                case .connection: MacConnectionSettings(role: $role, hostAddress: $hostAddress)
+                case .host: HostSettings(store: store)
+                case .appearance: AppearanceSettings(store: store)
                 case .logging: LoggingSettings(scope: .host(store))
-                // The Mac reaches its daemon over the local socket: nothing to set.
-                case .connection: EmptyView()
                 }
             }
             // A fixed width (taller is fine), as System Settings has; the scene sizes the window to it.
@@ -144,6 +152,36 @@ struct SettingsSplit<Content: View>: View {
         /// System Settings' window and sidebar widths (macOS 13 and later).
         private static let width: CGFloat = 715
         private static let sidebarWidth: CGFloat = 215
+    }
+#endif
+
+#if os(macOS)
+    /// What this Mac does for piton: a host (its own daemon) or a client of another host. Changing it returns to
+    /// onboarding.
+    struct MacConnectionSettings: View {
+        @Binding var role: MacRole?
+        @Binding var hostAddress: String
+
+        var body: some View {
+            Form {
+                Section {
+                    LabeledContent("This Mac", value: description)
+                    Button("Change…") { role = nil }
+                } footer: {
+                    Text("A host runs your agents; a client connects to another host over Tailscale.")
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Connection")
+        }
+
+        private var description: String {
+            switch role {
+            case .host: "Host"
+            case .client: "Client of \(hostAddress)"
+            case nil: "Not set up"
+            }
+        }
     }
 #endif
 
@@ -192,7 +230,7 @@ struct SettingsSplit<Content: View>: View {
     }
 
     /// A device's settings sections (iPhone, iPad): the daemon in General, then the device's own settings.
-    let deviceSections: [SettingsSection] = [.general, .connection, .appearance, .logging]
+    let deviceSections: [SettingsSection] = [.general, .connection, .host, .appearance, .logging]
 
     /// One of a device's settings sections (iPhone, iPad).
     struct DeviceSettingsSection: View {
@@ -205,7 +243,8 @@ struct SettingsSplit<Content: View>: View {
             switch section {
             case .general: GeneralSettings(store: store)
             case .connection: ConnectionSettings(host: $host, port: $port)
-            case .appearance: AppearanceSettings()
+            case .host: HostSettings(store: store)
+            case .appearance: AppearanceSettings(store: store)
             case .logging: LoggingSettings(scope: .device)
             }
         }
@@ -236,8 +275,9 @@ struct SettingsSplit<Content: View>: View {
                 switch (section, store) {
                 case (.connection, _): ConnectionSettings(host: $host, port: $port)
                 case (.general, .some(let store)): GeneralSettings(store: store)
-                case (.general, nil): EmptyView()
-                case (.appearance, _): AppearanceSettings()
+                case (.general, nil), (.host, nil): EmptyView()
+                case (.host, .some(let store)): HostSettings(store: store)
+                case (.appearance, let store): AppearanceSettings(store: store)
                 case (.logging, _): LoggingSettings(scope: .device)
                 }
             }
@@ -245,7 +285,7 @@ struct SettingsSplit<Content: View>: View {
 
         private var sections: [SettingsSection] {
             switch store {
-            case .some: [.general, .connection, .appearance, .logging]
+            case .some: [.general, .connection, .host, .appearance, .logging]
             case nil: [.connection, .appearance, .logging]
             }
         }

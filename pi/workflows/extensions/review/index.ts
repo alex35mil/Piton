@@ -8,7 +8,8 @@ import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { workflowTools } from "../__lib/tools.js"
 
 import * as project from "../../../extensions/__lib/project.js"
-import { EPIC_ROOT, GIG_ROOT, PROJECT_ROOT, type DeliverableKind } from "../__lib/domain.js"
+import { PITON_DIR } from "../../../extensions/__lib/settings.js"
+import { EPIC_ROOT, GIG_ROOT, type DeliverableKind } from "../__lib/domain.js"
 import {
     entityLabel,
     LOCAL_REVIEWS_DIR,
@@ -17,7 +18,7 @@ import {
     resolveEntityPath,
 } from "../__lib/entity.js"
 import * as Git from "../__lib/git.js"
-import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
+import { assertArtifactPersistencePrepared, readProjectPolicies as readPolicies } from "../__lib/project-config.js"
 import {
     CANDIDATE_FILE,
     isFailedOutcome,
@@ -852,7 +853,7 @@ export async function buildDeliverableReviewPrompt(
         deliverableKindReviewFocus(entityStatus.kind),
         deliverableRoundFocus(round, artifact, Boolean(plan)),
         instructions ? `\nExtra instructions:\n${instructions}` : "",
-        projectPolicies ? ["", "# Project Policies (.project/policies.md)", "", projectPolicies].join("\n") : "",
+        projectPolicies ? ["", "# Project Policies (policies.md)", "", projectPolicies].join("\n") : "",
         "",
         "---",
         "",
@@ -915,8 +916,7 @@ async function readParentEpicContext(cwd: string, deliverableDir: string): Promi
 }
 
 async function readProjectPolicies(cwd: string): Promise<string> {
-    const filePath = path.join(project.resolveRootDir(cwd), PROJECT_ROOT, "policies.md")
-    return truncate(await readOptional(filePath), MAX_EMBEDDED_FILE_BYTES)
+    return truncate(readPolicies(cwd), MAX_EMBEDDED_FILE_BYTES)
 }
 
 /** Where the branch's own changes start: the merge base with the target, remote-tracking when it exists. */

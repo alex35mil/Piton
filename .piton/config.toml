@@ -1,0 +1,207 @@
+[sandbox]
+allow = [
+    "$HOME/Library/Caches/org.swift.swiftpm"
+]
+read = [
+    "$HOME/Library/org.swift.swiftpm/security",
+    "$HOME/.local/state/piton/logs"
+]
+read_file = [
+    "$HOME/Library/Preferences/com.apple.dt.Xcode.plist",
+    "$HOME/Library/Developer/Xcode/SDKToSimulatorIndexMapping.plist",
+    "$HOME/.local/state/piton/piton.log",
+    "$HOME/.local/state/piton/launchd.log"
+]
+
+[workers]
+skip = ["apps/.build/index-build"]
+
+[permissions]
+deny = [
+    "read(*mise.local.toml)"
+]
+allow = [
+    "mcp(github, hint: readOnly)",
+    "mcp(github, projects_write)",
+    "mcp(github, issue_write)",
+    "mcp(github, add_issue_comment)",
+    "mcp(github, update_issue_comment)"
+]
+
+[branches]
+format = "identifier-title"
+
+[tracker]
+provider = "github"
+mcp_server = "github"
+repository = { owner = "alex35mil", repo = "piton" }
+project = { owner = "alex35mil", owner_type = "user", number = 2 }
+
+[tracker.labels.groups.kind]
+applies_to = ["epic", "deliverable"]
+cardinality = "exactlyOne"
+
+[tracker.labels.groups.kind.values.epic]
+name = "Kind: Epic"
+color = "#8250DF"
+description = "A multi-deliverable initiative."
+
+[tracker.labels.groups.kind.values.feature]
+name = "Kind: Feature"
+color = "#0969DA"
+description = "New user-visible or system capability."
+
+[tracker.labels.groups.kind.values.bugfix]
+name = "Kind: Bugfix"
+color = "#CF222E"
+description = "Correction of defective behavior."
+
+[tracker.labels.groups.kind.values.research]
+name = "Kind: Research"
+color = "#1A7F37"
+description = "Investigation producing evidence and conclusions."
+
+[tracker.labels.groups.kind.values.refactor]
+name = "Kind: Refactor"
+color = "#BC4C00"
+description = "Behavior-preserving structural improvement."
+
+[tracker.labels.groups.kind.values.audit]
+name = "Kind: Audit"
+color = "#9A6700"
+description = "Evidence-based assessment and recommendations."
+
+[tracker.labels.groups.kind.values.chore]
+name = "Kind: Chore"
+color = "#57606A"
+description = "Maintenance or operational work."
+
+[tracker.labels.groups.area]
+applies_to = ["epic", "deliverable"]
+cardinality = "oneOrMore"
+
+[tracker.labels.groups.area.values.pi-workflows]
+name = "Area: Pi/Workflows"
+color = "#006B75"
+description = "Epic, Task, Gig, and PR workflows: skills, references, and workflow extensions."
+
+[tracker.labels.groups.area.values.pi-context]
+name = "Area: Pi/Ext/Context"
+color = "#B2E0E6"
+description = "The context extension: /context session introspection."
+
+[tracker.labels.groups.area.values.pi-fetch]
+name = "Area: Pi/Ext/Fetch"
+color = "#B2E0E6"
+description = "The fetch extension: URL retrieval as Markdown."
+
+[tracker.labels.groups.area.values.pi-mcp]
+name = "Area: Pi/Ext/MCP"
+color = "#B2E0E6"
+description = "The mcp extension: MCP server integration."
+
+[tracker.labels.groups.area.values.pi-permissions]
+name = "Area: Pi/Ext/Permissions"
+color = "#B2E0E6"
+description = "The permissions extension: allow, deny, and ask rules."
+
+[tracker.labels.groups.area.values.pi-rules]
+name = "Area: Pi/Ext/Rules"
+color = "#B2E0E6"
+description = "The rules extension: rule files injected into the system prompt."
+
+[tracker.labels.groups.area.values.pi-status]
+name = "Area: Pi/Ext/Status"
+color = "#B2E0E6"
+description = "The status extension: runtime and rate-limit status entries."
+
+[tracker.labels.groups.area.values.pi-web-search]
+name = "Area: Pi/Ext/WebSearch"
+color = "#B2E0E6"
+description = "The web-search extension: Brave Search tool."
+
+[tracker.labels.groups.area.values.pi-package]
+name = "Area: Pi/Package"
+color = "#4FB3BF"
+description = "Pi package plumbing: dependencies, Pi upgrades, shared extension lib, test harness, commit skill."
+
+[tracker.labels.groups.area.values.daemon]
+name = "Area: CLI"
+color = "#DEA584"
+description = "The piton binary (Rust): daemon and CLI: pi RPC processes, worker clones, attach, and app serving."
+
+[tracker.labels.groups.area.values.apps-kit]
+name = "Area: Apps/Kit"
+color = "#F05138"
+description = "PitonKit: daemon protocol, transport, session store, and app logging."
+
+[tracker.labels.groups.area.values.apps-ui]
+name = "Area: Apps/UI"
+color = "#F47D5E"
+description = "PitonUI: shared SwiftUI views for sessions, session list, and settings."
+
+[tracker.labels.groups.area.values.apps-ios]
+name = "Area: Apps/iOS"
+color = "#FBB8A4"
+description = "The iOS and iPadOS app target and iOS-specific behavior."
+
+[tracker.labels.groups.area.values.apps-macos]
+name = "Area: Apps/macOS"
+color = "#FBB8A4"
+description = "The macOS app target and macOS-specific behavior."
+
+[tracker.labels.groups.area.values.nvim]
+name = "Area: Neovim"
+color = "#57A143"
+description = "The Neovim plugin over piton worker: pickers, tabs, and the tracker queue."
+
+[tracker.labels.groups.area.values.tooling]
+name = "Area: Tooling"
+color = "#EDEDED"
+description = "Repo-wide tooling: mise tasks, sandbox, signing, log collector, agent config, cross-area migrations."
+
+[tracker.labels.groups.provider]
+applies_to = ["epic", "deliverable"]
+cardinality = "zeroOrMore"
+
+[tracker.labels.groups.provider.values.github]
+name = "Provider: GitHub"
+color = "#24292F"
+description = "Specific to the GitHub tracker or forge."
+
+[tracker.labels.groups.provider.values.linear]
+name = "Provider: Linear"
+color = "#5E6AD2"
+description = "Specific to the Linear tracker."
+
+[tracker.labels.groups.gate]
+applies_to = ["deliverable"]
+cardinality = "zeroOrMore"
+
+[tracker.labels.groups.gate.values.plan]
+name = "Gate: Plan"
+color = "#FBCA04"
+description = "Wait for the user's plan approval before implementing."
+
+[tracker.fields]
+priority = { scope = "project", field = "Priority", values = ["Urgent", "High", "Medium", "Low"] }
+
+[tracker.fields.status]
+field = "Status"
+
+[tracker.fields.status.values]
+backlog = "Backlog"
+todo = "Todo"
+in_progress = "In Progress"
+in_review = "In Review"
+done = "Done"
+canceled = "Canceled"
+
+[tracker.fields.phase]
+field = "Phase"
+values = { planning = "Planning", execution = "Execution", self_review = "Self-Review" }
+
+[forge]
+provider = "github"
+mcp_server = "github"
+repository = { owner = "alex35mil", repo = "piton" }

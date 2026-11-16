@@ -1,6 +1,8 @@
--- The source's queued (Todo and Backlog) tracker work, read from the tracker
--- configured in `<source>/.project/integrations.json`, with the credential
--- the tracker's MCP registration names.
+-- The source's queued (Todo and Backlog) tracker work, read from the nearest
+-- `[tracker]` of piton's configuration chain (`config.toml`), with the
+-- credential the tracker's MCP registration names. Both come from
+-- `piton config get`; the plugin reads no configuration file itself. Keys are
+-- as the file has them (snake_case: `mcp_server`, `owner_type`).
 
 ---@class QueueParent
 ---@field mention string How a workflow command names the Epic.
@@ -29,32 +31,31 @@
 
 ---@class QueueTracker
 ---@field source string
----@field config table The `tracker` object of `integrations.json`.
+---@field config table The `[tracker]` table of `config.toml`.
 ---@field credential string Name of the environment variable holding the token.
 
 local util = require("piton.util")
+local cli = require("piton.cli")
 
 local M = {}
-
-local INTEGRATIONS = ".project/integrations.json"
 
 --- Queued items, Todo before Backlog, each in tracker priority order.
 --- Refuses when the tracker can't be read.
 ---@param source string
 ---@return QueueItem[]
 function M.load(source)
-    local file = vim.fs.joinpath(source, INTEGRATIONS)
-    if not vim.uv.fs_stat(file) then
-        util.refuse("No tracker configured: " .. file .. " doesn't exist")
+    local found = cli.config("tracker", source)
+    if type(found) ~= "table" then
+        util.refuse("No tracker configured: no [tracker] in " .. source .. "/.piton/config.toml or its parent folders")
     end
-    local config = util.read_json(file)
-    local tracker = type(config) == "table" and config.tracker or nil
-    if type(tracker) ~= "table" or type(tracker.mcpServer) ~= "string" then
+    local file = tostring(found.path)
+    local tracker = found.value
+    if type(tracker) ~= "table" or type(tracker.mcp_server) ~= "string" then
         util.refuse("No tracker configured in " .. file)
     end
 
     ---@type QueueTracker
-    local queue_tracker = { source = source, config = tracker, credential = M.credential(source, tracker.mcpServer) }
+    local queue_tracker = { source = source, config = tracker, credential = M.credential(source, tracker.mcp_server) }
     if tracker.provider == "github" then
         return require("piton.queue.github").load(queue_tracker)
     elseif tracker.provider == "linear" then
@@ -65,30 +66,20 @@ function M.load(source)
 end
 
 --- The environment variable the MCP registration authorizes with, from the
---- same settings files piton's pi package reads (global, then project, then local).
+--- same resolved MCP servers piton's pi package registers.
 ---@param source string
 ---@param server string
 ---@return string
 function M.credential(source, server)
-    local agent_dir = vim.env.PI_CODING_AGENT_DIR and vim.fs.normalize(vim.env.PI_CODING_AGENT_DIR)
-        or vim.fs.joinpath(vim.env.HOME, ".pi", "agent")
-    local files = {
-        vim.fs.joinpath(agent_dir, "mcp.json"),
-        vim.fs.joinpath(source, ".agents", "mcp.json"),
-        vim.fs.joinpath(source, ".agents", "mcp.local.json"),
-    }
+    local mcp = cli.config("mcp", source)
     local registration
-    for _, file in ipairs(files) do
-        if vim.uv.fs_stat(file) then
-            local settings = util.read_json(file)
-            local servers = type(settings) == "table" and settings.mcpServers or nil
-            if type(servers) == "table" and servers[server] ~= nil then
-                registration = servers[server]
-            end
+    for _, entry in ipairs(type(mcp) == "table" and type(mcp.servers) == "table" and mcp.servers or {}) do
+        if type(entry) == "table" and entry.name == server then
+            registration = entry.config
         end
     end
     if type(registration) ~= "table" then
-        util.refuse("MCP server " .. server .. " isn't registered in:\n" .. table.concat(files, "\n"))
+        util.refuse("MCP server " .. server .. " isn't registered in " .. source .. "'s configuration (mcp.json)")
     end
     local authorization = type(registration.headers) == "table" and registration.headers.Authorization or nil
     local variable = type(authorization) == "string" and authorization:match("^Bearer %${([%a_][%w_]*)}$")

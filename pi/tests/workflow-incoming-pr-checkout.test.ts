@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -52,20 +53,13 @@ function fixture(diverged = false) {
             )
             .trim()
     git(root, "init", "-b", "main")
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
     fs.writeFileSync(path.join(root, "README.md"), "parent\n")
     git(root, "add", ".")
     git(root, "commit", "-m", "parent")
-    fs.mkdirSync(path.join(root, ".project"))
-    fs.writeFileSync(
-        path.join(root, ".project/config.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
+    fs.mkdirSync(path.join(root, ".piton"))
     const forge = { provider: "github", mcpServer: "fixture", repository: { owner: "upstream", repo: "app" } }
-    fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
-        JSON.stringify({ tracker: minimalTracker(), forge }),
-    )
+    writeProjectConfig(root, { branchFormat: "identifier-title", tracker: minimalTracker(), forge })
     prepareArtifactPersistence(root)
     fs.writeFileSync(path.join(root, "README.md"), "parent staged\n")
     git(root, "add", "README.md")
@@ -152,7 +146,7 @@ function fixture(diverged = false) {
         )
         return JSON.parse((result.content[0] as { text: string }).text)
     }
-    const checkout = path.join(root, ".project/.local/pull-requests/12/checkout")
+    const checkout = path.join(root, ".piton/.local/pull-requests/12/checkout")
     const local = path.dirname(checkout)
     const parentState = () => ({
         head: git(root, "rev-parse", "HEAD"),
@@ -208,7 +202,7 @@ describe("registered incoming PR checkout tool", () => {
                 assert.equal(prepared.reviewBaseSha, f.common)
                 assert.equal(prepared.revision.base.sha, f.base)
                 assert.equal(prepared.paths.checkout.absolute, f.checkout)
-                assert.equal(prepared.paths.checkout.relative, ".project/.local/pull-requests/12/checkout")
+                assert.equal(prepared.paths.checkout.relative, ".piton/.local/pull-requests/12/checkout")
                 assert.equal(fs.existsSync(path.join(f.checkout, "src")), false)
                 assert.ok(fs.statSync(path.join(f.checkout, ".git")).isDirectory())
                 assert.equal((await f.call("prepare")).phase, "prepared")

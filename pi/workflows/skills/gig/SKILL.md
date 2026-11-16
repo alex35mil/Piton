@@ -1,6 +1,6 @@
 ---
 name: gig
-description: "Use for standalone Deliverable work under <repo>/.project/.local/gigs/. Initializes or resumes a Gig, then follows the shared Deliverable lifecycle."
+description: "Use for standalone Deliverable work under <repo>/.piton/.local/gigs/. Initializes or resumes a Gig, then follows the shared Deliverable lifecycle."
 allowed-tools:
     - "inspect_session_analysis"
     - "preflight_gig"
@@ -38,9 +38,9 @@ allowed-tools:
     - "select_pull_request_resource"
     - "cleanup_delivery_branch"
     - "prepare_merge_resolution_comment"
-    - "read(.project/*)"
-    - "write(.project/*)"
-    - "edit(.project/*)"
+    - "read(.piton/*)"
+    - "write(.piton/*)"
+    - "edit(.piton/*)"
 ---
 
 # Gig
@@ -57,7 +57,7 @@ The Deliverable lifecycle owns planning, root cause, review, implementation, ver
 
 ## Resume
 
-Follow the Deliverable resume steps for a Gig under `.project/.local/gigs/`. Verify `entity: "gig"` and that it isn't inside an Epic, then continue the lifecycle.
+Follow the Deliverable resume steps for a Gig under `.piton/.local/gigs/`. Verify `entity: "gig"` and that it isn't inside an Epic, then continue the lifecycle.
 
 ## Initialize
 

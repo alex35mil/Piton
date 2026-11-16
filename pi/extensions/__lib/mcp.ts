@@ -2,7 +2,7 @@ import * as fs from "node:fs"
 
 import type { ExtensionAPI, ToolDefinition, ToolAnnotations } from "@earendil-works/pi-coding-agent"
 
-import { getExtensionSettingsPaths } from "./project.js"
+import { resolveSettings, section, type LevelKind } from "./settings.js"
 
 export const MCP_TOOL_CATALOG_EVENT = "mcp:tool-catalog"
 export const MCP_TOOL_DECORATORS_EVENT = "mcp:tool-decorators"
@@ -31,7 +31,6 @@ export interface McpToolDecorators {
     use(decorator: McpToolDecorator): void
 }
 
-export type McpSettingsTier = "global" | "project" | "local"
 export type McpSettings = Record<string, unknown> & {
     mcpServers?: Record<string, unknown>
     autoEnableCodemode?: boolean
@@ -40,7 +39,9 @@ export type McpSettings = Record<string, unknown> & {
 export interface ConfiguredMcpServer {
     name: string
     config: unknown
-    tier: McpSettingsTier
+    /** The file the entry came from, and its level in piton's configuration chain. */
+    path: string
+    level: LevelKind
 }
 
 export function validateMcpName(kind: "server" | "tool", name: string): void {
@@ -114,10 +115,6 @@ export function observeMcpTools(pi: Pick<ExtensionAPI, "events" | "on">): McpToo
     return catalog
 }
 
-export function getMcpSettingsPaths(cwd: string) {
-    return getExtensionSettingsPaths("mcp", cwd)
-}
-
 export function isMcpRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value)
 }
@@ -177,29 +174,20 @@ export function mcpServerKey(name: string): string {
     return name.replace(/-/g, "_")
 }
 
-// Shared runtime/inspection merge; never connects or executes credential commands.
+/**
+ * The MCP servers pi registers: piton's resolved chain (the nearer entry replaces the whole entry of the same server,
+ * names differing only by `-` and `_` conflict). Without project trust, only the global tier's. Never connects or
+ * executes credential commands.
+ */
 export function readMcpConfiguration(cwd: string, projectTrusted: boolean) {
-    const paths = getMcpSettingsPaths(cwd)
-    const servers = new Map<string, ConfiguredMcpServer>()
-    let autoEnableCodemode: boolean | undefined
-    for (const tier of ["global", "project", "local"] as const) {
-        if (tier !== "global" && !projectTrusted) continue
-        const settings = readMcpSettings(paths[tier])
-        if (settings.autoEnableCodemode !== undefined) autoEnableCodemode = settings.autoEnableCodemode
-        for (const [name, config] of Object.entries(settings.mcpServers ?? {})) {
-            servers.set(name, { name, config, tier })
-        }
-    }
-    const namespaces = new Map<string, string>()
-    for (const name of servers.keys()) {
-        const key = mcpServerKey(name)
-        const clash = namespaces.get(key)
-        if (clash !== undefined) {
-            throw new Error(
-                `MCP server ${JSON.stringify(name)} conflicts with configured server ${JSON.stringify(clash)}`,
-            )
-        }
-        namespaces.set(key, name)
-    }
-    return { servers: [...servers.values()], autoEnableCodemode }
+    const resolved = resolveSettings(cwd)
+    // Without trust only the global tier is read, so the project's files can't break it.
+    const chosen = section(projectTrusted ? resolved.mcp : resolved.mcp_global)
+    const servers: ConfiguredMcpServer[] = chosen.servers.map(({ name, config, path, level }) => ({
+        name,
+        config,
+        path,
+        level,
+    }))
+    return { servers, autoEnableCodemode: chosen.autoEnableCodemode }
 }

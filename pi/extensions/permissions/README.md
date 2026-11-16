@@ -4,36 +4,29 @@ Controls tool execution with configurable allow/deny/ask rules. Prompts the user
 
 ## Configuration
 
-Settings file: `permissions.json` (3 tiers, each with a runtime-specific file):
-
-| Tier    | Shared                                       | Runtime                                                |
-| ------- | -------------------------------------------- | ------------------------------------------------------ |
-| Global  | `~/<agent-dir>/permissions.json`             | `~/<agent-dir>/permissions.<runtime>.json`             |
-| Project | `<repo-root>/.agents/permissions.json`       | `<repo-root>/.agents/permissions.<runtime>.json`       |
-| Local   | `<repo-root>/.agents/permissions.local.json` | `<repo-root>/.agents/permissions.<runtime>.local.json` |
+Settings: `[permissions]` and `[permissions.<runtime>]` of `config.toml` (then `config.local.toml`) in every level of piton's `.piton/` chain, farthest first: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, then `<repo-root>/.piton/`. `piton config resolve` reads them.
 
 ### Runtime
 
 `PITON_RUNTIME` says where Pi runs: unset (or empty) means `host`, `sandbox` means a sandboxed worker, such as a nono worker launched by piton. Any other value is invalid: tools are blocked until it's fixed, like invalid settings.
 
-Only the current runtime's files load. They merge in this order, the more specific location winning: global, global runtime, project, project runtime, local, local runtime. `allow`, `ask`, and `deny` lists from every loaded file are combined, and deny or ask beats allow wherever it comes from. Only `defaultMode` and keybindings take the last value set.
+Only the current runtime's table loads. Each file contributes `[permissions]`, then its runtime table; `config.local.toml` comes after `config.toml`, and nearer levels later. `allow`, `ask`, and `deny` lists from every loaded table are combined, and deny or ask beats allow wherever it comes from. `default_mode` and `skill_grants` come from the nearest table that sets them.
 
-For example, a global `permissions.sandbox.json` with `"defaultMode": "allow"` relaxes confirmations in every worker, unless a project's `permissions.json` sets its own `defaultMode`. Keep `.agents/permissions.<runtime>.local.json` out of Git, like `.agents/permissions.local.json`. Project setup's `configure_permissions` writes only the shared project or local file; runtime files are edited by hand.
+For example, a global `[permissions.sandbox]` with `default_mode = "allow"` relaxes confirmations in every worker, unless a project's `[permissions]` sets its own `default_mode`. Project setup's `configure_permissions` writes only `[permissions]` of the project or local file; runtime tables are edited by hand.
 
 `/permissions-settings` shows the runtime and the files that were loaded.
 
 ### Schema
 
-```json
-{
-    "defaultMode": "ask",
-    "allow": ["read", "bash(git *)"],
-    "deny": ["bash(rm -rf *)"],
-    "ask": ["write", "edit"],
-    "keybindings": {
-        "autoAcceptEdits": "ctrl+shift+a"
-    }
-}
+```toml
+[permissions]
+default_mode = "ask"
+allow = ["read", "bash(git *)"]
+deny = ["bash(rm -rf *)"]
+ask = ["write", "edit"]
+
+[permissions.sandbox]       # only in a sandboxed worker; [permissions.host] for the host
+default_mode = "allow"
 ```
 
 ### Rule Format
@@ -61,23 +54,23 @@ Only an explicit MCP `readOnlyHint: true` matches `hint: readOnly`; missing or f
 
 ### Evaluation Order
 
-Without a session mode: `deny` > `ask` > built-in/configured `allow` > `defaultMode` (default: `"ask"`). The strictest result across Bash command nodes wins.
+Without a session mode: `deny` > `ask` > built-in/configured `allow` > `default_mode` (default: `"ask"`). The strictest result across Bash command nodes wins.
 
-Session modes (`/permissions-mode` and auto-accept) never weaken explicit `deny` or `ask` rules. With a session mode, the result is the stricter of the session mode and any matching explicit `deny`/`ask` rule. When no explicit rule matches, the session mode replaces allow rules and `defaultMode`. So a session `deny` always blocks, an explicit `deny` always blocks, and an explicit `ask` still prompts under a session `allow`.
+Session modes (`/permissions-mode` and auto-accept) never weaken explicit `deny` or `ask` rules. With a session mode, the result is the stricter of the session mode and any matching explicit `deny`/`ask` rule. When no explicit rule matches, the session mode replaces allow rules and `default_mode`. So a session `deny` always blocks, an explicit `deny` always blocks, and an explicit `ask` still prompts under a session `allow`.
 
-- **Bash:** when no `deny`/`ask` rule targets `bash`, a session mode skips Bash parsing and redirect checks. Otherwise every command node is checked against those rules, and a command that can't be parsed is denied. The redirect check is not an explicit rule, so a session `allow` still skips it, and so does an effective (merged) `defaultMode` of `"allow"`.
+- **Bash:** when no `deny`/`ask` rule targets `bash`, a session mode skips Bash parsing and redirect checks. Otherwise every command node is checked against those rules, and a command that can't be parsed is denied. The redirect check is not an explicit rule, so a session `allow` still skips it, and so does an effective (merged) `default_mode` of `"allow"`.
 - **MCP:** a tool without live catalog metadata can't be matched against rules. Under a session `allow` or `ask` it is denied when any `deny`/`ask` rule is `*` or an `mcp(...)` rule; otherwise the session mode applies. Without a session mode it is always denied.
 
 Exact literal `true` and `false` Bash commands are built-in allow rules. Session modes and explicit deny or ask rules still take precedence.
 
 **What a block does:**
 
-- A `deny` blocks only that call and returns the cause to the model without ending the turn, so the model can recover. The reason names the matched rule, plus the command node for Bash, or the session mode, `defaultMode`, an unparseable command, or missing MCP metadata.
+- A `deny` blocks only that call and returns the cause to the model without ending the turn, so the model can recover. The reason names the matched rule, plus the command node for Bash, or the session mode, `default_mode`, an unparseable command, or missing MCP metadata.
 - Rejecting an `ask` prompt ends the turn: it's a deliberate stop. A file-review rejection with notes returns the notes and keeps the turn.
 
 ### Skill-Derived Rules
 
-Trusted local skills (global + project) can contribute allow rules via YAML frontmatter:
+With `skill_grants = true` in `[permissions]` (off unless set), trusted local skills (global + project) contribute allow rules for the whole session via YAML frontmatter:
 
 ```yaml
 ---
@@ -87,6 +80,8 @@ allowed-tools:
     - "mcp(github, get_issue)"
 ---
 ```
+
+Skills aren't protected files, so while `skill_grants` is on, an agent that edits a skill can grant itself the tools it lists. Off, the field is metadata only, and the tools follow your rules like any other.
 
 ### Persistent MCP inspection
 
@@ -100,7 +95,7 @@ Setup's `configure_permissions` merges approved MCP `allow` and `ask` lists into
 - Runtime indirection such as `eval`, `bash -c`, `source`, aliases, functions, and dynamic command names is checked as the outer invocation only
 - Shell-state-only assignments/declarations emit no outer command, while syntax-visible commands nested inside them are still checked
 - A leading `cd <dir> &&` is ignored only when `<dir>` resolves to the current directory
-- Writable file redirects (`>`, `>|`, `>>`, `&>`, `&>>`, and filename-targeted `>&word`) escalate otherwise-allowed Bash calls to `"ask"`, unless the effective `defaultMode` is `"allow"` or a session mode applies
+- Writable file redirects (`>`, `>|`, `>>`, `&>`, `&>>`, and filename-targeted `>&word`) escalate otherwise-allowed Bash calls to `"ask"`, unless the effective `default_mode` is `"allow"` or a session mode applies
 - Exact `/dev/null` targets, input redirects, fd duplication/closing, and process-substitution targets do not add a redirect prompt; nested process-substitution commands are still checked
 - Parser/WASM failures and trees containing `ERROR` or `MISSING` nodes are denied without fallback; this includes valid syntax unsupported by the grammar, such as `<>`
 - Bash wildcard rules match across newlines within a command node
@@ -120,12 +115,12 @@ Setup's `configure_permissions` merges approved MCP `allow` and `ask` lists into
 
 ### Auto-accept toggle
 
-`/permissions-toggle-auto-accept` (and the `autoAcceptEdits` keybinding) switches `edit` and `write` away from what the settings resolve to, for the current session. Toggling again returns to the settings' default.
+`/permissions-toggle-auto-accept` switches `edit` and `write` away from what the settings resolve to, for the current session. Toggling again returns to the settings' default.
 
 - **Review default** (the usual host setup, where edits ask): the toggle turns auto-accept on.
-- **Auto-accept default** (both `edit` and `write` allowed, for example a sandbox's `permissions.sandbox.json` with `"allow": ["edit", "write"]`): the toggle turns diff review on.
+- **Auto-accept default** (both `edit` and `write` allowed, for example a sandbox's `[permissions.sandbox]` with `allow = ["edit", "write"]`): the toggle turns diff review on.
 
-The default comes from the merged settings, skill-derived allows included, using only rules that apply to every path: `"edit"`, `"edit(*)"`, or `"*"`, in the usual `deny` > `ask` > `allow` > `defaultMode` order. It's auto-accept only when both tools resolve to `allow`. Path-scoped rules such as `edit(/tmp/*)` don't change the default and keep applying per call.
+The default comes from the merged settings, skill-derived allows included, using only rules that apply to every path: `"edit"`, `"edit(*)"`, or `"*"`, in the usual `deny` > `ask` > `allow` > `default_mode` order. It's auto-accept only when both tools resolve to `allow`. Path-scoped rules such as `edit(/tmp/*)` don't change the default and keep applying per call.
 
 The toggle sets session modes, so explicit `ask` and `deny` rules still win either way: with `"ask": ["edit(*.lock)"]`, lock files still prompt while auto-accept is on. Toggling back clears every `edit`/`write` session mode, including ones set with `/permissions-mode`.
 

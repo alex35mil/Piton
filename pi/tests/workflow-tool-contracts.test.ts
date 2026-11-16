@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writePermissions, writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -239,9 +240,9 @@ describe("workflow model-facing contracts", () => {
             extensions: [...codingFactories, memoryMcp("memory", ["echo"]), ...workflowFactories],
             tools: ["+codemode"],
             setup(root) {
-                fs.writeFileSync(path.join(root, "agent/permissions.json"), JSON.stringify({ defaultMode: "allow" }))
+                writePermissions("global", { defaultMode: "allow" })
                 fs.writeFileSync(
-                    path.join(root, "agent/mcp.json"),
+                    path.join(root, "config/mcp.json"),
                     JSON.stringify({
                         mcpServers: { memory: { url: "https://memory.invalid/mcp", exposure: "codemode" } },
                     }),
@@ -279,11 +280,8 @@ describe("workflow model-facing contracts", () => {
         const h = await nativeSessionFixture({
             extensions: [...codingFactories, ...workflowFactories],
             tools: ["+codemode"],
-            setup(root) {
-                fs.writeFileSync(
-                    path.join(root, "agent/permissions.json"),
-                    JSON.stringify({ defaultMode: "deny", allow: ["codemode"], deny: ["preflight_gig"] }),
-                )
+            setup() {
+                writePermissions("global", { defaultMode: "deny", allow: ["codemode"], deny: ["preflight_gig"] })
             },
         })
         try {
@@ -305,7 +303,7 @@ describe("workflow model-facing contracts", () => {
             // A deny fails only the nested call; it doesn't cancel the turn.
             assert.equal(outcome.details.calls[0].status, "error")
             assert.ok(JSON.stringify(outcome).includes("Denied by permission rule `preflight_gig`"))
-            assert.equal(fs.existsSync(path.join(h.root, ".project/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(h.root, ".piton/.local/gigs")), false)
         } finally {
             await h.cleanup()
         }
@@ -343,7 +341,7 @@ describe("workflow model-facing contracts", () => {
         }
     })
 
-    // "linked" is a sandboxed worker whose .project/.local is a symlink to its source checkout's directory;
+    // "linked" is a sandboxed worker whose .piton/.local is a symlink to its source checkout's directory;
     // "unlinked" is a sandboxed worker without that link, where the workflow must refuse to start.
     for (const layout of ["directory", "linked", "unlinked"] as const)
         it(`keeps discovery, setup, real initialization and Phase transitions working through reload and resume (${layout} local root)`, async () => {
@@ -356,7 +354,7 @@ describe("workflow model-facing contracts", () => {
                 tools: ["+codemode"],
                 setup(root) {
                     fs.writeFileSync(
-                        path.join(root, "agent/mcp.json"),
+                        path.join(root, "config/mcp.json"),
                         JSON.stringify({
                             mcpServers: { github: { url: "https://github.invalid/mcp", exposure: "codemode" } },
                         }),
@@ -367,15 +365,7 @@ describe("workflow model-facing contracts", () => {
                     fs.writeFileSync(path.join(root, "seed.txt"), "fixture")
                     git(root, "add", "seed.txt")
                     git(root, "commit", "-qm", "Initial fixture")
-                    fs.writeFileSync(
-                        path.join(root, "agent/permissions.json"),
-                        JSON.stringify({ defaultMode: "allow" }),
-                    )
-                    fs.mkdirSync(path.join(root, ".project"))
-                    fs.writeFileSync(
-                        path.join(root, ".project/config.json"),
-                        JSON.stringify({ branches: { format: "identifier-title" } }),
-                    )
+                    writePermissions("global", { defaultMode: "allow" })
                     const repository = { owner: "fixture", repo: "app" }
                     const statuses = {
                         backlog: "Backlog",
@@ -385,32 +375,30 @@ describe("workflow model-facing contracts", () => {
                         done: "Done",
                         canceled: "Canceled",
                     }
-                    fs.writeFileSync(
-                        path.join(root, ".project/integrations.json"),
-                        JSON.stringify({
-                            tracker: {
-                                provider: "github",
-                                mcpServer: "github",
-                                repository,
-                                project: { owner: "fixture", ownerType: "user", number: 1 },
-                                fields: {
-                                    status: { field: "Status", values: statuses },
-                                    phase: {
-                                        field: "Phase",
-                                        values: {
-                                            planning: "Planning",
-                                            execution: "Execution",
-                                            selfReview: "Self-Review",
-                                        },
+                    writeProjectConfig(root, {
+                        branchFormat: "identifier-title",
+                        tracker: {
+                            provider: "github",
+                            mcpServer: "github",
+                            repository,
+                            project: { owner: "fixture", ownerType: "user", number: 1 },
+                            fields: {
+                                status: { field: "Status", values: statuses },
+                                phase: {
+                                    field: "Phase",
+                                    values: {
+                                        planning: "Planning",
+                                        execution: "Execution",
+                                        selfReview: "Self-Review",
                                     },
-                                    priority: { scope: "project", field: "Priority", values: ["High"] },
                                 },
+                                priority: { scope: "project", field: "Priority", values: ["High"] },
                             },
-                            forge: { provider: "github", mcpServer: "github", repository },
-                        }),
-                    )
-                    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local\n")
-                    if (layout === "linked") fs.symlinkSync(source, path.join(root, ".project/.local"))
+                        },
+                        forge: { provider: "github", mcpServer: "github", repository },
+                    })
+                    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
+                    if (layout === "linked") fs.symlinkSync(source, path.join(root, ".piton/.local"))
                 },
             })
             async function invoke(code: string) {
@@ -424,10 +412,10 @@ describe("workflow model-facing contracts", () => {
                 await invoke(
                     'text(await tools.preflight_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor"})); text(await tools.init_github_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor",object:{issueId:900,issueNumber:9,issueUrl:"https://github.com/fixture/app/issues/9"}}));',
                 )
-                const directory = ".project/.local/gigs/9-fixture-work"
+                const directory = ".piton/.local/gigs/9-fixture-work"
                 if (layout === "unlinked") {
-                    // prepare_artifacts created a real .project/.local, which a sandbox must not write entities into.
-                    assert.ok(fs.statSync(path.join(h.root, ".project/.local")).isDirectory())
+                    // prepare_artifacts created a real .piton/.local, which a sandbox must not write entities into.
+                    assert.ok(fs.statSync(path.join(h.root, ".piton/.local")).isDirectory())
                     assert.equal(fs.existsSync(path.join(h.root, directory)), false)
                     assert.match(JSON.stringify(h.requests.at(-1)), /isn't linked to its source checkout/)
                     return
@@ -474,7 +462,7 @@ describe("workflow model-facing contracts", () => {
                 if (layout === "linked") {
                     assert.ok(fs.existsSync(path.join(source, "gigs/9-fixture-work/metadata.json")))
                     assert.equal(
-                        git(h.root, "status", "--porcelain", "--untracked-files=all", "--", ".project/.local"),
+                        git(h.root, "status", "--porcelain", "--untracked-files=all", "--", ".piton/.local"),
                         "",
                     )
                 }

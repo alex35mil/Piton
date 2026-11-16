@@ -3,12 +3,10 @@ import * as path from "node:path"
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 
-import * as project from "../../../extensions/__lib/project.js"
-import { PROJECT_ROOT } from "../__lib/domain.js"
+import { readProjectPolicies } from "../__lib/project-config.js"
 import {
     fence,
     MAX_EMBEDDED_FILE_BYTES,
-    readOptional,
     REVIEW_AUTHORITY_INSTRUCTIONS,
     REVIEW_DOCUMENT_INSTRUCTIONS,
     REVIEW_GIT_INSTRUCTIONS,
@@ -32,7 +30,7 @@ export async function buildEpicReviewPrompt(
     const { pass = NO_PASS_PROMPT, previousCandidate = "", instructions } = options
     const brief = await fs.promises.readFile(path.join(epicDir, "brief.md"), "utf-8")
     const candidate = await fs.promises.readFile(candidatePath, "utf-8")
-    const policies = await readOptional(path.join(project.resolveRootDir(ctx.cwd), PROJECT_ROOT, "policies.md"))
+    const policies = readProjectPolicies(ctx.cwd)
     const relEpicDir = path.relative(ctx.cwd, epicDir)
     const relCandidate = path.relative(ctx.cwd, candidatePath)
 
@@ -67,7 +65,7 @@ export async function buildEpicReviewPrompt(
         reviewAgentOutputInstructions(),
         "",
         policies
-            ? ["# Project Policies (.project/policies.md)", "", fence(policies, "markdown"), "", "---", ""].join("\n")
+            ? ["# Project Policies (policies.md)", "", fence(policies, "markdown"), "", "---", ""].join("\n")
             : "---",
         "",
         previousCandidate

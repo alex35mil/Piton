@@ -28,7 +28,9 @@ end
 local function fails(pattern, run)
     local ok, err = pcall(run)
     assert(not ok, "expected an error")
-    assert(tostring(err):find(pattern, 1, true), tostring(err))
+    -- Refusals are tables carrying the message shown to the user.
+    local message = type(err) == "table" and tostring(err.message) or tostring(err)
+    assert(message:find(pattern, 1, true), message)
 end
 
 -- A test must explicitly fake these boundaries: never call the installed daemon or real trackers.
@@ -233,6 +235,47 @@ test("new-agent picker loads mocked queue without credentials or real providers"
     end)
     piton.new()
     assert(picker.title:find("0 Todo", 1, true))
+end)
+
+test("queue reads its tracker and credential through piton config get", function()
+    local source = directory("config source")
+    local queue = require("piton.queue")
+    local calls = {}
+    local responses = {
+        tracker = {
+            code = 0,
+            stdout = vim.json.encode({
+                path = source .. "/.piton/config.toml",
+                value = { provider = "other", mcp_server = "linear" },
+            }),
+        },
+        mcp = {
+            code = 0,
+            stdout = vim.json.encode({
+                servers = {
+                    { name = "linear", config = { headers = { Authorization = "Bearer ${LINEAR_KEY}" } } },
+                },
+            }),
+        },
+    }
+    replace(util, "exec", function(cmd)
+        equal({ "piton", "config", "get" }, { cmd[1], cmd[2], cmd[3] })
+        equal({ "--workspace", source }, { cmd[5], cmd[6] })
+        calls[#calls + 1] = cmd[4]
+        return responses[cmd[4]]
+    end)
+    equal("LINEAR_KEY", queue.credential(source, "linear"))
+    fails("Unsupported tracker provider in " .. source .. "/.piton/config.toml", function() queue.load(source) end)
+    equal({ "mcp", "tracker", "mcp" }, calls)
+
+    responses.tracker = { code = 0, stdout = "null" }
+    fails("No tracker configured", function() queue.load(source) end)
+    -- A broken file: the resolver's message, unchanged.
+    responses.tracker = {
+        code = 3,
+        stdout = vim.json.encode({ format = 3, error = { kind = "invalid", message = "invalid config.toml" } }),
+    }
+    fails("invalid config.toml", function() queue.load(source) end)
 end)
 
 test("close_tab dispatches close or delete through the public API", function()

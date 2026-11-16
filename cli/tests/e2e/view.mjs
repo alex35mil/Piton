@@ -1,0 +1,614 @@
+// End-to-end tests of the `view` protocol (native clients) against real pi with the faux extension.
+// Usage (in cli/): cargo build && node tests/e2e/view.mjs, or `mise run cli:test`.
+import { execFileSync, spawn } from "node:child_process";
+import { lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import net from "node:net";
+import assert from "node:assert/strict";
+
+import { writeConfig } from "./config.mjs";
+
+const root = resolve(import.meta.dirname, "../..");
+const piton = join(root, "target/debug/piton");
+const ext = join(root, "tests/fixtures/faux-extension.ts");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/// `options.roots: false` leaves `roots` out of the config, as for a user who hasn't set any.
+function setup(options = {}) {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-view-")));
+    // Native apps start sessions only in checkouts under a root.
+    const root = join(dir, "Projects");
+    const ws = join(root, "ws");
+    const agent = join(dir, "agent");
+    mkdirSync(join(ws, ".git"), { recursive: true });
+    mkdirSync(join(root, "group", "inner", ".git"), { recursive: true });
+    mkdirSync(agent);
+    const socket = join(dir, "piton.sock");
+    const config = writeConfig(dir, {
+        daemon: {
+            socket,
+            log: join(dir, "piton.log"),
+            tailnet: { enabled: false },
+            pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
+            env: { login_shell: false, mise: false },
+            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+        },
+        host: { default_attach_mode: "host", empty_grace_ms: 60000, ...(options.roots === false ? {} : { roots: [root] }) },
+    });
+    return { dir, root, ws, socket, config, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
+}
+
+async function startDaemon(ctx) {
+    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    let err = "";
+    d.stderr.on("data", (c) => (err += c));
+    for (let i = 0; i < 100 && !err.includes("listening"); i++) await sleep(50);
+    assert.ok(err.includes("listening"), "daemon didn't start: " + err);
+    d.exited = new Promise((r) => d.on("exit", (code) => r(code)));
+    d.err = () => err;
+    return d;
+}
+
+/// A view client: requests with ids, replies, and pushed lines.
+function viewClient(ctx, name) {
+    const sock = net.connect(ctx.socket);
+    const c = { name, lines: [], waiters: [], n: 0 };
+    let buf = "";
+    sock.on("data", (chunk) => {
+        buf += chunk;
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (!line.trim()) continue;
+            const msg = JSON.parse(line);
+            c.lines.push(msg);
+            for (const w of [...c.waiters]) if (w.pred(msg)) { c.waiters.splice(c.waiters.indexOf(w), 1); w.resolve(msg); }
+        }
+    });
+    sock.write(JSON.stringify({ protocol: "view", version: 1, client: name }) + "\n");
+    c.wait = (pred, ms = 15000) => {
+        const hit = c.lines.find(pred);
+        if (hit) return Promise.resolve(hit);
+        return new Promise((res, rej) => {
+            c.waiters.push({ pred, resolve: res });
+            setTimeout(() => rej(new Error(`${name}: timeout; last ${JSON.stringify(c.lines.slice(-3)).slice(0, 600)}`)), ms);
+        });
+    };
+    c.waitNew = (pred, ms) => {
+        const from = c.lines.length;
+        return c.wait((m) => c.lines.indexOf(m) >= from && pred(m), ms);
+    };
+    c.req = async (type, args = {}) => {
+        const id = `${name}-${++c.n}`;
+        sock.write(JSON.stringify({ id, type, ...args }) + "\n");
+        const reply = await c.wait((m) => m.type === "reply" && m.id === id);
+        if (!reply.ok) throw new Error(`${type}: ${reply.error}`);
+        return reply.data;
+    };
+    c.reqRaw = async (type, args = {}) => {
+        const id = `${name}-${++c.n}`;
+        sock.write(JSON.stringify({ id, type, ...args }) + "\n");
+        return c.wait((m) => m.type === "reply" && m.id === id);
+    };
+    c.close = () => sock.end();
+    /// Applies snapshot/change lines for `session` to a local model, like a client would.
+    c.model = (session) => {
+        let items = [];
+        let state = null;
+        for (const m of c.lines) {
+            if (m.session !== session) continue;
+            if (m.type === "snapshot") {
+                items = structuredClone(m.items);
+                state = m.state;
+            } else if (m.type === "change") {
+                const ch = m.change;
+                if (ch.op === "append") items.push(structuredClone(ch.item));
+                else if (ch.op === "replace") items = items.map((i) => (i.id === ch.item.id ? structuredClone(ch.item) : i));
+                else if (ch.op === "delta") {
+                    const item = items.find((i) => i.id === ch.item);
+                    const key = ch.field === "text" ? "text" : "thinking";
+                    item.content[ch.index][key] = (item.content[ch.index][key] ?? "") + ch.text;
+                } else if (ch.op === "state") state = ch.state;
+                else if (ch.op === "reset") items = [];
+            }
+        }
+        return { items, state };
+    };
+    return c;
+}
+
+/// One request on the daemon's agent socket, as a pi in the session would send it.
+function agentRequest(socket, request) {
+    return new Promise((resolve, reject) => {
+        const sock = net.connect(socket);
+        let buf = "";
+        sock.on("data", (chunk) => (buf += chunk));
+        sock.on("end", () => {
+            try {
+                resolve(JSON.parse(buf));
+            } catch (e) {
+                reject(e);
+            }
+        });
+        sock.on("error", reject);
+        sock.write(JSON.stringify(request) + "\n");
+    });
+}
+
+const tests = {
+    async "protected writes: asked of the user in every client, written by the daemon"(ctx) {
+        const c = viewClient(ctx, "mac");
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        await c.req("session.watch", { session: key });
+        // The pi gets its token and the socket from the daemon.
+        await c.req("session.send", { session: key, message_id: "e", text: "env" });
+        await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.model(key).items.some((i) => i.type === "tool" && i.status === "done"), 20000);
+        const tool = c.model(key).items.find((i) => i.type === "tool");
+        const { token, socket } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
+        assert.equal(socket, join(ctx.dir, "agent.sock"));
+        assert.match(token, /^[0-9a-f]{64}$/);
+
+        const target = join(ctx.ws, ".piton", "config.toml");
+        // Not this session's, or not protected, or not a session at all: refused without asking.
+        assert.equal((await agentRequest(socket, { type: "protected_write", token: "guess", path: target, content: "{}" })).type, "error");
+        const plain = await agentRequest(socket, { type: "protected_write", token, path: join(ctx.ws, "src.rs"), content: "x" });
+        assert.equal(plain.outcome, "refused");
+
+        // A protected write waits for the user: a dialog in the shape pi.nvim's diff view opens.
+        const pending = agentRequest(socket, { type: "protected_write", token, path: target, content: '{"allow":["read"]}\n' });
+        const st = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        assert.equal(st.change.state.status, "needs_input");
+        const dialog = st.change.state.dialogs[0];
+        assert.match(dialog.id, /^piton:write:/);
+        const title = JSON.parse(dialog.title);
+        assert.equal(title.toolName, "write");
+        assert.equal(title.toolInput.path, realpathSync(ctx.ws) + "/.piton/config.toml");
+        // The current content, so a client that can't read the file shows a diff (null: the file is new).
+        assert.equal(title.current, null);
+        // One at a time.
+        const second = await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" });
+        assert.equal(second.outcome, "refused");
+        // The user approves with their own version and a note; the daemon writes it, and never tells pi. The dialog
+        // closes in every client (waited for from before the answer, so the change can't slip past).
+        const closed = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        await c.req("session.answer", {
+            session: key,
+            request_id: dialog.id,
+            answer: { value: JSON.stringify({ result: "AcceptModified", content: '{"allow":[]}\n', notes: [{ note: "n" }] }) },
+        });
+        const outcome = await pending;
+        assert.deepEqual(outcome, { type: "protected_write", outcome: "approved", modified: true, content: '{"allow":[]}\n', notes: [{ note: "n" }] });
+        assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
+        assert.equal((await closed).change.state.status, "idle");
+
+        // Rejected: nothing written.
+        const rejected = agentRequest(socket, { type: "protected_write", token, path: target, content: "bad" });
+        const again = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        await c.req("session.answer", { session: key, request_id: again.change.state.dialogs[0].id, answer: { value: "Reject" } });
+        assert.equal((await rejected).outcome, "rejected");
+        assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
+
+        // A skill isn't protected: the agent writes it itself, and a request for it is refused without asking.
+        const skill = join(ctx.ws, ".agents", "skills", "s", "SKILL.md");
+        const skillWrite = await agentRequest(socket, { type: "protected_write", token, path: skill, content: "x" });
+        assert.equal(skillWrite.outcome, "refused");
+        assert.match(skillWrite.reason, /isn't a protected file/);
+
+        // The agent stops waiting (its tool call was aborted): the dialog closes, and the next request is asked again
+        // instead of being refused as "another is waiting".
+        const abandoned = net.connect(socket);
+        abandoned.write(JSON.stringify({ type: "protected_write", token, path: target, content: "left" }) + "\n");
+        await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        const closing = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        abandoned.destroy();
+        await closing;
+        const next = agentRequest(socket, { type: "protected_write", token, path: target, content: "again" });
+        const reasked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        await c.req("session.answer", { session: key, request_id: reasked.change.state.dialogs[0].id, answer: { value: "Reject" } });
+        assert.equal((await next).outcome, "rejected");
+        assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
+
+        // The session ends: its token stops working.
+        await c.req("session.stop", { session: key });
+        await sleep(300);
+        assert.equal((await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" })).type, "error");
+        c.close();
+    },
+
+    async "start, watch, prompt, stream, settle"(ctx) {
+        const c = viewClient(ctx, "phone");
+        await c.req("sessions.subscribe");
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        await c.wait((m) => m.type === "sessions" && m.sessions.some((s) => s.key === key));
+        await c.req("session.watch", { session: key });
+        await c.wait((m) => m.type === "snapshot" && m.session === key);
+        await c.req("session.send", { session: key, message_id: "m1", text: "slow 30" });
+        await c.wait((m) => m.type === "change" && m.change.op === "delta");
+        await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.lines.some((l) => l.change?.op === "delta"), 20000);
+        const { items, state } = c.model(key);
+        const kinds = items.map((i) => i.type);
+        assert.deepEqual(kinds, ["user", "assistant"]);
+        assert.equal(items[1].streaming, false);
+        assert.match(items[1].content[0].text, /^word0 word1 .* word29$/);
+        assert.equal(state.title, "slow 30");
+        const list = await c.wait((m) => m.type === "sessions" && m.sessions.some((s) => s.key === key && s.title === "slow 30"));
+        assert.ok(list);
+        c.close();
+    },
+
+    async "tools and dialogs; answering from the view"(ctx) {
+        const c = viewClient(ctx, "phone");
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        await c.req("session.watch", { session: key });
+        await c.req("session.send", { session: key, message_id: "m1", text: "ask" });
+        const st = await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        assert.equal(st.change.state.status, "needs_input");
+        const dialog = st.change.state.dialogs[0];
+        assert.equal(dialog.method, "select");
+        await c.req("session.answer", { session: key, request_id: dialog.id, answer: { value: "beta" } });
+        const late = await c.reqRaw("session.answer", { session: key, request_id: dialog.id, answer: { value: "alpha" } });
+        assert.equal(late.ok, false, "a second answer is refused");
+        await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && m.change.state.dialogs.length === 0, 20000);
+        await sleep(300);
+        const { items } = c.model(key);
+        const tool = items.find((i) => i.type === "tool");
+        assert.equal(tool.name, "faux_ask");
+        assert.equal(tool.status, "done");
+        assert.equal(tool.preview, "picked beta");
+        const owner = items.find((i) => i.id === tool.message);
+        assert.equal(owner.type, "assistant", "tool links to its assistant message");
+        const out = await c.req("session.tool_output", { session: key, call_id: tool.call_id });
+        assert.equal(out.content[0].text, "picked beta");
+        c.close();
+    },
+
+    async "images travel as references; session.image returns the data"(ctx) {
+        const c = viewClient(ctx, "phone");
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        await c.req("session.watch", { session: key });
+        await c.req("session.send", { session: key, message_id: "m1", text: "picture" });
+        await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.model(key).items.some((i) => i.type === "tool" && i.status === "done"), 20000);
+        await sleep(300);
+        const tool = c.model(key).items.find((i) => i.type === "tool");
+        assert.equal(tool.name, "faux_picture");
+        assert.equal(tool.truncated, true, "the preview can't show the image");
+        const out = await c.req("session.tool_output", { session: key, call_id: tool.call_id });
+        const ref = out.content.find((b) => b.type === "image");
+        assert.equal(ref.data, undefined, "no image data in the tool output");
+        assert.equal(ref.mime_type, "image/png");
+        const image = await c.req("session.image", { session: key, image: ref.image });
+        assert.equal(image.mime_type, "image/png");
+        assert.equal(Buffer.from(image.data, "base64").length, 1536 * 1024);
+        // A fresh watcher's snapshot stays small, whatever the conversation's images weigh.
+        const late = viewClient(ctx, "late");
+        await late.req("session.watch", { session: key });
+        const snap = await late.wait((m) => m.type === "snapshot" && m.session === key);
+        assert.ok(JSON.stringify(snap).length < 64 * 1024, "snapshot carries no image data");
+        const missing = await c.reqRaw("session.image", { session: key, image: 999 });
+        assert.equal(missing.ok, false);
+        late.close();
+        c.close();
+    },
+
+    async "nvim and phone on one session: same conversation both ways"(ctx) {
+        // pi.nvim through piton attach.
+        const nvim = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
+        const nrecs = [];
+        let nbuf = "";
+        nvim.stdout.on("data", (d) => {
+            nbuf += d;
+            let i;
+            while ((i = nbuf.indexOf("\n")) >= 0) {
+                const l = nbuf.slice(0, i);
+                nbuf = nbuf.slice(i + 1);
+                if (l.trim()) nrecs.push(JSON.parse(l));
+            }
+        });
+        const waitN = async (pred, ms = 15000) => {
+            const t = Date.now();
+            while (Date.now() - t < ms) {
+                const hit = nrecs.find(pred);
+                if (hit) return hit;
+                await sleep(25);
+            }
+            throw new Error("nvim timeout: " + JSON.stringify(nrecs.slice(-3)).slice(0, 400));
+        };
+        nvim.stdin.write(JSON.stringify({ id: "s", type: "get_state" }) + "\n");
+        const st = await waitN((r) => r.id === "s");
+        nvim.stdin.write(JSON.stringify({ id: "p", type: "prompt", message: "from nvim" }) + "\n");
+        await waitN((r) => r.type === "agent_settled");
+
+        const c = viewClient(ctx, "phone");
+        const { sessions } = await c.req("sessions.list");
+        const s = sessions.find((x) => x.id === st.data.sessionId);
+        assert.ok(s, "nvim's session is listed");
+        assert.equal(s.clients, 1);
+        await c.req("session.watch", { session: s.key });
+        const snap = await c.wait((m) => m.type === "snapshot" && m.session === s.key);
+        assert.equal(snap.items[0].type, "user");
+        assert.equal(snap.items[0].content[0].text, "from nvim");
+        await c.req("session.send", { session: s.key, message_id: "m1", text: "from phone" });
+        await waitN((r) => r.type === "message_end" && r.message.role === "user" && JSON.stringify(r.message.content).includes("from phone"));
+        await waitN((r) => r.type === "agent_settled" && nrecs.indexOf(r) > nrecs.findIndex((x) => JSON.stringify(x).includes("from phone")));
+        await sleep(300);
+        const { items } = c.model(s.key);
+        assert.deepEqual(items.map((i) => i.type), ["user", "assistant", "user", "assistant"]);
+        nvim.stdin.end();
+        c.close();
+    },
+
+    async "resume from seq after a drop, or a snapshot"(ctx) {
+        const a = viewClient(ctx, "a");
+        const { session } = await a.req("session.start", { workspace: ctx.ws, mode: "host", prompt: "first" });
+        const key = session.key;
+        await a.req("session.watch", { session: key });
+        await a.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && a.model(key).items.length >= 2, 20000);
+        const lastSeq = Math.max(...a.lines.filter((m) => m.session === key && m.seq).map((m) => m.seq));
+        a.close();
+        // Something happens while the client is away.
+        const other = viewClient(ctx, "other");
+        await other.req("session.send", { session: key, message_id: "m1", text: "while away" });
+        await sleep(1500);
+        const b = viewClient(ctx, "b");
+        await b.req("session.watch", { session: key, from: lastSeq });
+        await sleep(500);
+        assert.ok(!b.lines.some((m) => m.type === "snapshot"), "resumed with changes, no snapshot");
+        const missed = b.lines.filter((m) => m.type === "change");
+        assert.ok(missed.length > 0);
+        assert.equal(missed[0].seq, lastSeq + 1, "no gap");
+        // A seq the daemon doesn't have gets a snapshot.
+        const c = viewClient(ctx, "c");
+        await c.req("session.watch", { session: key, from: 999999 });
+        await c.wait((m) => m.type === "snapshot");
+        other.close();
+        b.close();
+        c.close();
+    },
+
+    async "a repeated message id reaches pi once"(ctx) {
+        const a = viewClient(ctx, "phone");
+        const { session } = await a.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        await a.req("session.watch", { session: key });
+        // The phone sends, then its connection drops before the reply; it sends again on a new connection, and once
+        // more after the run (a late retry). Both repeats get the first reply.
+        const first = a.req("session.send", { session: key, message_id: "walk-1", text: "slow 20" });
+        const b = viewClient(ctx, "phone-again");
+        const repeat = await b.req("session.send", { session: key, message_id: "walk-1", text: "slow 20" });
+        assert.deepEqual(repeat, await first);
+        await a.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && a.model(key).items.length >= 2, 20000);
+        const late = await b.req("session.send", { session: key, message_id: "walk-1", text: "slow 20" });
+        assert.deepEqual(late, await first);
+        await sleep(500);
+        assert.deepEqual(a.model(key).items.map((i) => i.type), ["user", "assistant"], "one message, one reply");
+        // A new id is a new message.
+        await b.req("session.send", { session: key, message_id: "walk-2", text: "again" });
+        await a.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && a.model(key).items.length >= 4, 20000);
+        const missing = await b.reqRaw("session.send", { session: key, text: "no id" });
+        assert.equal(missing.ok, false, "message_id is required");
+        a.close();
+        b.close();
+    },
+
+    async "a slow request doesn't hold up the connection; messages keep their order"(ctx) {
+        const c = viewClient(ctx, "phone");
+        await c.req("sessions.subscribe");
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        await c.req("session.watch", { session: key });
+        await c.wait((m) => m.type === "snapshot" && m.session === key);
+        // Three messages written back to back, without waiting for replies: pi gets them in that order (the first a
+        // prompt, the others follow-ups queued behind it).
+        const sent = ["slow 20", "second", "third"].map((text, i) =>
+            c.req("session.send", { session: key, message_id: `order-${i}`, text }),
+        );
+        await Promise.all(sent);
+        const text = (i) => (typeof i.content === "string" ? i.content : i.content.find((b) => b.type === "text")?.text);
+        await c.wait((m) => m.type === "change" && m.change.op === "replace" && m.change.item.type === "assistant" && text(m.change.item) === "echo: third", 30000);
+        const users = c.model(key).items.filter((i) => i.type === "user").map(text);
+        assert.deepEqual(users, ["slow 20", "second", "third"], JSON.stringify(c.model(key).items.map((i) => [i.type, text(i)])));
+
+        // A stop that waits for pi to exit (a frozen pi: the grace periods, then SIGKILL) doesn't hold up requests
+        // behind it.
+        const other = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        process.kill(other.session.pid, "SIGSTOP");
+        const stopping = c.req("session.stop", { session: other.session.key });
+        const t = Date.now();
+        await c.req("daemon.state");
+        assert.ok(Date.now() - t < 1000, "daemon.state answered while the stop was pending");
+        assert.deepEqual(await stopping, { forced: true });
+        c.close();
+    },
+
+    async "history pages and errors"(ctx) {
+        const c = viewClient(ctx, "phone");
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        const key = session.key;
+        for (const t of ["one", "two", "three"]) {
+            await c.req("session.send", { session: key, message_id: t, text: t });
+            await sleep(700);
+        }
+        await c.req("session.watch", { session: key, limit: 2 });
+        const snap = await c.wait((m) => m.type === "snapshot");
+        assert.equal(snap.items.length, 2);
+        assert.equal(snap.has_more, true);
+        const page = await c.req("session.history", { session: key, before: snap.items[0].id, limit: 10 });
+        assert.equal(page.items.length, 4);
+        assert.equal(page.has_more, false);
+        const bad = await c.reqRaw("session.watch", { session: 424242 });
+        assert.equal(bad.ok, false);
+        const junk = await c.reqRaw("no.such.thing");
+        assert.equal(junk.ok, false);
+        c.close();
+    },
+
+    async "keep-awake: held while sessions live (idle too), toggled from the view"(ctx) {
+        const c = viewClient(ctx, "mac");
+        await c.req("sessions.subscribe");
+        const daemonLine = (pred) => c.wait((m) => m.type === "daemon" && pred(m.state));
+        // The test's host file has keep-awake off.
+        await daemonLine((s) => s.keep_awake === false && s.awake === false && s.sessions === 0);
+        const keepAwake = (on) => c.req("settings.set", { scope: "host", key: "keep_awake", value: on });
+        await keepAwake(true);
+        await daemonLine((s) => s.keep_awake === true && s.awake === false);
+        const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
+        // Held for an idle session: no prompt was sent.
+        await daemonLine((s) => s.awake === true && s.sessions === 1);
+        const off = await keepAwake(false);
+        assert.equal(off.state.keep_awake, false);
+        await daemonLine((s) => s.keep_awake === false && s.awake === false && s.sessions === 1);
+        await keepAwake(true);
+        await daemonLine((s) => s.keep_awake === true && s.awake === true);
+        await c.req("session.stop", { session: session.key });
+        await daemonLine((s) => s.awake === false && s.sessions === 0);
+        const state = await c.req("daemon.state");
+        const { version, settings, ...rest } = state.state;
+        assert.match(version, /^\d+\.\d+\.\d+ \([0-9a-f]{10}(-dirty)?\)$/, "version with the git commit");
+        assert.deepEqual(settings.find((s) => s.key === "keep_awake"), {
+            key: "keep_awake",
+            scope: "host",
+            value: true,
+            placement: "shared",
+            local_choice: true,
+            value_type: { kind: "bool" },
+            applies: { kind: "live" },
+            editable: true,
+        });
+        assert.deepEqual(rest, {
+            settings_error: null,
+            host_id: "e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0",
+            keep_awake: true,
+            awake: false,
+            sessions: 0,
+            logging: { policy: { mode: "info" }, default: "info" },
+        });
+        c.close();
+        // The choice is configuration: it's in the host file for the next start.
+        assert.match(readFileSync(join(ctx.config, "config.host.toml"), "utf8"), /keep_awake = true/);
+    },
+
+    async "settings: changed from the view, kept in the files, hand edits applied live"(ctx) {
+        const c = viewClient(ctx, "mac");
+        await c.req("sessions.subscribe");
+        const setting = (state, scope, key) => state.settings.find((s) => s.scope === scope && s.key === key);
+        const daemonLine = (pred) => c.waitNew((m) => m.type === "daemon" && pred(m.state));
+        const hostFile = join(ctx.config, "config.host.toml");
+        const localFile = join(ctx.config, "config.host.local.toml");
+        const clientFile = join(ctx.config, "config.client.toml");
+        const set = (scope, key, value, local) => c.req("settings.set", { scope, key, value, ...(local === undefined ? {} : { local }) });
+
+        // A preference moves to this host's local file and the shared one keeps its comments and order.
+        writeFileSync(hostFile, "# mine\n" + readFileSync(hostFile, "utf8"));
+        const roots = [ctx.root];
+        const moved = await set("host", "favorites", [ctx.ws], true);
+        assert.equal(setting(moved.state, "host", "favorites").placement, "local");
+        assert.equal(readFileSync(localFile, "utf8"), `favorites = ${JSON.stringify([ctx.ws])}\n`);
+        assert.match(readFileSync(hostFile, "utf8"), /^# mine\n/);
+        assert.deepEqual(setting(moved.state, "host", "roots").value, roots);
+
+        // A key that needs a restart is written, and waits.
+        const port = await set("host", "tailnet.port", 9123);
+        assert.deepEqual(setting(port.state, "host", "tailnet.port").applies, { kind: "restart", pending: true });
+
+        // Refused before anything is written.
+        assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "socket", value: "/elsewhere" })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "roots", value: "not a list" })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "roots", value: [] })).ok, false);
+        // The client file has no local one: a device keeps its own value in its app.
+        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "text_font", value: "x", local: true })).ok, false);
+
+        // A hand edit applies without a restart; a broken one keeps that file's last good values and says why.
+        writeFileSync(localFile, `favorites = []\n`);
+        await daemonLine((s) => setting(s, "host", "favorites").value.length === 0);
+        writeFileSync(localFile, "favorites = [\n");
+        await daemonLine((s) => s.settings_error !== null && setting(s, "host", "roots").value.length === 1);
+        writeFileSync(localFile, "");
+        await daemonLine((s) => s.settings_error === null);
+
+        // Changes to two files at once: both kept, each in its own file.
+        await Promise.all([set("host", "empty_grace_ms", 61000), set("client", "text_font", "Iosevka")]);
+        assert.match(readFileSync(hostFile, "utf8"), /empty_grace_ms = 61000/);
+        assert.match(readFileSync(clientFile, "utf8"), /text_font = "Iosevka"/);
+
+        // A file linked into a dotfiles folder after the daemon started: edits there apply too, and app writes keep
+        // the link.
+        const dotfiles = join(ctx.dir, "dotfiles");
+        mkdirSync(dotfiles);
+        const linked = join(dotfiles, "config.host.local.toml");
+        writeFileSync(linked, "");
+        rmSync(localFile);
+        symlinkSync(linked, localFile);
+        await sleep(500);
+        writeFileSync(linked, `favorites = ["/from/dotfiles"]\n`);
+        await daemonLine((s) => setting(s, "host", "favorites").value[0] === "/from/dotfiles");
+        await set("host", "favorites", ["/from/app"]);
+        assert.ok(lstatSync(localFile).isSymbolicLink());
+        assert.match(readFileSync(linked, "utf8"), /\/from\/app/);
+        c.close();
+    },
+
+    async "workspaces: browse the roots; start only inside them"(ctx) {
+        const c = viewClient(ctx, "phone");
+        const top = await c.req("workspaces.browse");
+        assert.deepEqual(top.entries.map((e) => e.path), [ctx.root]);
+        const level = await c.req("workspaces.browse", { path: ctx.root });
+        assert.deepEqual(
+            level.entries.map((e) => [e.kind, e.name]),
+            [["group", "group"], ["workspace", "ws"]],
+        );
+        const inner = await c.req("workspaces.browse", { path: join(ctx.root, "group") });
+        assert.equal(inner.entries[0].kind, "workspace");
+        const outside = await c.reqRaw("workspaces.browse", { path: ctx.dir });
+        assert.equal(outside.ok, false);
+        assert.match(outside.error, /isn't under a configured root/);
+        const escape = await c.reqRaw("session.start", { workspace: join(ctx.root, ".."), mode: "host" });
+        assert.equal(escape.ok, false, "no session outside the roots");
+        const notCheckout = await c.reqRaw("session.start", { workspace: join(ctx.root, "group"), mode: "host" });
+        assert.match(notCheckout.error, /isn't a git checkout/);
+        const ok = await c.req("session.start", { workspace: join(ctx.root, "group", "inner"), mode: "host" });
+        assert.ok(ok.session.key);
+        c.close();
+    },
+
+    "workspaces: without roots, the apps can't browse or start sessions": {
+        setup: { roots: false },
+        async run(ctx) {
+            const c = viewClient(ctx, "phone");
+            const browse = await c.reqRaw("workspaces.browse");
+            assert.equal(browse.ok, false);
+            assert.match(browse.error, /no workspace roots configured/);
+            const start = await c.reqRaw("session.start", { workspace: ctx.ws, mode: "host" });
+            assert.equal(start.ok, false);
+            assert.match(start.error, /no workspace roots configured/);
+            c.close();
+        },
+    },
+};
+
+const only = process.argv.slice(2);
+let failed = 0;
+for (const [name, test] of Object.entries(tests)) {
+    if (only.length && !only.some((o) => name.includes(o))) continue;
+    // A test is a function, or `{ setup, run }` when it needs a different config.
+    const { setup: options, run } = typeof test === "function" ? { run: test } : test;
+    const ctx = setup(options);
+    const daemon = await startDaemon(ctx);
+    const t = Date.now();
+    try {
+        await run(ctx);
+        console.log(`ok   ${name} (${Date.now() - t} ms)`);
+    } catch (e) {
+        failed++;
+        console.log(`FAIL ${name}\n     ${e.stack?.split("\n").slice(0, 5).join("\n     ")}\n     daemon: ${daemon.err().slice(-1500)}`);
+    } finally {
+        daemon.kill("SIGTERM");
+        await daemon.exited;
+    }
+}
+process.exit(failed ? 1 : 0);

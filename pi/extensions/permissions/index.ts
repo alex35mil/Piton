@@ -1,23 +1,22 @@
 /**
  * Permissions Extension
  *
- * Controls tool execution via settings files, each tier followed by its runtime file:
- *   ~/<agent-dir>/permissions.json             (global)
- *   <repo-root>/.agents/permissions.json       (project, committed)
- *   <repo-root>/.agents/permissions.local.json (project, gitignored)
- * Runtime files insert the runtime before `.json` / `.local.json`, e.g. `permissions.sandbox.json`.
+ * Controls tool execution via `[permissions]` and `[permissions.<runtime>]` of `config.toml` (and `config.local.toml`)
+ * in piton's configuration chain (the global tier, parent folders, the repository's .piton/), resolved by
+ * `piton config resolve`. Within a file: `[permissions]`, then the runtime's table.
  * PITON_RUNTIME selects the runtime: unset = host, `sandbox` = sandboxed worker; other values are invalid.
  *
  * Schema:
- * {
- *   "defaultMode": "ask" | "allow" | "deny",
- *   "allow": ["toolPattern", "tool(argPattern)", ...],
- *   "deny":  ["toolPattern", "tool(argPattern)", ...],
- *   "ask":   ["toolPattern", "tool(argPattern)", ...]
- * }
+ *   [permissions]
+ *   default_mode = "ask" | "allow" | "deny"
+ *   allow = ["toolPattern", "tool(argPattern)", ...]
+ *   deny  = ["toolPattern", "tool(argPattern)", ...]
+ *   ask   = ["toolPattern", "tool(argPattern)", ...]
+ *   [permissions.sandbox]   # the same keys, for one launch mode
  *
- * Trusted local skills (global + project) may also contribute runtime allow rules
- * via SKILL frontmatter: allowed_tools / allowed-tools.
+ * With `skill_grants = true` (off unless set), trusted local skills (global + project) also contribute runtime allow
+ * rules via SKILL frontmatter: allowed_tools / allowed-tools. Skills aren't protected files, so an agent that edits a
+ * skill can grant itself tools while this is on.
  *
  * Rule format:
  *   "read"                          — blanket match on a non-MCP tool name
@@ -46,8 +45,16 @@ import * as path from "node:path"
 import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
-import * as project from "../__lib/project.js"
 import { requireRuntime, type Runtime } from "../__lib/runtime.js"
+import { isProtected, PROTECTED_HINT } from "../__lib/protected.js"
+import {
+    camelKeys,
+    type LevelKind,
+    type PermissionScope,
+    resolveSettings,
+    section,
+    type Sharing,
+} from "../__lib/settings.js"
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
@@ -59,12 +66,11 @@ export type Mode = "allow" | "ask" | "deny"
 
 export interface PermissionSettings {
     defaultMode?: Mode
+    /** Whether loaded skills' `allowed-tools` become allow rules. Off unless set. */
+    skillGrants?: boolean
     allow?: string[]
     deny?: string[]
     ask?: string[]
-    keybindings?: {
-        autoAcceptEdits?: string
-    }
 }
 
 interface ParsedRule {
@@ -85,7 +91,7 @@ interface ResolvedPermissions {
     settings: PermissionSettings
     runtime: Runtime
     // Files that exist and were merged, in merge order.
-    files: { tier: PermissionTier; scope: PermissionScope; path: string }[]
+    files: { level: LevelKind; scope: PermissionScope; sharing: Sharing; path: string }[]
 }
 
 type SettingsResult = ResolvedPermissions | { error: Error }
@@ -124,8 +130,6 @@ export default function (pi: ExtensionAPI) {
         mcpCatalog = data instanceof Map ? new Map(data as McpToolCatalog) : new Map()
     })
 
-    const initSettings = tryLoadPermissionSettings(() => loadSettings(process.cwd()))
-    const keybindings = "settings" in initSettings ? (initSettings.settings.keybindings ?? {}) : {}
     let displayedSettingsError: string | undefined
 
     const updatePermissionSettingsErrorDisplay = (result: SettingsResult, ctx: ExtensionContext): void => {
@@ -183,13 +187,6 @@ export default function (pi: ExtensionAPI) {
         mcpCatalog = new Map()
     })
 
-    if (keybindings.autoAcceptEdits) {
-        pi.registerShortcut(keybindings.autoAcceptEdits as any, {
-            description: "Toggle auto-accept edits",
-            handler: toggleAutoAcceptEdits,
-        })
-    }
-
     pi.registerCommand(`${EXTENSION}-toggle-auto-accept`, {
         description: "Toggle auto-accept edits",
         handler: async (_args, ctx) => toggleAutoAcceptEdits(ctx),
@@ -219,7 +216,7 @@ export default function (pi: ExtensionAPI) {
             }
             updatePermissionSettingsErrorDisplay(result, ctx)
 
-            const derivedSkillAllowState = getDerivedSkillAllowState(pi)
+            const derivedSkillAllowState = skillGrants(pi, result.settings)
             const overrides = Object.fromEntries(SessionModeOverrides)
             const output = JSON.stringify(
                 {
@@ -336,90 +333,61 @@ export default function (pi: ExtensionAPI) {
             }
         }
     })
+    // The sandbox denies shell writes to protected files with a bare "Operation not permitted": say why, and what works.
+    pi.on("tool_result", async (event, ctx) => {
+        if (event.toolName !== "bash" || process.env.PITON_RUNTIME !== "sandbox") return undefined
+        const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
+        if (!deniedProtectedWrite(text, (file) => isProtected(ctx.cwd, file))) return undefined
+        return { content: [...event.content, { type: "text" as const, text: PROTECTED_HINT }] }
+    })
     return registerReviewCodemode(pi)
 }
 
-function mergePermissions(
-    base: Partial<PermissionSettings>,
-    override: Partial<PermissionSettings>,
-): Partial<PermissionSettings> {
-    return {
-        defaultMode: override.defaultMode ?? base.defaultMode,
-        allow: [...(base.allow ?? []), ...(override.allow ?? [])],
-        deny: [...(base.deny ?? []), ...(override.deny ?? [])],
-        ask: [...(base.ask ?? []), ...(override.ask ?? [])],
-        keybindings: { ...base.keybindings, ...override.keybindings },
-    }
+/**
+ * A shell output that reports a denied write to one of this workspace's protected files. The workspace's protected
+ * files are always readable, so "Operation not permitted" on one of them is a denied write; the same message about
+ * another checkout's folder is a read the sandbox doesn't grant, and gets no hint. `isProtected` asks the resolver
+ * (`piton config protected`, cached) about a path from the message; names that can't be protected aren't asked.
+ */
+export function deniedProtectedWrite(output: string, isProtected: (file: string) => boolean): boolean {
+    const name = /(^|\/)(\.piton(?!\/\.local)|\.pi)(\/|$)/i
+    return output.split("\n").some((line) => {
+        if (!/Operation not permitted|unable to unlink/.test(line)) return false
+        // The paths a message names: quoted ('x'), or between `: ` separators (`rm: x: Operation not permitted`).
+        const quoted = [...line.matchAll(/'([^']+)'/g)].map((match) => match[1]!)
+        const fields = line.split(": ").map((field) => field.trim())
+        return [...quoted, ...fields].some((file) => name.test(file) && isProtected(file))
+    })
 }
 
-export type PermissionTier = "global" | "project" | "local"
-
-// A tier's shared file applies everywhere; its runtime file applies only in that runtime.
-export type PermissionScope = "shared" | Runtime
-
+/** One permission table that sets something, with its own rules: `[permissions]` applies everywhere, `[permissions.<runtime>]` only in that runtime. */
 export interface PermissionSource {
-    tier: PermissionTier
+    level: LevelKind
     scope: PermissionScope
+    sharing: Sharing
     path: string
     settings: PermissionSettings
 }
 
-// `permissions.json` -> `permissions.sandbox.json`; `permissions.local.json` -> `permissions.sandbox.local.json`.
-function runtimeSettingsPath(sharedPath: string, tier: PermissionTier, runtime: Runtime): string {
-    const suffix = tier === "local" ? ".local.json" : ".json"
-    if (!sharedPath.endsWith(suffix)) throw new Error(`unexpected permission settings path ${sharedPath}`)
-    return `${sharedPath.slice(0, -suffix.length)}.${runtime}${suffix}`
-}
-
-/**
- * Every permission file for the runtime, in merge order: each tier's shared file, then its runtime file.
- * The more specific location wins for single values; rule lists from all files are combined.
- */
-export function permissionSourcePaths(cwd: string, runtime: Runtime) {
-    const paths = project.getExtensionSettingsPaths(EXTENSION, cwd)
-    return (["global", "project", "local"] as const).flatMap((tier) => [
-        { tier, scope: "shared" as PermissionScope, path: paths[tier] },
-        { tier, scope: runtime as PermissionScope, path: runtimeSettingsPath(paths[tier], tier, runtime) },
-    ])
-}
-
-export function readPermissionSettings(file: string): PermissionSettings {
-    if (!fs.existsSync(file)) return {}
-    let value: unknown
-    try {
-        value = JSON.parse(fs.readFileSync(file, "utf-8"))
-    } catch (error) {
-        throw new Error(`Invalid JSON in ${file}: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error(`invalid permission settings ${file}: expected an object`)
-    }
-    return validatePermissionSettings(value as PermissionSettings)
-}
-
+/** The resolved permissions for `cwd` in `runtime`: the merged settings and each file that contributed. */
 export function inspectPersistentPermissions(cwd: string, runtime: Runtime = requireRuntime()) {
-    const sources: PermissionSource[] = permissionSourcePaths(cwd, runtime).map((source) => ({
-        ...source,
-        settings: readPermissionSettings(source.path),
+    const resolved = section(resolveSettings(cwd, runtime).permissions)
+    const sources: PermissionSource[] = resolved.sources.map((source) => ({
+        level: source.level,
+        scope: source.scope,
+        sharing: source.sharing,
+        path: source.path,
+        settings: validatePermissionSettings(camelKeys(source.settings) as PermissionSettings),
     }))
-    return {
-        runtime,
-        sources,
-        settings: sources.reduce<PermissionSettings>(
-            (settings, source) => mergePermissions(settings, source.settings),
-            {},
-        ),
-    }
+    return { runtime, sources, settings: validatePermissionSettings(camelKeys(resolved.merged) as PermissionSettings) }
 }
 
 function loadSettings(cwd: string): ResolvedPermissions {
     const { runtime, sources, settings } = inspectPersistentPermissions(cwd)
     return {
         runtime,
-        settings: validatePermissionSettings(settings),
-        files: sources
-            .filter((source) => fs.existsSync(source.path))
-            .map(({ tier, scope, path: file }) => ({ tier, scope, path: file })),
+        settings,
+        files: sources.map(({ level, scope, sharing, path: file }) => ({ level, scope, sharing, path: file })),
     }
 }
 
@@ -429,7 +397,7 @@ export function inspectMcpAllowRules(rules: string[], sources: readonly Permissi
     const configured = sources.flatMap((source) =>
         (["allow", "ask", "deny"] as const).flatMap((mode) =>
             (source.settings[mode] ?? []).map((rule) => ({
-                tier: source.tier,
+                level: source.level,
                 scope: source.scope,
                 path: source.path,
                 mode,
@@ -437,10 +405,12 @@ export function inspectMcpAllowRules(rules: string[], sources: readonly Permissi
             })),
         ),
     )
-    const settings = sources.reduce<PermissionSettings>(
-        (settings, source) => mergePermissions(settings, source.settings),
-        {},
-    )
+    const settings: PermissionSettings = {
+        allow: sources.flatMap((source) => source.settings.allow ?? []),
+        ask: sources.flatMap((source) => source.settings.ask ?? []),
+        deny: sources.flatMap((source) => source.settings.deny ?? []),
+        defaultMode: sources.reduce<Mode | undefined>((mode, source) => source.settings.defaultMode ?? mode, undefined),
+    }
     return rules.map((rule) => {
         const candidate = parseMcpRule(rule)
         if (!candidate) throw new Error(`expected an MCP allow rule: ${JSON.stringify(rule)}`)
@@ -527,9 +497,8 @@ function tryLoadPermissionSettings(load: () => ResolvedPermissions): SettingsRes
 
 function loadResolvedPermissionSettings(pi: ExtensionAPI, cwd: string): SettingsResult {
     return tryLoadPermissionSettings(() => {
-        const derivedSkillAllowState = getDerivedSkillAllowState(pi)
         const resolved = loadSettings(cwd)
-        const settings = mergeSkillAllowRules(resolved.settings, derivedSkillAllowState.rules)
+        const settings = mergeSkillAllowRules(resolved.settings, skillGrants(pi, resolved.settings).rules)
         return { ...resolved, settings: validatePermissionSettings(settings) }
     })
 }
@@ -719,6 +688,13 @@ function getDerivedSkillAllowState(pi: ExtensionAPI): DerivedSkillAllowState {
     return cachedDerivedSkillAllowState
 }
 
+const NO_SKILL_GRANTS: Omit<DerivedSkillAllowState, "cacheKey"> = { rules: [], sources: [] }
+
+/** Skills' `allowed-tools` as allow rules, when the settings opt in (`skill_grants = true`); none otherwise. */
+function skillGrants(pi: ExtensionAPI, settings: PermissionSettings): Omit<DerivedSkillAllowState, "cacheKey"> {
+    return settings.skillGrants === true ? getDerivedSkillAllowState(pi) : NO_SKILL_GRANTS
+}
+
 function mergeSkillAllowRules(settings: PermissionSettings, skillRules: string[]): PermissionSettings {
     if (skillRules.length === 0) return settings
 
@@ -871,9 +847,9 @@ export function denyReason(toolName: string, cause: DenyCause): string {
         case "session":
             return `${STATUS_REJECTED} Denied by session permission mode for \`${toolName}\``
         case "default":
-            return `${STATUS_REJECTED} Denied by defaultMode \`deny\` (no allow rule matched)`
+            return `${STATUS_REJECTED} Denied by default_mode \`deny\` (no allow rule matched)`
         case "bashDefault":
-            return `${STATUS_REJECTED} Denied by defaultMode \`deny\`: no allow rule matched command \`${cause.command}\``
+            return `${STATUS_REJECTED} Denied by default_mode \`deny\`: no allow rule matched command \`${cause.command}\``
         case "unparsedBash":
             return `${STATUS_REJECTED} Denied: the shell command could not be parsed`
         case "mcpMetadata":

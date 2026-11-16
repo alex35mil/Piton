@@ -1,4 +1,6 @@
 import "./host-runtime.ts"
+import { writePermissions } from "./config-fixture.ts"
+import { clearSettingsCache, resolveSettings, section } from "../extensions/__lib/settings.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -40,11 +42,7 @@ function runtimeHarness(
         tools: [{ name: tool, inputSchema: nativeSchema }],
     })
     h.context.model = model
-    fs.mkdirSync(path.join(h.root, ".agents"))
-    fs.writeFileSync(
-        path.join(h.root, ".agents/permissions.json"),
-        JSON.stringify({ defaultMode: permissions === "absent" ? "ask" : permissions }),
-    )
+    writePermissions(h.root, { defaultMode: permissions === "absent" ? "ask" : permissions })
     if (permissions !== "absent") registerPermission(h.pi)
     else createCodemodeExtension()(h.pi)
     if (order === "workflow-first") registerIntegrations(h.pi)
@@ -121,7 +119,12 @@ describe("workflow MCP publication binding", () => {
                     body: `Queue request.\n\n${githubFooter}`,
                     labels: ["Kind: Feature"],
                 })
-                assert.ok(!fs.existsSync(path.join(h.context.cwd, ".project")))
+                // Signing configures nothing: no workflow settings appear.
+                clearSettingsCache()
+                const settings = resolveSettings(h.context.cwd, "host")
+                assert.deepEqual(section(settings.branches), {})
+                assert.equal(section(settings.tracker), null)
+                assert.equal(section(settings.forge), null)
                 assert.equal(h.prompts.length, 0)
             } finally {
                 await h.cleanup()

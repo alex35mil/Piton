@@ -1,6 +1,6 @@
 ---
 name: epic
-description: "Use to initialize, shape, review, resume, and complete an Epic under <repo>/.project/.local/epics/. Never implements Task work."
+description: "Use to initialize, shape, review, resume, and complete an Epic under <repo>/.piton/.local/epics/. Never implements Task work."
 allowed-tools:
     - "inspect_session_analysis"
     - "preflight_epic"
@@ -38,9 +38,9 @@ allowed-tools:
     - "record_resource_ids"
     - "invalidate_resource_ids"
     - "select_pull_request_resource"
-    - "read(.project/*)"
-    - "write(.project/*)"
-    - "edit(.project/*)"
+    - "read(.piton/*)"
+    - "write(.piton/*)"
+    - "edit(.piton/*)"
 ---
 
 # Epic
@@ -59,12 +59,12 @@ When reviewing, read [review](../../references/review.md). When writing human-fa
 
 ## Start or resume
 
-Follow the preparation and entity-selection gates in [artifacts](../../references/artifacts.md#initialization-inputs) for an Epic under `.project/.local/epics/`. When this clone has no local directory for the Epic, [restore it](../../references/epic.md#restore-an-epic) first.
+Follow the preparation and entity-selection gates in [artifacts](../../references/artifacts.md#initialization-inputs) for an Epic under `.piton/.local/epics/`. When this clone has no local directory for the Epic, [restore it](../../references/epic.md#restore-an-epic) first.
 
 1. **Read:**
    - `brief.md`, `metadata.json`, `notes.md` when present, and `epic.md`;
    - the relevant review round, when present;
-   - applicable `.project/policies.md`;
+   - applicable `.piton/policies.md`;
    - `scratch/` only when that context is relevant.
 
    Create missing notes when continuing local work.

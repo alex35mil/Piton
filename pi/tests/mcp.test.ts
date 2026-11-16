@@ -1,4 +1,4 @@
-import "./host-runtime.ts"
+import { TEST_CONFIG_HOME } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
@@ -6,8 +6,8 @@ import * as path from "node:path"
 import { describe, it } from "node:test"
 
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent"
+import { clearSettingsCache } from "../extensions/__lib/settings.ts"
 import {
-    getMcpSettingsPaths,
     mcpResponsePayload,
     mcpResponseValue,
     MCP_TOOL_DECORATORS_EVENT,
@@ -20,7 +20,17 @@ import { nativeMcpFixture } from "./native-mcp-fixture.ts"
 const schema = { type: "object" as const, properties: { value: { type: "string" } }, additionalProperties: false }
 const server = { name: "team-tools", config: { url: "https://example.com/mcp", exposure: "direct" as const } }
 
+/** The MCP files of the global tier and of `root`'s `.piton/`. */
+function getMcpSettingsPaths(root: string) {
+    return {
+        global: path.join(TEST_CONFIG_HOME, "mcp.json"),
+        project: path.join(root, ".piton/mcp.json"),
+        local: path.join(root, ".piton/mcp.local.json"),
+    }
+}
+
 function write(file: string, value: unknown) {
+    clearSettingsCache()
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, JSON.stringify(value))
 }
@@ -234,14 +244,12 @@ describe("native MCP integration", () => {
         }
     })
 
-    it("loads global registrations without reading either untrusted project tier", async () => {
+    it("registers only the global tier's servers in an untrusted project", async () => {
         const h = nativeMcpFixture({ projectTrusted: false, servers: [server] })
         try {
             const files = getMcpSettingsPaths(h.root)
-            for (const file of [files.project, files.local]) {
-                fs.mkdirSync(path.dirname(file), { recursive: true })
-                fs.writeFileSync(file, "untrusted malformed JSON")
-            }
+            write(files.project, { mcpServers: { project: { command: "never" } } })
+            write(files.local, { mcpServers: { private: { command: "never" } } })
             await h.install()
             await h.start()
             await h.waitFor(() => h.catalog().size === 1)

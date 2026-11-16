@@ -1,4 +1,5 @@
 import "./host-runtime.ts"
+import { writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -65,12 +66,8 @@ function fixture() {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "workflow-resource-ids-")))
     const git = (args: string[]) => cp.execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim()
     git(["init", "-q"])
-    fs.writeFileSync(path.join(root, ".gitignore"), "/.project/.local/\n")
-    fs.mkdirSync(path.join(root, ".project"))
-    fs.writeFileSync(
-        path.join(root, ".project/config.json"),
-        JSON.stringify({ branches: { format: "identifier-title" } }),
-    )
+    fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
+    fs.mkdirSync(path.join(root, ".piton"))
     const statuses = {
         backlog: "Backlog",
         todo: "Todo",
@@ -79,25 +76,23 @@ function fixture() {
         done: "Done",
         canceled: "Canceled",
     }
-    fs.writeFileSync(
-        path.join(root, ".project/integrations.json"),
-        JSON.stringify({
-            tracker: {
-                provider: "github",
-                mcpServer: "github",
-                repository: repo,
-                project: itemScope.project,
-                fields: {
-                    status: { field: "Status", values: statuses },
-                    phase: { field: "Phase", values: { ...phaseValues } },
-                    priority: { scope: "project", field: "Priority", values: ["High"] },
-                },
+    writeProjectConfig(root, {
+        branchFormat: "identifier-title",
+        tracker: {
+            provider: "github",
+            mcpServer: "github",
+            repository: repo,
+            project: itemScope.project,
+            fields: {
+                status: { field: "Status", values: statuses },
+                phase: { field: "Phase", values: { ...phaseValues } },
+                priority: { scope: "project", field: "Priority", values: ["High"] },
             },
-            forge: { provider: "github", mcpServer: "github", repository: repo },
-        }),
-    )
+        },
+        forge: { provider: "github", mcpServer: "github", repository: repo },
+    })
     prepareArtifactPersistence(root)
-    const directory = path.join(root, ".project/.local/gigs", common.entity)
+    const directory = path.join(root, ".piton/.local/gigs", common.entity)
     fs.mkdirSync(directory, { recursive: true })
     const metadata: Record<string, unknown> = {
         slug: "example",
@@ -518,7 +513,7 @@ describe("resource ID operations", () => {
         const f = fixture()
         try {
             await assert.rejects(beginPullRequestCreation(f.root, f.directory, mcpTools), /PR intent already exists/)
-            const epicDir = path.join(f.root, ".project/.local/epics/9-rollout")
+            const epicDir = path.join(f.root, ".piton/.local/epics/9-rollout")
             fs.mkdirSync(epicDir, { recursive: true })
             fs.writeFileSync(
                 path.join(epicDir, "metadata.json"),
@@ -656,7 +651,7 @@ describe("resource ID operations", () => {
                 assert.deepEqual(fs.readdirSync(f.directory).sort(), ["metadata.json", "resource-ids.json", "reviews"])
                 assert.equal(f.git(["rev-list", "--count", "HEAD"]), "1")
                 assert.equal(f.git(["status", "--porcelain"]), "")
-                assert.equal(f.git(["ls-files", "--", ".project/.local"]), "")
+                assert.equal(f.git(["ls-files", "--", ".piton/.local"]), "")
             } finally {
                 f.cleanup()
             }

@@ -1,9 +1,9 @@
 import { type Static, Type } from "typebox"
 import { compile } from "../../../extensions/__lib/schema.js"
+import { PITON_DIR } from "../../../extensions/__lib/settings.js"
 
-export const PROJECT_ROOT = ".project"
 // Everything under the local root is machine-local and never committed.
-export const PROJECT_LOCAL_ROOT = `${PROJECT_ROOT}/.local`
+export const PROJECT_LOCAL_ROOT = `${PITON_DIR}/.local`
 export const EPIC_ROOT = `${PROJECT_LOCAL_ROOT}/epics`
 export const GIG_ROOT = `${PROJECT_LOCAL_ROOT}/gigs`
 

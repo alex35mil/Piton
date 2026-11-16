@@ -21,7 +21,7 @@ Read this when a finished workflow's `inspect_session_analysis` returns `enabled
 ## Triage
 
 1. Keep a candidate only when piton's workflow instructions or tools contributed to it. Exclude user choices, project code, provider outages, and one-off agent mistakes that no instruction or tool invited.
-2. When it helps, confirm the cause in the installed workflow files this session loaded, or in the `workflowProject` source. Say when a cause was confirmed only in the source, since that checkout can differ from the installed copy.
+2. When it helps, confirm the cause in the workflow files this session loaded, in the source checkout the pi package runs from.
 3. Keep only findings that are addressable and worth a tracker item.
 4. Search the workflow tracker's open issues for each finding with a few targeted queries: its most specific text, such as an error message, tool name, file name, or distinctive phrase. Never list or compare every issue.
    - Leave consuming-project names, paths, and IDs out of queries.

@@ -1,4 +1,5 @@
-import "./host-runtime.ts"
+import { resetGlobalSettings, TEST_CONFIG_HOME } from "./host-runtime.ts"
+import { type PermissionsFixture, writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -10,7 +11,7 @@ import { describe, it } from "node:test"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata } from "../extensions/__lib/mcp.ts"
-import { getExtensionSettingsPaths } from "../extensions/__lib/project.ts"
+import { clearSettingsCache } from "../extensions/__lib/settings.ts"
 import { inspectPersistentPermissions } from "../extensions/permissions/index.ts"
 import registerProjectSetup from "../workflows/extensions/project-setup/index.ts"
 import {
@@ -31,17 +32,29 @@ function fixture() {
     process.env.PI_CODING_AGENT_DIR = path.join(root, "agent")
     git(root, "init", "-b", "main")
     git(root, "config", "core.excludesFile", "/dev/null")
-    const paths = getExtensionSettingsPaths("permissions", root)
+    resetGlobalSettings()
+    const real = fs.realpathSync(root)
+    const paths = {
+        global: path.join(TEST_CONFIG_HOME, "config.toml"),
+        project: path.join(real, ".piton/config.toml"),
+        local: path.join(real, ".piton/config.local.toml"),
+    }
     return {
         root,
         paths,
-        write(tier: keyof typeof paths, value: unknown) {
-            fs.mkdirSync(path.dirname(paths[tier]), { recursive: true })
-            fs.writeFileSync(paths[tier], `${JSON.stringify(value, null, 2)}\n`)
+        write(tier: keyof typeof paths, value: PermissionsFixture) {
+            writePermissions(tier === "global" ? "global" : root, value, tier === "local")
+        },
+        /** The `[permissions]` a tier's file holds, as the extension names its keys. */
+        read(tier: keyof typeof paths) {
+            clearSettingsCache()
+            const sources = inspectPersistentPermissions(root, "host").sources
+            return sources.find((source) => source.path === paths[tier] && source.scope === "shared")?.settings
         },
         cleanup() {
             if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR
             else process.env.PI_CODING_AGENT_DIR = previous
+            resetGlobalSettings()
             fs.rmSync(root, { recursive: true, force: true })
         },
     }
@@ -64,10 +77,10 @@ const live: McpToolCatalog = new Map(
 )
 const hint = "mcp(team-gh, hint: readOnly)"
 const writeRule = "mcp(team-gh, issue_write)"
-const gate = "write(.project/*/plan.md)"
+const gate = "write(.piton/*/plan.md)"
 
 describe("project setup permissions", () => {
-    it("merges allows and ask gates while preserving unrelated settings and the index", () => {
+    it("merges allows and ask gates while preserving unrelated settings and the index", async () => {
         const f = fixture()
         try {
             const original = {
@@ -75,12 +88,10 @@ describe("project setup permissions", () => {
                 allow: ["read"],
                 ask: ["edit(existing.md)"],
                 deny: ["bash(rm *)"],
-                keybindings: { autoAcceptEdits: "ctrl+shift+a" },
-                other: { keep: true },
             }
             f.write("project", original)
             const index = git(f.root, "ls-files", "--stage")
-            const configured = configureProjectPermissions(
+            const configured = await configureProjectPermissions(
                 f.root,
                 { target: "project", allow: [hint, writeRule], ask: [gate] },
                 live,
@@ -88,7 +99,7 @@ describe("project setup permissions", () => {
             assert.deepEqual(configured.added, { allow: [hint, writeRule], ask: [gate] })
             assert.equal(configured.changed, true)
             assert.equal(configured.localExclusionChanged, false)
-            assert.deepEqual(JSON.parse(fs.readFileSync(f.paths.project, "utf-8")), {
+            assert.deepEqual(f.read("project"), {
                 ...original,
                 allow: [...original.allow, hint, writeRule],
                 ask: [...original.ask, gate],
@@ -100,14 +111,14 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("skips coverage from every tier without touching files or exclusions", () => {
+    it("skips coverage from every tier without touching files or exclusions", async () => {
         for (const tier of ["global", "project", "local"] as const) {
             const f = fixture()
             try {
                 f.write(tier, { allow: ["mcp(team-gh, *)"] })
                 const before = fs.readFileSync(f.paths[tier], "utf-8")
                 const exclude = fs.readFileSync(path.join(f.root, ".git/info/exclude"), "utf-8")
-                const result = configureProjectPermissions(
+                const result = await configureProjectPermissions(
                     f.root,
                     { target: "local", allow: [hint, writeRule], ask: [] },
                     live,
@@ -126,10 +137,10 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("skips semantic duplicates within one approved request and on rerun", () => {
+    it("skips semantic duplicates within one approved request and on rerun", async () => {
         const f = fixture()
         try {
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "local", allow: [writeRule, "mcp(team-gh,issue_write)"], ask: [gate] },
                 live,
@@ -137,13 +148,11 @@ describe("project setup permissions", () => {
             assert.deepEqual(result.added, { allow: [writeRule], ask: [gate] })
             assert.equal(result.skipped.allow[0].status, "covered")
             assert.equal(result.localExclusionChanged, true)
-            assert.equal(
-                git(f.root, "check-ignore", ".agents/permissions.local.json"),
-                ".agents/permissions.local.json",
-            )
+            assert.equal(git(f.root, "check-ignore", ".piton/config.local.toml"), ".piton/config.local.toml")
             const before = fs.readFileSync(f.paths.local, "utf-8")
             assert.equal(
-                configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live).changed,
+                (await configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live))
+                    .changed,
                 false,
             )
             assert.equal(fs.readFileSync(f.paths.local, "utf-8"), before)
@@ -152,14 +161,14 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("preserves blockers, skips fully blocked writes, and reports partial read access", () => {
+    it("preserves blockers, skips fully blocked writes, and reports partial read access", async () => {
         const f = fixture()
         try {
             f.write("global", { ask: [writeRule] })
             f.write("local", { deny: ["mcp(team-gh, issue_read)"] })
             const secondRead = { ...read, serverToolName: "list_issues" }
             const reads = new Map([...live, [fixtureToolName("team-gh", "list_issues"), secondRead] as const])
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "project", allow: [hint, writeRule], ask: [] },
                 reads,
@@ -167,21 +176,19 @@ describe("project setup permissions", () => {
             assert.deepEqual(result.added.allow, [hint])
             assert.equal(result.inspection[0].tools.find((tool) => tool.tool === "issue_read")?.mode, "deny")
             assert.equal(result.skipped.allow[0].status, "blocked")
-            assert.deepEqual(JSON.parse(fs.readFileSync(f.paths.local, "utf-8")), {
-                deny: ["mcp(team-gh, issue_read)"],
-            })
-            assert.deepEqual(JSON.parse(fs.readFileSync(f.paths.global, "utf-8")), { ask: [writeRule] })
+            assert.deepEqual(f.read("local"), { allow: [], ask: [], deny: ["mcp(team-gh, issue_read)"] })
+            assert.deepEqual(f.read("global"), { allow: [], ask: [writeRule], deny: [] })
         } finally {
             f.cleanup()
         }
     })
 
-    it("checks new ask rules and rechecks policy changed after inspection", () => {
+    it("checks new ask rules and rechecks policy changed after inspection", async () => {
         const f = fixture()
         try {
             assert.equal(inspectProjectPermissions(f.root, { rules: [writeRule] }, live).rules[0].status, "available")
             f.write("global", { deny: [writeRule] })
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "project", allow: [writeRule], ask: [gate] },
                 live,
@@ -189,7 +196,7 @@ describe("project setup permissions", () => {
             assert.deepEqual(result.added, { allow: [], ask: [gate] })
             assert.equal(result.skipped.allow[0].status, "blocked")
             fs.rmSync(f.paths.global)
-            const sameRequest = configureProjectPermissions(
+            const sameRequest = await configureProjectPermissions(
                 f.root,
                 { target: "local", allow: [writeRule], ask: [writeRule] },
                 live,
@@ -200,10 +207,10 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("reports unavailable tools and never creates an empty permission file", () => {
+    it("reports unavailable tools and never creates an empty permission file", async () => {
         const f = fixture()
         try {
-            const result = configureProjectPermissions(
+            const result = await configureProjectPermissions(
                 f.root,
                 { target: "local", allow: [hint, writeRule], ask: [] },
                 new Map(),
@@ -220,7 +227,7 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("validates complete requests and all persistent tiers before any mutation", () => {
+    it("validates complete requests and all persistent tiers before any mutation", async () => {
         const f = fixture()
         try {
             const exclude = fs.readFileSync(path.join(f.root, ".git/info/exclude"), "utf-8")
@@ -230,20 +237,20 @@ describe("project setup permissions", () => {
                 { target: "local", allow: ["mcp(team-gh, hint: unknown)"], ask: [gate] },
                 { target: "local", allow: [writeRule, writeRule], ask: [] },
             ]) {
-                assert.throws(() => configureProjectPermissions(f.root, input, live))
+                await assert.rejects(async () => configureProjectPermissions(f.root, input, live))
                 assert.equal(fs.existsSync(f.paths.local), false)
             }
             for (const tier of ["global", "project", "local"] as const) {
                 for (const content of [
-                    "{broken",
-                    "[]",
-                    "null",
-                    '{"allow":"read"}',
-                    '{"allow":["mcp(team-gh, hint: unknown)"]}',
+                    "[permissions\n",
+                    "permissions = []\n",
+                    '[permissions]\nallow = "read"\n',
+                    '[permissions]\nallow = ["mcp(team-gh, hint: unknown)"]\n',
                 ]) {
+                    clearSettingsCache()
                     fs.mkdirSync(path.dirname(f.paths[tier]), { recursive: true })
                     fs.writeFileSync(f.paths[tier], content)
-                    assert.throws(() =>
+                    await assert.rejects(async () =>
                         configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live),
                     )
                     assert.equal(fs.readFileSync(f.paths[tier], "utf-8"), content)
@@ -256,15 +263,16 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("refuses local files in Git and leaves their contents and index intact", () => {
+    it("refuses local files in Git and leaves their contents and index intact", async () => {
         const f = fixture()
         try {
             f.write("local", { allow: ["read"] })
-            git(f.root, "add", ".agents/permissions.local.json")
+            git(f.root, "add", ".piton/config.local.toml")
             const before = fs.readFileSync(f.paths.local, "utf-8")
             const index = git(f.root, "ls-files", "--stage")
-            assert.throws(
-                () => configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live),
+            await assert.rejects(
+                async () =>
+                    configureProjectPermissions(f.root, { target: "local", allow: [writeRule], ask: [gate] }, live),
                 /in Git or staged/,
             )
             assert.equal(fs.readFileSync(f.paths.local, "utf-8"), before)
@@ -274,7 +282,7 @@ describe("project setup permissions", () => {
         }
     })
 
-    it("loads the same three-tier precedence used by runtime permission checks", () => {
+    it("loads the same chain precedence used by runtime permission checks", () => {
         const f = fixture()
         try {
             f.write("global", { defaultMode: "deny", allow: [hint], ask: [gate] })
@@ -285,8 +293,10 @@ describe("project setup permissions", () => {
             assert.deepEqual(snapshot.settings.allow, [hint, writeRule])
             assert.deepEqual(snapshot.settings.deny, [writeRule])
             assert.deepEqual(
-                snapshot.sources.map((source) => `${source.tier}:${source.scope}`),
-                ["global:shared", "global:host", "project:shared", "project:host", "local:shared", "local:host"],
+                snapshot.sources.map(
+                    (source) => `${source.level}:${source.sharing === "local" ? "local" : source.scope}`,
+                ),
+                ["global:shared", "repository:shared", "repository:local"],
             )
         } finally {
             f.cleanup()

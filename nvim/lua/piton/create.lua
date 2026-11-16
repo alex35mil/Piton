@@ -82,6 +82,7 @@ function M.refusal_message(refusal)
         or kind == "not_a_repository"
         or kind == "not_a_worker"
         or kind == "leftovers"
+        or kind == "invalid_configuration"
         or kind == "failed"
     then
         return cli.describe(refusal)

@@ -26,6 +26,7 @@
 ---| { kind: "unknown_default", checkout: string }
 ---| { kind: "not_a_worker", path: string }
 ---| { kind: "leftovers", path: string, lines: string[] }
+---| { kind: "invalid_configuration", message: string }
 ---| { kind: "failed", message: string }
 
 ---@alias PitonCreateResult
@@ -50,6 +51,7 @@ local REFUSAL_KINDS = {
     unknown_default = true,
     not_a_worker = true,
     leftovers = true,
+    invalid_configuration = true,
     failed = true,
 }
 
@@ -216,6 +218,27 @@ function M.preview_folder(source_path, name)
     return vim.fs.basename(source_path) .. "--" .. normalized
 end
 
+-- Exit code of `piton config get` when the part's files are invalid.
+local EXIT_INVALID_CONFIG = 3
+
+--- One part of the workspace's resolved configuration (`piton config get`):
+--- piton's resolver is the only reader of configuration files. Refuses with
+--- the resolver's message when the part can't be used.
+---@param part "tracker" | "mcp"
+---@param workspace string
+---@return any value nil when the part is unset (`tracker` with no table)
+function M.config(part, workspace)
+    local result = util.exec({ "piton", "config", "get", part, "--workspace", workspace })
+    local ok, value = pcall(vim.json.decode, result.stdout or "", { luanil = { object = true, array = true } })
+    if result.code == EXIT_OK and ok then
+        return value
+    end
+    if result.code == EXIT_INVALID_CONFIG and ok and type(value) == "table" and type(value.error) == "table" then
+        util.refuse(tostring(value.error.message))
+    end
+    util.refuse("piton config get " .. part .. " failed (exit " .. result.code .. "):\n" .. vim.trim(result.stderr or ""))
+end
+
 ---@param refusal_value PitonWorkerRefusal
 ---@return string
 function M.describe(refusal_value)
@@ -241,7 +264,7 @@ function M.describe(refusal_value)
         return r.path .. " is not an agent"
     elseif r.kind == "leftovers" then
         return r.path .. " isn't clean:\n" .. table.concat(r.lines, "\n")
-    elseif r.kind == "failed" then
+    elseif r.kind == "invalid_configuration" or r.kind == "failed" then
         return r.message
     end
     error("unknown piton refusal: " .. vim.inspect(r))

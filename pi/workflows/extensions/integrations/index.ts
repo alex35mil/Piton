@@ -37,8 +37,8 @@ import { gateOutcome } from "./gate.js"
 import {
     assertArtifactPersistencePrepared,
     assertSandboxArtifactsLinked,
+    developmentCheckout,
     loadSessionAnalysis,
-    resolveWorkflowProject,
 } from "../__lib/project-config.js"
 import * as Git from "../__lib/git.js"
 import {
@@ -316,10 +316,10 @@ export default function (pi: ExtensionAPI): void {
         name: "inspect_session_analysis",
         label: "inspect_session_analysis",
         description:
-            "Read whether the global workflows.json enables the in-chat session analysis that ends a finished Task, Gig, Epic, or incoming PR. Reads local settings only; never calls providers or changes configuration.",
+            "Read whether a finished Task, Gig, Epic, or incoming PR ends with the in-chat session analysis: on in a development install (the pi package running from a git checkout of piton) unless `[development] session_analysis = false` in the global config.host.toml, off otherwise. Reads local settings only; never calls providers or changes configuration.",
         parameters: Type.Object({}, { additionalProperties: false }),
-        async execute(_id, _params, _signal, _onUpdate, ctx) {
-            const result = { sessionAnalysis: loadSessionAnalysis(ctx.cwd) }
+        async execute() {
+            const result = { sessionAnalysis: loadSessionAnalysis() }
             return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
         },
     })
@@ -495,8 +495,7 @@ function buildWorkflowIntegrationContext(ctx: ExtensionContext, input: WorkflowC
         "target" in input
             ? {
                   target: input.target,
-                  projectRoot:
-                      input.target === "workflow" ? resolveWorkflowProject(ctx.cwd) : project.resolveRootDir(ctx.cwd),
+                  projectRoot: input.target === "workflow" ? developmentCheckout() : project.resolveRootDir(ctx.cwd),
               }
             : undefined
     const cwd = selection?.projectRoot ?? ctx.cwd
@@ -514,7 +513,7 @@ function buildWorkflowIntegrationContext(ctx: ExtensionContext, input: WorkflowC
  * Whether an operation starts, resumes, or addresses an entity whose artifacts a sandboxed
  * worker must keep in its source checkout. Project inspection and queue intake create no
  * entity or artifacts, so the sandbox link guard doesn't apply, including when they target
- * the workflow source project, whose `.project/.local` is a real directory.
+ * the workflow source project, whose `.piton/.local` is a real directory.
  */
 function persistsEntityArtifacts(operation: WorkflowContextInput["operation"]): boolean {
     switch (operation) {
