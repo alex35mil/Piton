@@ -1,8 +1,15 @@
 # Phase
 
-Phase is the current activity; Status is the lifecycle. Every initialized Epic, Task, and Gig stores `phase: planning | execution | selfReview` in `metadata.json`. Status and Priority stay with the tracker.
+Phase is the current activity; Status is the lifecycle. When the tracker configures Phase, every initialized Epic, Task, and Gig stores `phase: planning | execution | selfReview` in `metadata.json`. Status and Priority stay with the tracker.
 
 Phase is for visibility: it shows team members and observers where the work is. Nothing waits on it, and no tool requires a Phase.
+
+## When Phase isn't configured
+
+Phase is optional: a GitHub Project field, or Linear label groups, chosen at [setup](#setup).
+
+- When `inspect_integrations` shows no Phase, or an entity context returns `phaseProjection` with `state: notConfigured`, skip every Phase step in every workflow: setting, clearing, reading, and labeling.
+- Metadata then has no `phase`, and the Phase tools refuse.
 
 ## Transitions
 
@@ -61,4 +68,4 @@ During In Progress, native Phase equals the metadata Phase. Outside In Progress,
 
 ## Setup
 
-GitHub setup provisions or validates the Project field and options under its preview and hash approval. On Linear, the label setup tools create or check one Project-label group and one issue-label group, each single-select with the three active children, under the same approval ([label groups](./setup.md#label-groups)). Runtime never creates native metadata.
+Setup asks whether to track Phase. When the user declines, it provisions nothing and saves no Phase. Otherwise, GitHub setup provisions or validates the Project field and options under its preview and hash approval. On Linear, the label setup tools create or check one Project-label group and one issue-label group, each single-select with the three active children, under the same approval ([label groups](./setup.md#label-groups)). Runtime never creates native metadata.

@@ -210,7 +210,7 @@ The shared guard validates the branch configuration and persistence safety, reus
 
 **Authority:**
 
-- Artifacts, tracker identity, relationships, branch contracts, Phase, and review rounds are authoritative. Every entity stores `phase` in `metadata.json`. When changing Phase, read [Phase](./phase.md).
+- Artifacts, tracker identity, relationships, branch contracts, Phase, and review rounds are authoritative. With Phase configured, every entity stores `phase` in `metadata.json`. When changing Phase, read [Phase](./phase.md).
 - Lifecycle and Priority are native tracker Status and Priority, read fresh; nothing local stores them.
 - Keep machine data valid and transient context in `notes.md`. Never store credentials in `.piton/config.toml`.
 

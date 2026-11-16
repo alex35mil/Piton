@@ -21,6 +21,7 @@ import { writeTextAtomically } from "../__lib/files.js"
 import { assertArtifactPersistencePrepared, assertSandboxArtifactsLinked } from "../__lib/project-config.js"
 import { loadIntegrationConfig } from "../integrations/config.js"
 import { resolveWorkflowEnvironment, type WorkflowEnvironment } from "../integrations/policy.js"
+import { initialPhase } from "../integrations/phase.js"
 import type { RecoveryReads } from "../integrations/plan-publication.js"
 import { trackerReference, type TrackerObject, type TrackerRecord } from "../integrations/records.js"
 import type { ProviderEvidence } from "../integrations/resource-id-operations.js"
@@ -206,7 +207,7 @@ export function restoreEpic(cwd: string, input: RestoreEpicInput, tools: McpTool
         slug,
         title: facts.title.trim(),
         createdAt: new Date(facts.createdAt).toISOString(),
-        phase: "execution",
+        ...initialPhase(environment.tracker, "execution"),
         branch: readyBranch(plan.routing.epicBranch, defaultBranch, "generated"),
         tracker,
         // The published plan's Task list was accepted before it was published.

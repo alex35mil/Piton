@@ -12,7 +12,7 @@ The branch takes one ordinary merge commit of the target. History isn't rewritte
 4. **Plan** in Execution, returning native Status to In Progress as for any correction on submitted work. Write a plain-words resolution plan:
    - each conflicting file, what each side changed, and how each conflict is kept or combined;
    - a **Target changes to keep** section: for each of those commits, its SHA and PR, the fix or behavior that must survive, and how the resolution keeps it. A commit without a PR is described from its diff and message.
-5. **Review the plan.** Set Self-Review, then call `review_task` or `review_gig` with `phase: "conflict-plan"` and the plan as `resolution`. Follow [review](../review.md) until it approves; the merge review requires an approved resolution plan.
+5. **Review the plan.** Set Self-Review when Phase is configured ([Phase](../phase.md#when-phase-isnt-configured)), then call `review_task` or `review_gig` with `phase: "conflict-plan"` and the plan as `resolution`. Follow [review](../review.md) until it approves; the merge review requires an approved resolution plan.
 6. **Present** the reviewed plan in chat; no file is written. Accepting it authorizes only the local merge commit.
 
 ## Resolve
@@ -26,7 +26,7 @@ When the resolution needs a different approach than the approved plan, run `git 
 
 ## Review the merge
 
-1. Set Self-Review, then call the review tool with `phase: "conflict-merge"`. It reviews the merge commit's `git show --remerge-diff` against the newest approved resolution plan.
+1. Set Self-Review when Phase is configured, then call the review tool with `phase: "conflict-merge"`. It reviews the merge commit's `git show --remerge-diff` against the newest approved resolution plan.
 2. Amend the unpushed merge commit for corrections within the approved plan. Rerun verification and the merge review after each one.
 3. A correction outside the approved plan goes back to planning. Approving the revised plan also approves `git reset --keep <first-parent>` on the unpushed branch, then the merge runs again.
 
@@ -35,6 +35,6 @@ When the resolution needs a different approach than the approved plan, run `git 
 1. **Ask to push.** Show the final plain-words summary of the resolution, which becomes the PR comment. On request, show `git show --remerge-diff <merge>`.
 2. **After approval,** push the stored branch once, without force, so CI runs once.
 3. **Record it.** Call `prepare_merge_resolution_comment` with the approved summary and run the returned comment call unchanged; the push approval covers it.
-4. **In Review.** Return native Status to In Review and clear native Phase.
+4. **In Review.** Return native Status to In Review and clear native Phase when configured.
 
 Merging the new head needs a new request to ship. When the comment's outcome is uncertain, read the PR's comments for its marker before retrying.

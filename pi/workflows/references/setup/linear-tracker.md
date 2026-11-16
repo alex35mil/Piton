@@ -58,7 +58,7 @@ Read this when configuring a Linear tracker: the tracker object `configure_proje
 
 **Phase groups:**
 
-- Both mappings are required. Each has `scope: workspace | team`, the group's label definition, and distinct child definitions for `planning`, `execution`, and `selfReview`. Team scope means the configured team; workspace scope means no team.
+- Phase is optional ([Phase](../phase.md#when-phase-isnt-configured)). When configured, both mappings are required. Each has `scope: workspace | team`, the group's label definition, and distinct child definitions for `planning`, `execution`, and `selfReview`. Team scope means the configured team; workspace scope means no team.
 - Phase groups are single-select, for issues and Projects. The label setup tools create and check them with the other label groups ([label groups](../setup.md#label-groups)). Runtime reconciliation is in [Phase](../phase.md).
 
 **Workspace inspection:**

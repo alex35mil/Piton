@@ -719,6 +719,14 @@ describe("workflow integration configuration", () => {
 
             write({ ...linearConfig(), repository: { owner: "x", repo: "y" } })
             assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+
+            const { phase, ...withoutPhase } = linearConfig()
+            write(withoutPhase)
+            const loaded = loadIntegrationConfig(cwd).tracker
+            assert.equal(loaded.provider === "linear" && loaded.phase, undefined)
+
+            write({ ...withoutPhase, phase: { issues: phase.issues } })
+            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -767,6 +775,12 @@ describe("workflow integration configuration", () => {
 
             writeConfig(config("project", false))
             assert.equal(loadIntegrationConfig(cwd).tracker.provider, "github")
+
+            const withoutPhase = config("project")
+            delete (withoutPhase.fields as { phase?: unknown }).phase
+            writeConfig(withoutPhase)
+            const loaded = loadIntegrationConfig(cwd).tracker
+            assert.equal(loaded.provider === "github" && loaded.fields.phase, undefined)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -998,7 +1012,7 @@ describe("workflow integration configuration", () => {
                 value: "Execution",
                 changed: true,
             })
-            assert.equal(context.phaseProjection?.inProgress, "execution")
+            assert.partialDeepStrictEqual(context.phaseProjection, { inProgress: "execution" })
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -1164,7 +1178,7 @@ describe("workflow integration configuration", () => {
                 labels: ["customer", "execution"],
                 changed: true,
             })
-            assert.equal(context.phaseProjection?.inProgress, "execution")
+            assert.partialDeepStrictEqual(context.phaseProjection, { inProgress: "execution" })
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

@@ -76,7 +76,8 @@ const baseMetadataProperties = {
     slug: OneLineSchema,
     title: OneLineSchema,
     createdAt: OneLineSchema,
-    phase: PhaseSchema,
+    // Absent when the tracker doesn't configure Phase, and until the first Phase is set.
+    phase: Type.Optional(PhaseSchema),
     branch: ReadyBranchContractSchema,
     tracker: TrackerRecordSchema,
     forge: Type.Optional(ForgeRecordSchema),

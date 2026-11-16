@@ -287,16 +287,17 @@ function linearCatalogItemType(catalog: LinearLabelCatalog): LabelItemType {
  * An item in the configured team sees workspace and team labels together, and runtime applies
  * labels by name, so each catalog's workspace and team scopes form one collision domain.
  */
-export function assertLinearLabels(labels: LinearLabels | undefined, phase: LinearPhaseGroups): void {
+export function assertLinearLabels(labels: LinearLabels | undefined, phase: LinearPhaseGroups | undefined): void {
     const groups = Object.entries(labels?.groups ?? {})
     assertReservedGroups(groups)
     const managedByCatalog = new Map<LinearLabelCatalog, Set<string>>()
     for (const catalog of LinearLabelCatalogSchema.enum) {
         const itemType = linearCatalogItemType(catalog)
-        const phaseGroup = catalog === "issue" ? phase.issues : phase.projects
+        const phaseGroup = phase ? (catalog === "issue" ? phase.issues : phase.projects) : undefined
         const names = [
-            phaseGroup.group.name,
-            ...Object.values(phaseGroup.values).map((value) => value.name),
+            ...(phaseGroup
+                ? [phaseGroup.group.name, ...Object.values(phaseGroup.values).map((value) => value.name)]
+                : []),
             ...groups.flatMap(([key, group]) => {
                 const values = groupValuesFor(key, group, itemType)
                 if (values.length === 0) return []

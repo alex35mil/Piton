@@ -32,7 +32,7 @@ Every Deliverable ships through a merged PR.
 3. **Push** only the stored entity branch.
 4. **Create the PR** by running the returned call once, adding only the rendered body as `body`. It already carries the registered tool, the entity title, the stored branch as head, and the stored target as base. Approval never changes that contract. Don't discover PRs first.
 5. **Record.** On clear success, call `record_resource_creation` with that call's tool, arguments, and response as evidence. A rejected record changes nothing; correct the evidence and record again, never create again. It records the PR number and URL only in the local Resource IDs file; it never changes `metadata.json` or causes a follow-up commit. Use the number from the PR URL, not the database ID.
-6. **In Review.** After the PR is created or recovered, set native Status to In Review and clear native Phase (see [Phase](../phase.md)). A local commit or push without a reviewable PR is not submission.
+6. **In Review.** After the PR is created or recovered, set native Status to In Review and, when Phase is configured, clear native Phase (see [Phase](../phase.md)). A local commit or push without a reviewable PR is not submission.
 
 ## Revisions on an open PR
 

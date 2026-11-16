@@ -5,7 +5,7 @@ import { mcpResponsePayload, type McpToolCatalog } from "../../../extensions/__l
 import type { EntityStatus } from "../__lib/entity.js"
 import type { TrackerConfig } from "./config.js"
 import { itemFieldValue, singleSelectField } from "./github-project-reads.js"
-import type { NativePhaseFacts } from "./phase.js"
+import { requirePhase, type NativePhaseFacts } from "./phase.js"
 import { resourceIdsFromRead } from "./resource-id-operations.js"
 import { EvidenceSchema } from "./resource-id-tool.js"
 
@@ -36,7 +36,9 @@ export function githubPhaseFacts(
     const bound = entity.status.tracker
     if (tracker.provider !== "github" || bound.provider !== "github")
         throw new Error("GitHub Phase requires the configured GitHub tracker and a GitHub tracker issue")
-    const name = tracker.fields.phase.field
+    const native = requirePhase(tracker)
+    if (native.provider !== "github") throw new Error("GitHub Phase requires the configured GitHub Phase field")
+    const name = native.field.field
     const field = singleSelectField({ mcpServer: tracker.mcpServer, ...tracker.project }, input.field, name, tools)
     // Identity is the same check that records the entity's Project item ID.
     resourceIdsFromRead(

@@ -229,6 +229,27 @@ describe("workflow domain", () => {
         }
     })
 
+    it("initializes without a metadata Phase when the tracker doesn't configure Phase", () => {
+        for (const provider of ["github", "linear"] as const) {
+            const cwd = temporaryRepository(provider)
+            try {
+                const tracker = integrationsFromFile(section(resolveSettings(cwd).tracker)!.value) as {
+                    phase?: unknown
+                    fields?: { phase?: unknown }
+                }
+                delete tracker.phase
+                delete tracker.fields?.phase
+                writeProjectConfig(cwd, { tracker })
+                const object = provider === "github" ? issue(7) : linearIssue("ENG-7")
+                const created = init(cwd, gig("No Phase", object))
+                assert.equal("phase" in created.status, false)
+                assert.doesNotMatch(formatInitializedEntity(created), /Phase/)
+            } finally {
+                fs.rmSync(cwd, { recursive: true, force: true })
+            }
+        }
+    })
+
     it("initializes a GitHub Epic and Task from their issues with a plan marker", () => {
         const cwd = temporaryRepository()
         try {

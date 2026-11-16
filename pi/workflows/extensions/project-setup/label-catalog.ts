@@ -83,33 +83,39 @@ function linearCatalogItemType(catalog: LinearLabelCatalog): LabelItemType {
     return catalog === "issue" ? "deliverable" : "epic"
 }
 
-export function linearManagedEntries(labels: LinearLabels | undefined, phase: LinearPhaseGroups): ManagedEntry[] {
+/** `phase` is absent when the project doesn't track Phase; then no Phase groups are managed. */
+export function linearManagedEntries(
+    labels: LinearLabels | undefined,
+    phase: LinearPhaseGroups | undefined,
+): ManagedEntry[] {
     const entries: ManagedEntry[] = []
     for (const catalog of ["issue", "project"] as const) {
         const itemType = linearCatalogItemType(catalog)
-        const phaseGroup = catalog === "issue" ? phase.issues : phase.projects
-        const phaseKey = entryKey(catalog, "phase", null)
-        entries.push({
-            key: phaseKey,
-            catalog,
-            scope: phaseGroup.scope,
-            group: "phase",
-            value: null,
-            definition: phaseGroup.group,
-            parentKey: null,
-            groupType: "singleSelect",
-        })
-        for (const [value, definition] of Object.entries(phaseGroup.values)) {
+        const phaseGroup = phase ? (catalog === "issue" ? phase.issues : phase.projects) : undefined
+        if (phaseGroup) {
+            const phaseKey = entryKey(catalog, "phase", null)
             entries.push({
-                key: entryKey(catalog, "phase", value),
+                key: phaseKey,
                 catalog,
                 scope: phaseGroup.scope,
                 group: "phase",
-                value,
-                definition,
-                parentKey: phaseKey,
-                groupType: null,
+                value: null,
+                definition: phaseGroup.group,
+                parentKey: null,
+                groupType: "singleSelect",
             })
+            for (const [value, definition] of Object.entries(phaseGroup.values)) {
+                entries.push({
+                    key: entryKey(catalog, "phase", value),
+                    catalog,
+                    scope: phaseGroup.scope,
+                    group: "phase",
+                    value,
+                    definition,
+                    parentKey: phaseKey,
+                    groupType: null,
+                })
+            }
         }
         for (const [group, config] of Object.entries(labels?.groups ?? {})) {
             const values = groupValuesFor(group, config, itemType)

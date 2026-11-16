@@ -54,6 +54,12 @@ export const PhaseValuesSchema = Type.Object(
 )
 export type PhaseValues = Static<typeof PhaseValuesSchema>
 
+export const GitHubPhaseFieldSchema = Type.Object(
+    { field: FieldNameSchema, values: PhaseValuesSchema },
+    { additionalProperties: false },
+)
+export type GitHubPhaseField = Static<typeof GitHubPhaseFieldSchema>
+
 const StatusValuesSchema = Type.Object(
     {
         backlog: Type.String({ minLength: 1 }),
@@ -99,10 +105,8 @@ export const GitHubTrackerSchema = Type.Object(
                     },
                     { additionalProperties: false },
                 ),
-                phase: Type.Object(
-                    { field: FieldNameSchema, values: PhaseValuesSchema },
-                    { additionalProperties: false },
-                ),
+                // Phase is visibility only; without it, workflows track no Phase at all.
+                phase: Type.Optional(GitHubPhaseFieldSchema),
                 priority: PriorityFieldSchema,
             },
             { additionalProperties: false },
@@ -118,7 +122,8 @@ export const LinearTrackerSchema = Type.Object(
         provider: Type.Enum(["linear"], { type: "string" }),
         mcpServer: McpServerSchema,
         team: Type.String({ minLength: 1 }),
-        phase: LinearPhaseGroupsSchema,
+        // Phase is visibility only; without it, workflows track no Phase at all.
+        phase: Type.Optional(LinearPhaseGroupsSchema),
         labels: Type.Optional(LinearLabelsSchema),
         statuses: Type.Object(
             {
@@ -169,7 +174,7 @@ export function assertDistinctPhases(values: PhaseValues): void {
 }
 
 function assertGitHubTrackerInvariants(config: GitHubTracker): void {
-    assertDistinctPhases(config.fields.phase.values)
+    if (config.fields.phase) assertDistinctPhases(config.fields.phase.values)
     const statusOptions = Object.values(config.fields.status.values)
     if (new Set(statusOptions).size !== statusOptions.length) {
         throw new Error("GitHub Status mappings must use distinct options")
@@ -179,7 +184,7 @@ function assertGitHubTrackerInvariants(config: GitHubTracker): void {
 
     const projectFieldNames = [
         config.fields.status.field,
-        config.fields.phase.field,
+        ...(config.fields.phase ? [config.fields.phase.field] : []),
         ...(config.fields.priority.scope === "project" ? [config.fields.priority.field] : []),
     ]
     const duplicateProjectFields = projectFieldNames.filter(

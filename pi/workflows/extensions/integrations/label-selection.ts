@@ -302,11 +302,11 @@ export interface LinearCatalogLabel {
 /**
  * The complete Linear label-ID set for an item, from the fresh catalog of its label kind (issue
  * labels for Deliverables, Project labels for Epics) and its applied IDs. Phase labels and labels
- * outside the managed groups are kept.
+ * outside the managed groups are kept. `phase` is the item's Phase group, when Phase is configured.
  */
 export function planLinearLabelUpdate(
     labels: LinearLabels | undefined,
-    phase: LinearPhaseGroup,
+    phase: LinearPhaseGroup | undefined,
     team: string,
     itemType: LabelItemType,
     kind: WorkflowKind | undefined,
@@ -336,9 +336,11 @@ export function planLinearLabelUpdate(
         if (active.length !== 1) throw new LabelSelectionFailure({ kind: "missingLabel", name })
         return active[0].id
     })
-    const phaseGroup = facts.catalog.find(
-        (label) => label.isGroup && label.name === phase.group.name && label.team === scopeTeam(phase.scope),
-    )
+    const phaseGroup = phase
+        ? facts.catalog.find(
+              (label) => label.isGroup && label.name === phase.group.name && label.team === scopeTeam(phase.scope),
+          )
+        : undefined
     const phaseIds = new Set(
         phaseGroup ? facts.catalog.filter((label) => label.parentId === phaseGroup.id).map((label) => label.id) : [],
     )
