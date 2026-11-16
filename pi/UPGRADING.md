@@ -9,6 +9,7 @@ The package no longer reads configuration itself: it asks `piton config resolve`
 - **Keys are snake_case:** `default_mode`, `mcp_server`, `owner_type`, `in_progress`, `self_review`, `api_key`. Label keys you chose, like `pi-workflows`, stay as written.
 - **Where keys may go:** `web_search.api_key` only in a `config.local.toml`; `branches.username` only in a project's `config.local.toml` (either file in the global folder); `[tracker]` and `[forge]` only in a project or parent folder.
 - **Removed:** `[permissions.keybindings]`. Use `/permissions-toggle-auto-accept`.
+- **Skill grants are off by default:** a skill's `allowed-tools` grants nothing unless `skill_grants = true` in `[permissions]` (or `[permissions.host]` / `[permissions.sandbox]`). Without it, allow the tools you want by name. Skills are no longer protected files.
 - **Removed:** `workflowProject` and `sessionAnalysis`. Workflow reports open a pre-filled GitHub issue for you to submit; a development install (the package running from a git checkout of piton) files them in that checkout's tracker and runs session analysis.
 - **Parent folders** strictly below home can hold their own `.piton/` and `.agents/`, shared by every repository below them.
 - **Ignore rules:** `.gitignore` needs `/.piton/.local`, and `.git/info/exclude` gets one `/.piton/*.local.*` line. Project setup writes them.
