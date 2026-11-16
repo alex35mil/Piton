@@ -37,6 +37,7 @@ A Task or Gig takes one of two paths. Say which in one line before continuing. "
 
 - Write the plan directly. It's the only plan file; there is no separate draft.
 - Write the smallest self-contained plan that carries every settled decision. Entity skills define its content and review criteria.
+- Plan the smallest change that meets the Request. A new tool, module, mode, or setup decision the Request doesn't need is a scope question: ask before planning it.
 - Use the [reviewed document shape](./artifacts.md#reviewed-document-shape): `## Overview` explains the brief and why it matters, then a few scope and behavior bullets under `### Plan highlights`, then the supporting sections. Keep the highlights in sync with plan changes.
 
 ## Task and Gig plans
