@@ -76,8 +76,8 @@ The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is
 - `session/`: one pi process, and the conversation model the apps render (`view`).
 - `launch/`: pi's environment and command line, and the nono profile (`sandbox`, the only code that knows nono).
 - `apps/`: serving the native apps: the `view` protocol, the tailnet WebSocket, browsing roots, the Settings list.
-- `agent/`: `agent.sock`, the bridge from a sandboxed agent to the daemon. `protected/`: which files are protected,
-  and a protected write asked of the user.
+- `agent/`: the bridge between a sandboxed agent and the daemon: which files are protected and their Seatbelt rules
+  (`protected`), `agent.sock` (`socket`), and a protected write asked of the user (`write`).
 - `project/`: a workspace's source or worker relation, and worker clones.
 - `setup/`: `piton setup` and the launchd agent. `logging/`: piton's own logs, the logging policy, the collector.
 
@@ -776,9 +776,9 @@ next tool call. Changes are gated where they're written:
    default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
    shell commands, scripts, `git checkout`, MCP servers, pi itself. nono's typed rules can't express a read-only
    folder inside a writable one; its raw-rule field (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the
-   allows so the deny wins. `protected/` is the one definition; `piton config protected --seatbelt-rules` prints
-   the rules, and `cli/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames, hard
-   links, symlinks, other cases).
+   allows so the deny wins. `agent/protected.rs` is the one definition; `piton config protected --seatbelt-rules`
+   prints the rules, and `cli/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames,
+   hard links, symlinks, other cases).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
    the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
    over `~/.local/state/piton/agent.sock` (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps

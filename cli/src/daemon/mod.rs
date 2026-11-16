@@ -424,7 +424,7 @@ impl Daemon {
             Relation::Worker { source, .. } => format!(", worker of {}", source.display()),
         };
         let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let protected = crate::protected::Roots {
+        let protected = crate::agent::ProtectedRoots {
             source: canonical(&launch_config.source),
             checkout: canonical(&launch_config.checkout),
         };

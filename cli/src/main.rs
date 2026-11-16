@@ -6,7 +6,6 @@ mod daemon;
 mod launch;
 mod logging;
 mod project;
-mod protected;
 mod session;
 mod setup;
 mod state;

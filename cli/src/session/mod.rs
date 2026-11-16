@@ -166,8 +166,8 @@ pub enum SessionCmd {
     },
     /// A protected write the agent asked for (agent.sock): asked of the user in every client, written on approval.
     ProtectedWrite {
-        request: crate::protected::Request,
-        reply: oneshot::Sender<crate::protected::Outcome>,
+        request: crate::agent::WriteRequest,
+        reply: oneshot::Sender<crate::agent::WriteOutcome>,
     },
     /// The agent stopped waiting for a protected write (or got its answer): settle it if it's still pending.
     SettleProtectedWrite,
@@ -279,7 +279,7 @@ pub struct LaunchSpec {
     /// The generated sandbox profile, for sandboxed launches; removed when the session ends.
     pub profile: Option<launch::ProfileFile>,
     /// What this session's protected files are (canonical source and checkout).
-    pub protected: crate::protected::Roots,
+    pub protected: crate::agent::ProtectedRoots,
 }
 
 pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
@@ -432,7 +432,7 @@ struct PendingWrite {
     root: PathBuf,
     path: PathBuf,
     content: String,
-    reply: oneshot::Sender<crate::protected::Outcome>,
+    reply: oneshot::Sender<crate::agent::WriteOutcome>,
 }
 
 /// How many message ids a session remembers for repeats.
@@ -448,7 +448,7 @@ enum StopPhase {
 
 struct SessionTask {
     config: Arc<DaemonConfig>,
-    protected: crate::protected::Roots,
+    protected: crate::agent::ProtectedRoots,
     /// The protected write waiting for the user: one per session.
     protected_write: Option<PendingWrite>,
     /// The sandbox profile pi was launched with, removed when the session ends.
@@ -659,13 +659,13 @@ impl SessionTask {
     /// other is pending; otherwise asked of the user with a dialog every client shows. Every protected write asks.
     fn protected_write(
         &mut self,
-        request: crate::protected::Request,
-        reply: oneshot::Sender<crate::protected::Outcome>,
+        request: crate::agent::WriteRequest,
+        reply: oneshot::Sender<crate::agent::WriteOutcome>,
     ) {
-        use crate::protected::{Outcome, write_dialog as dialog};
-        let refuse = |reason: String| Outcome::Refused { reason };
+        use crate::agent::{WriteOutcome, write_dialog};
+        let refuse = |reason: String| WriteOutcome::Refused { reason };
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
-        let path = crate::protected::canonical_target(&request.path);
+        let path = crate::agent::canonical_target(&request.path);
         let Some(root) = self.protected.protected_root(&path).map(Path::to_path_buf) else {
             let _ = reply.send(refuse(format!(
                 "{} isn't a protected file of this session; write it with the write or edit tool",
@@ -687,7 +687,7 @@ impl SessionTask {
         self.next_internal += 1;
         let id = format!("piton:write:{}", self.next_internal);
         crate::log!("session {key}: asking about a protected write to {}", path.display());
-        let record = dialog(&id, &path, before.as_deref(), &request.content);
+        let record = write_dialog(&id, &path, before.as_deref(), &request.content);
         self.protected_write = Some(PendingWrite {
             id,
             root,
@@ -701,32 +701,32 @@ impl SessionTask {
 
     /// A client's answer to the pending protected write's dialog: write or not, and tell the agent.
     fn answer_protected_write(&mut self, answer: &Map<String, Value>) {
-        use crate::protected::{Decision, Outcome, write_approved as write};
+        use crate::agent::{WriteDecision, WriteOutcome, write_approved};
         let Some(pending) = self.protected_write.take() else {
             return;
         };
         let key = lock(&self.shared).key;
-        let outcome = match Decision::from_answer(answer) {
-            Decision::Approve { content, notes } => {
+        let outcome = match WriteDecision::from_answer(answer) {
+            WriteDecision::Approve { content, notes } => {
                 let modified = content.as_ref().is_some_and(|c| *c != pending.content);
                 let content = content.unwrap_or(pending.content);
-                match write(&pending.root, &pending.path, &content) {
+                match write_approved(&pending.root, &pending.path, &content) {
                     Ok(()) => {
                         crate::log!("session {key}: protected write to {} approved", pending.path.display());
-                        Outcome::Approved {
+                        WriteOutcome::Approved {
                             modified,
                             content,
                             notes,
                         }
                     }
-                    Err(e) => Outcome::Refused {
+                    Err(e) => WriteOutcome::Refused {
                         reason: format!("approved, but can't write {}: {e}", pending.path.display()),
                     },
                 }
             }
-            Decision::Reject { notes } => {
+            WriteDecision::Reject { notes } => {
                 crate::log!("session {key}: protected write to {} rejected", pending.path.display());
-                Outcome::Rejected { notes }
+                WriteOutcome::Rejected { notes }
             }
         };
         let _ = pending.reply.send(outcome);
@@ -1024,7 +1024,7 @@ impl SessionTask {
             pending.path.display()
         );
         if gone {
-            let _ = pending.reply.send(crate::protected::Outcome::Refused {
+            let _ = pending.reply.send(crate::agent::WriteOutcome::Refused {
                 reason: "the run ended before the user answered; ask again if it's still needed".into(),
             });
         } else {

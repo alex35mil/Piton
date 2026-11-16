@@ -6,22 +6,18 @@
 //! denied) and the daemon's check of a write an agent asks for over `agent.sock` (written only after the user approves
 //! it). See "Protected files" in docs/design.md.
 
-mod write;
-
-pub use write::{Decision, Outcome, Request, dialog as write_dialog, write as write_approved};
-
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{LOCAL_DIR, PITON_DIR};
 
 /// The roots protection is computed for: one launch's source and workspace checkouts (canonical).
 #[derive(Debug, Clone)]
-pub struct Roots {
+pub struct ProtectedRoots {
     pub source: PathBuf,
     pub checkout: PathBuf,
 }
 
-impl Roots {
+impl ProtectedRoots {
     /// The checkout a protected `path` (canonical, absolute) is in, which a write to it stays inside: the source for its
     /// `.piton/` (settings, permissions, sandbox grants), the workspace's checkout for `.pi/` (pi's settings and
     /// extensions, which run code) and `.agents/skills/` (skills and the scripts they run). `None` when it isn't
@@ -133,8 +129,8 @@ fn regex_escape(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn roots() -> Roots {
-        Roots {
+    fn roots() -> ProtectedRoots {
+        ProtectedRoots {
             source: "/u/p/repo".into(),
             checkout: "/u/p/repo--w".into(),
         }
@@ -175,7 +171,7 @@ mod tests {
     #[test]
     /// The rules `cli/tests/probe/protected.sh` checks on the host (it builds them the same way).
     fn rules_are_the_ones_the_host_check_proves() {
-        let r = Roots {
+        let r = ProtectedRoots {
             source: "/u/p/re.po".into(),
             checkout: "/u/p/re.po".into(),
         };

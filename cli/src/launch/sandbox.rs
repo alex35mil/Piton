@@ -99,9 +99,9 @@ pub fn profile(resolved: &LaunchConfig, home: &Path, env: &Env, agent_socket: &P
 }
 
 /// The protected roots, canonical as Seatbelt compares them.
-fn protected_roots(resolved: &LaunchConfig) -> crate::protected::Roots {
+fn protected_roots(resolved: &LaunchConfig) -> crate::agent::ProtectedRoots {
     let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    crate::protected::Roots {
+    crate::agent::ProtectedRoots {
         source: canonical(&resolved.source),
         checkout: canonical(&resolved.checkout),
     }

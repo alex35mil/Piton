@@ -1,5 +1,5 @@
 //! A protected write an agent asks for: the daemon asks the user (a dialog in every client), then writes the file
-//! itself. The agent can ask (over `agent.sock`, see crate::agent) but never answer: answers come only from clients.
+//! itself. The agent can ask (over `agent.sock`, see `socket.rs`) but never answer: answers come only from clients.
 //!
 //! The dialog is pi's file review format, so pi.nvim opens its diff view and the apps their review sheet: a `select`
 //! whose title is `{"prompt", "toolName", "toolInput"}` with `toolName` `write` and `toolInput {path, content}`, plus
@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 /// A request from the agent.
 #[derive(Debug, Clone, Deserialize)]
-pub struct Request {
+pub struct WriteRequest {
     /// Absolute path (the agent's view of it; resolved and checked by the daemon).
     pub path: PathBuf,
     /// The whole new content.
@@ -26,7 +26,7 @@ pub struct Request {
 /// The outcome the agent gets back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum Outcome {
+pub enum WriteOutcome {
     /// The user approved; `content` is what was written (the user's version when they changed it).
     Approved {
         modified: bool,
@@ -44,7 +44,7 @@ pub enum Outcome {
 
 /// What the user decided, from a client's answer to the dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decision {
+pub enum WriteDecision {
     Approve {
         /// The user's own version, when they changed it.
         content: Option<String>,
@@ -55,15 +55,15 @@ pub enum Decision {
     },
 }
 
-impl Decision {
+impl WriteDecision {
     /// Reads a client's `extension_ui_response` fields: `value` from a select (pi.nvim's JSON or a plain option),
     /// `cancelled` or a missing value as a rejection.
-    pub fn from_answer(answer: &serde_json::Map<String, Value>) -> Decision {
+    pub fn from_answer(answer: &serde_json::Map<String, Value>) -> WriteDecision {
         let Some(value) = answer.get("value").and_then(Value::as_str) else {
-            return Decision::Reject { notes: Vec::new() };
+            return WriteDecision::Reject { notes: Vec::new() };
         };
         match value {
-            "Accept" => Decision::Approve {
+            "Accept" => WriteDecision::Approve {
                 content: None,
                 notes: Vec::new(),
             },
@@ -76,8 +76,8 @@ impl Decision {
                     .cloned()
                     .unwrap_or_default();
                 match parsed.as_ref().and_then(|p| p.get("result")).and_then(Value::as_str) {
-                    Some("Accepted") => Decision::Approve { content: None, notes },
-                    Some("AcceptModified") => Decision::Approve {
+                    Some("Accepted") => WriteDecision::Approve { content: None, notes },
+                    Some("AcceptModified") => WriteDecision::Approve {
                         content: parsed
                             .as_ref()
                             .and_then(|p| p.get("content"))
@@ -85,7 +85,7 @@ impl Decision {
                             .map(str::to_string),
                         notes,
                     },
-                    Some(_) | None => Decision::Reject { notes },
+                    Some(_) | None => WriteDecision::Reject { notes },
                 }
             }
         }
@@ -93,7 +93,7 @@ impl Decision {
 }
 
 /// The dialog record for a request, in pi's `extension_ui_request` format.
-pub fn dialog(id: &str, path: &Path, current: Option<&str>, content: &str) -> Value {
+pub fn write_dialog(id: &str, path: &Path, current: Option<&str>, content: &str) -> Value {
     let title = json!({
         "prompt": format!("write (protected): {}", path.display()),
         "toolName": "write",
@@ -116,7 +116,7 @@ pub fn dialog(id: &str, path: &Path, current: Option<&str>, content: &str) -> Va
 /// path is walked from `root` one folder at a time, each opened with `O_NOFOLLOW` (missing ones created, never
 /// followed), and the temporary file and the rename happen relative to the last folder's descriptor. A path that no
 /// longer leads where the user saw it fails here instead of writing elsewhere.
-pub fn write(root: &Path, path: &Path, content: &str) -> std::io::Result<()> {
+pub fn write_approved(root: &Path, path: &Path, content: &str) -> std::io::Result<()> {
     use nix::fcntl::{AtFlags, OFlag, open, openat, renameat};
     use nix::sys::stat::{Mode, fstatat, mkdirat};
     use std::io::Write;
@@ -200,41 +200,41 @@ mod tests {
     #[test]
     fn reads_pi_nvim_and_plain_answers() {
         assert_eq!(
-            Decision::from_answer(&answer(json!({"value": "Accept"}))),
-            Decision::Approve {
+            WriteDecision::from_answer(&answer(json!({"value": "Accept"}))),
+            WriteDecision::Approve {
                 content: None,
                 notes: vec![]
             }
         );
         assert_eq!(
-            Decision::from_answer(&answer(json!({"value": "Reject"}))),
-            Decision::Reject { notes: vec![] }
+            WriteDecision::from_answer(&answer(json!({"value": "Reject"}))),
+            WriteDecision::Reject { notes: vec![] }
         );
         assert_eq!(
-            Decision::from_answer(&answer(json!({"cancelled": true}))),
-            Decision::Reject { notes: vec![] }
+            WriteDecision::from_answer(&answer(json!({"cancelled": true}))),
+            WriteDecision::Reject { notes: vec![] }
         );
         let note = json!({"path": "p", "note": "why"});
         assert_eq!(
-            Decision::from_answer(&answer(json!({
+            WriteDecision::from_answer(&answer(json!({
                 "value": json!({"result": "AcceptModified", "content": "mine", "notes": [note]}).to_string()
             }))),
-            Decision::Approve {
+            WriteDecision::Approve {
                 content: Some("mine".into()),
                 notes: vec![note.clone()]
             }
         );
         assert_eq!(
-            Decision::from_answer(&answer(json!({
+            WriteDecision::from_answer(&answer(json!({
                 "value": json!({"result": "Rejected", "notes": [note]}).to_string()
             }))),
-            Decision::Reject { notes: vec![note] }
+            WriteDecision::Reject { notes: vec![note] }
         );
     }
 
     #[test]
     fn the_dialog_is_pi_nvims_diff_format_with_the_current_content() {
-        let d = dialog("piton:w:1", Path::new("/r/.piton/config.toml"), Some("old"), "{}");
+        let d = write_dialog("piton:w:1", Path::new("/r/.piton/config.toml"), Some("old"), "{}");
         assert_eq!(d["type"], "extension_ui_request");
         assert_eq!(d["method"], "select");
         let title: Value = serde_json::from_str(d["title"].as_str().unwrap()).unwrap();
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(title["toolInput"]["path"], "/r/.piton/config.toml");
         assert_eq!(title["toolInput"]["content"], "{}");
         assert_eq!(title["current"], "old");
-        let new = dialog("piton:w:2", Path::new("/r/.pi/x"), None, "y");
+        let new = write_dialog("piton:w:2", Path::new("/r/.pi/x"), None, "y");
         let title: Value = serde_json::from_str(new["title"].as_str().unwrap()).unwrap();
         assert_eq!(title["current"], Value::Null);
     }
@@ -256,15 +256,15 @@ mod tests {
         std::fs::write(&file, "old").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        write(&root, &file, "new").unwrap();
+        write_approved(&root, &file, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
         assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
         // A new file in new folders.
         let skill = root.join("apps/.agents/skills/x/SKILL.md");
-        write(&root, &skill, "skill").unwrap();
+        write_approved(&root, &skill, "skill").unwrap();
         assert_eq!(std::fs::read_to_string(&skill).unwrap(), "skill");
         // Nothing outside the root.
-        assert!(write(&root, Path::new("/tmp/elsewhere"), "x").is_err());
+        assert!(write_approved(&root, Path::new("/tmp/elsewhere"), "x").is_err());
     }
 
     /// The agent swaps a folder on the approved path for a symlink while the user decides: the write refuses instead
@@ -280,7 +280,7 @@ mod tests {
         let approved = root.join("apps/.agents/skills/x/SKILL.md");
         std::fs::rename(root.join("apps"), root.join("apps.bak")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join("apps")).unwrap();
-        let refused = write(&root, &approved, "allowed-tools: [\"bash(*)\"]").unwrap_err();
+        let refused = write_approved(&root, &approved, "allowed-tools: [\"bash(*)\"]").unwrap_err();
         assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied, "{refused}");
         assert!(!elsewhere.join(".agents").exists(), "nothing written through the link");
 
@@ -290,7 +290,7 @@ mod tests {
         let target = elsewhere.join("config.toml");
         std::fs::write(&target, "theirs").unwrap();
         std::os::unix::fs::symlink(&target, root.join(".piton/config.toml")).unwrap();
-        let refused = write(&root, &root.join(".piton/config.toml"), "mine").unwrap_err();
+        let refused = write_approved(&root, &root.join(".piton/config.toml"), "mine").unwrap_err();
         assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "theirs");
         assert!(

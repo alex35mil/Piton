@@ -179,7 +179,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
             };
             let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            let roots = crate::protected::Roots {
+            let roots = crate::agent::ProtectedRoots {
                 source: canonical(workspace.source()),
                 checkout: canonical(&workspace.checkout),
             };
@@ -191,7 +191,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 (Some(path), false) => {
-                    let target = crate::protected::canonical_target(&workspace.path.join(path));
+                    let target = crate::agent::canonical_target(&workspace.path.join(path));
                     let protected = roots.protected_root(&target).is_some();
                     let output = serde_json::json!({"format": RESOLVE_FORMAT, "path": target, "protected": protected});
                     println!("{output}");
