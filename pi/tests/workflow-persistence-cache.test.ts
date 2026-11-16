@@ -115,6 +115,11 @@ describe("artifact persistence revalidation", () => {
         try {
             fs.writeFileSync(path.join(f.root, ".gitignore"), "")
             assert.throws(() => assertArtifactPersistencePrepared(f.root), /in \.gitignore/)
+            const nested = path.join(f.root, ".piton/.gitignore")
+            fs.writeFileSync(nested, "/.local\n")
+            assertArtifactPersistencePrepared(f.root)
+            fs.rmSync(nested)
+            assert.throws(() => assertArtifactPersistencePrepared(f.root), /in \.gitignore/)
             fs.writeFileSync(path.join(f.root, ".gitignore"), "/.piton/.local\n")
             assertArtifactPersistencePrepared(f.root)
             writeConfig(f.root, { "branches.username": "alex" }, true)

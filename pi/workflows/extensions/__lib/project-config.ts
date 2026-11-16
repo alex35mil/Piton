@@ -253,6 +253,7 @@ function persistenceInputs(root: string, config: ProjectConfig) {
         indexPath,
         excludePath,
         path.join(root, ".gitignore"),
+        path.join(root, PITON_DIR, ".gitignore"),
         ...localSettingsFiles(root).map((file) => path.join(root, file)),
     ]
     return {
