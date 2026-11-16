@@ -373,23 +373,44 @@ describe("incoming PR identity and context", () => {
         }
     })
 
-    it("refuses incoming-PR evidence in a sandboxed worker without a linked local root", () => {
+    it("records incoming-PR evidence in a sandboxed source checkout, including a private setup", () => {
         const f = fixture()
-        const source = fs.mkdtempSync(path.join(os.tmpdir(), "incoming-local-source-"))
         const previous = process.env.PITON_RUNTIME
         try {
             process.env.PITON_RUNTIME = "sandbox"
-            const local = path.join(f.root, ".piton", ".local")
-            fs.mkdirSync(local, { recursive: true })
-            assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools), /isn't linked/)
-            fs.cpSync(local, source, { recursive: true })
-            fs.rmSync(local, { recursive: true })
-            fs.symlinkSync(source, local)
+            assert.ok(fs.lstatSync(path.join(f.root, ".piton", ".local")).isDirectory())
+            assert.doesNotThrow(() => incomingPullRequestContext(f.root, "#12", mcpTools))
+            // Private setup: no .gitignore rule, only /.piton in .git/info/exclude.
+            f.git("rm", "-q", ".gitignore")
+            f.git("commit", "-qm", "private setup")
+            fs.appendFileSync(path.join(f.root, ".git", "info", "exclude"), "/.piton\n")
+            prepareArtifactPersistence(f.root)
             assert.doesNotThrow(() => incomingPullRequestContext(f.root, "#12", mcpTools))
         } finally {
             if (previous === undefined) delete process.env.PITON_RUNTIME
             else process.env.PITON_RUNTIME = previous
-            fs.rmSync(source, { recursive: true, force: true })
+            f.close()
+        }
+    })
+
+    it("refuses incoming-PR evidence in a sandboxed worker without a linked local root", () => {
+        const f = fixture()
+        const worker = `${f.root}--w`
+        const previous = process.env.PITON_RUNTIME
+        try {
+            cp.execFileSync("git", ["clone", "-q", f.root, worker])
+            cp.execFileSync("git", ["config", "--local", "agent.source", f.root], { cwd: worker })
+            process.env.PITON_RUNTIME = "sandbox"
+            const local = path.join(worker, ".piton", ".local")
+            fs.mkdirSync(local, { recursive: true })
+            assert.throws(() => incomingPullRequestContext(worker, "#12", mcpTools), /isn't linked/)
+            fs.rmSync(local, { recursive: true })
+            fs.symlinkSync(path.join(f.root, ".piton", ".local"), local)
+            assert.doesNotThrow(() => incomingPullRequestContext(worker, "#12", mcpTools))
+        } finally {
+            if (previous === undefined) delete process.env.PITON_RUNTIME
+            else process.env.PITON_RUNTIME = previous
+            fs.rmSync(worker, { recursive: true, force: true })
             f.close()
         }
     })

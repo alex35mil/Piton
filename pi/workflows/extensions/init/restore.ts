@@ -18,7 +18,7 @@ import {
 } from "../__lib/entity.js"
 import { epicTaskList, hasEpicTasksSection, parseEpicRouting, parseEpicTasks } from "../__lib/epic-tasks.js"
 import { writeTextAtomically } from "../__lib/files.js"
-import { assertArtifactPersistencePrepared, assertSandboxArtifactsLinked } from "../__lib/project-config.js"
+import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "../__lib/project-config.js"
 import { loadIntegrationConfig } from "../integrations/config.js"
 import { resolveWorkflowEnvironment, type WorkflowEnvironment } from "../integrations/policy.js"
 import { initialPhase } from "../integrations/phase.js"
@@ -180,7 +180,7 @@ function unpublishedRecord(object: TrackerObject, environment: WorkflowEnvironme
 export function restoreEpic(cwd: string, input: RestoreEpicInput, tools: McpToolCatalog) {
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
-    assertSandboxArtifactsLinked(root)
+    assertWorkerArtifactsLinked(root)
     const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
     const facts = epicFacts(environment, input.epic, tools)
     const unpublished = unpublishedRecord(facts.object, environment)
@@ -234,7 +234,7 @@ export function restoreEpic(cwd: string, input: RestoreEpicInput, tools: McpTool
 export function restoreEpicPlanSource(cwd: string, input: RestoreEpicPlanSourceInput, tools: McpToolCatalog) {
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
-    assertSandboxArtifactsLinked(root)
+    assertWorkerArtifactsLinked(root)
     const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
     const directory = resolveEntityDirectory(root, cwd, input.entityDir)
     const status = readEntityStatus(directory)

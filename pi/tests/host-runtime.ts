@@ -1,8 +1,8 @@
 /**
  * Every test file imports this first, so tests run in the host runtime no matter where the
- * runner was launched. A sandboxed worker exports PITON_RUNTIME=sandbox, and inheriting it
- * would make fixture repositories fail the sandbox artifact guard. Tests that exercise the
- * sandbox runtime set PITON_RUNTIME themselves and restore it afterward.
+ * runner was launched. A sandboxed session exports PITON_RUNTIME=sandbox, which would select
+ * fixtures' `[permissions.sandbox]` rules. Tests that exercise the sandbox runtime set
+ * PITON_RUNTIME themselves and restore it afterward.
  *
  * Configuration resolves through the `piton` binary: tests use this repository's debug build
  * (`mise run pi:test` builds it first) and an empty global tier of their own, never the user's.

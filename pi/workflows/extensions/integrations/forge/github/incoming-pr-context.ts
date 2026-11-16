@@ -11,7 +11,7 @@ import {
 } from "../../../../../extensions/__lib/mcp.js"
 import * as project from "../../../../../extensions/__lib/project.js"
 import { PROJECT_LOCAL_ROOT } from "../../../__lib/domain.js"
-import { assertArtifactPersistencePrepared, assertSandboxArtifactsLinked } from "../../../__lib/project-config.js"
+import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "../../../__lib/project-config.js"
 import { loadIntegrationConfig, type GitHubForge } from "../../config.js"
 import type { ProviderEvidence } from "../../resource-id-operations.js"
 
@@ -69,7 +69,7 @@ function normalizeRepository(repository: Repository): Repository {
 export function incomingPullRequestContext(cwd: string, reference: string, tools: McpToolCatalog) {
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
-    assertSandboxArtifactsLinked(root)
+    assertWorkerArtifactsLinked(root)
     const { forge, tracker } = loadIntegrationConfig(root)
     const selected = parseIncomingReference(reference, forge.repository)
     const board =
