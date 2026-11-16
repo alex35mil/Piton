@@ -77,6 +77,7 @@ export const expectedWorkflowTools = [
     "plan_incoming_pr_cancellation",
     "inspect_project_setup",
     "prepare_artifacts",
+    "configure_artifact_ignore",
     "configure_mcp",
     "configure_project",
     "inspect_permissions",

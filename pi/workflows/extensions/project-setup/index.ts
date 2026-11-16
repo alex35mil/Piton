@@ -19,9 +19,10 @@ import * as Git from "../__lib/git.js"
 import {
     globalConfigPaths,
     LOCAL_SETTINGS_EXCLUDE,
+    localExcludePath,
     prepareArtifactPersistence,
-    PROJECT_LOCAL_IGNORE,
 } from "../__lib/project-config.js"
+import { ArtifactIgnoreSchema, configureArtifactIgnore, inspectArtifactSharing } from "./artifact-sharing.js"
 import { inspectProjectMcp } from "../integrations/mcp.js"
 import { setupRoot } from "./root.js"
 import { inspectLinearWorkspace, LinearWorkspaceInspectionToolSchema } from "../integrations/tracker/linear.js"
@@ -110,6 +111,21 @@ export default function (pi: ExtensionAPI): void {
                     },
                 ],
                 details: prepared,
+            }
+        },
+    })
+
+    tools.registerTool({
+        name: "configure_artifact_ignore",
+        label: "configure_artifact_ignore",
+        description:
+            "Apply the approved sharing choice by appending one ignore rule: shared adds /.piton/.local to .gitignore; private adds /.piton/ to .git/info/exclude so no Piton file is tracked. A no-op when the rule is already in effect. Never changes the Git index.",
+        parameters: ArtifactIgnoreSchema,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const result = configureArtifactIgnore(setupRoot(ctx.cwd), params)
+            return {
+                content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+                details: result,
             }
         },
     })
@@ -332,7 +348,7 @@ const PROJECT_SETUP_FILES = [
 
 export function inspectProjectSetup(cwd: string, projectTrusted: boolean) {
     const root = setupRoot(cwd)
-    const excludePath = path.resolve(root, Git.run(root, ["rev-parse", "--git-path", "info/exclude"]))
+    const excludePath = localExcludePath(root)
     const configuration = inspectConfiguration(cwd)
     return {
         repositoryRoot: root,
@@ -348,7 +364,7 @@ export function inspectProjectSetup(cwd: string, projectTrusted: boolean) {
         localSettingsExclusion: LOCAL_SETTINGS_EXCLUDE,
         mcp: inspectProjectMcp(cwd, projectTrusted),
         boundEntityTrackers: inspectBoundEntityTrackers(root),
-        projectLocalIgnore: inspectProjectLocalIgnore(root),
+        artifactSharing: inspectArtifactSharing(root),
         projectPathsInGit: splitLines(Git.run(root, ["ls-files", "--cached", "--", PITON_DIR])),
         stagedProjectPaths: splitLines(Git.run(root, ["diff", "--cached", "--name-only", "--", PITON_DIR])),
     }
@@ -426,14 +442,6 @@ function snapshotAbsoluteFile(root: string, absolute: string) {
 
 function fileContent(file: string): { exists: false } | { exists: true; content: string } {
     return fs.existsSync(file) ? { exists: true, content: fs.readFileSync(file, "utf-8") } : { exists: false }
-}
-
-// What setup must do to .gitignore: nothing, or append the rule.
-function inspectProjectLocalIgnore(root: string) {
-    const file = path.join(root, ".gitignore")
-    const lines = fs.existsSync(file) ? fs.readFileSync(file, "utf-8").split(/\r?\n/) : []
-    if (lines.includes(PROJECT_LOCAL_IGNORE)) return { state: "present" as const, rule: PROJECT_LOCAL_IGNORE }
-    return { state: "append" as const, rule: PROJECT_LOCAL_IGNORE }
 }
 
 function splitLines(value: string): string[] {

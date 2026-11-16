@@ -3,6 +3,7 @@ name: project-setup
 description: "Use to interactively initialize or reconfigure Epic/Task/Gig workflows for a repository, including branch naming, tracker and forge integrations, and Project Policies."
 allowed-tools:
     - "inspect_project_setup"
+    - "configure_artifact_ignore"
     - "prepare_artifacts"
     - "configure_mcp"
     - "configure_project"
@@ -24,8 +25,6 @@ allowed-tools:
     - "read(.piton/*)"
     - "write(.piton/*)"
     - "edit(.piton/*)"
-    - "read(.gitignore)"
-    - "read(.git/info/exclude)"
 ---
 
 # Project setup
@@ -82,18 +81,32 @@ For example:
 
 **Order of decisions:**
 
-1. Tracker and forge roles, and their providers.
-2. Reuse or add MCP registrations; restart and resume when new ones are added.
-3. For Linear, the workspace inspection and status setup.
-4. Branch naming, filtered by tracker.
-5. Provider configuration for the selected roles. Once GitHub forge and Project are both known, offer fork-only incoming PR intake.
-6. Project Policies, then convenience permissions.
+1. Sharing: shared or private.
+2. Tracker and forge roles, and their providers.
+3. Reuse or add MCP registrations; restart and resume when new ones are added.
+4. For Linear, the workspace inspection and status setup.
+5. Branch naming, filtered by tracker.
+6. Provider configuration for the selected roles. In a shared setup, once GitHub forge and Project are both known, offer fork-only incoming PR intake.
+7. Project Policies, then convenience permissions.
 
-Workflow work always stays local under `.piton/.local/`; there's no persistence choice. When applying the ignore rule, read [artifacts](../../references/artifacts.md#persistence-and-authority). Removing files from Git needs separate approval and is outside setup.
+Workflow work always stays local under `.piton/.local/`. Removing files from Git needs separate approval and is outside setup.
 
 ## Decisions
 
-### 1. Integration roles
+### 1. Sharing
+
+When the snapshot's `artifactSharing` is `shared` or `private`, state it and keep it unless the user asks to change it. Otherwise ask:
+
+1. Shared (`shared`): configuration and policies can be committed for the team. `.gitignore` gets `/.piton/.local`, a tracked change.
+2. Private (`private`): no tracked file changes. `.git/info/exclude` gets `/.piton/`, so every Piton file stays in this clone, and its workers. Teammates see nothing.
+
+- Private needs no `.piton/` path in Git or staged; the tool refuses otherwise and names them.
+- Preview the exact rule and file, get approval, then call `configure_artifact_ignore` before any other write, so no Piton file is ever left unignored.
+- In a private setup, the later `local` or `project` file choices for MCP and permissions both stay outside Git; say so instead of explaining sharing.
+- A private setup never offers fork-only incoming PR intake: its workflow file only works once committed. `/pr` review works the same either way.
+- Switching a private setup to shared means removing the `/.piton/` exclude by hand first.
+
+### 2. Integration roles
 
 | Role | Choices | Owns |
 | --- | --- | --- |
@@ -104,7 +117,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
 - Never create placeholder, disabled, or secret-bearing configuration.
 - Choose the tracker before branch naming; the forge doesn't affect branch options.
 
-### 2. MCP registrations
+### 3. MCP registrations
 
 **Choosing servers:**
 
@@ -120,7 +133,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
 
    Never infer this choice or ask it per provider. Project trust is required for either.
 2. Then ask for each missing server's name and credential variable name, never the value. Defaults are `LINEAR_API_KEY` and `GITHUB_PERSONAL_ACCESS_TOKEN`.
-3. Preview the exact server entries, the target file, and, for local, the `/.piton/*.local.*` exclude append. Get approval, then call `configure_mcp`. Merge order, name conflicts, and toolsets are in [MCP registrations](../../references/setup.md#mcp-registrations).
+3. Preview the exact server entries, the target file, and, for local, the `/.piton/*.local.*` exclude append unless the sharing rule already covers it. Get approval, then call `configure_mcp`. Merge order, name conflicts, and toolsets are in [MCP registrations](../../references/setup.md#mcp-registrations).
 
 **Restarting:**
 
@@ -130,7 +143,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
   - ask them to reload or restart Pi and restore this session. Not an empty session, and not `/project-setup` again; the restored conversation holds the approved answers.
 - After restoring, refresh with `inspect_project_setup`, continue from the next unanswered decision, and proceed only once the provider's registered tools are available.
 
-### 3. Linear workspace inspection and statuses
+### 4. Linear workspace inspection and statuses
 
 1. **Call `inspect_linear_workspace`** after the MCP server is active and before branch naming. Use the credential variable from the recognized registration, or ask for the variable's name only.
 2. **On a missing variable, denied access, or API failure,** report the exact error and ask whether to fix access or continue with manual team and status values. Never fall back silently.
@@ -145,7 +158,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
    - With nothing to create, save the picked names without applying.
 5. **Phase groups:** read [Phase](../../references/phase.md#setup) and the [Linear tracker shape](../../references/setup/linear-tracker.md). The user picks the group and child names, scope, and colors for Projects and for issues. The label step creates or checks them.
 
-### 4. Branch naming
+### 5. Branch naming
 
 | Tracker and choice | Format |
 | --- | --- |
@@ -170,7 +183,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
 - When neither has one, ask for it and save it in `.piton/config.local.toml`, which stays outside Git.
 - Never store it in `.piton/config.toml`, infer it from Git or provider identity, or ask for it otherwise.
 
-### 5. Provider configuration
+### 6. Provider configuration
 
 #### GitHub tracker
 
@@ -251,9 +264,9 @@ Reuse the known repository and selected server; the forge is always configured a
 
 #### Fork-only incoming PR intake
 
-When GitHub forge and Project configuration are both known, read [incoming PR intake](../../references/setup/incoming-pr-intake.md) and offer it as a numbered enable or decline choice.
+In a shared setup, when GitHub forge and Project configuration are both known, read [incoming PR intake](../../references/setup/incoming-pr-intake.md) and offer it as a numbered enable or decline choice.
 
-### 6. Project Policies and permissions
+### 7. Project Policies and permissions
 
 **Project Policies:**
 
@@ -278,13 +291,7 @@ GitHub provisioning has its own preview and hash approval and must finish first.
 - **Configuration** for `configure_project`: the branch format, the tracker and forge exactly as the tools returned them, and a local username when one is needed (otherwise the existing username source, or none). The project file never holds a username.
 - **`.piton/policies.md`**, exactly, or that it will be absent.
 - **Fork-only intake**, when opted in: the rendered `.github/workflows/incoming-pr-project.yml` diff, the Project and repository, the secret name, and the prerequisites. Otherwise the path stays unchanged.
-- **`.gitignore`:** follow the setup context's `projectLocalIgnore`: an explicit no-op for `present`, or this exact append for `append`:
-
-    ```gitignore
-    /.piton/.local
-    ```
-
-  Mention the `/.piton/*.local.*` exclusion only when a local settings file exists or is proposed, either as an existing no-op or as the exact append.
+- **Sharing:** the rule already applied by `configure_artifact_ignore`, as a no-op. Mention the `/.piton/*.local.*` exclusion only when a local settings file exists or is proposed and the sharing rule doesn't cover it.
 
 - **Permissions**, when selected: the target, the exact `allow` and `ask` additions, skipped rules, and conflicts. For local additions, note that `configure_permissions` keeps `.piton/config.local.toml` outside Git and ensures its exclude entry; unchanged permissions add no exclusion.
 
@@ -297,7 +304,7 @@ The configuration files are protected: under Piton, each write shows the user it
 After approval:
 
 1. Call `configure_project` once with the approved configuration. It keeps the files' other settings.
-2. Write the approved `.piton/policies.md`, and apply the approved `.gitignore` change: append `/.piton/.local` when it isn't present.
+2. Write the approved `.piton/policies.md`.
 3. When permissions are selected, call `configure_permissions` once with the approved `target`, `allow`, and `ask` (use `[]` for an unselected list). Report actual additions, skips, and conflicts; a skipped rule grants nothing. A changed conflict needing a different grant needs approval again.
 4. Call `prepare_artifacts`. Stop on any Git-membership or exclusion conflict; never fix it by changing the index.
 5. With integrations, call `inspect_integrations` with `target: "current"`.

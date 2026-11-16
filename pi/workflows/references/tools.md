@@ -65,7 +65,7 @@ None of these call providers or turn identity, lifecycle, or merge facts into ca
 
 ## Setup, review, and delivery
 
-- **Setup:** `inspect_project_setup`, `prepare_artifacts`, `configure_mcp`, `configure_project`, `inspect_permissions`, `configure_permissions`, `inspect_linear_workspace`, `render_incoming_pr_intake`.
+- **Setup:** `inspect_project_setup`, `configure_artifact_ignore`, `prepare_artifacts`, `configure_mcp`, `configure_project`, `inspect_permissions`, `configure_permissions`, `inspect_linear_workspace`, `render_incoming_pr_intake`.
 - **GitHub provisioning:** `inspect_github_repository_setup`, `inspect_github_project_setup`, `inspect_github_project`, `preview_github_project_setup`, `apply_github_project_setup`. Preview and apply keep the full specification, approval hash, and credential isolation.
 - **Linear statuses:** `preview_linear_status_setup`, `apply_linear_status_setup`. Apply takes the approved `planHash` and only creates statuses.
 - **Label catalog:** `inspect_label_setup`, `preview_label_setup`, `apply_label_setup`, for both trackers.

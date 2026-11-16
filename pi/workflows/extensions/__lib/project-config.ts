@@ -18,11 +18,46 @@ import * as Git from "./git.js"
 export { BranchFormatSchema }
 export type { BranchFormat }
 
-/** Every `.local` file in `.piton/` stays out of Git; setup adds this to `.git/info/exclude`. */
+/**
+ * Every `.local` file in `.piton/` stays out of Git; setup adds this to `.git/info/exclude` when no repository rule
+ * already ignores them.
+ */
 export const LOCAL_SETTINGS_EXCLUDE = `/${PITON_DIR}/*.local.*`
-// The single repository rule that keeps every workflow entity and private evidence out of Git.
+// A shared setup's committed `.gitignore` rule that keeps every workflow entity and private evidence out of Git.
 // No trailing slash, so it also matches a worker's symlink to its source checkout's directory.
 export const PROJECT_LOCAL_IGNORE = `/${PROJECT_LOCAL_ROOT}`
+// A private setup's `.git/info/exclude` rule: every Piton file in the repository stays local to the clone. It also
+// matches a worker's `.piton/.local` symlink.
+export const PRIVATE_PROJECT_EXCLUDE = `/${PITON_DIR}/`
+
+/** Whether the repository's own rules ignore a path, and which rule file decides it. */
+export type IgnoreMatch = { kind: "ignored"; source: string } | { kind: "unignored" }
+
+/**
+ * Asks Git whether `query` (repository-relative; a trailing `/` queries a directory) is ignored by the repository's
+ * own rules: any `.gitignore` and `.git/info/exclude`. The user's global excludes file doesn't count: it's outside the
+ * repository and setup never writes it. A deciding negation (`!pattern`) means the path isn't ignored.
+ */
+export function repositoryIgnore(root: string, query: string): IgnoreMatch {
+    const match = Git.tryRun(root, ["-c", "core.excludesFile=", "check-ignore", "--verbose", "--no-index", "--", query])
+    // `<source>:<line>:<pattern>\t<path>`; repository rule files never contain `:`, a pattern might.
+    const rule = /^(.*?):(\d+):(.*)\t/.exec(match)
+    if (!rule || rule[3].startsWith("!")) return { kind: "unignored" }
+    return { kind: "ignored", source: rule[1] }
+}
+
+/** The repository's `.git/info/exclude`, resolved through Git. */
+export function localExcludePath(root: string): string {
+    return path.resolve(root, Git.run(root, ["rev-parse", "--git-path", "info/exclude"]))
+}
+
+/** Appends one rule line (after an optional comment line) to an ignore file, creating it when missing. */
+export function appendIgnoreRule(file: string, entry: string, comment?: string): void {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf-8") : ""
+    const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : ""
+    fs.appendFileSync(file, `${separator}${comment === undefined ? "" : `${comment}\n`}${entry}\n`)
+}
 
 export interface ProjectConfig {
     branches: { format: BranchFormat; username?: string }
@@ -153,7 +188,7 @@ export function prepareArtifactPersistence(cwd: string) {
     validatedPersistenceInputs = undefined
     const { excludePath, missing } = inspectArtifactPersistence(cwd)
     if (missing) {
-        appendExcludeEntry(excludePath, missing.comment, missing.entry)
+        appendIgnoreRule(excludePath, missing.entry, missing.comment)
         assertArtifactPersistencePrepared(cwd)
     }
     // A configured project always has the folder, so worker tooling can link it before the first entity.
@@ -202,7 +237,7 @@ function inspectArtifactPersistence(cwd: string) {
     assertProjectLocalIgnored(root)
     assertLocalSettingsOutsideGit(root)
     assertProjectLocalOutsideGit(root)
-    if (hasLocalSettings(root) && !hasExcludeEntry(excludePath, LOCAL_SETTINGS_EXCLUDE)) {
+    if (localSettingsFiles(root).some((file) => repositoryIgnore(root, file).kind === "unignored")) {
         return {
             config,
             excludePath,
@@ -228,10 +263,6 @@ function localSettingsFiles(root: string): string[] {
         .map((name) => `${PITON_DIR}/${name}`)
 }
 
-function hasLocalSettings(root: string): boolean {
-    return localSettingsFiles(root).length > 0
-}
-
 function persistenceInputs(root: string, config: ProjectConfig) {
     const paths = Git.run(root, [
         "rev-parse",
@@ -252,7 +283,9 @@ function persistenceInputs(root: string, config: ProjectConfig) {
     const files = [
         indexPath,
         excludePath,
+        // Every rule file that can decide whether `.piton/.local` and the local settings are ignored.
         path.join(root, ".gitignore"),
+        path.join(root, PITON_DIR, ".gitignore"),
         ...localSettingsFiles(root).map((file) => path.join(root, file)),
     ]
     return {
@@ -284,18 +317,25 @@ function formatUsesUsername(format: BranchFormat): boolean {
     return format.startsWith("username")
 }
 
-// Ask Git, so the answer matches what Git will actually stage. Only the committed root .gitignore
-// counts: .git/info/exclude and global excludes are local to one clone.
-function assertProjectLocalIgnored(root: string): void {
+/** Whether the repository's rules ignore `.piton/.local` in its current shape. */
+export function projectLocalIgnore(root: string): IgnoreMatch {
     const linked = isSymbolicLink(path.join(root, PROJECT_LOCAL_ROOT))
     // A symlink is a file to Git; query a missing or real directory in directory form.
-    const query = linked ? PROJECT_LOCAL_ROOT : `${PROJECT_LOCAL_ROOT}/`
-    const match = Git.tryRun(root, ["check-ignore", "--verbose", "--no-index", "--", query])
-    const source = match.split("\t")[0]?.split(":")[0]
-    if (source === ".gitignore") return
-    throw new Error(
-        `workflow artifacts require ${PROJECT_LOCAL_IGNORE} (no trailing slash) in .gitignore; add it through project setup before continuing`,
-    )
+    return repositoryIgnore(root, linked ? PROJECT_LOCAL_ROOT : `${PROJECT_LOCAL_ROOT}/`)
+}
+
+// Ask Git, so the answer matches what Git will actually stage. Any repository rule counts: a shared setup's committed
+// .gitignore or a private setup's .git/info/exclude.
+function assertProjectLocalIgnored(root: string): void {
+    const match = projectLocalIgnore(root)
+    switch (match.kind) {
+        case "ignored":
+            return
+        case "unignored":
+            throw new Error(
+                `workflow artifacts require ${PROJECT_LOCAL_ROOT} to be ignored: ${PROJECT_LOCAL_IGNORE} (no trailing slash) in .gitignore, or ${PRIVATE_PROJECT_EXCLUDE} in .git/info/exclude for a private setup; set it up through project setup before continuing`,
+            )
+    }
 }
 
 function isSymbolicLink(file: string): boolean {
@@ -326,19 +366,4 @@ function assertProjectLocalOutsideGit(root: string): void {
             `${PROJECT_LOCAL_ROOT}/ must remain outside Git; remove it from the index with git rm --cached before continuing`,
         )
     }
-}
-
-function hasExcludeEntry(excludePath: string, entry: string): boolean {
-    if (!fs.existsSync(excludePath)) return false
-    return fs
-        .readFileSync(excludePath, "utf-8")
-        .split(/\r?\n/)
-        .some((line) => line === entry)
-}
-
-function appendExcludeEntry(excludePath: string, comment: string, entry: string): void {
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true })
-    const existing = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, "utf-8") : ""
-    const separator = existing.length > 0 && !existing.endsWith("\n") ? "\n" : ""
-    fs.appendFileSync(excludePath, `${separator}${comment}\n${entry}\n`)
 }

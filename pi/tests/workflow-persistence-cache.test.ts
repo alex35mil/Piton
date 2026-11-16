@@ -114,7 +114,16 @@ describe("artifact persistence revalidation", () => {
         const f = fixture()
         try {
             fs.writeFileSync(path.join(f.root, ".gitignore"), "")
-            assert.throws(() => assertArtifactPersistencePrepared(f.root), /in \.gitignore/)
+            assert.throws(() => assertArtifactPersistencePrepared(f.root), /to be ignored/)
+            // Every rule file that decides coverage invalidates the cache.
+            fs.appendFileSync(f.exclude, "/.piton/.local\n")
+            assertArtifactPersistencePrepared(f.root)
+            fs.mkdirSync(path.join(f.root, ".piton"), { recursive: true })
+            fs.writeFileSync(path.join(f.root, ".piton/.gitignore"), "!/.local\n")
+            assert.throws(() => assertArtifactPersistencePrepared(f.root), /to be ignored/)
+            fs.rmSync(path.join(f.root, ".piton/.gitignore"))
+            fs.writeFileSync(f.exclude, "")
+            assert.throws(() => assertArtifactPersistencePrepared(f.root), /to be ignored/)
             fs.writeFileSync(path.join(f.root, ".gitignore"), "/.piton/.local\n")
             assertArtifactPersistencePrepared(f.root)
             writeConfig(f.root, { "branches.username": "alex" }, true)
