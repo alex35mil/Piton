@@ -386,9 +386,10 @@ fn remove(doc: &mut DocumentMut, key: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use toml_edit::Value;
+
     use super::*;
     use crate::config::model::paths::Scope;
-    use toml_edit::Value;
 
     /// `config.host.toml` and its local file: top-level keys as well as tables.
     fn host_pair(dir: &Path) -> FilePair {

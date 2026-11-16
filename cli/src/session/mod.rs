@@ -6,9 +6,6 @@ mod prompts;
 mod replay;
 mod view;
 
-pub use info::{Checkout, SessionInfo, SessionStatus};
-pub use view::DEFAULT_WINDOW as DEFAULT_VIEW_WINDOW;
-
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -23,13 +20,14 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
+pub use self::info::{Checkout, SessionInfo, SessionStatus};
+use self::prompts::PromptQueue;
+use self::replay::Replay;
+pub use self::view::DEFAULT_WINDOW as DEFAULT_VIEW_WINDOW;
+use self::view::{Change, StateInput, View};
 use crate::config::DaemonConfig;
 use crate::daemon::{AttachControl, EndReason};
-use crate::launch::LaunchMode;
-use crate::launch::{self, Env, LaunchError, SessionArg};
-use prompts::PromptQueue;
-use replay::Replay;
-use view::{Change, StateInput, View};
+use crate::launch::{self, Env, LaunchError, LaunchMode, SessionArg};
 
 pub type ClientId = u64;
 pub type SessionKey = u64;

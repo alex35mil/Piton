@@ -9,6 +9,6 @@ mod protected;
 mod socket;
 mod write;
 
-pub use protected::{ProtectedRoots, canonical_target};
-pub use socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, serve};
-pub use write::{WriteDecision, WriteOutcome, WriteRequest, write_approved, write_dialog};
+pub use self::protected::{ProtectedRoots, canonical_target};
+pub use self::socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, serve};
+pub use self::write::{WriteDecision, WriteOutcome, WriteRequest, write_approved, write_dialog};

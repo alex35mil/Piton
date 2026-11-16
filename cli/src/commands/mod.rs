@@ -14,8 +14,8 @@ use std::process::ExitCode;
 
 use usage_rs::Subcommands;
 
-pub use control::control;
-pub use logging::logging_state;
+pub use self::control::control;
+pub use self::logging::logging_state;
 
 /// Owns pi processes so sessions outlive their clients
 #[derive(usage_rs::Cli)]

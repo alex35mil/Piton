@@ -7,8 +7,7 @@ use std::process::ExitCode;
 use super::WorkerAction;
 use super::control::{control, report};
 use crate::config::DaemonConfig;
-use crate::daemon::ControlRequest;
-use crate::daemon::ControlResponse;
+use crate::daemon::{ControlRequest, ControlResponse};
 
 /// Exit code for a refused worker operation, so callers can tell it from a failure.
 const EXIT_REFUSED: u8 = 4;

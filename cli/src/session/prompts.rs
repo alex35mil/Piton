@@ -55,8 +55,9 @@ impl PromptQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn prompt(id: &str) -> Value {
         json!({"type": "prompt", "id": id})

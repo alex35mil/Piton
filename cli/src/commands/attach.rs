@@ -7,11 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use super::control::write_line;
-use crate::daemon::AttachControl;
-use crate::daemon::EndReason;
-use crate::daemon::FRAME_CONTROL;
-use crate::daemon::FRAME_RECORD;
-use crate::daemon::Hello;
+use crate::daemon::{AttachControl, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello};
 
 /// pi ended (terminated or crashed): the client must not reconnect.
 pub const EXIT_PI_ENDED: u8 = 3;

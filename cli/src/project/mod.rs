@@ -7,13 +7,13 @@
 
 mod worker;
 
-pub use worker::{
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+pub use self::worker::{
     CreateRequest, Mise, WorkerInfo, WorkerRefusal, create as create_worker, info as worker_info,
     leftovers as worker_leftovers, list as list_workers, remove as remove_worker,
 };
-
-use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The only path a worker shares with its source, as a symlink (the pi package's workflow artifacts).
 pub const SHARED_PATH: &str = crate::config::LOCAL_DIR;

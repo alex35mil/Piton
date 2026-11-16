@@ -6,11 +6,7 @@ use std::process::ExitCode;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::daemon::AttachControl;
-use crate::daemon::ControlRequest;
-use crate::daemon::ControlResponse;
-use crate::daemon::FRAME_CONTROL;
-use crate::daemon::Hello;
+use crate::daemon::{AttachControl, ControlRequest, ControlResponse, FRAME_CONTROL, Hello};
 
 /// Sends one control request to the daemon and returns its response.
 pub async fn control(socket: &Path, request: ControlRequest) -> Result<ControlResponse, String> {

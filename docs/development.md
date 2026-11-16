@@ -3,6 +3,9 @@
 ## Requirements
 
 - macOS 27, Xcode 27 (Swift 6.4), Rust 1.99 (installed by mise).
+- rustfmt from a pinned nightly, for formatting only: `rustup toolchain install nightly-2026-11-13 --profile minimal
+  --component rustfmt`. The import rules in `cli/rustfmt.toml` (one `use` per module; std, external crates, then this
+  crate) are unstable options. Builds, tests, and clippy stay on stable; `cli:lint` and `cli:format` name the date.
 - [mise](https://mise.jdx.dev): installs Rust and XcodeGen from `mise.toml` and runs every task.
 - pi on the `PATH` (the user's global mise config pins it; this repository doesn't).
 - Node (for the daemon's e2e tests and probes).
@@ -36,7 +39,8 @@ docs/              confirmed documentation
 | --- | --- |
 | `mise run cli:build` | Build the daemon and CLI (debug) |
 | `mise run cli:test` | Unit tests, then the e2e tests against real pi |
-| `mise run cli:lint` | `cargo fmt --check`, clippy with warnings as errors |
+| `mise run cli:lint` | Formatting (pinned nightly rustfmt), then clippy with warnings as errors |
+| `mise run cli:format` | Format the Rust sources (pinned nightly rustfmt) |
 | `mise run cli:install` | Install the stable binary and (re)load its launchd agent (host only; ends all sessions) |
 | `mise run apps:generate` | Generate `apps/Piton.xcodeproj` from `apps/project.yml` |
 | `mise run apps:build` | Build the iOS (simulator) and macOS apps into `apps/.build/xcode` |

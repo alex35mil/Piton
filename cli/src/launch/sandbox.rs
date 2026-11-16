@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::config::SandboxTable;
-use crate::config::{LOCAL_DIR, LaunchConfig, expand_home};
+use crate::config::{LOCAL_DIR, LaunchConfig, SandboxTable, expand_home};
 use crate::launch::Env;
 
 /// The base profile when the global tier names none.

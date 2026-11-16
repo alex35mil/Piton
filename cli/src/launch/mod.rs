@@ -3,16 +3,14 @@
 mod mode;
 mod sandbox;
 
-pub use mode::LaunchMode;
-pub use sandbox::DEFAULT_BASE as DEFAULT_SANDBOX_BASE;
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
 
-use crate::config::DaemonConfig;
-use crate::config::{ConfigError, LaunchConfig};
+pub use self::mode::LaunchMode;
+pub use self::sandbox::DEFAULT_BASE as DEFAULT_SANDBOX_BASE;
+use crate::config::{ConfigError, DaemonConfig, LaunchConfig};
 use crate::project::{self, ProjectError, Workspace};
 
 pub type Env = BTreeMap<String, String>;

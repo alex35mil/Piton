@@ -8,8 +8,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::config::{DaemonConfig, GlobalConfig, Paths, Resolved, Scope, Sharing};
-use crate::config::{EditError, KeyChange, Placement};
+use crate::config::{DaemonConfig, EditError, GlobalConfig, KeyChange, Paths, Placement, Resolved, Scope, Sharing};
 
 /// When a changed value takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

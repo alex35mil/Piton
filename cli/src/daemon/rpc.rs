@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-
 use std::sync::atomic::Ordering;
 
 use serde_json::{Map, Value, json};

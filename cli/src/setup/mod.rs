@@ -8,15 +8,14 @@
 
 mod service;
 
-pub use service::{
-    LABEL as SERVICE_LABEL, install as install_service, install_collector as install_collector_service,
-    status as service_status, uninstall as uninstall_service, uninstall_collector as uninstall_collector_service,
-};
-
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+pub use self::service::{
+    LABEL as SERVICE_LABEL, install as install_service, install_collector as install_collector_service,
+    status as service_status, uninstall as uninstall_service, uninstall_collector as uninstall_collector_service,
+};
 use crate::config::DaemonConfig;
 
 /// Version of the JSON output. The Mac app refuses one it doesn't know.

@@ -4,8 +4,7 @@ use std::process::ExitCode;
 
 use super::LoggingAction;
 use crate::config::DaemonConfig;
-use crate::daemon::ControlRequest;
-use crate::daemon::ControlResponse;
+use crate::daemon::{ControlRequest, ControlResponse};
 use crate::logging::{Expiration, Policy};
 
 pub async fn run(action: LoggingAction, config: &DaemonConfig) -> ExitCode {

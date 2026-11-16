@@ -1393,8 +1393,7 @@ mod tests {
     #[test]
     fn fixtures() {
         use crate::launch::LaunchMode;
-        use crate::session::SessionInfo;
-        use crate::session::SessionStatus;
+        use crate::session::{SessionInfo, SessionStatus};
         let mut view = View::new(7);
         let mut lines: Vec<String> = Vec::new();
         let state = |status, dialogs| StateInput {

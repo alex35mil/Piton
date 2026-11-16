@@ -56,15 +56,30 @@ node tests/e2e/logging.mjs
 node tests/e2e/setup.mjs
 '''
 
+# Formatting uses a pinned nightly rustfmt: the import rules in cli/rustfmt.toml are unstable options. Builds, tests,
+# and clippy stay on the stable toolchain above. Bump the date on purpose; the format may change with it.
+[tasks."cli:fmt-toolchain"]
+description = "Check that the pinned nightly rustfmt is installed"
+hide = true
+run = '''
+rustup run nightly-2026-11-13 rustfmt --version >/dev/null 2>&1 || {
+  echo "error: formatting needs rustfmt from nightly-2026-11-13:" >&2
+  echo "  rustup toolchain install nightly-2026-11-13 --profile minimal --component rustfmt" >&2
+  exit 1
+}
+'''
+
 [tasks."cli:lint"]
-description = "Check formatting and clippy"
+description = "Check formatting (pinned nightly rustfmt) and clippy"
 dir = "cli"
-run = ["cargo fmt --check", "cargo clippy --all-targets --quiet -- -D warnings"]
+depends = ["cli:fmt-toolchain"]
+run = ["cargo +nightly-2026-11-13 fmt --check", "cargo clippy --all-targets --quiet -- -D warnings"]
 
 [tasks."cli:format"]
-description = "Format Rust sources"
+description = "Format Rust sources (pinned nightly rustfmt)"
 dir = "cli"
-run = "cargo fmt"
+depends = ["cli:fmt-toolchain"]
+run = "cargo +nightly-2026-11-13 fmt"
 
 [tasks."cli:install"]
 description = "Install the stable piton binary into ~/.cargo/bin and (re)load its launchd agent (host only; ends all sessions)"

@@ -278,8 +278,9 @@ fn publish(root: &Path, incoming: &Path) -> Result<(), CollectError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
 
     #[test]
     fn interrupted_publication_recovers_last_snapshot() {

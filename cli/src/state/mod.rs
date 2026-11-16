@@ -12,8 +12,8 @@ mod transfer;
 
 use std::path::PathBuf;
 
-pub use db::{FILE, State};
-pub use transfer::{check, export, import};
+pub use self::db::{FILE, State};
+pub use self::transfer::{check, export, import};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {

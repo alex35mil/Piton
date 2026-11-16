@@ -201,8 +201,9 @@ fn str_field(map: &Map<String, Value>, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn feed(replay: &mut Replay, records: &[Value]) {
         for record in records {
