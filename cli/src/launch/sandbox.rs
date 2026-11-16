@@ -280,7 +280,7 @@ profile = false
         assert!(!p["filesystem"].to_string().contains('$'), "every path is literal");
         // The protected files, for this launch's source and checkout.
         let rules = p["unsafe_macos_seatbelt_rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 2, "the source's .piton/ and the checkout's .pi/");
         let source = h.replace('.', "\\.");
         assert!(
             rules[0]

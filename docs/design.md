@@ -663,7 +663,7 @@ the line. A host or client file has one schema and is read whole.
     daemon's `sandbox` module, the only code that knows the backend, translates the merged table and the
     protected-file rules into a nono profile for each launch.
   - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
-    and ask beat allow; `default_mode` from the nearest table that sets it.
+    and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
   - `[branches]`, `[web_search]`, the host file's keys: the nearer value per key.
   - `[tracker]` and `[forge]`: each the nearest table, whole.
@@ -763,16 +763,17 @@ daemon after the mise environment.
 
 **Protected files** are everything a later pi loads from the workspace that could widen what an agent may do without
 asking, or run code outside the sandbox: the source checkout's `.piton/` (except `.local/`); pi's project `.pi/`
-folders (settings, MCP servers, extensions, skills, system prompts), which pi reads from the working folder; and
-`.agents/skills/` (their `allowed-tools` become allow rules). The last two are protected at any depth in the
-workspace's checkout, since a session can start in a subfolder. `AGENTS.md` and rules aren't protected: they change what the
-agent is told, not what it may do. Without protection, a sandboxed agent in the source checkout could add `allow = ["bash(*)"]` to
+folders (settings, MCP servers, extensions, skills, system prompts), which pi reads from the working folder. `.pi/` is
+protected at any depth in the workspace's checkout, since a session can start in a subfolder. `AGENTS.md`, rules, and
+`.agents/skills/` aren't protected: they change what the agent is told, not what it may do. A skill's `allowed-tools`
+grants nothing unless the user opts in with `skill_grants = true` in `[permissions]`; with it on, an agent that edits a
+skill can grant itself the tools it lists. Without protection, a sandboxed agent in the source checkout could add `allow = ["bash(*)"]` to
 `[permissions.host]` in `.piton/config.toml`, and a host session in the same checkout would run any command without asking from its
 next tool call. Changes are gated where they're written:
 
 1. **OS sandbox.** The daemon adds raw Seatbelt rules to each sandboxed launch: `(deny file-write* ...)` with regexes
-   for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` and `.agents/skills` at any depth in the
-   checkout. Every protected name matches in any case (`.PI`, `.Agents/Skills`), since APFS is case-insensitive by
+   for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` at any depth in the checkout. Every
+   protected name matches in any case (`.PI`, `.PITON`), since APFS is case-insensitive by
    default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
    shell commands, scripts, `git checkout`, MCP servers, pi itself. nono's typed rules can't express a read-only
    folder inside a writable one; its raw-rule field (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the
@@ -784,7 +785,7 @@ next tool call. Changes are gated where they're written:
    over `~/.local/state/piton/agent.sock` (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps
    and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
    approve: answers come only from clients. One pending request per session; it ends when the agent stops waiting or
-   its run ends. Every protected write asks, skills included. The dialog carries the file's current content, so the
+   its run ends. Every protected write asks. The dialog carries the file's current content, so the
    apps show a diff without reading the file. On approval the daemon walks the path from the checkout without
    following any symlink, so a folder the agent swapped for a link while the user decided can't redirect the write.
    Only a pi running outside piton (no session token) has the permissions extension ask itself and write directly,

@@ -10,7 +10,7 @@ Settings: `[permissions]` and `[permissions.<runtime>]` of `config.toml` (then `
 
 `PITON_RUNTIME` says where Pi runs: unset (or empty) means `host`, `sandbox` means a sandboxed worker, such as a nono worker launched by piton. Any other value is invalid: tools are blocked until it's fixed, like invalid settings.
 
-Only the current runtime's table loads. Each file contributes `[permissions]`, then its runtime table; `config.local.toml` comes after `config.toml`, and nearer levels later. `allow`, `ask`, and `deny` lists from every loaded table are combined, and deny or ask beats allow wherever it comes from. `default_mode` comes from the nearest table that sets it.
+Only the current runtime's table loads. Each file contributes `[permissions]`, then its runtime table; `config.local.toml` comes after `config.toml`, and nearer levels later. `allow`, `ask`, and `deny` lists from every loaded table are combined, and deny or ask beats allow wherever it comes from. `default_mode` and `skill_grants` come from the nearest table that sets them.
 
 For example, a global `[permissions.sandbox]` with `default_mode = "allow"` relaxes confirmations in every worker, unless a project's `[permissions]` sets its own `default_mode`. Project setup's `configure_permissions` writes only `[permissions]` of the project or local file; runtime tables are edited by hand.
 
@@ -70,7 +70,7 @@ Exact literal `true` and `false` Bash commands are built-in allow rules. Session
 
 ### Skill-Derived Rules
 
-Trusted local skills (global + project) can contribute allow rules via YAML frontmatter:
+With `skill_grants = true` in `[permissions]` (off unless set), trusted local skills (global + project) contribute allow rules for the whole session via YAML frontmatter:
 
 ```yaml
 ---
@@ -80,6 +80,8 @@ allowed-tools:
     - "mcp(github, get_issue)"
 ---
 ```
+
+Skills aren't protected files, so while `skill_grants` is on, an agent that edits a skill can grant itself the tools it lists. Off, the field is metadata only, and the tools follow your rules like any other.
 
 ### Persistent MCP inspection
 

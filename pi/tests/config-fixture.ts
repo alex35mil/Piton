@@ -19,6 +19,7 @@ export interface ProjectConfigFixture {
 
 export interface PermissionsFixture {
     defaultMode?: string
+    skillGrants?: boolean
     allow?: string[]
     ask?: string[]
     deny?: string[]
@@ -41,9 +42,10 @@ function changes(config: ProjectConfigFixture): { shared: Record<string, unknown
 }
 
 export function permissionsTable(rules: PermissionsFixture): Record<string, unknown> {
-    const { defaultMode, ...lists } = rules
+    const { defaultMode, skillGrants, ...lists } = rules
     return {
         ...(defaultMode !== undefined ? { default_mode: defaultMode } : {}),
+        ...(skillGrants !== undefined ? { skill_grants: skillGrants } : {}),
         ...lists,
     }
 }

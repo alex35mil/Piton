@@ -593,9 +593,44 @@ describe("MCP permission lifecycle", () => {
         })
     })
 
+    it("grants skills' allowed-tools only with skill_grants", async () => {
+        await withIsolatedAgent(async () => {
+            for (const skillGrants of [undefined, false, true]) {
+                const project = createProjectSettings(JSON.stringify({ defaultMode: "deny", skillGrants }))
+                mkdirSync(join(project.cwd, ".agents"))
+                const skillPath = join(project.cwd, ".agents", "granting-skill.md")
+                writeFileSync(skillPath, "---\nname: granting\ndescription: granting\nallowed-tools:\n  - read\n---\n")
+                const commands = [
+                    {
+                        name: "skill:granting",
+                        source: "skill" as const,
+                        sourceInfo: {
+                            path: skillPath,
+                            source: "skill",
+                            scope: "project" as const,
+                            origin: "top-level" as const,
+                        },
+                    },
+                ]
+                try {
+                    const harness = createPermissionHarness(undefined, commands)
+                    const context = createContext(project.cwd)
+                    await harness.handler("session_start")({ reason: "startup" }, context.ctx)
+                    const result = (await harness.handler("tool_call")(
+                        { toolName: "read", toolCallId: "call-1", input: { path: "README.md" } },
+                        context.ctx,
+                    )) as { block: boolean } | undefined
+                    assert.equal(result?.block === true, skillGrants !== true, `skill_grants = ${skillGrants}`)
+                } finally {
+                    project.cleanup()
+                }
+            }
+        })
+    })
+
     it("validates skill-derived MCP rules through the same fail-closed boundary", async () => {
         await suppressErrors(async () => {
-            const project = createProjectSettings(JSON.stringify({ defaultMode: "allow" }))
+            const project = createProjectSettings(JSON.stringify({ defaultMode: "allow", skillGrants: true }))
             mkdirSync(join(project.cwd, ".agents"))
             const skillPath = join(project.cwd, ".agents", "legacy-skill.md")
             writeFileSync(
@@ -636,7 +671,7 @@ describe("MCP permission lifecycle", () => {
     it("rejects MCP skill rules with leading or trailing whitespace", async () => {
         await suppressErrors(async () => {
             for (const rule of [" mcp(github, *)", "mcp(github, *) "]) {
-                const project = createProjectSettings(JSON.stringify({ defaultMode: "allow" }))
+                const project = createProjectSettings(JSON.stringify({ defaultMode: "allow", skillGrants: true }))
                 mkdirSync(join(project.cwd, ".agents"))
                 const skillPath = join(project.cwd, ".agents", "whitespace-skill.md")
                 writeFileSync(

@@ -14,8 +14,9 @@
  *   ask   = ["toolPattern", "tool(argPattern)", ...]
  *   [permissions.sandbox]   # the same keys, for one launch mode
  *
- * Trusted local skills (global + project) may also contribute runtime allow rules
- * via SKILL frontmatter: allowed_tools / allowed-tools.
+ * With `skill_grants = true` (off unless set), trusted local skills (global + project) also contribute runtime allow
+ * rules via SKILL frontmatter: allowed_tools / allowed-tools. Skills aren't protected files, so an agent that edits a
+ * skill can grant itself tools while this is on.
  *
  * Rule format:
  *   "read"                          — blanket match on a non-MCP tool name
@@ -65,6 +66,8 @@ export type Mode = "allow" | "ask" | "deny"
 
 export interface PermissionSettings {
     defaultMode?: Mode
+    /** Whether loaded skills' `allowed-tools` become allow rules. Off unless set. */
+    skillGrants?: boolean
     allow?: string[]
     deny?: string[]
     ask?: string[]
@@ -213,7 +216,7 @@ export default function (pi: ExtensionAPI) {
             }
             updatePermissionSettingsErrorDisplay(result, ctx)
 
-            const derivedSkillAllowState = getDerivedSkillAllowState(pi)
+            const derivedSkillAllowState = skillGrants(pi, result.settings)
             const overrides = Object.fromEntries(SessionModeOverrides)
             const output = JSON.stringify(
                 {
@@ -347,7 +350,7 @@ export default function (pi: ExtensionAPI) {
  * (`piton config protected`, cached) about a path from the message; names that can't be protected aren't asked.
  */
 export function deniedProtectedWrite(output: string, isProtected: (file: string) => boolean): boolean {
-    const name = /(^|\/)(\.piton(?!\/\.local)|\.pi|\.agents\/skills)(\/|$)/i
+    const name = /(^|\/)(\.piton(?!\/\.local)|\.pi)(\/|$)/i
     return output.split("\n").some((line) => {
         if (!/Operation not permitted|unable to unlink/.test(line)) return false
         // The paths a message names: quoted ('x'), or between `: ` separators (`rm: x: Operation not permitted`).
@@ -494,9 +497,8 @@ function tryLoadPermissionSettings(load: () => ResolvedPermissions): SettingsRes
 
 function loadResolvedPermissionSettings(pi: ExtensionAPI, cwd: string): SettingsResult {
     return tryLoadPermissionSettings(() => {
-        const derivedSkillAllowState = getDerivedSkillAllowState(pi)
         const resolved = loadSettings(cwd)
-        const settings = mergeSkillAllowRules(resolved.settings, derivedSkillAllowState.rules)
+        const settings = mergeSkillAllowRules(resolved.settings, skillGrants(pi, resolved.settings).rules)
         return { ...resolved, settings: validatePermissionSettings(settings) }
     })
 }
@@ -684,6 +686,13 @@ function getDerivedSkillAllowState(pi: ExtensionAPI): DerivedSkillAllowState {
         sources,
     }
     return cachedDerivedSkillAllowState
+}
+
+const NO_SKILL_GRANTS: Omit<DerivedSkillAllowState, "cacheKey"> = { rules: [], sources: [] }
+
+/** Skills' `allowed-tools` as allow rules, when the settings opt in (`skill_grants = true`); none otherwise. */
+function skillGrants(pi: ExtensionAPI, settings: PermissionSettings): Omit<DerivedSkillAllowState, "cacheKey"> {
+    return settings.skillGrants === true ? getDerivedSkillAllowState(pi) : NO_SKILL_GRANTS
 }
 
 function mergeSkillAllowRules(settings: PermissionSettings, skillRules: string[]): PermissionSettings {

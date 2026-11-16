@@ -1,6 +1,6 @@
 //! Protected files: what an agent may not change without the user's approval, because it decides what the agent may do
-//! or what runs. The source checkout's `.piton/` (except `.local/`, the workflow artifacts), and `.pi/` and
-//! `.agents/skills/` at any depth in the workspace's checkout.
+//! or what runs. The source checkout's `.piton/` (except `.local/`, the workflow artifacts), and `.pi/` at any depth in
+//! the workspace's checkout.
 //!
 //! Two layers use this one definition: the Seatbelt rules every sandboxed launch carries (any write by any process is
 //! denied) and the daemon's check of a write an agent asks for over `agent.sock` (written only after the user approves
@@ -20,8 +20,7 @@ pub struct ProtectedRoots {
 impl ProtectedRoots {
     /// The checkout a protected `path` (canonical, absolute) is in, which a write to it stays inside: the source for its
     /// `.piton/` (settings, permissions, sandbox grants), the workspace's checkout for `.pi/` (pi's settings and
-    /// extensions, which run code) and `.agents/skills/` (skills and the scripts they run). `None` when it isn't
-    /// protected. Every protected write asks the user. Names compare case-insensitively: APFS is case-insensitive by
+    /// extensions, which run code). `None` when it isn't protected. Every protected write asks the user. Names compare case-insensitively: APFS is case-insensitive by
     /// default, so `.PI/settings.json` is the file pi reads as `.pi/settings.json`.
     pub fn protected_root(&self, path: &Path) -> Option<&Path> {
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
@@ -38,8 +37,7 @@ impl ProtectedRoots {
                 Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => None,
             })
             .collect();
-        let protected = parts.contains(&".pi") || parts.windows(2).any(|w| w == [".agents", "skills"]);
-        protected.then_some(self.checkout.as_path())
+        parts.contains(&".pi").then_some(self.checkout.as_path())
     }
 
     /// The Seatbelt rules for a sandboxed launch: deny every write to the protected paths. Paths are canonical, as
@@ -58,11 +56,6 @@ impl ProtectedRoots {
             format!(
                 "(deny file-write* (regex #\"^{checkout}/(.+/)?{}(/|$)\"))",
                 any_case(".pi")
-            ),
-            format!(
-                "(deny file-write* (regex #\"^{checkout}/(.+/)?{}/{}(/|$)\"))",
-                any_case(".agents"),
-                any_case("skills")
             ),
         ]
     }
@@ -144,22 +137,15 @@ mod tests {
         let checkout = Some(PathBuf::from("/u/p/repo--w"));
         assert_eq!(c("/u/p/repo/.piton/config.toml"), source);
         assert_eq!(c("/u/p/repo/.piton/.local/gigs/x/notes.md"), None);
-        // A worker's own `.piton/` isn't read, so it isn't protected; its `.pi/` and skills are.
+        // A worker's own `.piton/` isn't read, so it isn't protected; its `.pi/` is.
         assert_eq!(c("/u/p/repo--w/.piton/config.toml"), None);
         assert_eq!(c("/u/p/repo--w/.pi/settings.json"), checkout);
         assert_eq!(c("/u/p/repo--w/apps/sub/.pi/extensions/x.ts"), checkout);
-        // Every file pi could load as a skill, at any depth.
-        for skill in [
-            "/u/p/repo--w/.agents/skills/deploy/SKILL.md",
-            "/u/p/repo--w/.agents/skills/group/deploy/SKILL.md",
-            "/u/p/repo--w/apps/.agents/skills/tools/run.md",
-            "/u/p/repo--w/.agents/skills/deploy/scripts/run",
-        ] {
-            assert_eq!(c(skill), checkout, "{skill}");
-        }
+        // Skills are agent-editable: their `allowed-tools` grant nothing unless the user opts in.
+        assert_eq!(c("/u/p/repo--w/.agents/skills/deploy/SKILL.md"), None);
+        assert_eq!(c("/u/p/repo--w/apps/.agents/skills/tools/run.md"), None);
         // Any case: APFS is case-insensitive.
         assert_eq!(c("/u/p/repo--w/.PI/settings.json"), checkout);
-        assert_eq!(c("/u/p/repo--w/.Agents/Skills/x/SKILL.md"), checkout);
         assert_eq!(c("/u/p/repo/.PITON/config.toml"), source);
         assert_eq!(c("/u/p/repo/.piton/.LOCAL/x"), None);
         assert_eq!(c("/u/p/repo--w/.agents/rules/r.md"), None);
@@ -180,7 +166,6 @@ mod tests {
             [
                 r#"(deny file-write* (require-all (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN](/|$)") (require-not (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN]/\.[lL][oO][cC][aA][lL](/|$)"))))"#,
                 r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.[pP][iI](/|$)"))"#,
-                r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.[aA][gG][eE][nN][tT][sS]/[sS][kK][iI][lL][lL][sS](/|$)"))"#,
             ]
         );
     }

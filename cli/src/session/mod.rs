@@ -680,8 +680,6 @@ impl SessionTask {
             ));
             return;
         }
-        // Every protected write asks, skills included: pi reads skills from more files and frontmatter forms than piton
-        // could reliably tell apart, and a skill's `allowed-tools` grant permissions.
         let before = std::fs::read_to_string(&path).ok();
         let key = lock(&self.shared).key;
         self.next_internal += 1;

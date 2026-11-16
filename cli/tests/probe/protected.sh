@@ -51,15 +51,14 @@ attempt denied "hard-link a protected file out"         "ln .piton/config.toml $
 attempt denied "symlink-replace a protected file"       'ln -sf /tmp/x .piton/config.toml'
 attempt denied "create .pi/ at the root"                'mkdir -p .pi/extensions'
 attempt denied "create .pi/ in a subfolder"             'mkdir -p apps/sub/.pi/extensions'
-attempt denied "create a skill in a subfolder"          'mkdir -p apps/.agents/skills/x'
-attempt denied "edit an existing skill"                 'echo more >> .agents/skills/s/SKILL.md'
 attempt denied "write .PI/ (another case)"              'mkdir -p .PI && echo x > .PI/settings.json'
-attempt denied "write .Agents/Skills/ (another case)"   'mkdir -p .Agents/Skills/y && echo x > .Agents/Skills/y/SKILL.md'
 attempt denied "write .PITON/ (another case)"           'echo x > .PITON/config.toml'
 attempt ok     "write workflow artifacts"               'echo z > .piton/.local/x'
 attempt ok     "write .piton/.LOCAL (another case)"     'echo z > .piton/.LOCAL/y'
 attempt ok     "write a source file"                    'echo w > src/a.rs'
 attempt ok     "write rules (not protected)"            'mkdir -p .agents/rules && echo r > .agents/rules/r.md'
+attempt ok     "edit a skill (not protected)"           'echo more >> .agents/skills/s/SKILL.md'
+attempt ok     "create a skill in a subfolder"          'mkdir -p apps/.agents/skills/x && echo s > apps/.agents/skills/x/SKILL.md'
 attempt ok     "create a folder named like .pi but not" 'mkdir -p apps/.pix && echo q > apps/.pix/f'
 # Moving a parent of a not-yet-existing protected folder is an ordinary write; the daemon guards its own writes
 # against it (it never follows a symlink on an approved path).

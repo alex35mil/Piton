@@ -260,9 +260,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
         assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
         // A new file in new folders.
-        let skill = root.join("apps/.agents/skills/x/SKILL.md");
-        write_approved(&root, &skill, "skill").unwrap();
-        assert_eq!(std::fs::read_to_string(&skill).unwrap(), "skill");
+        let extension = root.join("apps/.pi/extensions/x.ts");
+        write_approved(&root, &extension, "x").unwrap();
+        assert_eq!(std::fs::read_to_string(&extension).unwrap(), "x");
         // Nothing outside the root.
         assert!(write_approved(&root, Path::new("/tmp/elsewhere"), "x").is_err());
     }
@@ -277,12 +277,12 @@ mod tests {
         let elsewhere = base.join("home");
         std::fs::create_dir_all(root.join("apps")).unwrap();
         std::fs::create_dir_all(&elsewhere).unwrap();
-        let approved = root.join("apps/.agents/skills/x/SKILL.md");
+        let approved = root.join("apps/.pi/settings.json");
         std::fs::rename(root.join("apps"), root.join("apps.bak")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join("apps")).unwrap();
-        let refused = write_approved(&root, &approved, "allowed-tools: [\"bash(*)\"]").unwrap_err();
+        let refused = write_approved(&root, &approved, "{}").unwrap_err();
         assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied, "{refused}");
-        assert!(!elsewhere.join(".agents").exists(), "nothing written through the link");
+        assert!(!elsewhere.join(".pi").exists(), "nothing written through the link");
 
         // Nor a symlink at the file itself: refused, and neither the link nor its target changes.
         std::fs::remove_file(root.join("apps")).unwrap();

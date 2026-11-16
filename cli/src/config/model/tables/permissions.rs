@@ -1,6 +1,6 @@
 //! `[permissions]`: pi's tool rules, with `[permissions.host]` / `[permissions.sandbox]` for one launch mode. Each file
 //! contributes `[permissions]` and then the current runtime's table; rule lists combine across levels (deny and ask
-//! beat allow when evaluated), and `default_mode` comes from the nearest table that sets it.
+//! beat allow when evaluated), and `default_mode` and `skill_grants` come from the nearest table that sets them.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,9 @@ use super::{TableValue, nearer};
 pub struct PermissionsTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<PermissionMode>,
+    /// Whether loaded skills' `allowed-tools` become allow rules. Off unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_grants: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -29,6 +32,8 @@ pub struct PermissionsTable {
 pub struct PermissionRules {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<PermissionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_grants: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -58,15 +63,19 @@ impl TableValue for PermissionsTable {}
 pub struct PermissionSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<PermissionMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_grants: Option<bool>,
     pub allow: Vec<String>,
     pub ask: Vec<String>,
     pub deny: Vec<String>,
 }
 
 impl PermissionSettings {
-    /// Folds a nearer table's rules in: lists combine; `default_mode` from the nearest that sets it.
+    /// Folds a nearer table's rules in: lists combine; `default_mode` and `skill_grants` from the nearest that sets
+    /// them.
     pub fn merge(&mut self, n: PermissionSettings) {
         nearer(&mut self.default_mode, n.default_mode);
+        nearer(&mut self.skill_grants, n.skill_grants);
         self.allow.extend(n.allow);
         self.ask.extend(n.ask);
         self.deny.extend(n.deny);
@@ -76,6 +85,7 @@ impl PermissionSettings {
     pub fn shared(table: &PermissionsTable) -> Self {
         Self {
             default_mode: table.default_mode,
+            skill_grants: table.skill_grants,
             allow: table.allow.clone(),
             ask: table.ask.clone(),
             deny: table.deny.clone(),
@@ -87,12 +97,14 @@ impl From<PermissionRules> for PermissionSettings {
     fn from(rules: PermissionRules) -> Self {
         let PermissionRules {
             default_mode,
+            skill_grants,
             allow,
             ask,
             deny,
         } = rules;
         Self {
             default_mode,
+            skill_grants,
             allow,
             ask,
             deny,
@@ -127,5 +139,26 @@ mod tests {
             Some(PermissionMode::Allow),
             "a table without default_mode keeps it"
         );
+    }
+
+    #[test]
+    fn the_nearest_skill_grants_wins() {
+        let mut base = PermissionSettings::default();
+        assert_eq!(base.skill_grants, None, "off unless set");
+        base.merge(PermissionSettings {
+            skill_grants: Some(true),
+            ..PermissionSettings::default()
+        });
+        base.merge(PermissionSettings::default());
+        assert_eq!(
+            base.skill_grants,
+            Some(true),
+            "a table without it keeps the farther one"
+        );
+        base.merge(PermissionSettings {
+            skill_grants: Some(false),
+            ..PermissionSettings::default()
+        });
+        assert_eq!(base.skill_grants, Some(false));
     }
 }

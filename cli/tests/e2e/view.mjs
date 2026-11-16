@@ -191,16 +191,11 @@ const tests = {
         assert.equal((await rejected).outcome, "rejected");
         assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
 
-        // A skill asks too, whatever changed in it.
+        // A skill isn't protected: the agent writes it itself, and a request for it is refused without asking.
         const skill = join(ctx.ws, ".agents", "skills", "s", "SKILL.md");
-        mkdirSync(join(ctx.ws, ".agents", "skills", "s"), { recursive: true });
-        writeFileSync(skill, "---\nallowed-tools:\n  - read\n---\nold\n");
-        const skillWrite = agentRequest(socket, { type: "protected_write", token, path: skill, content: "---\nallowed-tools:\n  - read\n---\nnew\n" });
-        const asked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
-        assert.equal(JSON.parse(asked.change.state.dialogs[0].title).current, "---\nallowed-tools:\n  - read\n---\nold\n");
-        await c.req("session.answer", { session: key, request_id: asked.change.state.dialogs[0].id, answer: { value: "Accept" } });
-        assert.equal((await skillWrite).outcome, "approved");
-        assert.match(readFileSync(skill, "utf8"), /new/);
+        const skillWrite = await agentRequest(socket, { type: "protected_write", token, path: skill, content: "x" });
+        assert.equal(skillWrite.outcome, "refused");
+        assert.match(skillWrite.reason, /isn't a protected file/);
 
         // The agent stops waiting (its tool call was aborted): the dialog closes, and the next request is asked again
         // instead of being refused as "another is waiting".

@@ -552,7 +552,6 @@ describe("protected files", () => {
         for (const output of [
             "sh: .piton/config.toml: Operation not permitted",
             "rm: /u/repo/.pi/settings.json: Operation not permitted",
-            "mkdir: apps/.agents/skills/x: Operation not permitted",
             "error: unable to unlink old '.piton/config.toml': Operation not permitted",
             "sh: .PITON/config.toml: Operation not permitted",
         ]) {
@@ -564,6 +563,8 @@ describe("protected files", () => {
             "cat .piton/config.toml",
             "touch .piton/.local/x: Operation not permitted",
             "sh: apps/.pix/f: Operation not permitted",
+            // Skills aren't protected: a denial there is something else.
+            "mkdir: apps/.agents/skills/x: Operation not permitted",
             // Another checkout's folder the sandbox can't read: not a protected write here.
             "ls: /other/repo/.piton: Operation not permitted",
         ]) {
