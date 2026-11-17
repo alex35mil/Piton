@@ -1,6 +1,7 @@
--- The new-agent picker: adopt a queued Todo or Backlog item, or create a
--- plain agent named by what's typed, always offered as the last row. Queued
--- items load when it opens, Todo above Backlog.
+-- The new-agent picker: adopt a queued Todo or Backlog item or review an
+-- incoming pull request, or create a plain agent named by what's typed,
+-- always offered as the last row. Queued items load when it opens: Todo,
+-- Backlog, then pull requests.
 
 ---@alias NewAgentEntry
 ---| { kind: "queued", item: QueueItem }
@@ -8,7 +9,7 @@
 
 ---@alias NewAgentQueueState
 ---| { kind: "loading" }
----| { kind: "loaded", todo: integer, backlog: integer }
+---| { kind: "loaded", todo: integer, backlog: integer, pull_requests: integer }
 ---| { kind: "unavailable", message: string }
 
 local util = require("piton.util")
@@ -24,17 +25,19 @@ local ISSUE_ICON = ""
 local PR_ICON = ""
 
 -- Picker groups, top to bottom; `sort` keeps them apart whatever the score.
-local NAMED_GROUP = 2
+local NAMED_GROUP = 3
 
----@param status QueueStatus
+---@param section QueueSection
 ---@return integer
-local function status_group(status)
-    if status == "todo" then
+local function section_group(section)
+    if section == "todo" then
         return 0
-    elseif status == "backlog" then
+    elseif section == "backlog" then
         return 1
+    elseif section == "pull_requests" then
+        return 2
     end
-    error("unknown queue status: " .. vim.inspect(status))
+    error("unknown queue section: " .. vim.inspect(section))
 end
 
 ---@param status QueueStatus
@@ -54,11 +57,37 @@ local function title(state)
     if state.kind == "loading" then
         return "New agent · loading queue…"
     elseif state.kind == "loaded" then
-        return ("New agent · %d Todo%s · %d Backlog"):format(state.todo, state.todo == 1 and "" or "s", state.backlog)
+        return ("New agent · %d Todo%s · %d Backlog · %d PR%s"):format(
+            state.todo,
+            state.todo == 1 and "" or "s",
+            state.backlog,
+            state.pull_requests,
+            state.pull_requests == 1 and "" or "s"
+        )
     elseif state.kind == "unavailable" then
         return "New agent · queue unavailable"
     end
     error("unknown queue state: " .. vim.inspect(state))
+end
+
+--- Where the item stands: its queue status, or for a pull request its board
+--- Status, when it has one.
+---@param item QueueItem
+---@return string?
+local function position_text(item)
+    local kind = item.kind
+    if kind.kind == "pr" then
+        return kind.board and status_text(kind.board) or nil
+    elseif kind.kind == "epic" or kind.kind == "task" or kind.kind == "gig" or kind.kind == "unclassified" then
+        local section = item.section
+        if section == "todo" or section == "backlog" then
+            return status_text(section)
+        elseif section == "pull_requests" then
+            error("an issue in the pull-request section: " .. vim.inspect(item))
+        end
+        error("unknown queue section: " .. vim.inspect(section))
+    end
+    error("unknown queue kind: " .. vim.inspect(kind))
 end
 
 ---@param item QueueItem
@@ -139,10 +168,11 @@ function M.pick()
             elseif kind.kind == "gig" or kind.kind == "pr" or kind.kind == "unclassified" then
                 -- The plain case: nothing to add.
             end
-            if queued.status == "backlog" then
-                table.insert(parts, { " · Backlog", "Comment" })
-            elseif queued.status == "todo" then
+            local position = position_text(queued)
+            if queued.section == "todo" then
                 -- The default: nothing to add.
+            elseif position then
+                table.insert(parts, { " · " .. position, "Comment" })
             end
             return parts
         end,
@@ -161,7 +191,7 @@ function M.pick()
                 queued.title,
                 "",
                 "Kind: " .. kind_text(queued),
-                "Status: " .. status_text(queued.status),
+                "Status: " .. (position_text(queued) or "not on the board"),
                 "URL: " .. queued.url,
                 "Agent: " .. (cli.preview_folder(source, queue.agent_name(queued)) or "(no name)"),
                 "Prompt: " .. (queue.command(queued) or "(empty)"),
@@ -209,24 +239,29 @@ function M.pick()
         end)
         if result.kind == "ok" then
             local started = result.value.started ---@type table<string, true>
-            local counts = { todo = 0, backlog = 0 } ---@type table<QueueStatus, integer>
+            local counts = { todo = 0, backlog = 0, pull_requests = 0 } ---@type table<QueueSection, integer>
             for _, queued in
                 ipairs(result.value.items --[[@as QueueItem[] ]])
             do
                 if not started[queued.id] then
                     local text = table.concat(
-                        { queued.marker or "", queued.title, kind_text(queued), status_text(queued.status) },
+                        { queued.marker or "", queued.title, kind_text(queued), position_text(queued) or "" },
                         " "
                     )
                     table.insert(queued_items, {
                         text = text,
-                        group = status_group(queued.status),
+                        group = section_group(queued.section),
                         entry = { kind = "queued", item = queued },
                     })
-                    counts[queued.status] = counts[queued.status] + 1
+                    counts[queued.section] = counts[queued.section] + 1
                 end
             end
-            update({ kind = "loaded", todo = counts.todo, backlog = counts.backlog })
+            update({
+                kind = "loaded",
+                todo = counts.todo,
+                backlog = counts.backlog,
+                pull_requests = counts.pull_requests,
+            })
         elseif result.kind == "refused" then
             log.warn(result.message)
             update({ kind = "unavailable", message = result.message })

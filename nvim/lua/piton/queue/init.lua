@@ -13,16 +13,22 @@
 ---| { kind: "epic" }
 ---| { kind: "task", epic: QueueParent }
 ---| { kind: "gig" }
----| { kind: "pr" } An incoming pull request.
+---| { kind: "pr", board: QueueStatus? } An incoming pull request; `board` is its Project Status when it's on the board.
 ---| { kind: "unclassified" } Top-level work in a tracker with no Epic Kind label configured to tell an Epic from a Gig.
 
 ---@alias QueueStatus
 ---| "todo"
 ---| "backlog"
 
+--- Where the picker lists an item: issues by their queue status, every incoming pull request in one section after them.
+---@alias QueueSection
+---| "todo"
+---| "backlog"
+---| "pull_requests"
+
 ---@class QueueItem
 ---@field id string Stable identity, stored as the agent's `agent.issue`.
----@field status QueueStatus
+---@field section QueueSection
 ---@field mention string How a workflow command names the item.
 ---@field marker string? Short reference, when the tracker has one (`#12`, `ENG-42`).
 ---@field title string
@@ -39,8 +45,8 @@ local cli = require("piton.cli")
 
 local M = {}
 
---- Queued items, Todo before Backlog, each in tracker priority order.
---- Refuses when the tracker can't be read.
+--- Queued items, Todo before Backlog, each in tracker priority order, then
+--- incoming pull requests. Refuses when the tracker can't be read.
 ---@param source string
 ---@return QueueItem[]
 function M.load(source)
@@ -199,6 +205,10 @@ end
 ---@type QueueStatus[]
 M.STATUSES = { "todo", "backlog" }
 
+-- Picker sections, top to bottom.
+---@type QueueSection[]
+M.SECTIONS = { "todo", "backlog", "pull_requests" }
+
 --- The queue status a tracker status name maps to; nil for any other status.
 ---@param name string?
 ---@param values {todo: string, backlog: string} Configured status names.
@@ -212,15 +222,15 @@ function M.status_of(name, values)
     return nil
 end
 
---- `items` regrouped by status in `STATUSES` order, keeping their order
---- within a status.
+--- `items` regrouped by section in `SECTIONS` order, keeping their order
+--- within a section.
 ---@param items QueueItem[]
 ---@return QueueItem[]
-function M.group_by_status(items)
+function M.group_by_section(items)
     local result = {}
-    for _, status in ipairs(M.STATUSES) do
+    for _, section in ipairs(M.SECTIONS) do
         for _, item in ipairs(items) do
-            if item.status == status then
+            if item.section == section then
                 table.insert(result, item)
             end
         end
