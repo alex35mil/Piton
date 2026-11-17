@@ -1211,6 +1211,14 @@ describe("standalone review", () => {
             assert.match(branch, /^\+committed step$/m)
             assert.match(branch, /^\+unstaged change$/m)
             assert.match(branch, /read each untracked file/i)
+            // Any revision is a base: a remote-tracking ref, a tag, or a SHA, not only a bare branch name.
+            git("update-ref", "refs/remotes/origin/main", "main")
+            git("tag", "v1", "main")
+            for (const base of ["origin/main", "v1", git("rev-parse", "main")]) {
+                const other = await prompt({ kind: "branch", base })
+                assert.match(other, /^\+committed step$/m, base)
+                assert.doesNotMatch(other, /No merge base/, base)
+            }
 
             const paths = await prompt({ kind: "paths", paths: ["base.md"] })
             assert.match(paths, /base\.md/)
@@ -1222,7 +1230,7 @@ describe("standalone review", () => {
     })
 
     it("refuses unknown revisions, option-like refs, and paths outside the repository", async () => {
-        const { root } = repository()
+        const { root, git } = repository()
         try {
             assert.throws(() => resolveReviewTarget(root, { kind: "commit", commit: "nope" }), /unknown revision/)
             assert.throws(() => resolveReviewTarget(root, { kind: "commit", commit: "--output=x" }), /invalid revision/)
@@ -1231,6 +1239,11 @@ describe("standalone review", () => {
             assert.ok(!StandaloneReviewValidator.check({ target: { kind: "uncommitted", base: "main" } }))
             assert.throws(() => resolveReviewTarget(root, { kind: "paths", paths: ["../x"] }), /outside the repository/)
             assert.throws(() => resolveReviewTarget(root, { kind: "paths", paths: ["absent.md"] }), /does not exist/)
+            // Unrelated history has no merge base: refuse instead of reviewing a partial diff.
+            git("stash", "-q", "-u")
+            git("switch", "-q", "--orphan", "unrelated")
+            git("commit", "-q", "--allow-empty", "-m", "root")
+            assert.throws(() => resolveReviewTarget(root, { kind: "branch", base: "main" }), /no merge base/)
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }

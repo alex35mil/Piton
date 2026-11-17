@@ -42,7 +42,7 @@ A Task or Gig takes one of two paths. Say which in one line before continuing. "
 
 ## Task and Gig plans
 
-The plan informs the user. It waits for approval only when the item is marked (below).
+The plan informs the user. It waits for approval only when the item is marked (below). Without a tracker, or for a local Gig, skip the Phase, publication, and gate steps ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
 
 1. Set Planning with the Phase tool for the configured tracker when Phase is configured, then call `review_task` or `review_gig` with `phase: "plan"`. Handle the cycle as described in [review](./review.md).
 2. Publish the plan, as described in [provider bodies](./integrations/shared.md#provider-bodies).

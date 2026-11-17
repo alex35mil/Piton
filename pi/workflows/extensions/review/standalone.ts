@@ -17,7 +17,7 @@ import {
     REVIEW_GIT_INSTRUCTIONS,
     truncate,
 } from "./context.js"
-import { branchDiff, commitDiff, commitRangeDiff, workingTreeDiff } from "./diff.js"
+import { commitDiff, commitRangeDiff, workingTreeDiff } from "./diff.js"
 import { reviewAgentOutputInstructions, renderReviewDocument } from "./findings.js"
 import { reviewerEnvironment } from "./model.js"
 import { executeReviewRound } from "./round.js"
@@ -68,7 +68,7 @@ type ResolvedTarget =
     | { kind: "uncommitted" }
     | { kind: "commit"; commit: string }
     | { kind: "range"; base: string; head: string }
-    | { kind: "branch"; base: string }
+    | { kind: "branch"; base: string; mergeBase: string }
     | { kind: "paths"; paths: string[] }
 
 function verifyRef(root: string, ref: string): string {
@@ -86,8 +86,13 @@ export function resolveReviewTarget(root: string, target: ReviewTarget): Resolve
             return { kind: "commit", commit: verifyRef(root, target.commit) }
         case "range":
             return { kind: "range", base: verifyRef(root, target.base), head: verifyRef(root, target.head ?? "HEAD") }
-        case "branch":
-            return { kind: "branch", base: verifyRef(root, target.base) }
+        case "branch": {
+            // Any revision works as the base (a branch, `origin/main`, a tag, a SHA): the merge base comes from it.
+            const base = verifyRef(root, target.base)
+            const mergeBase = Git.tryRun(root, ["merge-base", "--end-of-options", base, "HEAD"])
+            if (!mergeBase) throw new Error(`the current branch has no merge base with ${JSON.stringify(base)}`)
+            return { kind: "branch", base, mergeBase }
+        }
         case "paths":
             return {
                 kind: "paths",
@@ -139,7 +144,14 @@ async function targetChanges(root: string, target: ResolvedTarget): Promise<{ ch
                 untracked: false,
             }
         case "branch":
-            return { changes: await branchDiff(root, target.base), untracked: true }
+            return {
+                changes: await workingTreeDiff(
+                    root,
+                    target.mergeBase,
+                    `Changes from the merge base with ${target.base} (${target.mergeBase}) to the working tree: committed, staged, and unstaged.`,
+                ),
+                untracked: true,
+            }
         case "paths":
             return { changes: "", untracked: false }
     }
