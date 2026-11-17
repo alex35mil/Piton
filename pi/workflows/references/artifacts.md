@@ -116,7 +116,7 @@ Entity files sit directly in the entity directory.
 
 ### Incoming PR evidence
 
-[Incoming PRs](./pr/incoming.md) keep private evidence under `.piton/.local/pull-requests/<number>/`, including an approved nested checkout at `checkout/` and review rounds under `reviews/<base-sha>-<head-sha>/review-NNN/inputs/`. The `/.piton/.local/` ignore rule covers the whole area. These records are evidence, not approvals, and create no entity, lifecycle, or branch contract. Never stage, commit, or publish them. The file inventory is in the [PR extension README](../extensions/pr/README.md#private-evidence-layout).
+[Incoming PRs](./pr/incoming.md) keep private evidence under `.piton/.local/pull-requests/<number>/`, including the review record for the checkout it runs in and review rounds under `reviews/<base-sha>-<head-sha>/review-NNN/inputs/`. The `/.piton/.local/` ignore rule covers the whole area. These records are evidence, not approvals, and create no entity, lifecycle, or branch contract. Never stage, commit, or publish them. The file inventory is in the [PR extension README](../extensions/pr/README.md#private-evidence-layout).
 
 ## Project Policy precedence
 

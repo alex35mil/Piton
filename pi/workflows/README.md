@@ -27,12 +27,12 @@ New work creates the tracker object first; the local entity is named after it (`
 `/pr` reviews an existing contribution privately. It uses the configured GitHub forge and needs no initialized entity.
 
 - **Before checkout:** you get a 1–5 malicious-code safety score with evidence and limitations. Every score needs your explicit approval before anything is checked out.
-- **Checkout:** registered tools manage an independent nested checkout. The agent never reconstructs that Git work in Bash, and the parent repository stays untouched.
+- **Checkout:** registered tools review the PR in the current checkout, normally a worker the Neovim picker created for it. HEAD sits at the merge base with the PR staged, so the editor shows the contribution as a staged diff. Tool and agent configuration (mise, direnv, Nix, `AGENTS.md`, `.agents`, `.pi`, editor project files) stays at the checkout's starting version on disk unless you approve releasing the PR's. Preparation refuses existing work and never stashes; restore returns the checkout to where it started. The agent never reconstructs that Git work in Bash.
 - **Separate approvals:** review text and verdict, fixes, commits, pushes, publication, and merging each need their own approval. Existing permission prompts can enforce per-call confirmation.
 - **Rebase:** an approved standard rebase moves the contribution onto the observed target and immediately updates the same contributor branch with a SHA-pinned `--force-with-lease`, before any later fixes or testing.
 - **Running contributor code:** needs separate command and environment approval. Checks that can't run are reported as not run.
 - **Fork heads** keep their own repository identity. The PR title, body, and branches stay intact.
-- **Editor:** the agent and editor stay rooted in the parent repository; nested-checkout browsing isn't added to Delta or pi.nvim.
+- **Editor:** editors and language servers can run project code when files open (build scripts, proc macros, linter config); the tools can't prevent that. The safety assessment calls such changes out.
 
 See [incoming PR handling](references/pr/incoming.md).
 

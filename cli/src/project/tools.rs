@@ -12,6 +12,7 @@ pub const TOOLS_FORMAT: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectTool {
+    Git,
     Mise,
     Direnv,
     Nix,
@@ -28,6 +29,8 @@ pub enum ProjectTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCategory {
+    /// Chooses which configured helpers (filters, diff and merge drivers) Git runs on the repository's files.
+    Vcs,
     /// Sets up the shell or session environment (and can run commands while doing it).
     Environment,
     /// Instructs or extends an agent.
@@ -48,7 +51,8 @@ pub enum ConfigPath {
     Directory { path: &'static str },
 }
 
-pub const ALL: [ProjectTool; 11] = [
+pub const ALL: [ProjectTool; 12] = [
+    ProjectTool::Git,
     ProjectTool::Mise,
     ProjectTool::Direnv,
     ProjectTool::Nix,
@@ -65,6 +69,7 @@ pub const ALL: [ProjectTool; 11] = [
 impl ProjectTool {
     pub fn category(self) -> ToolCategory {
         match self {
+            Self::Git => ToolCategory::Vcs,
             Self::Mise | Self::Direnv | Self::Nix | Self::Devbox => ToolCategory::Environment,
             Self::Agents | Self::Pi | Self::Piton => ToolCategory::Agent,
             Self::Neovim | Self::VsCode | Self::Zed | Self::JetBrains => ToolCategory::Editor,
@@ -74,6 +79,9 @@ impl ProjectTool {
     pub fn config_paths(self) -> &'static [ConfigPath] {
         use ConfigPath::{Directory, File};
         match self {
+            // A contribution's attributes could select filters and drivers the user configured for other repositories,
+            // which then run whenever the user's own Git touches those files.
+            Self::Git => &[File { path: ".gitattributes" }],
             Self::Mise => &[
                 File { path: "mise.toml" },
                 File { path: ".mise.toml" },
@@ -219,6 +227,8 @@ mod tests {
     #[test]
     fn config_paths_at_any_depth() {
         let held = [
+            ".gitattributes",
+            "vendor/.gitattributes",
             "mise.toml",
             "apps/mise.toml",
             ".mise.local.toml",
@@ -264,12 +274,13 @@ mod tests {
     fn registry_serializes_tools_and_paths() {
         let json = serde_json::to_value(registry()).unwrap();
         assert_eq!(json["format"], TOOLS_FORMAT);
-        assert_eq!(json["tools"][0]["tool"], "mise");
-        assert_eq!(json["tools"][0]["category"], "environment");
+        let mise = &json["tools"][1];
+        assert_eq!(mise["tool"], "mise");
+        assert_eq!(mise["category"], "environment");
         assert_eq!(
-            json["tools"][0]["paths"][0],
+            mise["paths"][0],
             serde_json::json!({"kind": "file", "path": "mise.toml"})
         );
-        assert_eq!(json["tools"][0]["pathspecs"][0], ":(glob,icase)**/mise.toml");
+        assert_eq!(mise["pathspecs"][0], ":(glob,icase)**/mise.toml");
     }
 }

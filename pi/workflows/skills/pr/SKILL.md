@@ -43,10 +43,11 @@ When changing board state, read [Project handling](../../references/pr/project.m
 ## Checkout
 
 - **Safety score:** before checkout, present the 1–5 malicious-code safety score with its context label, for example **Checkout safety: 5/5 (safe)**, plus evidence and limitations. A 5 isn't a guarantee, and every score requires explicit checkout approval.
-- **Tools:** use `prepare_incoming_pr_checkout`, `checkout_incoming_pr`, `inspect_incoming_pr_checkout`, and `begin_incoming_pr_fixes` for approved object preparation, checkout and contributor-review setup, inspection, and the validated move to fixes.
+- **Where:** the review happens in the current checkout, normally the PR's worker. It needs no staged, unstaged, or untracked work, and never stashes. Tool and agent configuration stays at the checkout's starting version on disk unless its release is separately approved.
+- **Tools:** use `prepare_incoming_pr_checkout`, `checkout_incoming_pr`, `inspect_incoming_pr_checkout`, and `begin_incoming_pr_fixes` for approved preparation, contributor-review setup, inspection, and the validated move to fixes. `restore_incoming_pr_checkout` returns the checkout to where it started.
 - **No manual Git:** never reconstruct that Git work in Bash, or fall back to manual Git after a refusal or unavailability.
 - **Order:** review contributor code first. Restore a clean, verified contributor head through the tool before approved uncommitted fixes.
-- Checkout and edit approval isn't permission to run contributor code.
+- Checkout and edit approval isn't permission to run contributor code or release its configuration.
 
 ## Rebase, fixes, and transport
 
@@ -68,7 +69,7 @@ When changing board state, read [Project handling](../../references/pr/project.m
 
 ## Shipping and cancellation
 
-- **Shipping:** an exact request to ship and merge a ready PR covers the shared repository merge, confirmed Done, and safe registered `cleanup_incoming_pr_checkout` as one set, with no further strategy or cleanup question. Keep the parent repository, contributor branches, and private evidence.
+- **Shipping:** an exact request to ship and merge a ready PR covers the shared repository merge, confirmed Done, and registered `cleanup_incoming_pr_checkout`, which restores the checkout, as one set, with no further strategy or cleanup question. Keep contributor branches and private evidence.
 - **Cancellation:** an explicit cancellation closes the PR and sets Canceled, keeping local work, with no cleanup.
 - **Partial outcomes:** report them, and resume only confirmed unfinished steps.
 
