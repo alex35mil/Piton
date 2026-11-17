@@ -237,6 +237,76 @@ test("new-agent picker loads mocked queue without credentials or real providers"
     assert(picker.title:find("0 Todo", 1, true))
 end)
 
+test("GitHub queue lists incoming pull requests once, after issues, without the viewer's own", function()
+    local queue = require("piton.queue")
+    local github = require("piton.queue.github")
+    local function content(typename, number, title)
+        return {
+            __typename = typename,
+            number = number,
+            title = title,
+            url = "https://github.com/o/r/" .. number,
+            state = "OPEN",
+            repository = { nameWithOwner = "o/r" },
+            labels = { nodes = {} },
+        }
+    end
+    local board = {
+        { status = { name = "Backlog" }, content = content("PullRequest", 7, "Board PR") },
+        { status = { name = "Todo" }, content = content("Issue", 3, "An issue") },
+        { status = { name = "Todo" }, content = content("PullRequest", 9, "My board PR") },
+    }
+    local open = {
+        { number = 5, title = "Off-board PR", url = "https://github.com/o/r/5", author = { login = "alice" } },
+        { number = 7, title = "Board PR", url = "https://github.com/o/r/7", author = { login = "bob" } },
+        { number = 8, title = "My PR", url = "https://github.com/o/r/8", author = { login = "me" } },
+        { number = 9, title = "My board PR", url = "https://github.com/o/r/9", author = { login = "me" } },
+        { number = 10, title = "Ghost PR", url = "https://github.com/o/r/10" },
+    }
+    replace(queue, "post", function(_, _, _, query)
+        if query:find("pullRequests", 1, true) then
+            return {
+                status = 200,
+                body = {
+                    data = {
+                        viewer = { login = "me" },
+                        repository = {
+                            pullRequests = { nodes = open, pageInfo = { hasNextPage = false } },
+                        },
+                    },
+                },
+            }
+        end
+        return {
+            status = 200,
+            body = { data = { owner = { projectV2 = { items = { nodes = board, pageInfo = { hasNextPage = false } } } } } },
+        }
+    end)
+    local items = github.load({
+        source = "/s",
+        credential = "TOKEN",
+        config = {
+            repository = { owner = "o", repo = "r" },
+            project = { owner = "o", owner_type = "user", number = 1 },
+            fields = {
+                status = { field = "Status", values = { todo = "Todo", backlog = "Backlog" } },
+                priority = { field = "Priority", values = {} },
+            },
+            labels = { groups = { kind = { values = { epic = { name = "Kind: Epic" } } } } },
+        },
+    })
+    local summary = vim.tbl_map(function(item)
+        return { item.marker, item.section, item.kind.kind, item.kind.board }
+    end, items)
+    equal({
+        { "#3", "todo", "gig", nil },
+        { "#7", "pull_requests", "pr", "backlog" },
+        { "#5", "pull_requests", "pr", nil },
+        { "#10", "pull_requests", "pr", nil },
+    }, summary)
+    equal("/pr #7 Board PR ", queue.command(items[2]))
+end)
+
 test("queue reads its tracker and credential through piton config get", function()
     local source = directory("config source")
     local queue = require("piton.queue")

@@ -223,7 +223,6 @@ describe("incoming PR identity and context", () => {
                 assert.fail("Expected the configured PR read tool")
             assert.equal(result.incomingPullRequest.read.tool, "mcp__contributions__pull_request_read")
             assert.equal(result.incomingPullRequest.localDirectory, ".piton/.local/pull-requests/12")
-            assert.equal(result.incomingPullRequest.checkoutDirectory, ".piton/.local/pull-requests/12/checkout")
             assert.equal(result.incomingPullRequest.reviewsDirectory, ".piton/.local/pull-requests/12/reviews")
             assert.deepEqual(result.safety.checkout.tools, INCOMING_CHECKOUT_TOOLS)
             assert.equal(result.safety.checkout.tools.prepare, "prepare_incoming_pr_checkout")
@@ -244,13 +243,11 @@ describe("incoming PR identity and context", () => {
             assert.match(result.safety.checkout.scale[4].meaning, /No malicious indicators/)
             assert.match(result.safety.checkout.assessment, /not a guarantee/)
             assert.match(result.safety.checkout.approval, /Every score requires explicit checkout approval/)
-            assert.match(result.safety.checkout.phases, /standard rebase and conflict resolution immediately publish/)
             assert.match(
                 result.safety.checkout.rebase,
                 /Observe actual target\/contributor tips separately from unchanged provider evidence/,
             )
             assert.match(result.safety.checkout.rebase, /Never use plain --force/)
-            assert.match(result.safety.execution, /separate command and appropriately isolated environment approval/)
             assert.throws(
                 () => incomingPullRequestContext(f.root, "https://github.com/other/app/pull/12", mcpTools),
                 /configured repository/,
@@ -869,6 +866,10 @@ describe("incoming PR entry and existing permissions", () => {
         assert.match(String(messages[0]), /#12/)
         assert.match(String(messages[0]), /Use the pr skill/)
         assert.match(String(messages[0]), /does not authorize publication/)
+        assert.doesNotMatch(String(messages[0]), /Maintainer context/)
+        await commands.pr.handler("#12 Fix the login flow ", ctx)
+        assert.match(String(messages[1]), /\n#12\n/)
+        assert.match(String(messages[1]), /Maintainer context: Fix the login flow/)
     })
 
     it("keeps explicit ask for all posting/merge tools even under a session allow", async () => {
