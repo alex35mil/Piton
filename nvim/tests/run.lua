@@ -340,6 +340,11 @@ test("queue reads its tracker and credential through piton config get", function
 
     responses.tracker = { code = 0, stdout = "null" }
     fails("No tracker configured", function() queue.load(source) end)
+    responses.tracker = {
+        code = 0,
+        stdout = vim.json.encode({ path = source .. "/.piton/config.toml", value = { provider = "none" } }),
+    }
+    fails("The tracker is turned off", function() queue.load(source) end)
     -- A broken file: the resolver's message, unchanged.
     responses.tracker = {
         code = 3,

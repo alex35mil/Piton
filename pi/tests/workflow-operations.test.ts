@@ -12,14 +12,17 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { parse } from "../extensions/__lib/schema.ts"
 import { type EntityStatus, EntityStatusValidator, writeEntityStatus } from "../workflows/extensions/__lib/entity.ts"
 import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
-import { GitHubTrackerValidator, LinearTrackerValidator } from "../workflows/extensions/integrations/config.ts"
+import {
+    GitHubTrackerValidator,
+    LinearTrackerValidator,
+    type TrackerConfig,
+} from "../workflows/extensions/integrations/config.ts"
 import { registerWorkflowOperations } from "../workflows/extensions/integrations/operations.ts"
 import {
     setWorkflowPhase,
     SetWorkflowPhaseValidator,
     type NativePhaseFacts,
 } from "../workflows/extensions/integrations/phase.ts"
-import type { WorkflowEnvironment } from "../workflows/extensions/integrations/policy.ts"
 import { githubPhaseReads, linearPhases, phaseValues } from "./workflow-phase-fixtures.ts"
 import { withToolExecution } from "./extension-context-fixture.ts"
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
@@ -51,13 +54,8 @@ const linear = parse(LinearTrackerValidator, {
     phase: linearPhases(),
     statuses: { projects: statuses, issues: statuses },
 })
-const forge = { provider: "github" as const, mcpServer: "github", repository }
-
-function environment(provider: "github" | "linear"): WorkflowEnvironment {
-    return {
-        tracker: structuredClone(provider === "github" ? github : linear),
-        forge,
-    }
+function environment(provider: "github" | "linear"): TrackerConfig {
+    return structuredClone(provider === "github" ? github : linear)
 }
 
 function entity(provider: "github" | "linear", kind: "epic" | "task" | "gig" = "gig"): EntityStatus {
@@ -256,7 +254,7 @@ describe("workflow operations", () => {
             git("init", "-q")
             fs.mkdirSync(path.join(root, ".piton"))
             fs.writeFileSync(path.join(root, ".gitignore"), "/.piton/.local\n")
-            writeProjectConfig(root, { branchFormat: "identifier-title", tracker: github, forge })
+            writeProjectConfig(root, { branchFormat: "identifier-title", tracker: github })
             prepareArtifactPersistence(root)
             const directory = path.join(root, ".piton/.local/gigs/11-example")
             fs.mkdirSync(directory, { recursive: true })

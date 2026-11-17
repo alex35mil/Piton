@@ -345,7 +345,7 @@ describe("managed GitHub plan comments", () => {
                         tools,
                     )
                     assert.equal(context.state, "enabled")
-
+                    assert.ok(context.projection)
                     assert.match(
                         context.projection.rendering,
                         /prepare_tracker_publication.*Preserve issue title\/description/,

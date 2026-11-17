@@ -19,8 +19,7 @@ import {
 import { epicTaskList, hasEpicTasksSection, parseEpicRouting, parseEpicTasks } from "../__lib/epic-tasks.js"
 import { writeTextAtomically } from "../__lib/files.js"
 import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "../__lib/project-config.js"
-import { loadIntegrationConfig } from "../integrations/config.js"
-import { resolveWorkflowEnvironment, type WorkflowEnvironment } from "../integrations/policy.js"
+import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "../integrations/config.js"
 import { initialPhase } from "../integrations/phase.js"
 import type { RecoveryReads } from "../integrations/plan-publication.js"
 import { trackerReference, type TrackerObject, type TrackerRecord } from "../integrations/records.js"
@@ -63,8 +62,7 @@ interface EpicFacts {
     createdAt: string
 }
 
-function epicFacts(environment: WorkflowEnvironment, evidence: ProviderEvidence, tools: McpToolCatalog): EpicFacts {
-    const tracker = environment.tracker
+function epicFacts(tracker: TrackerConfig, evidence: ProviderEvidence, tools: McpToolCatalog): EpicFacts {
     const response = mcpResponsePayload(evidence.response)
     const text = (value: unknown, name: string) => {
         if (typeof value !== "string" || !value.trim()) throw new Error(`Epic read lacks its ${name}`)
@@ -108,13 +106,13 @@ function epicFacts(environment: WorkflowEnvironment, evidence: ProviderEvidence,
 }
 
 function publishedPlan(
-    environment: WorkflowEnvironment,
+    tracker: TrackerConfig,
     record: TrackerRecord,
     title: string,
     pages: ProviderEvidence[],
     tools: McpToolCatalog,
 ) {
-    const server = environment.tracker.mcpServer
+    const server = tracker.mcpServer
     const noop = () => {
         throw new Error("plan restore never saves publication state")
     }
@@ -157,12 +155,12 @@ function publishedPlan(
     return { ...restored, routing, tasks }
 }
 
-function unpublishedRecord(object: TrackerObject, environment: WorkflowEnvironment): TrackerRecord {
+function unpublishedRecord(object: TrackerObject, tracker: TrackerConfig): TrackerRecord {
     if (object.provider === "github") {
-        if (environment.tracker.provider !== "github") throw new Error("configured tracker is not GitHub")
+        if (tracker.provider !== "github") throw new Error("configured tracker is not GitHub")
         return {
             provider: "github",
-            repository: { ...environment.tracker.repository },
+            repository: { ...tracker.repository },
             external: { issueNumber: object.issueNumber },
             planComment: { state: "unpublished" },
         }
@@ -181,10 +179,10 @@ export function restoreEpic(cwd: string, input: RestoreEpicInput, tools: McpTool
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
     assertWorkerArtifactsLinked(root)
-    const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
-    const facts = epicFacts(environment, input.epic, tools)
-    const unpublished = unpublishedRecord(facts.object, environment)
-    const plan = publishedPlan(environment, unpublished, facts.title, input.pages, tools)
+    const configured = requireTracker(loadIntegrationRoles(root), "Epic restore")
+    const facts = epicFacts(configured, input.epic, tools)
+    const unpublished = unpublishedRecord(facts.object, configured)
+    const plan = publishedPlan(configured, unpublished, facts.title, input.pages, tools)
 
     const slug = slugify(input.slug)
     const name = entityName(trackerReference(facts.object), slug)
@@ -207,7 +205,7 @@ export function restoreEpic(cwd: string, input: RestoreEpicInput, tools: McpTool
         slug,
         title: facts.title.trim(),
         createdAt: new Date(facts.createdAt).toISOString(),
-        ...initialPhase(environment.tracker, "execution"),
+        ...initialPhase(configured, "execution"),
         branch: readyBranch(plan.routing.epicBranch, defaultBranch, "generated"),
         tracker,
         // The published plan's Task list was accepted before it was published.
@@ -235,10 +233,10 @@ export function restoreEpicPlanSource(cwd: string, input: RestoreEpicPlanSourceI
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
     assertWorkerArtifactsLinked(root)
-    const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
+    const configured = requireTracker(loadIntegrationRoles(root), "Epic plan restore")
     const directory = resolveEntityDirectory(root, cwd, input.entityDir)
     const status = readEntityStatus(directory)
     if (status.entity !== "epic") throw new Error("plan source restore requires an Epic")
-    const plan = publishedPlan(environment, status.tracker, status.title, input.pages, tools)
+    const plan = publishedPlan(configured, status.tracker, status.title, input.pages, tools)
     return { source: plan.source, routing: plan.routing }
 }

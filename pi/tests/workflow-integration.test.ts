@@ -15,8 +15,10 @@ import { withToolExecution } from "./extension-context-fixture.ts"
 
 import {
     assertConfiguredPriority,
-    loadIntegrationConfig,
+    loadIntegrationRoles,
     PriorityFieldValidator,
+    requireTracker,
+    RoleUnavailableError,
 } from "../workflows/extensions/integrations/config.ts"
 import { prepareArtifactPersistence, setInstallationForTests } from "../workflows/extensions/__lib/project-config.ts"
 import registerIntegrations, {
@@ -32,6 +34,11 @@ import { linearPriorityNumber } from "../workflows/extensions/integrations/recor
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
 
 const mcpTools = workflowMcpCatalog("github", "linear", "workflow-github", "workflow-linear")
+
+/** The configured tracker, for validation tests: it must be on. */
+function loadTracker(cwd: string) {
+    return requireTracker(loadIntegrationRoles(cwd), "test")
+}
 
 const statuses = {
     backlog: "Backlog",
@@ -369,17 +376,25 @@ describe("workflow-source queue context", () => {
         const f = workflowFixture(t)
         prepareWorkflowProject(f.source)
         const file = path.join(f.source, ".piton/config.toml")
-        for (const changes of [{ tracker: null, forge: null }, { tracker: null }, { forge: null }, { tracker: 1 }]) {
-            writeProjectConfig(f.source, { tracker: config(), forge: forgeConfig() })
-            if ("tracker" in changes && changes.tracker === 1) fs.appendFileSync(file, "[tracker\n")
-            else writeConfig(f.source, changes)
-            const before = fileSnapshot(f.root)
-            assert.throws(
-                () => buildIntegrationContext(f.ctx, { operation: "inspect", target: "workflow" }, mcpTools),
-                (error: Error) => error.message.includes(f.source) && error.message.includes("config.toml"),
-            )
-            assert.deepEqual(fileSnapshot(f.root), before)
-        }
+        writeProjectConfig(f.source, { tracker: config(), forge: forgeConfig() })
+        fs.appendFileSync(file, "[tracker\n")
+        const broken = fileSnapshot(f.root)
+        assert.throws(
+            () => buildIntegrationContext(f.ctx, { operation: "inspect", target: "workflow" }, mcpTools),
+            (error: Error) => error.message.includes(f.source) && error.message.includes("config.toml"),
+        )
+        assert.deepEqual(fileSnapshot(f.root), broken)
+        // A missing role isn't an error: inspection reports it off, and a step that needs it refuses.
+        fs.writeFileSync(file, "")
+        writeProjectConfig(f.source, { branchFormat: "identifier-title", forge: forgeConfig() })
+        prepareArtifactPersistence(f.source)
+        const inspected = buildIntegrationContext(f.ctx, { operation: "inspect", target: "workflow" }, mcpTools)
+        assert.equal(inspected.roles.tracker?.state, "disabled")
+        assert.equal(inspected.roles.forge?.state, "enabled")
+        assert.throws(
+            () => buildIntegrationContext(f.ctx, { ...queueSelection, target: "workflow" }, mcpTools),
+            (error: Error) => error.message.includes(f.source) && /needs the tracker/.test(error.message),
+        )
         fs.writeFileSync(file, "")
         writeProjectConfig(f.source, {
             branchFormat: "identifier-title",
@@ -538,20 +553,33 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("requires both a tracker and a forge", () => {
+    it("loads each integration role as on or off", () => {
         const cwd = temporaryProject()
         try {
-            assert.throws(() => loadIntegrationConfig(cwd), /missing required \[tracker\] and \[forge\]/)
-            writeProjectConfig(cwd, { forge: forgeConfig() })
-            assert.throws(() => loadIntegrationConfig(cwd), /missing required \[tracker\]:/)
-            writeConfig(cwd, { forge: null })
-            writeProjectConfig(cwd, { tracker: config() })
-            assert.throws(() => loadIntegrationConfig(cwd), /missing required \[forge\]:/)
-            writeProjectConfig(cwd, { forge: forgeConfig() })
-            assert.deepEqual(loadIntegrationConfig(cwd), {
-                tracker: config(),
-                forge: forgeConfig(),
+            assert.deepEqual(loadIntegrationRoles(cwd), {
+                tracker: { state: "off", reason: "absent" },
+                forge: { state: "off", reason: "absent" },
             })
+            writeProjectConfig(cwd, { forge: forgeConfig() })
+            const forgeOnly = loadIntegrationRoles(cwd)
+            assert.deepEqual(forgeOnly.forge, { state: "on", config: forgeConfig() })
+            assert.throws(
+                () => requireTracker(forgeOnly, "plan publication"),
+                (error: unknown) =>
+                    error instanceof RoleUnavailableError &&
+                    error.role === "tracker" &&
+                    error.off.reason === "absent" &&
+                    /plan publication/.test(error.message),
+            )
+            writeProjectConfig(cwd, { tracker: config(), forge: { provider: "none" } })
+            const trackerOnly = loadIntegrationRoles(cwd)
+            assert.deepEqual(trackerOnly.tracker, { state: "on", config: config() })
+            assert.equal(trackerOnly.forge.state, "off")
+            assert.ok(trackerOnly.forge.state === "off" && trackerOnly.forge.reason === "disabled")
+            writeProjectConfig(cwd, { tracker: { provider: "none", mcpServer: "github" }, forge: forgeConfig() })
+            assert.throws(() => loadIntegrationRoles(cwd), /invalid .*\.piton\/config\.toml/)
+            writeProjectConfig(cwd, { tracker: { provider: "jira" } })
+            assert.throws(() => loadIntegrationRoles(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -710,33 +738,33 @@ describe("workflow integration configuration", () => {
         try {
             const write = (tracker: unknown) => writeProjectConfig(cwd, { tracker, forge: forgeConfig() })
             write(linearConfig())
-            assert.equal(loadIntegrationConfig(cwd).tracker.provider, "linear")
+            assert.equal(loadTracker(cwd).provider, "linear")
 
             const duplicateStatuses = linearConfig()
             duplicateStatuses.statuses.issues.todo = duplicateStatuses.statuses.issues.backlog
             write(duplicateStatuses)
-            assert.throws(() => loadIntegrationConfig(cwd), /Linear issue Status mappings must use distinct options/)
+            assert.throws(() => loadTracker(cwd), /Linear issue Status mappings must use distinct options/)
 
             const missingIssueCanceled = linearConfig()
             delete (missingIssueCanceled.statuses.issues as Partial<typeof statuses>).canceled
             write(missingIssueCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
 
             const missingProjectCanceled = linearConfig()
             delete (missingProjectCanceled.statuses.projects as Partial<typeof statuses>).canceled
             write(missingProjectCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
 
             write({ ...linearConfig(), repository: { owner: "x", repo: "y" } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
 
             const { phase, ...withoutPhase } = linearConfig()
             write(withoutPhase)
-            const loaded = loadIntegrationConfig(cwd).tracker
+            const loaded = loadTracker(cwd)
             assert.equal(loaded.provider === "linear" && loaded.phase, undefined)
 
             write({ ...withoutPhase, phase: { issues: phase.issues } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -750,46 +778,46 @@ describe("workflow integration configuration", () => {
             const duplicateStatus = config("project")
             duplicateStatus.fields.status.values.todo = duplicateStatus.fields.status.values.backlog
             writeConfig(duplicateStatus)
-            assert.throws(() => loadIntegrationConfig(cwd), /Status mappings must use distinct options/)
+            assert.throws(() => loadTracker(cwd), /Status mappings must use distinct options/)
 
             const missingCanceled = config("project")
             delete (missingCanceled.fields.status.values as Partial<typeof statuses>).canceled
             writeConfig(missingCanceled)
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
 
             const duplicateProjectField = config("project")
             duplicateProjectField.fields.priority.field = duplicateProjectField.fields.status.field
             writeConfig(duplicateProjectField)
-            assert.throws(() => loadIntegrationConfig(cwd), /Project field names must be distinct/)
+            assert.throws(() => loadTracker(cwd), /Project field names must be distinct/)
 
             writeConfig({
                 ...config("project"),
                 labels: kindLabels({ ...kindLabelNames, bugfix: kindLabelNames.feature.toUpperCase() }),
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /"KIND: FEATURE" is used more than once/)
+            assert.throws(() => loadTracker(cwd), /"KIND: FEATURE" is used more than once/)
 
             const phaseCollision = config("project")
             phaseCollision.fields.phase.field = phaseCollision.fields.status.field
             writeConfig(phaseCollision)
-            assert.throws(() => loadIntegrationConfig(cwd), /Project field names must be distinct/)
+            assert.throws(() => loadTracker(cwd), /Project field names must be distinct/)
 
             const duplicatePhase = config("project")
             duplicatePhase.fields.phase.values.selfReview = duplicatePhase.fields.phase.values.execution
             writeConfig(duplicatePhase)
-            assert.throws(() => loadIntegrationConfig(cwd), /Phase mappings must use distinct options/)
+            assert.throws(() => loadTracker(cwd), /Phase mappings must use distinct options/)
 
             const separateScope = config("issue")
             separateScope.fields.priority.field = separateScope.fields.status.field
             writeConfig(separateScope)
-            assert.equal(loadIntegrationConfig(cwd).tracker.provider, "github")
+            assert.equal(loadTracker(cwd).provider, "github")
 
             writeConfig(config("project", false))
-            assert.equal(loadIntegrationConfig(cwd).tracker.provider, "github")
+            assert.equal(loadTracker(cwd).provider, "github")
 
             const withoutPhase = config("project")
             delete (withoutPhase.fields as { phase?: unknown }).phase
             writeConfig(withoutPhase)
-            const loaded = loadIntegrationConfig(cwd).tracker
+            const loaded = loadTracker(cwd)
             assert.equal(loaded.provider === "github" && loaded.fields.phase, undefined)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
@@ -898,6 +926,50 @@ describe("workflow integration configuration", () => {
         }
     })
 
+    it("runs forge steps with the tracker off, and tracker steps with the forge off", () => {
+        const cwd = temporaryProject()
+        try {
+            prepareWorkflowProject(cwd)
+            prepareArtifactPersistence(cwd)
+            const entityDir = writeGitHubGigEntity(cwd)
+            const ctx = { cwd } as ExtensionContext
+            const source = "# Result\n\n## Overview\n\nDelivered.\n\n## Verification\n\nTests passed.\n"
+
+            writeProjectConfig(cwd, { tracker: { provider: "none" } })
+            const forgeSide = buildIntegrationContext(ctx, { operation: "pullRequest", entityDir }, mcpTools)
+            assert.equal(forgeSide.roles.forge?.state, "enabled")
+            const resumed = buildIntegrationContext(ctx, { operation: "resume", entityDir }, mcpTools)
+            assert.equal(resumed.roles.tracker?.state, "disabled")
+            assert.equal(resumed.projection, undefined)
+            assert.throws(
+                () => buildIntegrationContext(ctx, { operation: "artifactProjection", entityDir }, mcpTools),
+                /needs the tracker, which is turned off/,
+            )
+            // Without a tracker, the PR body has no closing reference.
+            assert.doesNotMatch(
+                renderEntityProviderBody(ctx, { entityDir, destination: "pullRequest", source }),
+                /Closes/,
+            )
+            assert.throws(
+                () => renderEntityProviderBody(ctx, { entityDir, destination: "tracker", source }),
+                /needs the tracker/,
+            )
+
+            writeProjectConfig(cwd, { tracker: config(), forge: { provider: "none" } })
+            assert.equal(
+                buildIntegrationContext(ctx, { operation: "artifactProjection", entityDir }, mcpTools).roles.tracker
+                    ?.state,
+                "enabled",
+            )
+            assert.throws(
+                () => buildIntegrationContext(ctx, { operation: "pullRequest", entityDir }, mcpTools),
+                /needs the forge, which is turned off/,
+            )
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
     it("renders Epic and Gig trackers losslessly without local mutations", () => {
         const githubEpic = {
             provider: "github",
@@ -963,6 +1035,7 @@ describe("workflow integration configuration", () => {
                 { operation: "artifactProjection", entityDir },
                 mcpTools,
             )
+            assert.ok(projection.projection)
             assert.match(projection.projection.contentPolicy, /lossless.*never summarize or condense/)
             assert.match(projection.projection.rendering, /tracker_publication.*exact registered document mutation/)
             assert.equal(projection.projection.authority, "local artifact")
@@ -985,7 +1058,7 @@ describe("workflow integration configuration", () => {
                 tracker: { ...config("issue"), project: { owner: "alex", ownerType: "user", number: 3 } },
                 forge: forgeConfig(),
             })
-            assert.equal(loadIntegrationConfig(cwd).tracker.provider, "github")
+            assert.equal(loadTracker(cwd).provider, "github")
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -1204,11 +1277,11 @@ describe("workflow integration configuration", () => {
                 ...valid,
                 labels: kindLabels({ ...otherKinds, review: audit } as unknown as typeof kindLabelNames),
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /`kind` label group values must be exactly/)
+            assert.throws(() => loadTracker(cwd), /`kind` label group values must be exactly/)
             write({ ...valid, fields: { ...valid.fields, type: { scope: "project", field: "Kind" } } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
             write({ ...valid, fields: { labels: true } })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -1227,11 +1300,11 @@ describe("workflow integration configuration", () => {
             const github = (labels: unknown) => ({ ...config("project", false), labels })
             const loads = (tracker: unknown) => {
                 write(tracker)
-                return loadIntegrationConfig(cwd)
+                return loadTracker(cwd)
             }
             const rejects = (tracker: unknown, error: RegExp) => {
                 write(tracker)
-                assert.throws(() => loadIntegrationConfig(cwd), error)
+                assert.throws(() => loadTracker(cwd), error)
             }
 
             assert.ok(loads(github({ groups: { ...kindLabels().groups, area } })))
@@ -1332,7 +1405,7 @@ describe("workflow integration configuration", () => {
                         groups: { area: { ...linearArea, appliesTo: ["deliverable"] } },
                         unmanaged: { keep: [{ name: "Area: Frontend", catalog: "project", scope: "team" }] },
                     }),
-                ).tracker.provider === "linear",
+                ).provider === "linear",
                 "a kept Project label may share a name with a managed issue label",
             )
             rejects(
@@ -1355,13 +1428,13 @@ describe("workflow integration configuration", () => {
                 ...config("project", false),
                 labels: { kind: { epic: "Kind: Epic", deliverableKinds: { feature: "Kind: Feature" } } },
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
             const linear = linearConfig()
             write({
                 ...linear,
                 phase: { ...linear.phase, issues: { scope: "workspace", group: "Phase", values: phaseValues } },
             })
-            assert.throws(() => loadIntegrationConfig(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

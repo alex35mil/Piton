@@ -56,6 +56,9 @@ function M.load(source)
     end
     local file = tostring(found.path)
     local tracker = found.value
+    if type(tracker) == "table" and tracker.provider == "none" then
+        util.refuse("The tracker is turned off (provider = \"none\" in " .. file .. ")")
+    end
     if type(tracker) ~= "table" or type(tracker.mcp_server) ~= "string" then
         util.refuse("No tracker configured in " .. file)
     end

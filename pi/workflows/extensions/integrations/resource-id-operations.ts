@@ -4,7 +4,7 @@ import { isMcpTool, mcpResponsePayload, type McpToolCatalog } from "../../../ext
 import * as project from "../../../extensions/__lib/project.js"
 import { readEntityStatus, resolveEntityDirectory, type EntityStatus } from "../__lib/entity.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
-import { loadIntegrationConfig } from "./config.js"
+import { loadIntegrationRoles, requireForge, requireTracker } from "./config.js"
 import {
     invalidateResourceIds,
     isResourceIdsKind,
@@ -35,7 +35,7 @@ export interface ResourceIdsContext {
 export function resolveResourceIdsContext(cwd: string, entityDir: string, resource: ResourceKind): ResourceIdsContext {
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
-    const config = loadIntegrationConfig(root)
+    const roles = loadIntegrationRoles(root)
     const directory = resolveEntityDirectory(root, cwd, entityDir)
     const status = readEntityStatus(directory)
     const tracker = status.tracker
@@ -44,7 +44,7 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
     switch (resource) {
         case "github-issue":
         case "github-project-item": {
-            const configured = config.tracker
+            const configured = requireTracker(roles, `${resource} resource IDs`)
             if (configured.provider !== "github" || tracker.provider !== "github")
                 throw new Error("resource IDs require a GitHub tracker issue")
             if (!sameRepository(tracker.repository, configured.repository))
@@ -62,7 +62,7 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
             break
         }
         case "linear-project": {
-            const configured = config.tracker
+            const configured = requireTracker(roles, `${resource} resource IDs`)
             if (configured.provider !== "linear" || tracker.provider !== "linear" || tracker.resource !== "project")
                 throw new Error("resource IDs require a Linear Project")
             scope = {
@@ -75,7 +75,7 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
             break
         }
         case "linear-issue": {
-            const configured = config.tracker
+            const configured = requireTracker(roles, `${resource} resource IDs`)
             if (configured.provider !== "linear" || tracker.provider !== "linear" || tracker.resource === "project")
                 throw new Error("resource IDs require a Linear issue")
             scope = {
@@ -92,14 +92,15 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
             break
         }
         case "github-pull-request": {
+            const configured = requireForge(roles, "PR resource IDs")
             const forge = status.forge
             if (!forge) throw new Error("PR resource IDs require immutable forge intent prepared before submission")
-            if (!sameRepository(forge.repository, config.forge.repository))
+            if (!sameRepository(forge.repository, configured.repository))
                 throw new Error("forge repository differs from the configured repository")
             scope = {
                 ...common,
                 kind: resource,
-                mcpServer: config.forge.mcpServer,
+                mcpServer: configured.mcpServer,
                 repository: forge.repository,
                 head: forge.head,
                 target: forge.target,

@@ -276,6 +276,7 @@ describe("managed Linear plan documents", () => {
                     tools,
                 )
                 assert.equal(context.state, "enabled")
+                assert.ok(context.projection)
                 assert.match(context.projection.rendering, /tracker_publication/)
                 readEntityStatus(path.join(f.root, f.directory))
             } finally {

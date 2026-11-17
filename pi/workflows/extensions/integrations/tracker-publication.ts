@@ -17,8 +17,8 @@ import {
 import { assertAcceptedTaskList } from "../__lib/epic-acceptance.js"
 import { resolveAnnouncementOrigin, withPlanAnnouncement } from "./announcement-state.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
-import { loadIntegrationConfig } from "./config.js"
-import { assertEntityEnvironment, resolveWorkflowEnvironment } from "./policy.js"
+import { loadIntegrationRoles, requireTracker } from "./config.js"
+import { assertEntityTracker } from "./policy.js"
 import {
     type AnnouncementInput,
     AnnouncementInputSchema,
@@ -206,11 +206,11 @@ export async function trackerPublication(cwd: string, raw: TrackerPublicationInp
     const directory = resolveEntityDirectory(root, cwd, input.entityDir)
     return withFileMutationQueue(path.join(directory, ENTITY_METADATA_FILE), async () => {
         assertArtifactPersistencePrepared(root)
-        const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
+        const configured = requireTracker(loadIntegrationRoles(root), "plan publication")
         const status = readEntityStatus(directory)
-        assertEntityEnvironment(status, environment)
+        assertEntityTracker(status, configured)
         const tracker = status.tracker
-        const server = environment.tracker.mcpServer
+        const server = configured.mcpServer
         // Publication and announcement saves can follow each other in one call; each builds on the latest record.
         let current = tracker
         const save = (record: TrackerRecord) => {

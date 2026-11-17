@@ -2,17 +2,16 @@ import * as path from "node:path"
 
 import * as project from "../../../extensions/__lib/project.js"
 import { parseResourceIds, recordResourceIds, type ResourceIds } from "../integrations/resource-ids.js"
-import type { WorkflowEnvironment } from "../integrations/policy.js"
+import type { TrackerConfig } from "../integrations/config.js"
 import type { TrackerObject } from "../integrations/records.js"
 import type { InitializedEntity } from "./entity.js"
 
 // Resource IDs the tracker object's create or selection evidence already proved.
 export function resourceIdsFromTrackerObject(
     object: TrackerObject,
-    environment: WorkflowEnvironment,
+    tracker: TrackerConfig,
     entity: string,
 ): ResourceIds[] {
-    const tracker = environment.tracker
     if (object.provider === "github" && tracker.provider === "github") {
         const scope = {
             entity,
