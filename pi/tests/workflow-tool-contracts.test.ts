@@ -127,7 +127,6 @@ describe("workflow model-facing contracts", () => {
         for (const old of [
             "init",
             "integration_context",
-            "review",
             "resource_ids",
             "tracker_publication",
             "set_workflow_phase",
@@ -139,6 +138,10 @@ describe("workflow model-facing contracts", () => {
             "prepare_gig_completion_presentation",
         ])
             assert.ok(!registeredWorkflowTools().some((t) => t.name === old), old)
+        // `review` is now the entity-free standalone review, not the old entity dispatcher: no entity selector.
+        const review = registeredWorkflowTools().find((t) => t.name === "review")!.parameters
+        assert.ok(Type.IsObject(review))
+        assert.deepEqual(Object.keys(review.properties).sort(), ["context", "instructions", "model", "target"])
     })
 
     it("retains nested configuration alternatives instead of multiplying configuration tools", () => {

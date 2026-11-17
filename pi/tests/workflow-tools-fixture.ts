@@ -96,6 +96,7 @@ export const expectedWorkflowTools = [
     "apply_label_setup",
     "review_pull_request",
     "record_pull_request_review_response",
+    "review",
     "review_epic",
     "review_task",
     "review_gig",

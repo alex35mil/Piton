@@ -19,7 +19,6 @@ import {
 } from "../workflows/extensions/review/findings.ts"
 import registerReviewTools, {
     assertReviewPreconditions,
-    branchDiff,
     buildDeliverableReviewPrompt,
     createReviewRoundDirectory,
     failedReviewGate,
@@ -29,6 +28,14 @@ import registerReviewTools, {
 import registerEpic from "../workflows/extensions/epic/index.ts"
 import { readReviewCycle, type ReviewPass } from "../workflows/extensions/__lib/review-rounds.ts"
 import { buildEpicReviewPrompt } from "../workflows/extensions/review/epic.ts"
+import { branchDiff } from "../workflows/extensions/review/diff.ts"
+import {
+    buildStandaloneReviewPrompt,
+    resolveReviewTarget,
+    runStandaloneReview,
+    type StandaloneReviewInput,
+    StandaloneReviewValidator,
+} from "../workflows/extensions/review/standalone.ts"
 import { chooseReviewPass, reviewPassNotice, reviewPassPrompt } from "../workflows/extensions/review/pass.ts"
 import type { ReviewAgentRunOptions, ReviewAgentRunResult } from "../workflows/extensions/review/agent.ts"
 import {
@@ -126,7 +133,7 @@ function writeReviewRound(
 }
 
 describe("workflow reviewer isolation", () => {
-    it("registers one review tool per entity and one response recorder", () => {
+    it("registers one review tool per entity, one response recorder, and the standalone review", () => {
         const tools: string[] = []
         const pi = {
             events: createEventBus(),
@@ -139,6 +146,7 @@ describe("workflow reviewer isolation", () => {
         assert.deepEqual(tools, [
             "review_pull_request",
             "record_pull_request_review_response",
+            "review",
             "review_epic",
             "review_task",
             "review_gig",
@@ -1150,6 +1158,127 @@ describe("workflow reviewer isolation", () => {
             await assert.rejects(run({ phase: "conflict-merge" }), /parents don't match conflict-plan-003/)
         } finally {
             fs.rmSync(parent, { recursive: true, force: true })
+        }
+    })
+})
+
+describe("standalone review", () => {
+    function repository() {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-standalone-review-"))
+        const git = (...args: string[]) => cp.execFileSync("git", args, { cwd: root, encoding: "utf-8" }).trim()
+        const write = (name: string, content: string) => fs.writeFileSync(path.join(root, name), content)
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "test@example.com")
+        git("config", "user.name", "Test")
+        write("base.md", "base\n")
+        git("add", ".")
+        git("commit", "-q", "-m", "initial")
+        git("switch", "-q", "-c", "work")
+        write("step.md", "committed step\n")
+        git("add", ".")
+        git("commit", "-q", "-m", "step one")
+        write("base.md", "base\nunstaged change\n")
+        write("untracked.md", "new file\n")
+        return { root, git }
+    }
+
+    it("embeds each target's changes and the stated context, with no workflow entity", async () => {
+        const { root, git } = repository()
+        try {
+            const prompt = (target: StandaloneReviewInput["target"], context?: string) =>
+                buildStandaloneReviewPrompt(root, { target, ...(context ? { context } : {}) })
+
+            const uncommitted = await prompt({ kind: "uncommitted" }, "Keep base.md stable.")
+            assert.match(uncommitted, /^\+unstaged change$/m)
+            assert.doesNotMatch(uncommitted, /^\+committed step$/m)
+            assert.match(uncommitted, /\?\? untracked\.md/)
+            assert.match(uncommitted, /read each untracked file/i)
+            assert.match(uncommitted, /# Stated context[\s\S]*Keep base\.md stable\./)
+            assert.doesNotMatch(uncommitted, /reviews\//)
+
+            const commit = await prompt({ kind: "commit", commit: "HEAD" })
+            assert.match(commit, /^\+committed step$/m)
+            assert.match(commit, /step one/)
+            assert.doesNotMatch(commit, /unstaged change/)
+            assert.doesNotMatch(commit, /# Stated context/)
+
+            const range = await prompt({ kind: "range", base: "main" })
+            assert.match(range, /main\.\.HEAD/)
+            assert.match(range, /^\+committed step$/m)
+            assert.doesNotMatch(range, /unstaged change/)
+
+            const branch = await prompt({ kind: "branch", base: "main" })
+            assert.match(branch, /^\+committed step$/m)
+            assert.match(branch, /^\+unstaged change$/m)
+            assert.match(branch, /read each untracked file/i)
+
+            const paths = await prompt({ kind: "paths", paths: ["base.md"] })
+            assert.match(paths, /base\.md/)
+            assert.doesNotMatch(paths, /# Changes/)
+            git("status", "--short")
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it("refuses unknown revisions, option-like refs, and paths outside the repository", async () => {
+        const { root } = repository()
+        try {
+            assert.throws(() => resolveReviewTarget(root, { kind: "commit", commit: "nope" }), /unknown revision/)
+            assert.throws(() => resolveReviewTarget(root, { kind: "commit", commit: "--output=x" }), /invalid revision/)
+            assert.ok(!StandaloneReviewValidator.check({ target: { kind: "commit", commit: "--output=x" } }))
+            assert.ok(!StandaloneReviewValidator.check({ target: { kind: "commit" } }))
+            assert.ok(!StandaloneReviewValidator.check({ target: { kind: "uncommitted", base: "main" } }))
+            assert.throws(() => resolveReviewTarget(root, { kind: "paths", paths: ["../x"] }), /outside the repository/)
+            assert.throws(() => resolveReviewTarget(root, { kind: "paths", paths: ["absent.md"] }), /does not exist/)
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it("returns rendered findings and keeps no round files", async () => {
+        const { root } = repository()
+        const pi = { getSettings: () => ({}), getCommands: () => [] } as never
+        const ctx = { cwd: root, modelRegistry: { getRegisteredNativeProvider: () => undefined } as never }
+        let directory = ""
+        try {
+            const text = await runStandaloneReview(
+                pi,
+                ctx,
+                { target: { kind: "uncommitted" } },
+                {
+                    execute: async (options) => {
+                        directory = options.directory
+                        assert.equal(options.toolset, "filesAndGit")
+                        assert.equal(options.cwd, fs.realpathSync(root))
+                        return { report: reviewReport("blocked") }
+                    },
+                },
+            )
+            assert.match(text, /F1/)
+            assert.match(text, /blocked/)
+            assert.equal(fs.existsSync(directory), false)
+            assert.equal(fs.existsSync(path.join(root, ".piton")), false)
+
+            await assert.rejects(
+                runStandaloneReview(
+                    pi,
+                    ctx,
+                    { target: { kind: "uncommitted" } },
+                    {
+                        execute: async (options) => {
+                            directory = options.directory
+                            throw new Error(
+                                `Review agent exited with code 1.\n\nArtifacts:\n- ${options.directory}/request.md`,
+                            )
+                        },
+                    },
+                ),
+                (error: Error) => /exited with code 1/.test(error.message) && !/Artifacts/.test(error.message),
+            )
+            assert.equal(fs.existsSync(directory), false)
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
         }
     })
 })
