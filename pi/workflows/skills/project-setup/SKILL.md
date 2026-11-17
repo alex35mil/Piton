@@ -101,8 +101,8 @@ Workflow work always stays local under `.piton/.local/`. When the user asks for 
 | tracker | GitHub, Linear | work items, Backlog and Todo, lifecycle, Priority, hierarchy, plan publication |
 | forge | GitHub | pull requests |
 
-- Configure both roles. Workflows need a tracker and a GitHub forge.
-- Never create placeholder, disabled, or secret-bearing configuration.
+- Both roles are optional. Ask which ones the user wants; recommend both for team work. Without a tracker, Gigs run locally and Epics and Tasks are unavailable; without a forge, work stops after local commits.
+- To turn off a role a parent folder configures, save `{ "provider": "none" }` for it. Never create placeholder or secret-bearing configuration.
 - Choose the tracker before branch naming; the forge doesn't affect branch options.
 
 ### 2. MCP registrations
@@ -248,7 +248,7 @@ A rerun can change only labels. Reuse the saved groups and lists as the desired 
 
 #### GitHub forge
 
-Reuse the known repository and selected server; the forge is always configured alongside the tracker. Use the same candidate rules and ask only for missing or ambiguous identity. When tracker and forge share a repository and server, say so rather than asking twice.
+Reuse the known repository and selected server. Use the same candidate rules and ask only for missing or ambiguous identity. When tracker and forge share a repository and server, say so rather than asking twice.
 
 #### Fork-only incoming PR intake
 

@@ -684,7 +684,8 @@ the line. A host or client file has one schema and is read whole.
     and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
   - `[branches]`, `[web_search]`, the host file's keys: the nearer value per key.
-  - `[tracker]` and `[forge]`: each the nearest table, whole.
+  - `[tracker]` and `[forge]`: each the nearest table, whole. Both are optional; `provider = "none"` turns one off,
+    including one a farther level sets (the pi package reads it).
   - `policies.md` and rules: combined, farthest first.
 - **Writes.** The apps and `piton config set` change keys with `toml_edit`, keeping comments and layout
   (`--global` for the global `config.toml`, `--scope host|client` for the host and client files). The pi package

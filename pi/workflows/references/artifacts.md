@@ -79,7 +79,8 @@ Use concise lowercase kebab-case, with a soft cap around 48 characters; shorten 
 
 ## Names and initial branches
 
-- An entity's directory is `<reference>-<slug>`: `12-<slug>` for a GitHub issue, `ENG-12-<slug>` for a Linear issue, and `<YYYYMMDD>-<slug>` for a Linear Epic.
+- An entity's directory is `<reference>-<slug>`: `12-<slug>` for a GitHub issue, `ENG-12-<slug>` for a Linear issue, and `<YYYYMMDD>-<slug>` for a Linear Epic or a local Gig, dated by its creation.
+- A local Gig's branch uses that dated name: as is under `identifier-title` and `tracker`, with `<username>/` under `username/identifier-title`.
 - The `identifier-title` branch format uses that name in lowercase; `username/identifier-title` prefixes it with `<username>/`. Only initialized entities get directories and branches.
 - Epic and Gig start from and target the repository default branch. It's resolved, in order, from `origin/HEAD`, an existing workflow contract, the current attached local branch, or the sole local branch. A remote is optional.
 - A Task copies its parent Epic's current target. The Task skill owns its prerequisites and parent relation.
@@ -105,7 +106,7 @@ Entity files sit directly in the entity directory.
 
 ```text
 .piton/
-  config.toml          # Required: branch format, tracker, and forge, non-secret; committed; never entity state.
+  config.toml          # Required: branch format; optional tracker and forge; non-secret; committed; never entity state.
   config.local.toml    # Optional personal values, such as the username; always local.
   policies.md          # Optional repository-specific workflow additions or overrides; committed.
   .local/              # All workflow work; never committed.

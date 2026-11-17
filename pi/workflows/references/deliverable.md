@@ -19,14 +19,15 @@ Related files, read when the step is reached:
    - `<repo>/.piton/policies.md` when present. Apply it throughout.
 
    Create missing notes or pending files when continuing local work.
-3. Read lifecycle and Priority fresh from the tracker.
+3. Read lifecycle and Priority fresh from the tracker, when the Deliverable has a tracker item.
 4. Branch: switch to the stored branch `name` and verify its stored `start` and `target`. The branch contract is immutable. Never invent a branch name or base.
 
 ## Integration boundary
 
 Initialization starts from the tracker object ([integration roles](./integrations/shared.md#initialize-from-the-tracker-object)), then `initialize_integration` sets up the board. On resume, reuse the `resume_integration` result from the artifact gate.
 
-- Read [integration roles](./integrations/shared.md), then the provider reference for each role: [GitHub tracker](./integrations/tracker/github.md) or [Linear tracker](./integrations/tracker/linear.md), and [GitHub forge](./integrations/forge/github.md). Report an unavailable role without blocking the other.
+- Read [integration roles](./integrations/shared.md), then the provider reference for each enabled role: [GitHub tracker](./integrations/tracker/github.md) or [Linear tracker](./integrations/tracker/linear.md), and [GitHub forge](./integrations/forge/github.md). Report an unavailable role without blocking the other.
+- A role that's off, or a local Gig, skips its steps throughout this lifecycle ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
 - Permission denial, invalid configuration, or provider failure: follow the [MCP boundary](./core.md#mcp-boundary). Nothing local replaces an unavailable tracker.
 
 After every `plan.md` change, publish the plan as described in [provider bodies](./integrations/shared.md#provider-bodies). Once it's published, each change posts a one-line [plan-update note](./integrations/shared.md#plan-update-notes), without asking.
