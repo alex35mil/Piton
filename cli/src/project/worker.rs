@@ -392,12 +392,13 @@ pub fn info(path: &Path) -> Result<WorkerInfo> {
     })
 }
 
-/// Uncommitted changes and unpushed commits, as lines to show.
+/// Uncommitted changes and unpushed commits, as lines to show. A pristine incoming-PR review (see
+/// [`pristine_pr_review`]) isn't uncommitted work: its staged contribution and held configuration are the tool's.
 pub fn leftovers(path: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     match git_ok(path, &["status", "--porcelain"]) {
         Err(e) => lines.push(format!("git status failed: {e}")),
-        Ok(s) if !s.is_empty() => {
+        Ok(s) if !s.is_empty() && pristine_pr_review(path).is_none() => {
             lines.push("Uncommitted changes:".into());
             lines.extend(s.lines().take(15).map(str::to_string));
         }
@@ -459,6 +460,87 @@ pub fn remove(worker: &WorkerInfo, force: bool, mise: Option<&Mise>) -> Result<O
     }
     crate::log!("worker deleted: {}", worker.path.display());
     Ok(update_source(&worker.source))
+}
+
+/// The PR number of the incoming-PR review the pi package's `/pr` tools recorded for this checkout, when the checkout is
+/// exactly in its recorded review state: HEAD, index, and files on disk as the tool left them, with nothing untracked.
+/// The record is `.piton/.local/pull-requests/<number>/checkout.json`; the fields read here are a contract with
+/// `pi/workflows/extensions/pr/state.ts` (see "Workers" in docs/design.md). Anything else, including an unreadable
+/// record, is not pristine.
+pub fn pristine_pr_review(checkout: &Path) -> Option<u64> {
+    let records = checkout.join(SHARED_PATH).join("pull-requests");
+    let canonical = std::fs::canonicalize(checkout).ok()?;
+    std::fs::read_dir(&records).ok()?.flatten().find_map(|entry| {
+        let number: u64 = entry.file_name().to_str()?.parse().ok()?;
+        let record: ReviewRecord =
+            serde_json::from_slice(&std::fs::read(entry.path().join("checkout.json")).ok()?).ok()?;
+        let state = match record.phase.as_str() {
+            "contributorReview" | "fixes" => record.workspace?,
+            _ => return None,
+        };
+        (std::fs::canonicalize(&record.location.root).ok()? == canonical && matches_review(&canonical, &state))
+            .then_some(number)
+    })
+}
+
+#[derive(Deserialize)]
+struct ReviewRecord {
+    phase: String,
+    location: ReviewLocation,
+    workspace: Option<ReviewWorkspace>,
+}
+
+#[derive(Deserialize)]
+struct ReviewLocation {
+    root: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewWorkspace {
+    head_sha: String,
+    index_tree: String,
+    disk_commit: String,
+}
+
+fn matches_review(checkout: &Path, state: &ReviewWorkspace) -> bool {
+    let sha = |s: &str| s.len() >= 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if ![&state.head_sha, &state.index_tree, &state.disk_commit]
+        .iter()
+        .all(|s| sha(s))
+    {
+        return false;
+    }
+    let head = git_ok(checkout, &["rev-parse", "--verify", "HEAD"]);
+    let detached = git_ok(checkout, &["symbolic-ref", "--quiet", "HEAD"]).is_err();
+    let index = git_ok(checkout, &["write-tree"]);
+    if head.as_deref() != Ok(state.head_sha.as_str()) || !detached || index.as_deref() != Ok(state.index_tree.as_str())
+    {
+        return false;
+    }
+    // The files on disk against the recorded disk commit, through a throwaway index so the real one is untouched.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let scratch = std::env::temp_dir().join(format!("piton-pr-review-{}-{nanos}.index", std::process::id()));
+    let with_index = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
+            .args(args)
+            .env("GIT_INDEX_FILE", &scratch)
+            .output()
+            .ok()
+    };
+    let ok = |out: Option<std::process::Output>| out.filter(|o| o.status.success());
+    let clean = ok(with_index(&["read-tree", &state.disk_commit])).is_some()
+        && ok(with_index(&["update-index", "-q", "--refresh"])).is_some()
+        && ok(with_index(&["diff-files", "--quiet", "--ignore-submodules=all"])).is_some()
+        && ok(with_index(&["ls-files", "--others", "--exclude-standard", "-z"])).is_some_and(|o| o.stdout.is_empty());
+    let _ = std::fs::remove_file(&scratch);
+    clean
 }
 
 fn update_source(source: &Path) -> Option<String> {
@@ -724,5 +806,82 @@ mod tests {
         assert_eq!(project::resolve(&inner).unwrap().source(), source);
         assert!(matches!(info(&inner), Err(WorkerRefusal::NotAWorker { .. })));
         assert_eq!(info(&worker.path).unwrap().path, worker.path);
+    }
+
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        git_ok(dir, args).unwrap()
+    }
+
+    /// The review state the pi package's `/pr` tools leave a worker in: HEAD at the merge base, the PR in the index,
+    /// and a held configuration file at its base version on disk. Deletion treats it as clean; anything more is a
+    /// leftover.
+    #[test]
+    fn pristine_pr_review_is_not_a_leftover() {
+        let (_dir, source) = fixture();
+        let info = create(
+            &CreateRequest {
+                from: source.clone(),
+                name: "pr-12".into(),
+                label: None,
+                issue: None,
+            },
+            None,
+            &paths(source.parent().unwrap()),
+        )
+        .unwrap();
+        let w = &info.path;
+        std::fs::write(w.join("mise.toml"), "base\n").unwrap();
+        git(w, &["add", "mise.toml"]);
+        git(w, &["commit", "-q", "-m", "base"]);
+        let base = git_out(w, &["rev-parse", "HEAD"]);
+        std::fs::write(w.join("README"), "pr").unwrap();
+        std::fs::write(w.join("mise.toml"), "pr\n").unwrap();
+        git(w, &["commit", "-q", "-am", "pr"]);
+        let pr = git_out(w, &["rev-parse", "HEAD"]);
+        let pr_tree = git_out(w, &["rev-parse", &format!("{pr}^{{tree}}")]);
+        // Files on disk: the PR with mise.toml held at base.
+        git(w, &["checkout", "-q", &base, "--", "mise.toml"]);
+        let disk_tree = git_out(w, &["write-tree"]);
+        let disk = git_out(w, &["commit-tree", &disk_tree, "-m", "disk"]);
+        // Review state: HEAD at base, detached; index = PR; disk = PR with held base mise.toml.
+        git(w, &["read-tree", &pr]);
+        git(w, &["update-ref", "--no-deref", "HEAD", &base]);
+        let record = |phase: &str, root: &Path| {
+            serde_json::json!({
+                "phase": phase,
+                "location": { "root": root },
+                "workspace": { "headSha": base, "indexTree": pr_tree, "diskCommit": disk },
+            })
+        };
+        let file = source.join(SHARED_PATH).join("pull-requests/12/checkout.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let uncommitted = |lines: &[String]| lines.iter().any(|l| l == "Uncommitted changes:");
+        assert!(
+            uncommitted(&leftovers(w)),
+            "no record: the review state is uncommitted work"
+        );
+
+        std::fs::write(&file, record("contributorReview", w).to_string()).unwrap();
+        assert_eq!(pristine_pr_review(w), Some(12));
+        assert!(!uncommitted(&leftovers(w)));
+
+        // A record for another checkout or a non-review phase doesn't apply.
+        std::fs::write(&file, record("contributorReview", &source).to_string()).unwrap();
+        assert_eq!(pristine_pr_review(w), None);
+        std::fs::write(&file, record("rebasing", w).to_string()).unwrap();
+        assert_eq!(pristine_pr_review(w), None);
+
+        // Edits, untracked files, and staging changes are leftovers.
+        std::fs::write(&file, record("fixes", w).to_string()).unwrap();
+        assert_eq!(pristine_pr_review(w), Some(12));
+        std::fs::write(w.join("README"), "edited").unwrap();
+        assert!(uncommitted(&leftovers(w)));
+        std::fs::write(w.join("README"), "pr").unwrap();
+        assert_eq!(pristine_pr_review(w), Some(12));
+        std::fs::write(w.join("new.txt"), "x").unwrap();
+        assert_eq!(pristine_pr_review(w), None);
+        std::fs::remove_file(w.join("new.txt")).unwrap();
+        git(w, &["reset", "-q", "--", "README"]);
+        assert_eq!(pristine_pr_review(w), None);
     }
 }

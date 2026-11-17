@@ -96,6 +96,9 @@ enum Cmd {
         #[usage(subcommand)]
         action: StateAction,
     },
+    /// Print the tools a repository can configure for itself (environment managers, agents, editors) and the
+    /// repository files each reads, as JSON (for the pi package's incoming-PR review).
+    Tools,
     /// Print a shell completion script.
     Completion {
         #[usage(long, choices("bash", "zsh", "fish"))]
@@ -274,6 +277,13 @@ pub fn main() -> ExitCode {
     match &cli.command {
         Cmd::Service { action } => return service(action, cli.config_home.as_deref()),
         Cmd::Config { action } => return config::run(action),
+        Cmd::Tools => {
+            println!(
+                "{}",
+                serde_json::to_string(&crate::project::tools::registry()).unwrap_or_default()
+            );
+            return ExitCode::SUCCESS;
+        }
         Cmd::Completion { shell } => {
             let shell = match shell.as_str() {
                 "bash" => usage_rs::complete::Shell::Bash,
@@ -306,6 +316,7 @@ pub fn main() -> ExitCode {
         | Cmd::Logging { .. }
         | Cmd::Service { .. }
         | Cmd::Config { .. }
+        | Cmd::Tools
         | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
     };
     let config = match loaded {
@@ -338,7 +349,7 @@ pub fn main() -> ExitCode {
 
 async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
     match command {
-        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } => {
+        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } | Cmd::Tools => {
             unreachable!("handled before the runtime starts")
         }
         Cmd::Daemon => match crate::daemon::run(config).await {
