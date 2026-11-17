@@ -147,7 +147,11 @@ impl Policy {
             for access in &rule.access {
                 match (rule.effect, access) {
                     (Effect::Allow, Access::Read) => {
+                        // Seatbelt ranks a rule's action above its order: a later `file-read*` allow loses to an
+                        // earlier `file-read-data` deny. Name the actions the deny names, so the later allow wins.
                         out.push(format!("(allow file-read* {})", filter(path, false)?));
+                        out.push(format!("(allow file-read-data {})", filter(path, false)?));
+                        out.push(format!("(allow file-read-metadata {})", filter(path, false)?));
                         out.push(format!("(allow process-exec* {})", filter(path, false)?));
                         out.push(format!("(allow file-map-executable {})", filter(path, false)?));
                     }
@@ -267,6 +271,8 @@ mod tests {
         };
         let rules = policy.seatbelt().unwrap();
         assert_eq!(rules[0], r#"(deny file-write* (subpath "/s/\"q\""))"#);
+        // A read allow names `file-read-data`, which a deny names: a broader `file-read*` alone would lose to it.
+        assert!(rules.contains(&r#"(allow file-read-data (subpath "/s/logs"))"#.to_string()));
         let first_network = rules.iter().position(|r| r.contains("network")).unwrap();
         assert!(rules[..first_network].iter().all(|r| !r.contains("network")));
         assert_eq!(

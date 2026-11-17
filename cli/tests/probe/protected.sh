@@ -45,9 +45,11 @@ cat > "$scratch/attempts.sh" <<'EOF'
 attempt() {
     expect=$1; what=$2; shift 2
     # No terminal: a tool that can't write asks before giving up (`rm`: "override rw-r--r--?") and would wait.
-    if sh -c "$*" </dev/null >/dev/null 2>&1; then got=ok; else got=denied; fi
+    if sh -c "$*" </dev/null >/dev/null 2>"$ERR"; then got=ok; else got=denied; fi
     if [ "$got" = "$expect" ]; then mark=pass; else mark=FAIL; fi
     printf '%-5s %-7s %s\n' "$mark" "$got" "$what"
+    # Why a check failed: the command's last error line.
+    if [ "$mark" = FAIL ] && [ -s "$ERR" ]; then printf '      %s\n' "$(tail -n 1 "$ERR")"; fi
 }
 connect() { python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$1"; }
 # Protected files.
@@ -88,7 +90,8 @@ attempt denied "write pi's extensions"                  "mkdir $AGENT_DIR/extens
 attempt denied "write pi's settings"                    ": >> $AGENT_DIR/settings.json"
 attempt ok     "write pi's sessions"                    "mkdir -p $AGENT_DIR/sessions/$PROBE && rmdir $AGENT_DIR/sessions/$PROBE"
 attempt denied "write the global configuration"         ": >> $CONFIG_HOME/config.toml"
-# The daemon.
+# The daemon. The socket checks need python3 to run; if it can't, they all read "denied" and prove nothing.
+attempt ok     "run python3 (for the socket checks)"   'python3 -I -c pass'
 attempt denied "read the daemon's database"             "cat $STATE/piton.db"
 attempt ok     "read Piton's logs"                      "ls $STATE/logs"
 attempt denied "connect to the control socket"          "connect $STATE/piton.sock"
@@ -98,7 +101,7 @@ EOF
 
 cd "$src"
 status=0
-OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" CONFIG_HOME="$config_home" PROBE="$probe" \
+OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" CONFIG_HOME="$config_home" PROBE="$probe" ERR="$scratch/err" \
     PITON_SANDBOX_POLICY="$policy" "$piton" sandbox-exec -- sh "$scratch/attempts.sh" </dev/null \
     >"$scratch/out" 2>&1 || status=$?
 cat "$scratch/out"
