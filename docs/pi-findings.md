@@ -151,16 +151,47 @@ workspace and agent dir). They aren't part of `probe.mjs`; the research report o
 
 ## pi's agent directory
 
-What pi 1.5 writes in its agent directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`), read from its source: the
-sandbox keeps exactly these writable ("Agent access" in design.md).
+What pi 1.5 writes in its agent directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`) and in a project's `.pi/`,
+read from every file write in its `dist/` (pi 1.5.2). The sandbox keeps exactly the runtime state and the locks
+writable (`AGENT_DIR_WRITES` in `cli/src/launch/sandbox/policy.rs`; "Agent access" in design.md). Re-read this when
+pi is upgraded: search its `dist/` (outside `bundle/`) for `writeFileSync`, `mkdirSync`, `appendFileSync`,
+`renameSync`, `rmSync`, `createWriteStream`, and `lockfile.`.
 
-- Runtime state: `sessions/`, `auth.json` (provider logins and token refreshes, locked with `proper-lockfile`:
-  `auth.json.lock/`), `models-store.json`, `mcp-auth.json`, `crashes.json`, `mcp.log`.
-- Configuration and code a later pi loads: `settings.json` (written when a setting changes in a session; a failed
-  write is recorded as a settings error and pi keeps running), `trust.json` (whether a folder's `.pi/` extensions,
-  settings, MCP servers, skills, and prompts load), `keybindings.json`, `models.json`, `extensions/`,
-  `skills/`, `prompts/`, `themes/`, `tools/`, `bin/` (managed `fd`, `rg`), `npm/` and `git/` (installed packages),
-  `tmp/` (package installs).
+`proper-lockfile` locks are folders (`<file>.lock/`) pi creates, touches while it holds them, and removes. pi takes
+them to read a file as well as to write it.
+
+- Runtime state, writable:
+  - `sessions/` (the default session folder; `sessionDir`, `--session-dir`, and `PI_CODING_AGENT_SESSION_DIR` move
+    it, see below).
+  - `auth.json` and `auth.json.lock/` (provider logins and token refreshes); `models-store.json` and its lock (the
+    providers' model catalogs, refreshed at startup); `mcp-auth.json` and its lock (MCP OAuth state).
+  - `mcp-auth-refresh-<hash>.lock/`: one lock per MCP server while its OAuth token refreshes.
+  - `crashes.json`; `mcp.log` and `mcp.log.1` (MCP servers' log messages, rotated at 5 MB; write errors ignored).
+- Locks of read-only files, writable without the files:
+  - `settings.json.lock/`: taken to read `settings.json` at startup. Without it pi prints `Warning: Invalid settings
+    file ... EPERM ... mkdir ...settings.json.lock` and runs without the global settings: no packages, so no
+    extension providers such as `claude-code`, and none of the extensions, default model, or other settings.
+  - `trust.json.lock/`: taken to read `trust.json`, at startup when the folder has `.pi/` resources or
+    `.agents/skills`. Without it pi exits (`EPERM ... mkdir ...trust.json.lock`).
+  - A project's `.pi/settings.json.lock/`, in the workspace: taken to read `.pi/settings.json` when the project is
+    trusted. Without it pi warns as above and ignores the project's settings.
+- Configuration and code a later pi loads, read-only (a write fails in the sandbox):
+  - `settings.json`: written when a setting changes in a session; a failed write is recorded as a settings error and
+    pi keeps running.
+  - `trust.json`: written when the user answers the trust prompt (interactive only) or an extension's
+    `project_trust` handler asks to remember; RPC sessions with no handler only read it.
+  - `mcp.json` (MCP servers; `/mcp` changes, `pi mcp add`), `keybindings.json` (a one-time format migration),
+    `models.json`, `extensions/`, `skills/`, `prompts/`, `themes/`, `SYSTEM.md`, `APPEND_SYSTEM.md`.
+  - `bin/` (managed `fd` and `rg`, downloaded when they aren't on `PATH`), `npm/` and `git/` (packages: installed
+    when missing, updated with `pi update`), `tmp/extensions/` (packages from `-e`).
+  - Startup migrations of old layouts (`oauth.json`, `commands/`, `tools/`, session files at the folder's root): they
+    find nothing to do in a current agent directory, and their errors are ignored.
+- Elsewhere: tool output pi doesn't show in full goes to the OS temp folder. `/export` and the interactive debug log
+  (`pi-debug.log` in the agent directory) are interactive commands.
+
+A session folder set with `sessionDir` (settings or a project's `.pi/settings.json`), `--session-dir`, or
+`PI_CODING_AGENT_SESSION_DIR` outside the agent directory isn't granted: a sandboxed pi can't create its session file
+there. Grant it with `[sandbox] allow`.
 
 ## Sandboxes don't nest
 

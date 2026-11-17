@@ -1,6 +1,7 @@
 //! Protected files: what an agent may not change without the user's approval, because it decides what the agent may do
 //! or what runs. The source checkout's `.piton/` (except `.local/`, the workflow artifacts), and `.pi/` at any depth in
-//! the workspace's checkout.
+//! the workspace's checkout. `.pi/settings.json.lock` itself isn't protected: pi creates that lock folder to read the
+//! project's settings, and it decides nothing.
 //!
 //! Two layers use this one definition: the Seatbelt rules every sandboxed launch carries (any write by any process is
 //! denied) and the daemon's check of a write an agent asks for over `agent.sock` (written only after the user approves
@@ -9,6 +10,10 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{LOCAL_DIR, PITON_DIR};
+
+const PI_DIR: &str = ".pi";
+/// The `proper-lockfile` lock pi takes on `.pi/settings.json` to read it (docs/pi-findings.md).
+const PI_SETTINGS_LOCK: &str = "settings.json.lock";
 
 /// The roots protection is computed for: one launch's source and workspace checkouts (canonical).
 #[derive(Debug, Clone)]
@@ -37,7 +42,10 @@ impl ProtectedRoots {
                 Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => None,
             })
             .collect();
-        parts.contains(&".pi").then_some(self.checkout.as_path())
+        if let [.., PI_DIR, PI_SETTINGS_LOCK] = parts.as_slice() {
+            return None;
+        }
+        parts.contains(&PI_DIR).then_some(self.checkout.as_path())
     }
 
     /// The Seatbelt rules for a sandboxed launch: deny every write to the protected paths. Paths are canonical, as
@@ -55,7 +63,13 @@ impl ProtectedRoots {
             ),
             format!(
                 "(deny file-write* (regex #\"^{checkout}/(.+/)?{}(/|$)\"))",
-                any_case(".pi")
+                any_case(PI_DIR)
+            ),
+            // The lock folder alone, not what's in it: pi creates, touches, and removes it.
+            format!(
+                "(allow file-write* (regex #\"^{checkout}/(.+/)?{}/{}$\"))",
+                any_case(PI_DIR),
+                any_case(PI_SETTINGS_LOCK)
             ),
         ]
     }
@@ -152,6 +166,11 @@ mod tests {
         assert_eq!(c("/u/p/repo--w/src/main.rs"), None);
         assert_eq!(c("/u/p/repo--w/apps/.pix/f"), None);
         assert_eq!(c("/elsewhere/.pi/x"), None);
+        // The lock pi takes to read the project's settings, and only it.
+        assert_eq!(c("/u/p/repo--w/.pi/settings.json.lock"), None);
+        assert_eq!(c("/u/p/repo--w/apps/.PI/Settings.json.LOCK"), None);
+        assert_eq!(c("/u/p/repo--w/.pi/settings.json.lock/x"), checkout);
+        assert_eq!(c("/u/p/repo--w/.pi/extensions/settings.json.lock"), checkout);
     }
 
     #[test]
@@ -166,6 +185,7 @@ mod tests {
             [
                 r#"(deny file-write* (require-all (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN](/|$)") (require-not (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN]/\.[lL][oO][cC][aA][lL](/|$)"))))"#,
                 r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.[pP][iI](/|$)"))"#,
+                r#"(allow file-write* (regex #"^/u/p/re\.po/(.+/)?\.[pP][iI]/[sS][eE][tT][tT][iI][nN][gG][sS]\.[jJ][sS][oO][nN]\.[lL][oO][cC][kK]$"))"#,
             ]
         );
     }

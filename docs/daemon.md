@@ -112,11 +112,16 @@ Gemini CLI's:
 - **Reads:** everything, except credentials and private data: SSH and GPG keys, cloud and registry credentials
   (`~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.npmrc`, `~/.netrc`, ...), keychains and password
   managers, browser profiles, Mail and Messages, shell history and rc files. The list is nono's deny groups, vendored.
-- **Writes:** the workspace, the source's `.piton/.local`, temp folders, and pi's runtime state (sessions, auth,
-  models store). Not user caches: host tools reuse what's in them without checking, so a writable cache would let a
-  sandboxed agent run code on the host. Not pi's settings, extensions, or packages, which host sessions load.
-- **Always closed:** protected files (`.piton/`, `.pi/`) and every configuration level, the daemon's state folder
-  (except `logs/` for reading and `agent.sock`), and the daemon's control socket.
+- **Writes:** the workspace, the source's `.piton/.local`, temp folders, and pi's runtime state in its agent directory
+  (sessions, logins, model catalogs, MCP auth and logs, and the locks pi takes even to read its settings and project
+  trust). Not user caches: host tools reuse what's in them without checking, so a writable cache would let a
+  sandboxed agent run code on the host. Not pi's settings, project trust, MCP servers, extensions, managed
+  binaries, or packages, which host sessions load: changing a setting, trusting a project, adding an MCP server, or
+  installing or updating a pi package from a sandboxed session fails, so do those in a host session. A session folder
+  moved out of the agent directory (`sessionDir`, `PI_CODING_AGENT_SESSION_DIR`) needs `allow`.
+- **Always closed:** protected files (`.piton/`, `.pi/`, except the lock pi takes to read `.pi/settings.json`) and
+  every configuration level, the daemon's state folder (except `logs/` for reading and `agent.sock`), and the
+  daemon's control socket.
 - **Network:** open: pi has to reach its model provider, and fetch, web search, MCP, and installs need it too.
 
 `[sandbox]` adds to that, in any `config.toml` of the chain; lists only add across levels:

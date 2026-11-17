@@ -84,20 +84,43 @@ pub fn nono_denies() -> Vec<(String, Source)> {
 /// `/private/var/folders`) and the device nodes programs write to (nono's `system_write_macos`).
 pub const WRITE_ROOTS: &[&str] = &["/private/tmp", "/private/var/folders", "/dev"];
 
-/// pi's runtime state in its agent directory, writable in the launch's agent directory. Everything else there
-/// (`settings.json`, `extensions/`, skills, prompts, themes, installed packages, managed binaries) is code or
-/// configuration a later pi loads, host sessions included, so it stays read-only.
-pub const AGENT_DIR_RUNTIME_DIRS: &[&str] = &["sessions"];
+/// One entry of pi's agent directory a sandboxed pi may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentDirWrite {
+    /// A folder of runtime state and everything in it.
+    Folder(&'static str),
+    /// A runtime file pi writes in place.
+    File(&'static str),
+    /// The `proper-lockfile` lock of a file (`<file>.lock`): an empty folder pi creates, touches, and removes. pi takes
+    /// it to read the file too, so a read-only file still needs its lock.
+    Lock(&'static str),
+    /// Every entry whose name starts with this: locks named per key.
+    NamePrefix(&'static str),
+}
 
-/// Files of pi's runtime state, and their `proper-lockfile` lock folders (`<file>.lock`): credentials, the models
-/// store, and logs, none of which decides what pi loads. `trust.json` isn't one: it decides whether a folder's `.pi/`
-/// extensions and settings load, so it stays read-only with the rest.
-pub const AGENT_DIR_RUNTIME_FILES: &[&str] = &[
-    "auth.json",
-    "models-store.json",
-    "mcp-auth.json",
-    "crashes.json",
-    "mcp.log",
+/// What a sandboxed pi writes in its agent directory, from pi 1.5's source (docs/pi-findings.md, "pi's agent
+/// directory"): runtime state (sessions, credentials, the models store, logs), none of which decides what pi loads, and
+/// the locks pi takes. Everything else there (`settings.json`, `trust.json`, `mcp.json`, `extensions/`, skills,
+/// prompts, themes, installed packages, managed binaries) is code or configuration a later pi loads, host sessions
+/// included, so it stays read-only.
+pub const AGENT_DIR_WRITES: &[AgentDirWrite] = &[
+    AgentDirWrite::Folder("sessions"),
+    AgentDirWrite::File("auth.json"),
+    AgentDirWrite::Lock("auth.json"),
+    AgentDirWrite::File("models-store.json"),
+    AgentDirWrite::Lock("models-store.json"),
+    AgentDirWrite::File("mcp-auth.json"),
+    AgentDirWrite::Lock("mcp-auth.json"),
+    // One lock per MCP server while its OAuth token refreshes: `mcp-auth-refresh-<hash>.lock`.
+    AgentDirWrite::NamePrefix("mcp-auth-refresh-"),
+    AgentDirWrite::File("crashes.json"),
+    AgentDirWrite::File("mcp.log"),
+    // `mcp.log` rotated.
+    AgentDirWrite::File("mcp.log.1"),
+    // Read at startup: without its lock pi runs without the global settings (packages, extensions, default model).
+    AgentDirWrite::Lock("settings.json"),
+    // Read at startup when the workspace has `.pi/` resources or `.agents/skills`: without its lock pi exits.
+    AgentDirWrite::Lock("trust.json"),
 ];
 
 /// The folders mise installs tools into: what the host runs. Written only with `install = "allow"`.

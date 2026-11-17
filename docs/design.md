@@ -802,9 +802,11 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    then, writable with `allow`; exposing `~/Library/Keychains` also reopens the keychain Mach services the library
    always closes.
 4. **pi's agent directory:** read-only, except its runtime state (`sessions/`, `auth.json`, `models-store.json`,
-   `mcp-auth.json`, `crashes.json`, `mcp.log`, and their locks: credentials and logs). Its settings, project trust
-   (`trust.json`), extensions, skills, prompts, themes, and packages decide what a later pi loads, host sessions
-   included. A workspace's `mise.toml` can
+   `mcp-auth.json`, `crashes.json`, `mcp.log` and its rotation, their locks, and MCP's per-server token-refresh
+   locks: credentials, catalogs, and logs). Its settings, project trust (`trust.json`), MCP servers, extensions,
+   skills, prompts, themes, managed binaries, and packages decide what a later pi loads, host sessions included.
+   pi locks `settings.json` and `trust.json` even to read them, so their locks (`<file>.lock/`) are writable; the
+   files aren't. `docs/pi-findings.md` lists every write pi makes there, from its source. A workspace's `mise.toml` can
    set `PI_CODING_AGENT_DIR`, so the launch is refused when it's the home folder or above it, inside the host's own
    agent directory (the daemon's environment names it) or a checkout's `.pi/`, or overlaps a configuration level,
    the state folder, or a denied path. The host's agent directory stays closed whichever one the launch uses.
@@ -833,7 +835,8 @@ skill can grant itself the tools it lists. Without protection, a sandboxed agent
 next tool call. Changes are gated where they're written:
 
 1. **OS sandbox.** Each sandboxed launch carries raw Seatbelt rules: `(deny file-write* ...)` with regexes
-   for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` at any depth in the checkout. Every
+   for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` at any depth in the checkout (excluding
+   the `.pi/settings.json.lock` folder itself, which pi creates to read the project's settings). Every
    protected name matches in any case (`.PI`, `.PITON`), since APFS is case-insensitive by
    default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
    shell commands, scripts, `git checkout`, MCP servers, pi itself. The library's typed grants can't express a

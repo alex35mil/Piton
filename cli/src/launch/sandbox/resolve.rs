@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::{
     SandboxError,
-    policy::{self, Source},
+    policy::{self, AgentDirWrite, Source},
     rules::{Access, Effect, Policy, Rule, Target},
 };
 use crate::{
@@ -161,27 +161,14 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Policy, SandboxEr
             },
         );
     }
-    for dir in policy::AGENT_DIR_RUNTIME_DIRS {
-        rules.push(
-            Effect::Allow,
-            &[Access::Write],
-            subpath(&agent.join(dir)),
-            Source::AgentDir,
-        );
-    }
-    for file in policy::AGENT_DIR_RUNTIME_FILES {
-        rules.push(
-            Effect::Allow,
-            &[Access::Write],
-            literal(&agent.join(file)),
-            Source::AgentDir,
-        );
-        rules.push(
-            Effect::Allow,
-            &[Access::Write],
-            subpath(&agent.join(format!("{file}.lock"))),
-            Source::AgentDir,
-        );
+    for write in policy::AGENT_DIR_WRITES {
+        let target = match write {
+            AgentDirWrite::Folder(name) => subpath(&agent.join(name)),
+            AgentDirWrite::File(name) => literal(&agent.join(name)),
+            AgentDirWrite::Lock(name) => subpath(&agent.join(format!("{name}.lock"))),
+            AgentDirWrite::NamePrefix(name) => Target::Prefix { path: agent.join(name) },
+        };
+        rules.push(Effect::Allow, &[Access::Write], target, Source::AgentDir);
     }
 
     // 4. The user's denies.
@@ -276,6 +263,9 @@ impl Rules {
                 path: canonical_target(path),
             }),
             Target::Literal { path } => Some(Target::Literal {
+                path: canonical_target(path),
+            }),
+            Target::Prefix { path } => Some(Target::Prefix {
                 path: canonical_target(path),
             }),
             Target::Protected { .. } => None,
@@ -526,11 +516,36 @@ mod tests {
         assert!(allowed(&p, &agent.join("sessions/--w--/s.jsonl"), Access::Write));
         assert!(allowed(&p, &agent.join("auth.json"), Access::Write));
         assert!(allowed(&p, &agent.join("auth.json.lock/x"), Access::Write));
+        for state in [
+            "models-store.json",
+            "models-store.json.lock",
+            "mcp-auth.json",
+            "mcp-auth.json.lock",
+            "mcp-auth-refresh-0123abcd.lock",
+            "mcp-auth-refresh-0123abcd.lock/x",
+            "crashes.json",
+            "mcp.log",
+            "mcp.log.1",
+            // pi locks `settings.json` and `trust.json` to read them; only the locks are writable.
+            "settings.json.lock",
+            "settings.json.lock/x",
+            "trust.json.lock",
+            "trust.json.lock/x",
+        ] {
+            assert!(allowed(&p, &agent.join(state), Access::Write), "{state}");
+        }
         for code in [
             "settings.json",
             // Which folders' `.pi/` extensions and settings host sessions load.
             "trust.json",
-            "trust.json.lock/x",
+            "mcp.json",
+            "keybindings.json",
+            "models.json",
+            "bin/rg",
+            "tmp/extensions/x",
+            "git/x",
+            // The name prefix covers only its own names.
+            "mcp-auth-refreshx",
             "extensions/x.ts",
             "extensions/sessions/index.ts",
             "npm/x",

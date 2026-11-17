@@ -16,7 +16,7 @@ trap 'chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
 scratch=$(cd "$scratch" && pwd -P)
 src="$scratch/repo"
 outside="$scratch/outside"
-mkdir -p "$src/.piton/.local" "$src/apps/sub" "$src/src" "$src/.agents/skills/s" "$outside"
+mkdir -p "$src/.piton/.local" "$src/apps/sub" "$src/apps/.pi" "$src/src" "$src/.agents/skills/s" "$outside"
 git -C "$src" init -q
 marker='# piton protected-file probe'
 echo "$marker" > "$src/.piton/config.toml"
@@ -83,6 +83,9 @@ attempt denied "create .pi/ at the root"                'mkdir -p .pi/extensions
 attempt denied "create .pi/ in a subfolder"             'mkdir -p apps/sub/.pi/extensions'
 attempt denied "write .PI/ (another case)"              'mkdir -p .PI && echo x > .PI/settings.json'
 attempt denied "write .PITON/ (another case)"           'echo x > .PITON/config.toml'
+# pi locks .pi/settings.json to read it: the lock folder alone is writable.
+attempt ok     "take and drop the project settings lock" 'mkdir apps/.pi/settings.json.lock && touch apps/.pi/settings.json.lock && rmdir apps/.pi/settings.json.lock'
+attempt denied "write inside the settings lock"         'mkdir apps/.pi/settings.json.lock && echo x > apps/.pi/settings.json.lock/f'
 attempt ok     "write workflow artifacts"               'echo z > .piton/.local/x'
 attempt ok     "write .piton/.LOCAL (another case)"     'echo z > .piton/.LOCAL/y'
 attempt ok     "write a source file"                    'echo w > src/a.rs'
@@ -108,6 +111,12 @@ attempt denied "write a user cache"                     "mkdir $HOME/Library/Cac
 attempt denied "write pi's extensions"                  "mkdir $AGENT_DIR/extensions/$PROBE"
 attempt denied "write pi's settings"                    ": >> $AGENT_DIR/settings.json"
 attempt ok     "write pi's sessions"                    "mkdir -p $AGENT_DIR/sessions/$PROBE && rmdir $AGENT_DIR/sessions/$PROBE"
+attempt denied "write pi's project trust"               ": >> $AGENT_DIR/trust.json"
+attempt denied "write pi's MCP servers"                 ": >> $AGENT_DIR/mcp.json"
+# The locks pi takes to read its settings and trust, and an MCP server's token-refresh lock; never left behind.
+attempt ok     "take and drop pi's settings lock"       "mkdir $AGENT_DIR/settings.json.lock && touch $AGENT_DIR/settings.json.lock && rmdir $AGENT_DIR/settings.json.lock"
+attempt ok     "take and drop pi's trust lock"          "mkdir $AGENT_DIR/trust.json.lock && rmdir $AGENT_DIR/trust.json.lock"
+attempt ok     "take and drop an MCP refresh lock"      "mkdir $AGENT_DIR/mcp-auth-refresh-$PROBE.lock && rmdir $AGENT_DIR/mcp-auth-refresh-$PROBE.lock"
 attempt denied "write the global configuration"         ": >> $CONFIG_HOME/config.toml"
 # The daemon. The socket checks need python3 to run; if it can't, they all read "denied" and prove nothing.
 attempt ok     "run python3 (for the socket checks)"   'python3 -I -c pass'

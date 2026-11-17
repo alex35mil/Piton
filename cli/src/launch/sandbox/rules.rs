@@ -38,6 +38,8 @@ pub enum Target {
     Subpath { path: PathBuf },
     /// Exactly this path.
     Literal { path: PathBuf },
+    /// Every path whose text starts with this one (`<dir>/name-` covers `<dir>/name-x.lock` and what's in it).
+    Prefix { path: PathBuf },
     /// The protected files of a launch (`agent/protected.rs`): write rules only.
     Protected { source: PathBuf, checkout: PathBuf },
 }
@@ -47,6 +49,10 @@ impl Target {
         match self {
             Target::Subpath { path: root } => path.starts_with(root),
             Target::Literal { path: exact } => path == exact,
+            Target::Prefix { path: prefix } => path
+                .as_os_str()
+                .as_encoded_bytes()
+                .starts_with(prefix.as_os_str().as_encoded_bytes()),
             Target::Protected { source, checkout } => ProtectedRoots {
                 source: source.clone(),
                 checkout: checkout.clone(),
@@ -129,11 +135,18 @@ impl Policy {
                     (Target::Subpath { .. }, _) => format!("(subpath \"{p}\")"),
                     (Target::Literal { .. }, false) => format!("(literal \"{p}\")"),
                     (Target::Literal { .. }, true) => format!("(path \"{p}\")"),
+                    (Target::Prefix { .. }, false) => format!("(prefix \"{p}\")"),
+                    (Target::Prefix { .. }, true) => {
+                        return Err(format!(
+                            "{} is a name prefix, which can't name a socket",
+                            path.display()
+                        ));
+                    }
                     (Target::Protected { .. }, _) => unreachable!("protected rules are emitted whole"),
                 })
             };
             let path = match &rule.target {
-                Target::Subpath { path } | Target::Literal { path } => path,
+                Target::Subpath { path } | Target::Literal { path } | Target::Prefix { path } => path,
                 Target::Protected { source, checkout } => {
                     // Write denies only: everything else of a protected file follows the other rules.
                     let roots = ProtectedRoots {
@@ -266,13 +279,24 @@ mod tests {
                     source: Source::Piton { what: "agent".into() },
                 },
                 rule(Effect::Allow, &[Access::Read], "/s/logs", "logs"),
+                Rule {
+                    effect: Effect::Allow,
+                    access: vec![Access::Write],
+                    target: Target::Prefix {
+                        path: "/a/lock-".into(),
+                    },
+                    source: Source::AgentDir,
+                },
             ],
             keychain: true,
         };
+        assert!(policy.decide(Path::new("/a/lock-1/x"), Access::Write).allowed);
+        assert!(!policy.decide(Path::new("/a/lock"), Access::Write).allowed);
         let rules = policy.seatbelt().unwrap();
         assert_eq!(rules[0], r#"(deny file-write* (subpath "/s/\"q\""))"#);
         // A read allow names `file-read-data`, which a deny names: a broader `file-read*` alone would lose to it.
         assert!(rules.contains(&r#"(allow file-read-data (subpath "/s/logs"))"#.to_string()));
+        assert!(rules.contains(&r#"(allow file-write* (prefix "/a/lock-"))"#.to_string()));
         let first_network = rules.iter().position(|r| r.contains("network")).unwrap();
         assert!(rules[..first_network].iter().all(|r| !r.contains("network")));
         assert_eq!(
