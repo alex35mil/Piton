@@ -11,7 +11,7 @@ import {
 } from "../../../../../extensions/__lib/mcp.js"
 import * as project from "../../../../../extensions/__lib/project.js"
 import { PROJECT_LOCAL_ROOT } from "../../../__lib/domain.js"
-import { assertArtifactPersistencePrepared, assertSandboxArtifactsLinked } from "../../../__lib/project-config.js"
+import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "../../../__lib/project-config.js"
 import { loadIntegrationConfig, type GitHubForge } from "../../config.js"
 import type { ProviderEvidence } from "../../resource-id-operations.js"
 
@@ -69,7 +69,7 @@ function normalizeRepository(repository: Repository): Repository {
 export function incomingPullRequestContext(cwd: string, reference: string, tools: McpToolCatalog) {
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
-    assertSandboxArtifactsLinked(root)
+    assertWorkerArtifactsLinked(root)
     const { forge, tracker } = loadIntegrationConfig(root)
     const selected = parseIncomingReference(reference, forge.repository)
     const board =
@@ -103,7 +103,6 @@ export function incomingPullRequestContext(cwd: string, reference: string, tools
         incomingPullRequest: {
             ...selected,
             localDirectory: incomingLocalDirectory(selected),
-            checkoutDirectory: path.join(incomingLocalDirectory(selected), "checkout"),
             reviewsDirectory: incomingReviewsDirectory(selected),
             read: {
                 ...resolveMcpTool(forge.mcpServer, "pull_request_read", tools),
@@ -116,7 +115,7 @@ export function incomingPullRequestContext(cwd: string, reference: string, tools
             checkout: {
                 tools: INCOMING_CHECKOUT_TOOLS,
                 orchestration:
-                    "Discover and use the named registered checkout operations for init/fetch, exact checkout, contributor-review setup, validated transitions and approved standard rebase with immediate SHA-pinned --force-with-lease PR update. GitHub fetch/remote-tip observation/push use SSH with existing authentication; configure no HTTPS credentials and change no parent/global Git configuration. Saved unpublished rebase results recover through approved publish_incoming_pr_rebase with their original lease, without checkout recreation or another rebase. Approved commit_incoming_pr_fixes and separate publish_incoming_pr_fixes preserve additive history and advance the managed baseline; fixes publication is non-forced. An exact request to ship and merge includes shared repository merge, confirmed Project Done and safe owned cleanup without another cleanup question. Keep private evidence, contributor branches and the parent repository unchanged. Never reconstruct this Git orchestration in Bash or fall back after refusal/unavailability. It returns paths, revision, phase and diff state and verifies the parent remains untouched.",
+                    "Discover and use the named registered checkout operations, which work in the current checkout (normally the PR's worker): preparation and fetch, contributor-review setup, validated transitions, held-configuration release and hold, restore, and approved standard rebase with immediate SHA-pinned --force-with-lease PR update. Configuration that tools and agents load (the piton tools registry) stays at the checkout's starting version on disk unless its release is approved. GitHub fetch/remote-tip observation/push use SSH with existing authentication; configure no HTTPS credentials and change no global Git configuration. Saved unpublished rebase results recover through approved publish_incoming_pr_rebase with their original lease, without another rebase. Approved commit_incoming_pr_fixes and separate publish_incoming_pr_fixes preserve additive history and advance the managed baseline; fixes publication is non-forced. An exact request to ship and merge includes shared repository merge, confirmed Project Done and restoring the checkout without another cleanup question. Keep private evidence and contributor branches. Never reconstruct this Git orchestration in Bash or fall back after refusal/unavailability.",
                 scale: [
                     { score: 1, label: "malicious", meaning: "Clear malicious behavior found." },
                     { score: 2, label: "suspicious", meaning: "Strong suspicious indicators." },
@@ -132,13 +131,13 @@ export function incomingPullRequestContext(cwd: string, reference: string, tools
                     "Before materializing source, present Checkout safety: N/5 (label), using the scale's label; for example, Checkout safety: 5/5 (safe). Include exact-revision evidence and coverage limitations. A 5 is not a guarantee.",
                 approval:
                     "Every score requires explicit checkout approval for the exact revision/path. No automatic threshold or durable approval token.",
-                phases: "Contributor-only review first; restore a clean original contributor head. Approved standard rebase and conflict resolution immediately publish using the pinned lease, before later approved uncommitted fixes and maintainer testing. Preserve the main files, branch, index and session root.",
+                phases: "Contributor-only review first (HEAD at the merge base, the PR staged); then the clean contributor head for approved fixes. Approved standard rebase and conflict resolution run in a private scratch worktree and immediately publish using the pinned lease, before later approved uncommitted fixes and maintainer testing. Restore returns the checkout to its starting branch and revision.",
                 rebase: "Observe actual target/contributor tips separately from unchanged provider evidence. Approval covers exact standard rebase plus immediate PR update, with consent/access established first. Never use plain --force, refresh a rejected lease automatically, or execute contributor code. Later fix commits/push, testing, publication and GitHub merge retain separate approvals.",
             },
             project:
                 "Use incomingPullRequestProject for scoped native Project plans. Existing membership is preserved; explicit missing intake chooses Backlog/Todo, review start sets In Review and keeps it through contributor/fix activity until confirmed merge/Done or unmerged close/Canceled. Do not infer activity or set In Progress/Phase.",
             execution:
-                "Approved nested checkout and static fixes are supported now. Disable automatic hooks, filters and project-code/config execution. Executing contributor code needs separate command and appropriately isolated environment approval. Report unavailable runtime checks as not run; a nested checkout is not a sandbox.",
+                "Approved checkout and static fixes are supported. Git hooks, filters and helpers stay disabled, and tool and agent configuration stays at its trusted version on disk. Editors and language servers can still run project code when files open; call such changes out in the safety assessment. Executing contributor code needs separate command and appropriately isolated environment approval. Report unavailable runtime checks as not run; a checkout is not a sandbox.",
             identity:
                 "Review/merge use the base repository; contributor-branch writes require the actual head repository/ref, consent and effective access.",
             publication:

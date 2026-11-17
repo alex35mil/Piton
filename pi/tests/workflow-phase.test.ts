@@ -14,8 +14,10 @@ import { githubPhaseFacts } from "../workflows/extensions/integrations/github-ph
 import {
     NativePhaseFactsValidator,
     phaseProjectionContract,
+    initialPhase,
     planPhaseMutation,
     resolveLinearPhaseGroup,
+    trackerPhase,
     type NativePhaseFacts,
 } from "../workflows/extensions/integrations/phase.ts"
 import { itemFieldValue, singleSelectField } from "../workflows/extensions/integrations/github-project-reads.ts"
@@ -143,10 +145,44 @@ describe("shared workflow Phase", () => {
     it("returns a local lifecycle-dependent contract, not an inferred tracker status", () => {
         for (const tracker of [github, linear]) {
             const contract = phaseProjectionContract("selfReview", tracker, "gig")
+            if (contract.state !== "configured") assert.fail("expected configured Phase")
             assert.equal(contract.inProgress, "selfReview")
             assert.equal(contract.otherwise, null)
             assert.match(contract.authority, /read fresh native lifecycle/)
         }
+    })
+
+    it("tracks no Phase when the tracker doesn't configure it", () => {
+        const githubWithout = structuredClone(github)
+        delete githubWithout.fields.phase
+        const linearWithout = structuredClone(linear)
+        delete linearWithout.phase
+        for (const [tracker, facts] of [
+            [githubWithout, githubFacts],
+            [linearWithout, linearFacts()],
+        ] as const) {
+            assert.equal(trackerPhase(tracker).state, "notConfigured")
+            assert.deepEqual(initialPhase(tracker, "planning"), {})
+            assert.equal(phaseProjectionContract(undefined, tracker, "gig").state, "notConfigured")
+            assert.throws(() => planPhaseMutation(tracker, "gig", "execution", "inProgress", facts), /isn't configured/)
+        }
+        assert.deepEqual(initialPhase(github, "planning"), { phase: "planning" })
+        assert.throws(() => resolveLinearPhaseGroup(linearWithout, "gig", linearFacts().catalog), /isn't configured/)
+    })
+
+    it("clears native Phase for an entity whose metadata has no Phase yet, but won't project one", () => {
+        const selected = { ...githubFacts, current: phaseValues.execution }
+        assert.deepEqual(planPhaseMutation(github, "gig", undefined, "inReview", selected), {
+            provider: "github",
+            field: "Phase",
+            value: null,
+            changed: true,
+        })
+        assert.throws(() => planPhaseMutation(github, "gig", undefined, "inProgress", selected), /set it/)
+        const contract = phaseProjectionContract(undefined, github, "gig")
+        if (contract.state !== "configured") assert.fail("expected configured Phase")
+        assert.equal(contract.phase, null)
+        assert.equal(contract.inProgress, null)
     })
 
     it("recognizes no-op and clearing assignments without losing unrelated labels", () => {
@@ -380,7 +416,7 @@ describe("shared workflow Phase", () => {
         )
 
         const teamScoped = structuredClone(linear)
-        teamScoped.phase.issues.scope = "team"
+        teamScoped.phase!.issues.scope = "team"
         const facts = linearFacts()
         for (const label of facts.catalog) label.team = "Engineering"
         assert.equal(resolveLinearPhaseGroup(teamScoped, "task", facts.catalog).values.planning, "planning")
@@ -389,7 +425,7 @@ describe("shared workflow Phase", () => {
 
     it("uses distinct Project and issue group configurations", () => {
         const tracker = structuredClone(linear)
-        tracker.phase.projects.group.name = "Project Phase"
+        tracker.phase!.projects.group.name = "Project Phase"
         const facts = linearFacts()
         facts.catalog[0].name = "Project Phase"
         assert.doesNotThrow(() => resolveLinearPhaseGroup(tracker, "epic", facts.catalog))

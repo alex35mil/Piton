@@ -3,7 +3,6 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { requireRuntime } from "../../../extensions/__lib/runtime.js"
 import {
     configFileName,
     PITON_DIR,
@@ -77,9 +76,11 @@ export function detectInstallation(packageDir: string = PACKAGE_DIR): Installati
     if (installation?.packageDir === packageDir) return installation.value
     let value: Installation = { kind: "app" }
     try {
-        const root = fs.realpathSync(Git.run(packageDir, ["rev-parse", "--show-toplevel"]))
-        const isPiton =
-            fs.realpathSync(packageDir) === path.join(root, "pi") && fs.existsSync(path.join(root, "cli", "Cargo.toml"))
+        // Ask Git where the package sits instead of comparing paths: on a case-insensitive file system the package
+        // path can differ in case from the checkout's real name, which `fs.realpathSync` doesn't canonicalize.
+        const prefix = Git.run(packageDir, ["rev-parse", "--show-prefix"])
+        const root = Git.run(packageDir, ["rev-parse", "--show-toplevel"])
+        const isPiton = prefix === "pi/" && fs.existsSync(path.join(root, "cli", "Cargo.toml"))
         if (isPiton) value = { kind: "development", checkout: root }
     } catch {
         // Not in a git checkout: an app install.
@@ -147,6 +148,20 @@ export function repositoryRoot(cwd: string): string {
     return resolveSettings(cwd).checkout
 }
 
+/**
+ * What the workspace's checkout is, as piton's resolver decides it (`agent.source` in the local Git config plus the
+ * `<repo>--<name>` layout): an original source checkout, or a disposable worker cloned from `source`. Independent of
+ * the runtime: a source checkout may run sandboxed, and a worker may run on the host.
+ */
+export type CheckoutRelation =
+    | { kind: "source"; checkout: string }
+    | { kind: "worker"; checkout: string; source: string }
+
+export function checkoutRelation(cwd: string): CheckoutRelation {
+    const { checkout, source } = resolveSettings(cwd)
+    return checkout === source ? { kind: "source", checkout } : { kind: "worker", checkout, source }
+}
+
 let validatedPersistenceInputs: string | undefined
 
 export function prepareArtifactPersistence(cwd: string) {
@@ -156,10 +171,20 @@ export function prepareArtifactPersistence(cwd: string) {
         appendExcludeEntry(excludePath, missing.comment, missing.entry)
         assertArtifactPersistencePrepared(cwd)
     }
-    // A configured project always has the folder, so worker tooling can link it before the first entity.
-    // Created only after the ignore check passed, so Git already ignores it.
-    const localRoot = path.join(repositoryRoot(cwd), PROJECT_LOCAL_ROOT)
-    if (!fs.existsSync(localRoot) && !isSymbolicLink(localRoot)) fs.mkdirSync(localRoot, { recursive: true })
+    const relation = checkoutRelation(cwd)
+    switch (relation.kind) {
+        case "source": {
+            // A configured project always has the folder, so worker tooling can link it before the first entity.
+            // Created only after the ignore check passed, so Git already ignores it.
+            const localRoot = path.join(relation.checkout, PROJECT_LOCAL_ROOT)
+            if (!fs.existsSync(localRoot) && !isSymbolicLink(localRoot)) fs.mkdirSync(localRoot, { recursive: true })
+            break
+        }
+        case "worker":
+            // A worker never gets a folder of its own; its artifacts live in the source's, through the link.
+            assertWorkerLinked(relation)
+            break
+    }
     return { state: "ready" as const, excludePath }
 }
 
@@ -170,24 +195,37 @@ export function assertArtifactPersistencePrepared(cwd: string): ProjectConfig {
 }
 
 /**
- * In a sandboxed worker, workflow artifacts must reach the source checkout through the
- * `.piton/.local` symlink. A missing or real directory would keep them only in the
- * disposable copy, so they'd be lost when the worker is deleted.
+ * In a worker, in any runtime, workflow artifacts must reach the source checkout through a `.piton/.local` symlink to
+ * the source's folder. A missing or real directory, or a link elsewhere, would keep them only in the disposable copy,
+ * so they'd be lost when the worker is deleted. A source checkout keeps its own folder, sandboxed or not.
  */
-export function assertSandboxArtifactsLinked(cwd: string): void {
-    if (requireRuntime() !== "sandbox") return
-    const localRoot = path.join(repositoryRoot(cwd), PROJECT_LOCAL_ROOT)
-    if (isSymbolicLink(localRoot) && isDirectory(localRoot)) return
+export function assertWorkerArtifactsLinked(cwd: string): void {
+    const relation = checkoutRelation(cwd)
+    switch (relation.kind) {
+        case "source":
+            return
+        case "worker":
+            assertWorkerLinked(relation)
+            return
+    }
+}
+
+function assertWorkerLinked(worker: { checkout: string; source: string }): void {
+    const localRoot = path.join(worker.checkout, PROJECT_LOCAL_ROOT)
+    const sourceRoot = path.join(worker.source, PROJECT_LOCAL_ROOT)
+    const target = isSymbolicLink(localRoot) ? realDirectory(localRoot) : undefined
+    if (target !== undefined && target === realDirectory(sourceRoot)) return
     throw new Error(
-        `this worker's ${PROJECT_LOCAL_ROOT} isn't linked to its source checkout, so workflow artifacts would be lost when the worker is deleted; run project setup in the source checkout, then recreate the worker`,
+        `this worker's ${PROJECT_LOCAL_ROOT} isn't linked to its source checkout's (${sourceRoot}), so workflow artifacts would be lost when the worker is deleted; run project setup in ${worker.source}, then recreate the worker`,
     )
 }
 
-function isDirectory(file: string): boolean {
+/** The directory's real path, or undefined when it's missing or not a directory. */
+function realDirectory(file: string): string | undefined {
     try {
-        return fs.statSync(file).isDirectory()
+        return fs.statSync(file).isDirectory() ? fs.realpathSync(file) : undefined
     } catch {
-        return false
+        return undefined
     }
 }
 
@@ -253,6 +291,7 @@ function persistenceInputs(root: string, config: ProjectConfig) {
         indexPath,
         excludePath,
         path.join(root, ".gitignore"),
+        path.join(root, PITON_DIR, ".gitignore"),
         ...localSettingsFiles(root).map((file) => path.join(root, file)),
     ]
     return {
@@ -284,17 +323,15 @@ function formatUsesUsername(format: BranchFormat): boolean {
     return format.startsWith("username")
 }
 
-// Ask Git, so the answer matches what Git will actually stage. Only the committed root .gitignore
-// counts: .git/info/exclude and global excludes are local to one clone.
+// Ask Git, so the answer matches what Git will actually stage. Any repository rule counts: a committed setup's
+// .gitignore or a private setup's .git/info/exclude. The global excludes file doesn't: it's outside the repository.
 function assertProjectLocalIgnored(root: string): void {
     const linked = isSymbolicLink(path.join(root, PROJECT_LOCAL_ROOT))
     // A symlink is a file to Git; query a missing or real directory in directory form.
     const query = linked ? PROJECT_LOCAL_ROOT : `${PROJECT_LOCAL_ROOT}/`
-    const match = Git.tryRun(root, ["check-ignore", "--verbose", "--no-index", "--", query])
-    const source = match.split("\t")[0]?.split(":")[0]
-    if (source === ".gitignore") return
+    if (Git.succeeds(root, ["-c", "core.excludesFile=", "check-ignore", "--quiet", "--no-index", "--", query])) return
     throw new Error(
-        `workflow artifacts require ${PROJECT_LOCAL_IGNORE} (no trailing slash) in .gitignore; add it through project setup before continuing`,
+        `workflow artifacts require ${PROJECT_LOCAL_IGNORE} (no trailing slash) in .gitignore, or /${PITON_DIR} in .git/info/exclude for a private setup; add it through project setup before continuing`,
     )
 }
 

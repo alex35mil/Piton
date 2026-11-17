@@ -95,7 +95,7 @@ Never hand-build GitHub tracker configuration. Use the exact `trackerConfig` ret
 - `provider: "github"`, the MCP server, and the repository identity;
 - the Project owner, owner type (`user` or `org`), and the Project's URL number;
 - one Project Status field mapping `backlog`, `todo`, `inProgress`, `inReview`, `done`, and `canceled` to distinct names;
-- one Project Phase single-select field mapping `planning`, `execution`, and `selfReview` to distinct names;
+- optionally, one Project Phase single-select field mapping `planning`, `execution`, and `selfReview` to distinct names;
 - Priority, with `issue` or `project` scope, a field name, and unique non-empty values that exclude lowercase `not set`.
 
 It contains no `labels`; add the section the label setup tools return ([label groups](#label-groups)).
@@ -104,7 +104,7 @@ It contains no `labels`; add the section the label setup tools return ([label gr
 
 - All Project-scoped field names are distinct.
 - Status and Phase are always Project-scoped.
-- Phase projects In Progress activity.
+- Phase, when configured, projects In Progress activity.
 - Native GitHub issue Type stays independent and unmanaged. Never substitute labels, Custom Properties, or another field scope.
 
 Example returned configuration for a Project-contained tracker (use the actual output, not these sample identities):

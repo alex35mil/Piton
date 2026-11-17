@@ -82,7 +82,8 @@ None of these call providers or turn identity, lifecycle, or merge facts into ca
 - **Review:** `review_pull_request`, `record_pull_request_review_response`.
 - **Checkout:**
   - `prepare_incoming_pr_checkout`, `checkout_incoming_pr`, `inspect_incoming_pr_checkout`, `begin_incoming_pr_fixes`;
+  - `release_incoming_pr_configuration`, `hold_incoming_pr_configuration`;
   - `observe_incoming_pr_target`, `rebase_incoming_pr`, `continue_incoming_pr_rebase`, `publish_incoming_pr_rebase`;
-  - `commit_incoming_pr_fixes`, `publish_incoming_pr_fixes`, `cleanup_incoming_pr_checkout`.
+  - `commit_incoming_pr_fixes`, `publish_incoming_pr_fixes`, `restore_incoming_pr_checkout`, `cleanup_incoming_pr_checkout`.
 
   The incoming context's `safety.checkout.tools` map supplies these names. Checkout, execution, Git writes, publication, and merge each keep their own approval; keep these tools outside PR skill-derived allow rules.

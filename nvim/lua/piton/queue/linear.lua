@@ -75,7 +75,7 @@ function M.projects(fetch, config, status)
         ---@type QueueItem
         local item = {
             id = "linear:project:" .. project.id,
-            status = status,
+            section = status,
             mention = project.url,
             title = project.name,
             url = project.url,
@@ -97,7 +97,7 @@ function M.issues(fetch, config, status)
         ---@type QueueItem
         local item = {
             id = "linear:issue:" .. issue.id,
-            status = status,
+            section = status,
             mention = issue.identifier,
             marker = issue.identifier,
             title = issue.title,

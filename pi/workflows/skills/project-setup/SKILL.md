@@ -26,6 +26,7 @@ allowed-tools:
     - "edit(.piton/*)"
     - "read(.gitignore)"
     - "read(.git/info/exclude)"
+    - "edit(.git/info/exclude)"
 ---
 
 # Project setup
@@ -89,7 +90,7 @@ For example:
 5. Provider configuration for the selected roles. Once GitHub forge and Project are both known, offer fork-only incoming PR intake.
 6. Project Policies, then convenience permissions.
 
-Workflow work always stays local under `.piton/.local/`; there's no persistence choice. When applying the ignore rule, read [artifacts](../../references/artifacts.md#persistence-and-authority). Removing files from Git needs separate approval and is outside setup.
+Workflow work always stays local under `.piton/.local/`. When the user asks for a private setup (no tracked file changes), and `projectPathsInGit` and `stagedProjectPaths` are empty, append `/.piton` (no trailing slash) to `.git/info/exclude` before any other `.piton/` write, skip the `.gitignore` change, and don't offer fork-only intake, whose workflow file must be committed. When applying the ignore rule, read [artifacts](../../references/artifacts.md#persistence-and-authority). Removing files from Git needs separate approval and is outside setup.
 
 ## Decisions
 
@@ -143,7 +144,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
    - Present every create (scope, name, type, color, position), the mappings, and any `permissionWarning`. Say created statuses can only be archived, never deleted.
    - Require approval of that exact `planHash`, call `apply_linear_status_setup`, and save only its returned `statuses`.
    - With nothing to create, save the picked names without applying.
-5. **Phase groups:** read [Phase](../../references/phase.md#setup) and the [Linear tracker shape](../../references/setup/linear-tracker.md). The user picks the group and child names, scope, and colors for Projects and for issues. The label step creates or checks them.
+5. **Phase groups:** read [Phase](../../references/phase.md#setup) and the [Linear tracker shape](../../references/setup/linear-tracker.md). Ask whether to track Phase; when declined, save no `phase`. Otherwise the user picks the group and child names, scope, and colors for Projects and for issues. The label step creates or checks them.
 
 ### 4. Branch naming
 
@@ -194,7 +195,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
    - Personal repositories: explain that organization Issue Fields are unavailable, and use Project-contained Priority without asking.
    - Organization repositories: ask one of: 1. Project-contained, 2. Organization-native, 3. Custom (each field separately).
    - For organization-native or custom scope, ask whether missing Issue Fields should be created (this needs an organization repository and admin token permissions) or switched to Project scope.
-7. **Defaults.** Offer the editable `defaults`: six Status options, the Phase field and its options, and Priority options.
+7. **Defaults.** Offer the editable `defaults`: six Status options, the Phase field and its options, and Priority options. Ask whether to track Phase; when declined, drop the Phase field and its visible field.
    - All Project field names, Phase included, stay distinct.
    - Option colors, descriptions, visual order, and extra options aren't runtime inputs; configured names are.
 8. **Presentation.** Offer the Board defaults ([presentation](../../references/setup/github-project.md#presentation)).
@@ -205,7 +206,7 @@ Workflow work always stays local under `.piton/.local/`; there's no persistence 
 
 **Field rules:**
 
-- Status and Phase are always Project fields. Phase has Planning, Execution, and Self-Review and projects In Progress activity.
+- Status and Phase are always Project fields. Phase is optional and has Planning, Execution, and Self-Review and projects In Progress activity.
 - Labels come from the label step, not from Project setup.
 - Native issue Type stays unmanaged. Never use labels for lifecycle or Priority, or Custom Properties for anything.
 - A personal Project may use organization issue metadata when its repository belongs to that organization, but availability never selects the scope. Project-contained configuration ignores organization metadata.
@@ -237,7 +238,7 @@ When initialized entities are already bound to another GitHub Project, stop. Rep
 
 For either tracker, after its configuration, read [label groups](../../references/setup.md#label-groups), then:
 
-1. **Choose groups.** Ask whether to use Kind labels for Epics, Deliverables, both, or neither, and offer the default `kind` group. Offer the `gate` group with its `plan` value, default label `Gate: Plan`, for issues whose plan the user wants to approve first. Then ask for other groups: key, `appliesTo`, cardinality, and values, plus scope and native backing on Linear. On Linear, include the Phase groups.
+1. **Choose groups.** Ask whether to use Kind labels for Epics, Deliverables, both, or neither, and offer the default `kind` group. Offer the `gate` group with its `plan` value, default label `Gate: Plan`, for issues whose plan the user wants to approve first. Then ask for other groups: key, `appliesTo`, cardinality, and values, plus scope and native backing on Linear. On Linear, include the Phase groups when tracked.
 2. **Inspect and preview.** Call `inspect_label_setup` and show the existing labels. Ask whether any should become configured values, and pass those as `remap`. Then call `preview_label_setup`.
 3. **Decisions.** Ask the user about each returned decision, exactly as listed, and preview again with the answers until none remain. Present each conflict with its `resolution`.
 4. **Approve and apply.** Present every action, with removals and their usage called out separately. Require approval of that exact `planHash`, then call `apply_label_setup`.

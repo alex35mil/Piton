@@ -35,11 +35,12 @@ import {
 } from "../__lib/entity.js"
 import { type EpicTask, readEpicRouting, readEpicTasks } from "../__lib/epic-tasks.js"
 import type { ResourceIds } from "../integrations/resource-ids.js"
+import { initialPhase } from "../integrations/phase.js"
 import { resourceIdsFromTrackerObject } from "./resource-ids.js"
 import * as Git from "../__lib/git.js"
 import {
     assertArtifactPersistencePrepared,
-    assertSandboxArtifactsLinked,
+    assertWorkerArtifactsLinked,
     type ProjectConfig,
 } from "../__lib/project-config.js"
 import { resolveWorkflowEnvironment, type WorkflowEnvironment } from "../integrations/policy.js"
@@ -173,7 +174,7 @@ function prepare(input: PreflightInput | EntityInitialization, options: Initiali
     const root = project.resolveRootDir(options.cwd)
     assertGitRepository(root)
     const projectConfig = assertArtifactPersistencePrepared(root)
-    assertSandboxArtifactsLinked(root)
+    assertWorkerArtifactsLinked(root)
     const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
     const slug = slugify(input.slug)
     const parent = input.entity === "task" ? readParentEpic(root, input) : undefined
@@ -262,7 +263,7 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
             slug,
             title: input.title.trim(),
             createdAt: (options.now ?? new Date()).toISOString(),
-            phase: "planning" as const,
+            ...initialPhase(environment.tracker, "planning"),
             branch: contract,
             tracker,
         }

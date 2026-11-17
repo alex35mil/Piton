@@ -5,6 +5,7 @@
 //! the worker's local git config (`agent.source`), which lives in `.git/` and is checked against the folder layout
 //! (`<parent>/<repo>--<name>` next to `<parent>/<repo>`).
 
+pub mod tools;
 mod worker;
 
 use std::{

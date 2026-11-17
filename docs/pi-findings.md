@@ -93,6 +93,46 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
 - Short sessions don't compact (keepRecentTokens, default 20k); the probe sets `compaction.keepRecentTokens: 1` in
   the scratch agent dir's `settings.json`.
 
+## Context control from an extension (#207)
+
+Verified on pi 1.5.2 (2026-11-17) with throwaway probes written for the #207 research (faux provider, scratch
+workspace and agent dir). They aren't part of `probe.mjs`; the research report on #207 has the numbers.
+
+- **Compaction threshold:** pi compacts when the context exceeds `contextWindow - reserveTokens`; there is no
+  absolute budget. The settings live in pi's `settings.json`, which Piton never writes.
+- **`ctx.compact()` has a floor:** it keeps `keepRecentTokens` (default 20k) word for word and fails with "Nothing to
+  compact (session too small)" below that, before `session_before_compact` runs. An extension can't hold a smaller
+  budget through it.
+- **Compaction blocks prompts:** during a manual compaction `get_state.isCompacting` is true and a `prompt` is
+  refused ("Cannot submit a prompt while compaction is in progress"), with or without `streamingBehavior`. It isn't
+  queued.
+- **Boundary drafts:** a `compaction` entry returned from `turn_end` or `agent_before_settle` is appended without a
+  model call, without the floor, and without `compaction_start`/`compaction_end`: only `entry_appended` is emitted.
+  Piton doesn't handle `entry_appended` yet, so its view shows such a cut only after a later rebuild. A cut at
+  `turn_end` also bounds a single long tool run, which a cut at settle doesn't.
+- **Slow `agent_before_settle`:** while a handler runs (for example, waiting for a summary), `isStreaming` is true and a
+  `followUp` prompt is accepted and queued.
+- **`context` handlers:** a returned message list is sent as is, with pi's prompt and tools restored at the head, and
+  isn't persisted. A restarted pi without the handler sends the whole history.
+- **Prompt sections:** sections set in `before_agent_start` are diffed, and only changed sections go out as a patch
+  system message. Models with `supportsMidConvoSystemMessages` keep their cached prefix; others rebuild the prompt
+  head (a cache miss per change). So per-turn data such as a clock belongs on the user message, through an `input`
+  transform, not in a section.
+- **Message order:** a message returned from `before_agent_start` follows the user's prompt in the same run and is
+  stored as a `custom_message` entry.
+- **`new_session`:** the new session is ready in about 30 ms. `session_start` reports `reason: "new"` and
+  `previousSessionFile`; it fired twice per `new_session` in the probe, so handlers must be idempotent.
+- **Model calls from an extension:** `ctx.modelRegistry.complete()` works inside a hook and from a background
+  promise.
+- **Session size and memory:** pi holds the whole session file in memory, and a full `get_entries` multiplies it.
+  Start time and turn time stay flat. `get_entries` with `since` stays cheap.
+
+  | Session file | pi memory before / after a full `get_entries` | Full `get_entries` |
+  | --- | --- | --- |
+  | 10 MB | 145 / 211 MB | 48 ms |
+  | 50 MB | 247 / 469 MB | 123 ms |
+  | 200 MB | 491 / 1,352 MB | 384 ms |
+
 ## switch_session while streaming (`switch-streaming`)
 
 - pi aborts the run first: the streaming message ends with `stopReason: "aborted"` (`message_end`, `turn_end`,

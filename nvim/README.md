@@ -49,9 +49,13 @@ them. All notifications use `vim.notify` with title `Piton`.
 
 - **`setup(opts?)`** configures editor integration. Omitted options use defaults; another call replaces the previous
   configuration, rather than retaining old hooks. Unknown options and wrong types are rejected before changing it.
-- **`new()`** opens the new-agent picker: Todo before Backlog, with a named agent always available. Queued work already
-  assigned to a worker is excluded. Creation opens its tab and pre-fills the appropriate workflow command; it never
-  sends the prompt automatically.
+- **`new()`** opens the new-agent picker: Todo, then Backlog, then incoming pull requests, with a named agent always
+  available. Queued work already assigned to a worker is excluded. Creation opens its tab and pre-fills the
+  appropriate workflow command; it never sends the prompt automatically.
+  - With a GitHub tracker, the pull-request section lists every open PR of the configured repository that the
+    authenticated user didn't author. PRs on the board and off it are listed once, board PRs first with their Status.
+    Selecting one creates a worker with `/pr #NN Title` pre-filled. `/pr` reviews it in that worker.
+  - A Linear tracker lists no pull requests.
 - **`pick()`** lists the current repository's source and workers, with live pi status. Selecting an existing tab focuses
   it; otherwise it opens a tab. With no selection, typed text can create a named worker.
 - **`get(path)`** returns the agent containing a path, or nil. The record has `path`, `source`, `label`, and optional

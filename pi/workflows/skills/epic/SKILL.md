@@ -148,7 +148,7 @@ Labels: <group=value, …, only with label groups configured>
 2. **Wait.** Summarize the plan and its Task list in chat, and wait for the user's acceptance. Phase stays Planning until then.
 3. **On acceptance:**
    - call `accept_epic_tasks`;
-   - set Execution ([Phase](../../references/phase.md)); lifecycle stays `inProgress`;
+   - set Execution when Phase is configured ([Phase](../../references/phase.md)); lifecycle stays `inProgress`;
    - run [Task issue processing](../../references/epic-tasks.md#task-issue-processing); accepting the Task list approves its creates, cancellations, and board updates;
    - publish `epic.md` through the same integration steps as on resume.
 4. **Stop** without initializing or implementing a Task.
@@ -172,7 +172,7 @@ Changing the Task list needs another review and acceptance ([accepted Task list]
 When the user explicitly resumes the Epic and asks to complete it:
 
 1. Resolve every Task through its issue's lifecycle. When any Task is untagged, queued, or started but neither `done` nor `canceled`, report them and stop.
-2. Set native Status straight from In Progress to the configured `done` value and clear native Phase ([Phase](../../references/phase.md)). Keep the last metadata Phase.
+2. Set native Status straight from In Progress to the configured `done` value and, when Phase is configured, clear native Phase ([Phase](../../references/phase.md)) and keep the last metadata Phase.
 3. Report the completion evidence. Change no committed file; Epic completion never creates a commit, push, PR, or CI run.
 4. Call `inspect_session_analysis`. When it returns `enabled`, read [session analysis](../../references/session-analysis.md).
 

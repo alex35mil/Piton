@@ -16,17 +16,18 @@ Work in two phases: **contributor review only**, then **clean contributor head p
 
 - Restore and verify the clean original PR head before any fix. Preserve unexpected changes; never reset or clean them away.
 - Call `begin_incoming_pr_fixes` only after completed contributor discussion, approved corrections, fresh matching PR evidence, and confirmation that editor buffers have no unsaved changes.
-- It validates the actual HEAD, index, and source, and refuses untracked files, including ignored additions, before restoring the clean contributor head.
+- It validates that HEAD, the index, and the files on disk are exactly as the review left them, with nothing untracked, before moving HEAD to the clean contributor head.
+- A fix to held configuration needs approved `release_incoming_pr_configuration` first ([held configuration](./checkout.md#held-configuration)).
 
 **Inspecting:**
 
-- `inspect_incoming_pr_checkout` returns paths, original and actual provider revisions, the published baseline, separate target and lease observations, phase validation, native rebase and conflict details, and staged, unstaged, and untracked state.
+- `inspect_incoming_pr_checkout` returns paths, original and actual provider revisions, the start, the published baseline, separate target and lease observations, phase validation, native rebase and conflict details, and changed and untracked files relative to what the tool left on disk.
 - The original contribution, the rebase result and conflicts, and later baseline-to-fixes diffs stay distinct.
 - Preserve refused or incomplete work; never reset or clean it by hand.
 
 ## Approved rebase and immediate PR update
 
-**Transport.** All checkout-tool GitHub fetches, remote-tip observations, and pushes use SSH (`git@github.com:<owner>/<repo>.git`) with existing trusted SSH authentication. Never configure HTTPS credentials or change parent or global Git configuration. PR URL selection and MCP evidence are unchanged.
+**Transport.** All checkout-tool GitHub fetches, remote-tip observations, and pushes use SSH (`git@github.com:<owner>/<repo>.git`) with existing trusted SSH authentication. Never configure HTTPS credentials or change global Git configuration. PR URL selection and MCP evidence are unchanged.
 
 **Approval:**
 
@@ -41,7 +42,7 @@ Work in two phases: **contributor review only**, then **clean contributor head p
 **Conflicts:**
 
 - Standard rebase replays commits as a straight line and doesn't recreate merge commits. Ordinary already-upstream and empty-commit behavior applies.
-- Verified conflicts return affected paths, unmerged stages, and diffs. Propose and get approval for the resolution contents, edit those files, then call `continue_incoming_pr_rebase` with the exact approved checkout-relative `resolutionPaths`.
+- The rebase runs in a private scratch worktree, so the checkout under review never holds a half-applied rebase. Verified conflicts return `conflictPaths` there, unmerged stages, and diffs. Propose and get approval for the resolution contents, edit those files, then call `continue_incoming_pr_rebase` with the exact approved `resolutionPaths`, relative to the scratch worktree.
 - The tool stages only those paths and continues. Unexplained index or metadata changes, edits outside those paths, and untracked additions are preserved and refused. Another conflict needs another approved resolution.
 - Never automatically abort, skip, reset, clean, or restart.
 
@@ -61,7 +62,7 @@ Work in two phases: **contributor review only**, then **clean contributor head p
   - a changed or deleted branch stops, without a refreshed lease or recreation.
 - Reconcile uncertain push responses with exact remote reads before retrying, and report completed remote steps even when a later local check fails.
 - After publication, get fresh provider evidence. Never fabricate a response or alter the original evidence.
-- A completed rebase whose HTTPS push failed is recovered through approved `publish_incoming_pr_rebase` over SSH, reusing its result and original lease, without recreating the checkout, rerunning the rebase, or refreshing the lease. Never fall back to manual Git or configure HTTPS credentials.
+- A completed rebase whose HTTPS push failed is recovered through approved `publish_incoming_pr_rebase` over SSH, reusing its result and original lease, without rerunning the rebase or refreshing the lease. Never fall back to manual Git or configure HTTPS credentials.
 
 **Afterwards:** only once the rebase update is confirmed do approved fixes and maintainer testing proceed. Keep those fixes uncommitted throughout discussion; their commit and push, and any contributor-code execution, stay separately approved.
 

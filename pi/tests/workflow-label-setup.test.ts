@@ -462,6 +462,42 @@ describe("Linear label setup", () => {
         }
     })
 
+    it("sets up labels without Phase groups and saves no Phase", async () => {
+        const cwd = project()
+        const catalog = { issue: [], project: [] }
+        const writes: string[] = []
+        const options = { cwd, fetch: fakeLinear(catalog, writes), env: { LINEAR_KEY: "k" } }
+        const def = (name: string) => ({ name, color: "#1D76DB", description: "" })
+        const labels = {
+            groups: {
+                area: {
+                    appliesTo: ["deliverable" as const],
+                    cardinality: "zeroOrMore" as const,
+                    scope: "workspace" as const,
+                    values: { fe: def("Area: FE") },
+                },
+            },
+        }
+        try {
+            const preview = await runLabelSetup({ operation: "preview", target: linearTarget("ALE"), labels }, options)
+            assert.equal(preview.state, "ready", JSON.stringify(preview.decisions))
+            const applied = await runLabelSetup(
+                {
+                    operation: "apply",
+                    target: linearTarget("ALE"),
+                    labels,
+                    approvedPlanHash: preview.planHash as string,
+                },
+                options,
+            )
+            assert.equal(applied.state, "applied")
+            assert.deepEqual(writes, ["Create Area: FE"], "no Phase group is created")
+            assert.equal("phase" in (applied.configuration as object), false)
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
     it("uses the previous managed set only when its team is the target team", async () => {
         const statuses = { backlog: "B", todo: "T", inProgress: "P", inReview: "R", done: "D", canceled: "C" }
         const saved = (team: string) => ({

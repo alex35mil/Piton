@@ -1,5 +1,7 @@
 -- Todo and Backlog items of a GitHub Project: Todo first, each ordered by the
--- configured Priority, then by the Project's manual order.
+-- configured Priority, then by the Project's manual order. Then incoming pull
+-- requests: the open ones of the configured repository not authored by the
+-- viewer, on the board or not, listed once.
 
 local util = require("piton.util")
 local queue = require("piton.queue")
@@ -47,6 +49,102 @@ query($owner: String!, $number: Int!, $status: String!, $priority: String!, $cur
 }]]):format(owner_type == "org" and "organization" or "user")
 end
 
+local PULL_REQUESTS = [[
+query($owner: String!, $repo: String!, $cursor: String) {
+  viewer { login }
+  repository(owner: $owner, name: $repo) {
+    pullRequests(first: 100, after: $cursor, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number title url author { login } }
+    }
+  }
+}]]
+
+---@class GitHubPullRequest
+---@field number integer
+---@field title string
+---@field url string
+---@field author string? Login; nil for a deleted account.
+
+--- Open pull requests of the repository, oldest first, and the viewer's login.
+---@param tracker QueueTracker
+---@return GitHubPullRequest[], string
+function M.pull_requests(tracker)
+    local config = tracker.config
+    local viewer ---@type string?
+    local nodes = queue.paginate(function(cursor)
+        local response = queue.post(tracker, URL, "Bearer {{VAR}}", PULL_REQUESTS, {
+            owner = config.repository.owner,
+            repo = config.repository.repo,
+            cursor = cursor,
+        })
+        local data = queue.data(URL, response)
+        viewer = vim.tbl_get(data, "viewer", "login")
+        local connection = vim.tbl_get(data, "repository", "pullRequests")
+        if not connection then
+            util.refuse(
+                ("GitHub repository %s/%s not found"):format(config.repository.owner, config.repository.repo)
+            )
+        end
+        return connection
+    end)
+    if type(viewer) ~= "string" then
+        util.refuse("GitHub didn't return the authenticated user")
+    end
+    ---@cast viewer string
+    local result = {} ---@type GitHubPullRequest[]
+    for _, node in ipairs(nodes) do
+        table.insert(result, {
+            number = node.number,
+            title = node.title,
+            url = node.url,
+            author = vim.tbl_get(node, "author", "login"),
+        })
+    end
+    return result, viewer
+end
+
+--- Incoming pull requests: every open PR not authored by `viewer`, board PRs
+--- in board order first (they carry their Status), then the rest oldest
+--- first. Each PR appears once.
+---@param repository string `owner/repo`
+---@param board QueueItem[] Board pull requests, in board order.
+---@param open GitHubPullRequest[]
+---@param viewer string
+---@return QueueItem[]
+function M.incoming(repository, board, open, viewer)
+    local authors = {} ---@type table<string, string?>
+    local listed = {} ---@type table<string, true>
+    for _, pr in ipairs(open) do
+        authors["#" .. pr.number] = pr.author
+    end
+    local result = {} ---@type QueueItem[]
+    local function add(item, author)
+        if author ~= viewer and not listed[item.id] then
+            listed[item.id] = true
+            table.insert(result, item)
+        end
+    end
+    for _, item in ipairs(board) do
+        add(item, authors[item.marker])
+    end
+    for _, pr in ipairs(open) do
+        local marker = "#" .. pr.number
+        ---@type QueueItem
+        local item = {
+            id = "github:" .. repository .. marker,
+            section = "pull_requests",
+            mention = marker,
+            marker = marker,
+            title = pr.title,
+            url = pr.url,
+            kind = { kind = "pr" },
+        }
+        add(item, pr.author)
+    end
+    return result
+end
+
 ---@param tracker QueueTracker
 ---@return QueueItem[]
 function M.load(tracker)
@@ -86,15 +184,16 @@ function M.load(tracker)
         then
             -- Issues and pull requests share one number sequence per repository.
             local marker = "#" .. content.number
+            local pull_request = content.__typename == "PullRequest"
             ---@type QueueItem
             local item = {
                 id = "github:" .. repository .. marker,
-                status = queue_status,
+                section = pull_request and "pull_requests" or queue_status,
                 mention = marker,
                 marker = marker,
                 title = content.title,
                 url = content.url,
-                kind = content.__typename == "PullRequest" and { kind = "pr" } or M.kind(content, epic_label),
+                kind = pull_request and { kind = "pr", board = queue_status } or M.kind(content, epic_label),
             }
             table.insert(result, item)
             orders[item] = { rank = M.priority_rank(node.priority, priority.values), position = position }
@@ -103,7 +202,12 @@ function M.load(tracker)
     queue.sort_by_priority(result, function(item)
         return orders[item]
     end)
-    return queue.group_by_status(result)
+    local issues, board = {}, {} ---@type QueueItem[], QueueItem[]
+    for _, item in ipairs(result) do
+        table.insert(item.section == "pull_requests" and board or issues, item)
+    end
+    local open, viewer = M.pull_requests(tracker)
+    return queue.group_by_section(vim.list_extend(issues, M.incoming(repository, board, open, viewer)))
 end
 
 --- Rank of an item's Priority value in the configured order, whether the

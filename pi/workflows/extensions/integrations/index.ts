@@ -29,6 +29,7 @@ import {
     LinearPhaseInputSchema,
     LinearPhaseInputValidator,
     linearPhaseFacts,
+    linearPhaseGroup,
     phaseProjectionContract,
     planPhaseMutation,
 } from "./phase.js"
@@ -36,7 +37,7 @@ import { GitHubPhaseInputSchema, GitHubPhaseInputValidator, githubPhaseFacts } f
 import { gateOutcome } from "./gate.js"
 import {
     assertArtifactPersistencePrepared,
-    assertSandboxArtifactsLinked,
+    assertWorkerArtifactsLinked,
     developmentCheckout,
     loadSessionAnalysis,
 } from "../__lib/project-config.js"
@@ -510,10 +511,9 @@ function buildWorkflowIntegrationContext(ctx: ExtensionContext, input: WorkflowC
 }
 
 /**
- * Whether an operation starts, resumes, or addresses an entity whose artifacts a sandboxed
- * worker must keep in its source checkout. Project inspection and queue intake create no
- * entity or artifacts, so the sandbox link guard doesn't apply, including when they target
- * the workflow source project, whose `.piton/.local` is a real directory.
+ * Whether an operation starts, resumes, or addresses an entity whose artifacts a worker must
+ * keep in its source checkout. Project inspection and queue intake create no entity or
+ * artifacts, so the worker link guard doesn't apply to them.
  */
 function persistsEntityArtifacts(operation: WorkflowContextInput["operation"]): boolean {
     switch (operation) {
@@ -542,7 +542,7 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
     const forgeOnly = ["pullRequest", "shippingRead", "shippingMerge"].includes(operation)
     const environment = resolveWorkflowEnvironment(loadIntegrationConfig(cwd))
     assertArtifactPersistencePrepared(cwd)
-    if (persistsEntityArtifacts(operation)) assertSandboxArtifactsLinked(cwd)
+    if (persistsEntityArtifacts(operation)) assertWorkerArtifactsLinked(cwd)
     const entity = entityDir ? readWorkflowEntity(cwd, entityDir) : undefined
     if (entity) assertEntityEnvironment(entity.status, environment)
     if ((operation === "shippingRead" || operation === "shippingMerge") && entity?.status.entity === "epic")
@@ -687,7 +687,7 @@ function planLabelMutation(
     if (current.provider !== "linear") throw new Error("label facts don't match the configured Linear tracker")
     const update = planLinearLabelUpdate(
         tracker.labels,
-        itemType === "epic" ? tracker.phase.projects : tracker.phase.issues,
+        linearPhaseGroup(tracker.phase, status.entity),
         tracker.team,
         itemType,
         kind,

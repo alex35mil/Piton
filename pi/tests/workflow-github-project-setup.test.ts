@@ -940,6 +940,43 @@ describe("GitHub Project setup", () => {
         assert.equal(github.deleteProjectFieldAttempts, 0)
     })
 
+    it("provisions no Phase field when Phase isn't tracked", async () => {
+        const github = new FakeGitHub()
+        const base = projectContained({
+            mode: "new",
+            title: "No Phase",
+            visibility: "private",
+            associateRepository: false,
+        })
+        const { phase: _phase, ...fields } = base.fields
+        const withPhaseColumn = { ...base, fields }
+        await assert.rejects(
+            runGitHubProjectSetup({ operation: "preview", specification: withPhaseColumn }, setupOptions(github)),
+            /Phase visible field requires a Phase field/,
+        )
+        const specification = {
+            ...withPhaseColumn,
+            presentation: {
+                ...base.presentation,
+                visibleFields: base.presentation.visibleFields.filter(
+                    (field) => !(field.kind === "workflow" && field.field === "phase"),
+                ),
+            },
+        }
+        const preview = await runGitHubProjectSetup({ operation: "preview", specification }, setupOptions(github))
+        assert.equal(preview.state, "ready")
+        const applied = await runGitHubProjectSetup(
+            { operation: "apply", specification, approvedPlanHash: preview.planHash },
+            setupOptions(github),
+        )
+        assert.equal(applied.state, "provisioned")
+        assert.deepEqual(
+            github.projects[0].fields.map((field) => field.name),
+            ["Status", "Priority"],
+        )
+        assert.equal((applied.trackerConfig as Record<string, any>).fields.phase, undefined)
+    })
+
     it("requires distinct Phase option and Project field names", async () => {
         const github = new FakeGitHub()
         const base = projectContained({

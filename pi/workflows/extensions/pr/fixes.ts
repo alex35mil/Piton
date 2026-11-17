@@ -1,11 +1,20 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
+
 import { mcpResponsePayload } from "../../../extensions/__lib/mcp.js"
 import type { ProviderEvidence } from "../integrations/resource-id-operations.js"
-import { checkoutGit, checkoutGitResult, githubSshUrl, headBranchRef } from "./git.js"
+import { githubSshUrl, headBranchRef } from "./git.js"
 import { remoteHead } from "./rebase.js"
 import { historicalRebase, stateFacts, type CheckoutState } from "./state.js"
-import { checkoutSourcePath, matchesFixCommit, observeCheckout, requireClean, validatePhase } from "./worktree.js"
+import {
+    checkoutSourcePath,
+    diskCommitFor,
+    matchesFixCommit,
+    observe,
+    requireExact,
+    type Checkout,
+    type Observed,
+} from "./workspace.js"
 
 type Save = (state: CheckoutState) => Promise<void>
 type Editing = Extract<CheckoutState, { phase: "fixes" }>
@@ -21,70 +30,83 @@ function messageText(message: string): string {
     return message.endsWith("\n") ? message : message + "\n"
 }
 
+/**
+ * The maintainer's changes in a fixes draft: tracked edits and new files relative to the files on disk the tool left.
+ * HEAD and the index stay at the baseline, so held configuration differs only through the tool's own disk state.
+ */
+function draft(observed: Observed): string[] {
+    return [...new Set([...observed.changed, ...observed.untracked])].sort()
+}
+
+/** A fixes draft is an editable disk state: HEAD and the index unchanged, no conflict or Git operation in progress. */
+function requireDraftable(observed: Observed, state: Editing | Committing): void {
+    if (
+        observed.head !== state.workspace.headSha ||
+        !observed.detached ||
+        observed.indexTree !== state.workspace.indexTree ||
+        observed.unmerged.length ||
+        observed.native.kind !== "none"
+    )
+        throw new Error(
+            "Unexplained HEAD, index, or Git operation changes; preserve them and investigate before committing",
+        )
+}
+
 export async function commitFixes(
-    directory: string,
+    c: Checkout,
     state: Editing | Committing,
     paths: string[],
     message: string,
     evidence: ProviderEvidence,
     save: Save,
-    signal?: AbortSignal,
 ): Promise<CheckoutState> {
     open(evidence)
-    const git = (args: string[]) => checkoutGit(directory, args, signal)
-    const approved = paths.map((file) => checkoutSourcePath(directory, file)).sort()
+    const approved = paths.map((file) => checkoutSourcePath(c.root, file)).sort()
     if (new Set(approved).size !== approved.length) throw new Error("Approve unique exact source paths")
     const text = messageText(message)
     let pending: Committing
     if (state.phase === "committingFixes") {
         if (state.fixes.message !== text || JSON.stringify(state.fixes.paths) !== JSON.stringify(approved))
             throw new Error("Recovery must match the exact recorded commit paths/message")
-        validatePhase(state, await observeCheckout(directory, state, signal))
         pending = state
     } else {
-        const observed = await observeCheckout(directory, state, signal)
-        validatePhase(state, observed)
-        if (observed.staged || observed.unmerged.length)
-            throw new Error("Unexplained index changes; preserve staging before commit")
-        const changed = [
-            ...new Set([
-                ...(
-                    await git([
-                        "diff",
-                        "--name-only",
-                        "-z",
-                        "--no-ext-diff",
-                        "--no-textconv",
-                        "--no-renames",
-                        state.baselineSha,
-                        "--",
-                    ])
-                )
-                    .split("\0")
-                    .filter(Boolean),
-                ...observed.untracked,
-            ]),
-        ].sort()
+        const observed = await observe(c, state.workspace.diskCommit)
+        requireDraftable(observed, state)
+        const changed = draft(observed)
         if (!changed.length) throw new Error("No unpublished fixes to commit; skip the commit step")
         if (JSON.stringify(changed) !== JSON.stringify(approved))
             throw new Error("Changed/untracked paths must match the complete approved fix set")
+        const held = new Set([...observed.heldChanged, ...observed.heldUntracked])
+        switch (state.configuration) {
+            case "held":
+                if (approved.some((file) => held.has(file)))
+                    throw new Error(
+                        "A fix touches held configuration, which is on disk at its trusted version; release the PR's configuration first, then redo that edit",
+                    )
+                break
+            case "released":
+                break
+        }
         for (const file of approved) {
             try {
-                if (fs.lstatSync(path.join(directory, file)).isDirectory())
+                if (fs.lstatSync(path.join(c.root, file)).isDirectory())
                     throw new Error("Approve individual source files, not recursive directory staging")
             } catch (error) {
                 if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
             }
         }
-        await git(["var", "GIT_COMMITTER_IDENT"])
-        await git(["add", "--force", "--all", "--", ...approved])
-        const staged = await observeCheckout(directory, state, signal)
-        const treeSha = (await git(["write-tree"])).trim()
-        if (treeSha === staged.headCommit?.tree) throw new Error("No actual fix tree change; no empty commit created")
-        if (!staged.worktreeMatchesIndex || staged.untracked.length || staged.native.kind !== "none")
+        await c.git(["var", "GIT_COMMITTER_IDENT"])
+        await c.git(["add", "--force", "--all", "--", ...approved])
+        const staged = await observe(c, state.workspace.diskCommit)
+        const treeSha = (await c.git(["write-tree"])).trim()
+        if (treeSha === state.workspace.indexTree) throw new Error("No actual fix tree change; no empty commit created")
+        if (JSON.stringify(draft(staged)) !== JSON.stringify(approved) || staged.native.kind !== "none")
             throw new Error("Fix source changed during staging; preserve it and reassess")
+        // After the commit, the files on disk are the committed tree with held configuration as it was.
+        const diskCommit = await diskCommitFor(c, treeSha, state.trustedSha, state.configuration)
         pending = {
             ...stateFacts(state),
+            workspace: state.workspace,
             phase: "committingFixes",
             publishedRebase: historicalRebase(state),
             fixes: {
@@ -93,52 +115,59 @@ export async function commitFixes(
                 message: text,
                 paths: approved,
                 indexFingerprint: staged.indexFingerprint,
+                diskCommit,
             },
         }
         await save(pending)
     }
-    let observed = await observeCheckout(directory, pending, signal)
-    validatePhase(pending, observed)
+    let observed = await observe(c, pending.fixes.diskCommit)
     let messages = pending.messages
     if (observed.head === pending.fixes.sourceSha) {
-        const result = await checkoutGitResult(
-            directory,
-            ["commit", "--no-verify", "--no-gpg-sign", "--cleanup=verbatim", `--message=${pending.fixes.message}`],
-            signal,
-        )
+        if (observed.indexFingerprint !== pending.fixes.indexFingerprint || observed.native.kind !== "none")
+            throw new Error("Fix commit intent/index changed; preserve and investigate")
+        const result = await c.result([
+            "commit",
+            "--no-verify",
+            "--no-gpg-sign",
+            "--cleanup=verbatim",
+            `--message=${pending.fixes.message}`,
+        ])
         messages = [...messages, ...[result.stdout.trim(), result.stderr.trim()].filter(Boolean)]
-        observed = await observeCheckout(directory, pending, signal)
+        observed = await observe(c, pending.fixes.diskCommit)
         if (observed.head === pending.fixes.sourceSha)
             throw new Error(`Fix commit did not complete; intent preserved. ${result.stderr}`)
     }
     if (!observed.head || !matchesFixCommit(observed, pending.fixes))
         throw new Error("Fix commit result does not match recorded parent/tree/message; preserve and investigate")
+    // A commit leaves HEAD attached only when it was; detach so the review stays off every branch.
+    await c.git(["update-ref", "--no-deref", "HEAD", observed.head])
     const completed: Committed = {
         ...stateFacts(pending),
+        workspace: { headSha: observed.head, indexTree: pending.fixes.treeSha, diskCommit: pending.fixes.diskCommit },
         phase: "committedFixes",
         messages,
         publishedRebase: pending.publishedRebase,
         fixes: { ...pending.fixes, resultSha: observed.head, publication: { kind: "pending" } },
     }
     await save(completed)
-    requireClean(observed, completed.fixes.resultSha)
+    requireExact(await observe(c, completed.workspace.diskCommit), completed.workspace, "Fix commit")
     return completed
 }
 
 export async function publishFixes(
-    directory: string,
+    c: Checkout,
     state: Committed,
     evidence: ProviderEvidence,
     save: Save,
-    signal?: AbortSignal,
 ): Promise<CheckoutState> {
-    validatePhase(state, await observeCheckout(directory, state, signal))
+    requireExact(await observe(c, state.workspace.diskCommit), state.workspace, "Fix publication")
     const repository = state.revision.head.repository
     if (!repository) throw new Error("Missing contributor repository identity")
-    const ref = await headBranchRef(directory, state.revision.head.ref, signal)
+    const ref = await headBranchRef(c.git, state.revision.head.ref)
     const confirm = async (candidate: Committed): Promise<CheckoutState> => {
         const result: Editing = {
             ...stateFacts(candidate),
+            workspace: candidate.workspace,
             baselineSha: candidate.fixes.resultSha,
             phase: "fixes",
             publishedRebase: candidate.publishedRebase,
@@ -146,7 +175,7 @@ export async function publishFixes(
         await save(result)
         return result
     }
-    const before = await remoteHead(directory, repository, state.revision.head.ref, signal)
+    const before = await remoteHead(c, repository, state.revision.head.ref)
     if (before === state.fixes.resultSha) return confirm(state)
     if (before !== state.fixes.sourceSha) {
         const rejected: Committed = {
@@ -161,22 +190,18 @@ export async function publishFixes(
         return rejected
     }
     open(evidence)
-    validatePhase(state, await observeCheckout(directory, state, signal))
+    requireExact(await observe(c, state.workspace.diskCommit), state.workspace, "Fix publication")
     let attempted: Committed = { ...state, fixes: { ...state.fixes, publication: { kind: "attempted" } } }
     await save(attempted)
-    const pushed = await checkoutGitResult(
-        directory,
-        [
-            "push",
-            "--porcelain",
-            "--no-verify",
-            "--recurse-submodules=no",
-            "--signed=false",
-            githubSshUrl(repository),
-            `${state.fixes.resultSha}:${ref}`,
-        ],
-        signal,
-    )
+    const pushed = await c.result([
+        "push",
+        "--porcelain",
+        "--no-verify",
+        "--recurse-submodules=no",
+        "--signed=false",
+        githubSshUrl(repository),
+        `${state.fixes.resultSha}:${ref}`,
+    ])
     attempted = {
         ...attempted,
         messages: [...attempted.messages, ...[pushed.stdout.trim(), pushed.stderr.trim()].filter(Boolean)],
@@ -184,7 +209,7 @@ export async function publishFixes(
     await save(attempted)
     let after: string | null
     try {
-        after = await remoteHead(directory, repository, state.revision.head.ref, signal)
+        after = await remoteHead(c, repository, state.revision.head.ref)
     } catch {
         const uncertain = {
             ...attempted,

@@ -163,6 +163,21 @@ with `.piton/.local` linked to the source's.
 - **`piton worker delete <path> [--force]`:** refuses with the uncommitted changes and unpushed commits unless forced;
   stops the worker's sessions, drops mise's trust in the folder, unlinks `.piton/.local`, deletes the folder, and
   fast-forwards the source.
+  - An incoming-PR review that the pi package's `/pr` tools left untouched isn't an uncommitted change. Piton reads
+    `.piton/.local/pull-requests/<number>/checkout.json`, which pi writes, and checks four fields: `phase`,
+    `location.root`, and `workspace.{headSha, indexTree, diskCommit}`.
+  - The review is untouched when all of these hold: the phase is `contributorReview` or `fixes`, the record's root is
+    this worker, HEAD is detached at `headSha`, the index tree is `indexTree`, and the files on disk equal
+    `diskCommit` with nothing untracked.
+  - Any edit, untracked file, or staging change is still a leftover. Unpushed commits are reported as usual.
+  - A review in `rebasing`, `rebased`, `committingFixes`, or `committedFixes` is always a leftover. The tools keep
+    HEAD detached, so an unpublished fix commit, rebase result, or rebase in progress is on no branch, and Git
+    status can be clean.
+- **`piton tools`:** prints the registry of tools a repository can configure for itself, as JSON. The registry
+  (`project/tools.rs`) covers environment managers (mise, direnv, Nix, devbox), agents (`AGENTS.md`, `.agents/`,
+  `.pi/`, `.piton/`), and editors (Neovim, VS Code, Zed, JetBrains). Each entry lists the repository files the tool
+  reads, as case-insensitive Git pathspecs that match at any depth. Incoming-PR review keeps those files at a
+  trusted revision on disk.
 - **`--json`:** every `piton worker` command prints the daemon's response; refusals are typed (`kind`: `exists`,
   `source_dirty`, `source_off_default`, `unknown_default`, `invalid_name`, `not_a_repository`, `not_a_worker`,
   `leftovers`, `failed`) with what a caller needs to explain or force them, and exit 4.

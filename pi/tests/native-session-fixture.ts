@@ -86,19 +86,22 @@ export async function nativeSessionFixture(options: {
     tools?: string[]
     setup?: (root: string) => void
     review?: (root: string, title: string, signal?: AbortSignal) => Promise<string | undefined>
+    /** The folder pi runs in, relative to the fixture's folder, which `setup` creates; the fixture folder itself when omitted. */
+    workspace?: string
 }) {
     assert.equal(VERSION, "1.5.2")
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-"))
-    const agentDir = path.join(root, "agent")
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-"))
+    const root = options.workspace ? path.join(fixture, options.workspace) : fixture
+    const agentDir = path.join(fixture, "agent")
     const oldAgentDir = process.env.PI_CODING_AGENT_DIR
     const oldConfigHome = process.env.PITON_CONFIG_HOME
     process.env.PI_CODING_AGENT_DIR = agentDir
-    // The session's own global tier: `setup` writes global piton settings to `<root>/config`.
-    process.env.PITON_CONFIG_HOME = path.join(root, "config")
+    // The session's own global tier: `setup` writes global piton settings to `<fixture>/config`.
+    process.env.PITON_CONFIG_HOME = path.join(fixture, "config")
     fs.mkdirSync(agentDir)
-    fs.mkdirSync(path.join(root, "config"))
+    fs.mkdirSync(path.join(fixture, "config"))
     clearSettingsCache()
-    options.setup?.(root)
+    options.setup?.(fixture)
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } })
     settingsManager.setProjectTrusted(true)
     const manager = SessionManager.inMemory(root)
@@ -217,7 +220,7 @@ export async function nativeSessionFixture(options: {
                 if (oldConfigHome === undefined) delete process.env.PITON_CONFIG_HOME
                 else process.env.PITON_CONFIG_HOME = oldConfigHome
                 clearSettingsCache()
-                fs.rmSync(root, { recursive: true, force: true })
+                fs.rmSync(fixture, { recursive: true, force: true })
             }
         },
     }
