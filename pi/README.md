@@ -46,4 +46,4 @@ Every project uses a tracker (GitHub or Linear) and a GitHub forge. The tracker 
 
 ## Parallel workers
 
-Run several Gigs or Tasks at once, each in its own copy-on-write copy of the repository with Pi inside a nono sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and `PITON_RUNTIME=sandbox` lets them use separate `[permissions.sandbox]` rules. Piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).
+Run several Gigs or Tasks at once, each in its own copy-on-write copy of the repository with Pi inside Piton's sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and `PITON_RUNTIME=sandbox` lets them use separate `[permissions.sandbox]` rules. Piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).

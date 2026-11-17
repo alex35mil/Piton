@@ -13,7 +13,7 @@ pub mod workers;
 pub use self::{
     branches::BranchesTable,
     permissions::{PermissionSettings, PermissionsTable},
-    sandbox::{NetworkProfile, SandboxTable},
+    sandbox::{InstallMode, Preset, SandboxTable},
     web_search::WebSearchTable,
     workers::WorkersTable,
 };

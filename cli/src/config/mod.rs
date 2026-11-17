@@ -21,8 +21,8 @@ pub use self::{
     check::portability::warnings as portability_warnings,
     model::{
         daemon::{DaemonConfig, TailnetConfig},
-        paths::{LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
-        tables::{NetworkProfile, SandboxTable},
+        paths::{AGENTS_DIR, LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
+        tables::{InstallMode, Preset},
     },
     read::{
         global::{

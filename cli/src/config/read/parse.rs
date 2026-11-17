@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn tables_are_parsed_on_their_own() {
         let d = doc(
-            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\nread = [\"/r\"]\n",
+            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\nallow = [\"/r\"]\n",
             LevelKind::Repository,
             Sharing::Shared,
         )
@@ -293,7 +293,7 @@ mod tests {
             d.part::<PermissionsTable>(Table::Permissions).unwrap().unwrap().allow,
             ["read"]
         );
-        assert_eq!(d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().read, ["/r"]);
+        assert_eq!(d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().allow, ["/r"]);
         assert!(d.part::<Integration>(Table::Tracker).unwrap().is_some());
         assert!(d.part::<Integration>(Table::Forge).unwrap().is_none());
     }
@@ -313,14 +313,14 @@ mod tests {
         };
         use LevelKind::{Global, Parent, Repository};
         use Sharing::{Local, Shared};
-        // The base sandbox: global only.
-        let base = "[sandbox]\nbase = \"default\"\n";
+        // Lifting a built-in deny: global only, so a repository can't open the user's credentials to itself.
+        let expose = "[sandbox]\nexpose = [\"~/.ssh/config\"]\n";
         assert!(matches!(
-            part(base, Parent, Shared, Table::Sandbox),
-            Err(ConfigError::GlobalOnly { ref key, .. }) if key == "sandbox.base"
+            part(expose, Parent, Shared, Table::Sandbox),
+            Err(ConfigError::GlobalOnly { ref key, .. }) if key == "sandbox.expose"
         ));
-        assert!(part(base, Global, Local, Table::Sandbox).is_ok());
-        assert!(part("[sandbox]\nread = [\"/r\"]\n", Repository, Shared, Table::Sandbox).is_ok());
+        assert!(part(expose, Global, Local, Table::Sandbox).is_ok());
+        assert!(part("[sandbox]\nallow = [\"/r\"]\n", Repository, Shared, Table::Sandbox).is_ok());
         // Integrations: project only.
         for table in [Table::Tracker, Table::Forge] {
             let text = format!("[{}]\nprovider = \"github\"\n", table.name());
@@ -350,12 +350,10 @@ mod tests {
     #[test]
     fn global_files_are_parsed_whole() {
         let path = Path::new("config.host.toml");
-        let host: HostFile = parse_global(
-            "roots = [\"~/p\"]\nkeep_awake = false\n[sandbox]\ncommand = [\"nono\"]\n",
-            path,
-        )
-        .unwrap();
+        let host: HostFile = parse_global("roots = [\"~/p\"]\nkeep_awake = false\n", path).unwrap();
         assert_eq!(host.keep_awake, Some(false));
+        let err = parse_global::<HostFile>("[sandbox]\ncommand = [\"nono\"]\n", path).unwrap_err();
+        assert!(err.to_string().contains("no longer runs nono"), "{err}");
         assert!(parse_global::<HostFile>("[pi]\ncommand = []\n", path).is_err());
         assert!(parse_global::<HostFile>("[host]\nroots = []\n", path).is_err());
         let client: ClientFile = parse_global("text_font = \"Inter\"\n", Path::new("config.client.toml")).unwrap();

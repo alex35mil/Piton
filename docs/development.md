@@ -148,20 +148,20 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
 - Every sandboxed pi gets `PITON_RUNTIME=sandbox` from the daemon. The Swift tasks then turn off SwiftPM's and the
   compiler's own sandboxes (`--disable-sandbox`, `OTHER_SWIFT_FLAGS=-disable-sandbox`), since macOS doesn't nest
   sandboxes. `mise run --dry-run <task>` shows the command.
-- `[sandbox]` in `.piton/config.toml` holds this project's grants: read-write `~/Library/Caches/org.swift.swiftpm`,
-  read `~/Library/org.swift.swiftpm/security` and `~/Library/Preferences/com.apple.dt.Xcode.plist`, and read the
-  log-only directory `~/.local/state/piton/logs` and the legacy daemon log files (never their parent directory,
-  which contains the control socket). It's read from the source checkout, so an agent can't widen its own sandbox.
-  The daemon merges it with the global `[sandbox]` and the parent folders' into a profile it generates for each
-  launch. Without these grants, `mise run apps:build` fails at package resolution ("ManifestLoading couldn't be
-  saved"); `apps:test` still works.
+- `[sandbox]` in `.piton/config.toml` turns on the `swift` and `rust` presets: SwiftPM's and clang's caches, Xcode's
+  DerivedData, and cargo's registry and locks. Everything else this project needs (Xcode's preferences, Piton's logs)
+  is readable by default; the daemon's sockets and database stay closed. It's read from the source checkout, so an
+  agent can't widen its own sandbox. Without the `swift` preset, `mise run apps:build` fails at package resolution
+  ("ManifestLoading couldn't be saved"). `piton sandbox why <path> [--write]` names the rule that decides.
 - `.piton/config.local.toml` (ignored through `/.piton/*.local.*`) holds this machine's grants, for example a
-  neighbouring checkout to read (`[sandbox]` `read = ["~/Projects/personal/tooling/pi.nvim"]`). Grant lists only
-  add across files and levels. Applied to sessions started after a change.
+  neighbouring checkout to write (`[sandbox]` `allow = ["~/Projects/personal/tooling/pi.nvim"]`). Lists only add
+  across files and levels. Applied to sessions started after a change.
 - The hidden Xcode preference `IDEPackageSupportDisableManifestSandbox` must be set on the host, once per machine:
   `defaults write com.apple.dt.Xcode IDEPackageSupportDisableManifestSandbox -bool YES`.
-- nono can't start inside nono, so the daemon's sandbox launch mode can't be tested from a sandboxed worker; the e2e
-  tests use host mode.
+- Sandboxes don't nest, so a sandboxed worker can't start a sandboxed pi: the e2e tests run pi in host mode and check
+  a sandboxed launch's policy through `piton sandbox show`; `sh cli/tests/probe/protected.sh` checks the applied
+  sandbox from a host shell. In a sandboxed session, `PITON_BIN` is the installed `piton`, which may be older than the
+  code: run `apps:test` with `PITON_BIN=$PWD/cli/target/debug/piton` after changing the daemon's protocol.
 - Installing the daemon and launching apps are host-only.
 
 ## Workflow reports and session analysis

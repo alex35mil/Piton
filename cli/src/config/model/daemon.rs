@@ -22,7 +22,6 @@ pub struct DaemonConfig {
     /// Hold the Mac awake while sessions are live.
     pub keep_awake: bool,
     pub pi: PiConfig,
-    pub sandbox: SandboxConfig,
     pub env: EnvConfig,
     pub stop: StopConfig,
     /// How long a pi with no messages, no run, and no pending dialog may stay without clients.
@@ -65,12 +64,6 @@ pub struct PiConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct SandboxConfig {
-    /// The sandbox executable. Its policy comes from each launch's `[sandbox]` chain (`launch/sandbox.rs`).
-    pub command: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct EnvConfig {
     /// Start from the login shell's environment (captured once at daemon start) instead of the daemon's own.
     pub login_shell: bool,
@@ -106,9 +99,6 @@ impl DaemonConfig {
             pi: PiConfig {
                 command: host.pi.command.unwrap_or_else(|| vec!["pi".into()]),
                 args: host.pi.args.unwrap_or_default(),
-            },
-            sandbox: SandboxConfig {
-                command: host.sandbox.command.unwrap_or_else(|| vec!["nono".into()]),
             },
             env: EnvConfig {
                 login_shell: host.env.login_shell.unwrap_or(true),

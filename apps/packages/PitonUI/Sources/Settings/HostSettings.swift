@@ -117,7 +117,7 @@ struct HostSettingRow: View {
             } label: {
                 label
             }
-        case (true, .text), (true, .integer), (true, .textList), (true, .integerList), (true, .networkProfile):
+        case (true, .text), (true, .integer), (true, .textList), (true, .choiceList):
             TextSettingField(
                 label: label, text: setting.valueType.text(setting.value), parse: setting.valueType.parse(_:),
                 save: save(_:))

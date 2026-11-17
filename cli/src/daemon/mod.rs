@@ -120,7 +120,6 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     // What pi will be launched with: if a tool is missing here, sessions fail to start.
     let found: Vec<String> = [
         config.pi.command.first().map(String::as_str).unwrap_or("pi"),
-        config.sandbox.command.first().map(String::as_str).unwrap_or("nono"),
         "mise",
         config.tailnet.cli.as_str(),
     ]
@@ -171,7 +170,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     let tailnet = daemon.config().tailnet.clone();
     if tailnet.enabled {
         // Remote access is optional: without Tailscale the daemon still serves local clients.
-        // Like pi and nono: found through the user's shell PATH, not launchd's (`/usr/local/bin` isn't in it).
+        // Like pi: found through the user's shell PATH, not launchd's (`/usr/local/bin` isn't in it).
         let cli = launch::resolve_program(&tailnet.cli, &daemon.base_env);
         tokio::spawn(crate::apps::serve_tailnet(daemon.clone(), cli, tailnet));
     }
@@ -355,6 +354,9 @@ impl Daemon {
     /// Applies a change from the apps to its global file, then rereads the files.
     pub fn set_app_setting(&self, change: crate::apps::SettingChange) -> Result<(), crate::apps::SettingError> {
         let mut snapshot = lock(&self.app_settings);
+        // A value the apps show read-only (a preset with options) is edited in the file: saving the list control's
+        // names would drop the options.
+        snapshot.check_editable(&change)?;
         crate::apps::write_setting(&self.config().paths, &change)?;
         crate::log!(
             "config: {} ({:?}) changed from the apps",
@@ -406,9 +408,9 @@ impl Daemon {
             crate::agent::SOCKET_ENV.into(),
             self.config().agent_socket().to_string_lossy().into_owned(),
         );
-        let profile = match mode {
+        let policy = match mode {
             LaunchMode::Sandbox => Some(
-                launch::write_profile(&self.config(), &launch_config, &self.base_env, key)
+                launch::sandbox_policy(&self.config(), &launch_config, &self.base_env, &env, &workspace.path)
                     .inspect_err(|e| crate::log!("launch refused: {e}"))?,
             ),
             LaunchMode::Host => None,
@@ -440,7 +442,7 @@ impl Daemon {
             mode,
             session,
             env,
-            profile,
+            policy,
             protected,
         };
         let resume = match &spec.session {

@@ -1,9 +1,10 @@
 #!/bin/sh
-# Host-only check of the protected-file Seatbelt rules (docs/design.md, "Protected files"): runs a shell in a nono
-# sandbox with the rules the daemon generates (`piton config protected --seatbelt-rules`), in a scratch checkout, and
-# reports what each write attempt did. Run from a host shell (not a sandboxed session: nono doesn't nest), after
-# `mise run cli:build`: `sh cli/tests/probe/protected.sh`. Prints one line per attempt and exits 1 when any
-# result differs from the expectation.
+# Host-only check of the sandbox a launch gets (docs/design.md, "Agent access"): resolves a scratch checkout's policy
+# the way the daemon does (`piton sandbox show`), runs a shell through `piton sandbox-exec` with it, and reports what
+# each attempt did. Run from a host shell (not a sandboxed session: sandboxes don't nest), after `mise run cli:build`:
+# `sh cli/tests/probe/protected.sh`. Prints one line per attempt and exits 1 when any result differs from the
+# expectation. It reads and connects to real paths of this user (credentials, the daemon's sockets) but writes only in
+# its scratch folder.
 set -eu
 
 piton=$(cd "$(dirname "$0")/../.." && pwd)/target/debug/piton
@@ -19,18 +20,10 @@ echo '{}' > "$src/.piton/config.toml"
 echo 'skill' > "$src/.agents/skills/s/SKILL.md"
 echo 'a' > "$src/src/a.rs"
 
-# The daemon's own rules for this checkout, as a JSON array.
-rules=$("$piton" config protected --workspace "$src" --seatbelt-rules | python3 -I -c 'import json,sys; print(json.dumps([l.rstrip("\n") for l in sys.stdin if l.strip()]))')
-profile="$scratch/profile.json"
-cat > "$profile" <<EOF
-{
-  "meta": {"name": "piton-protected-probe"},
-  "extends": "default",
-  "workdir": {"access": "readwrite"},
-  "filesystem": {"allow": ["$outside"]},
-  "unsafe_macos_seatbelt_rules": $rules
-}
-EOF
+# The daemon's policy for this checkout, with the user's own global configuration.
+policy=$("$piton" sandbox show --workspace "$src" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
+agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+state=$HOME/.local/state/piton
 
 # Each attempt: expectation (ok | denied), a description, and a shell command run in the sandbox from the checkout.
 cat > "$scratch/attempts.sh" <<'EOF'
@@ -41,6 +34,8 @@ attempt() {
     if [ "$got" = "$expect" ]; then mark=pass; else mark=FAIL; fi
     printf '%-5s %-7s %s\n' "$mark" "$got" "$what"
 }
+connect() { python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$1"; }
+# Protected files.
 attempt ok     "read a protected file"                  'cat .piton/config.toml'
 attempt denied "overwrite a protected file"             'echo x > .piton/config.toml'
 attempt denied "create a file in .piton/"               'echo y > .piton/new.json'
@@ -63,10 +58,31 @@ attempt ok     "create a folder named like .pi but not" 'mkdir -p apps/.pix && e
 # Moving a parent of a not-yet-existing protected folder is an ordinary write; the daemon guards its own writes
 # against it (it never follows a symlink on an approved path).
 attempt ok     "swap a parent folder for a symlink"     "mv apps apps.bak && ln -s $OUTSIDE apps"
+# Reads: everything but credentials.
+attempt ok     "read system files"                      'cat /etc/hosts'
+attempt ok     "read git config"                        "test ! -e $HOME/.gitconfig || cat $HOME/.gitconfig"
+attempt denied "read an SSH key"                        "cat $HOME/.ssh/id_*"
+attempt denied "list the keychains' contents"           "cat $HOME/Library/Keychains/login.keychain-db"
+attempt denied "read shell history"                     "cat $HOME/.zsh_history"
+# Writes outside the workspace.
+attempt ok     "write temp"                             'mktemp'
+attempt denied "write the home folder"                  "touch $HOME/piton-probe"
+attempt denied "write a user cache"                     "mkdir -p $HOME/Library/Caches/piton-probe"
+attempt denied "write pi's extensions"                  "mkdir -p $AGENT_DIR/extensions/sessions"
+attempt denied "write pi's settings"                    "echo x >> $AGENT_DIR/settings.json"
+attempt ok     "write pi's sessions"                    "mkdir -p $AGENT_DIR/sessions/piton-probe && rmdir $AGENT_DIR/sessions/piton-probe"
+attempt denied "write the global configuration"         "echo x >> ${PITON_CONFIG_HOME:-$HOME/.config/piton}/config.toml"
+# The daemon.
+attempt denied "read the daemon's database"             "cat $STATE/piton.db"
+attempt ok     "read Piton's logs"                      "ls $STATE/logs"
+attempt denied "connect to the control socket"          "connect $STATE/piton.sock"
+attempt denied "connect to it through a symlink"        "ln -s $STATE/piton.sock ctl.sock && connect ctl.sock"
+attempt ok     "connect to the agent socket"            "connect $STATE/agent.sock"
 EOF
 
 cd "$src"
-OUTSIDE="$outside" nono run -s --profile "$profile" --allow-cwd -- sh "$scratch/attempts.sh" </dev/null | tee "$scratch/out"
+OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" PITON_SANDBOX_POLICY="$policy" \
+    "$piton" sandbox-exec -- sh "$scratch/attempts.sh" </dev/null | tee "$scratch/out"
 # The integrity of the protected file itself, checked from outside the sandbox.
 if [ "$(cat "$src/.piton/config.toml")" = '{}' ]; then echo "pass  ok      protected file unchanged"; else echo "FAIL  changed protected file changed"; fi
 ! rg -q '^FAIL' "$scratch/out"

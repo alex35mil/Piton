@@ -565,10 +565,9 @@ public enum SettingValueType: Codable, Sendable, Hashable {
     case text
     case textList
     case integer
-    case integerList
     case choice(options: [String])
-    /// A network profile name, or `false` for no proxy filtering.
-    case networkProfile
+    /// Several of the listed options.
+    case choiceList(options: [String])
 
     enum CodingKeys: String, CodingKey { case kind, options }
 
@@ -579,9 +578,8 @@ public enum SettingValueType: Codable, Sendable, Hashable {
         case "text": self = .text
         case "text_list": self = .textList
         case "integer": self = .integer
-        case "integer_list": self = .integerList
         case "choice": self = .choice(options: try c.decode([String].self, forKey: .options))
-        case "network_profile": self = .networkProfile
+        case "choice_list": self = .choiceList(options: try c.decode([String].self, forKey: .options))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: c, debugDescription: "unknown setting value type \(other)")
@@ -595,11 +593,12 @@ public enum SettingValueType: Codable, Sendable, Hashable {
         case .text: try c.encode("text", forKey: .kind)
         case .textList: try c.encode("text_list", forKey: .kind)
         case .integer: try c.encode("integer", forKey: .kind)
-        case .integerList: try c.encode("integer_list", forKey: .kind)
         case .choice(let options):
             try c.encode("choice", forKey: .kind)
             try c.encode(options, forKey: .options)
-        case .networkProfile: try c.encode("network_profile", forKey: .kind)
+        case .choiceList(let options):
+            try c.encode("choice_list", forKey: .kind)
+            try c.encode(options, forKey: .options)
         }
     }
 }

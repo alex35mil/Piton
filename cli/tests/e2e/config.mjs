@@ -6,8 +6,8 @@ import { dirname, join } from "node:path";
 
 const toml = (value) => JSON.stringify(value);
 
-/// `daemon` and `host` are flat objects of TOML values for the host file; table keys (`pi`, `env`, `stop`, `tailnet`,
-/// `sandbox` for its `command`) are objects of their own. `project` is the global `config.toml` (sandbox policy, the
+/// `daemon` and `host` are flat objects of TOML values for the host file; table keys (`pi`, `env`, `stop`, `tailnet`)
+/// are objects of their own. `project` is the global `config.toml` (sandbox policy, the
 /// defaults every project inherits). Keep-awake is off unless `keepAwake`, so no `caffeinate` runs.
 export function writeConfig(dir, { daemon = {}, host = {}, project = {}, keepAwake = false } = {}) {
     const home = join(dir, "config");

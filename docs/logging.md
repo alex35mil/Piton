@@ -74,17 +74,9 @@ The `log` key of `config.host.toml` overrides the daemon's file path. Its defaul
 use the bounded file writers instead of appending a duplicate unbounded `launchd.log`. A foreground daemon's info
 records still go to stderr. Early configuration failures leave a sanitized startup marker in the default daemon log.
 
-The sandbox should grant **read-only access to the logs directory**, not its parent (which contains the control
-socket). This project's `.piton/config.toml` grants it. For agents in other projects, add it to the global
-`config.toml` (`~/.config/piton/`) in the dotfiles:
-
-```toml
-[sandbox]
-read = ["~/.local/state/piton/logs"]
-```
-
-Grant lists only add across levels. Grants apply to newly launched sandbox processes, not existing ones.
-Agents receive no CoreDevice access, settings write access, daemon control socket access, or host command execution.
+A sandboxed agent can read the logs directory in every project: Piton's built-in sandbox policy closes the rest of the
+state folder (the database, the control socket) and opens `logs/` for reading. Agents receive no CoreDevice access,
+settings write access, daemon control socket access, or host command execution.
 
 `PITON_LOGS_DIR` can select a different host root for development and tests; the Mac app and CLI understand it. All test
 tasks use temporary roots so they never change the owner's capture policy or logs. Installed services use the default

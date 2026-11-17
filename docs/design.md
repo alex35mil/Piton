@@ -74,7 +74,8 @@ The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is
 - `daemon/`: the running daemon: startup, the session registry, the Unix socket (`rpc`, `control`, and the apps'
   `view` connections), keep-awake, reloading the global files, and the local socket's messages (`protocol`).
 - `session/`: one pi process, and the conversation model the apps render (`view`).
-- `launch/`: pi's environment and command line, and the nono profile (`sandbox`, the only code that knows nono).
+- `launch/`: pi's environment and command line, and the sandbox (`sandbox`: the built-in policy, one launch's
+  resolved rules, and applying them with the `nono` library; the only code that knows the backend).
 - `apps/`: serving the native apps: the `view` protocol, the tailnet WebSocket, browsing roots, the Settings list.
 - `agent/`: the bridge between a sandboxed agent and the daemon: which files are protected and their Seatbelt rules
   (`protected`), `agent.sock` (`socket`), and a protected write asked of the user (`write`).
@@ -101,7 +102,7 @@ LaunchAgent for development without the app. The CLI is symlinked onto `PATH`.
 **Onboarding.** On first launch the Mac app asks what this Mac does: host (runs the daemon; the app connects to its
 socket) or client (connects to another host over the tailnet, like the phone). The choice is kept on the Mac and can
 be changed in Settings > Connection. A host's onboarding lists the steps from `piton setup check --json`, run with
-the bundled binary: tools (pi, mise, nono, tailscale), the global configuration, the CLI link
+the bundled binary: tools (pi, mise, tailscale), the global configuration, the CLI link
 (`~/.local/bin/piton` to the bundled `piton`), start at login, the state database, and remote access (this host's
 tailnet name and port). Each is ok, missing with its fix, or failed: `piton setup apply <step>` does the steps
 Piton can (create the global folder, link the CLI, create the database), the app registers the daemon, and the rest
@@ -122,12 +123,13 @@ environment (today a `:tcd` worker inherits the Neovide launch folder's environm
 
 ### Launch mode: sandbox or host
 
-The mode is chosen per launch, not per workspace. nono is the only sandbox.
+The mode is chosen per launch, not per workspace. Seatbelt, through the `nono` library, is the only sandbox.
 
-- **Sandbox (default):** `nono run -s --profile <generated> --allow-cwd -- pi --mode rpc [...]`, with Piton's
-  environment passed through. The daemon generates the profile for each launch from the configuration chain's
-  `[sandbox]` tables (see "Configuration and state"); it grants the source's `.piton/.local` and keeps protected files
-  read-only. See "Workers" for what "source" means.
+- **Sandbox (default):** `<piton> sandbox-exec -- pi --mode rpc [...]`, with Piton's environment passed through.
+  `<piton>` is the daemon's own executable (in Piton.app, the bundled one). The daemon resolves the launch's policy
+  ("Agent access") from Piton's built-in policy and the configuration chain's `[sandbox]` tables, and passes it in
+  the environment; the helper applies it to itself, removes it from the environment, and becomes pi. The daemon is
+  never sandboxed. See "Workers" for what "source" means.
 - **Host:** `pi --mode rpc [...]` directly. Only chosen explicitly: `piton start --host`, or the host toggle in the app.
 - `piton attach` (pi.nvim) always launches in sandbox mode. Choosing host from pi.nvim is out of scope for now.
 - A session's mode is recorded; resuming a saved session from the app or CLI defaults to its last mode; an attach to a
@@ -451,7 +453,7 @@ text frame per message, plain `ws://` (Tailscale encrypts the traffic). `cli/src
   when it belongs to the same Tailscale user as this Mac, isn't tagged, isn't shared in from another tailnet, and
   isn't this Mac itself. Refusals are logged with the reason; the peer sees the connection close.
 - **Why not this Mac:** sandboxed agents can open network connections, and through the tailnet address they'd look
-  like the owner. Local clients use the Unix socket (`0600`, outside the `piton` sandbox). Never add a localhost or
+  like the owner. Local clients use the Unix socket (`0600`; the sandbox denies connecting to it). Never add a localhost or
   token path to the WebSocket: the identity check is the only way in.
 - **Only `view`:** an `rpc` or `control` hello over the WebSocket is closed (no remote `piton attach`).
 - **Dead connections:** a phone that loses its network sends no close, and its TCP connection would linger for many
@@ -645,8 +647,7 @@ Three families of files, each read by its own consumer:
   committed": this machine's values, secrets, or anything you don't want in a diff (`/.piton/*.local.*` keeps it out
   of Git).
 - **`config.host.toml` / `config.host.local.toml`, global only:** read by the daemon. Top-level keys: `socket`, `log`,
-  `roots`, `favorites`, `logging`, `default_attach_mode`, `empty_grace_ms`, `keep_awake`; tables `[pi]`, `[sandbox]`
-  (only `command`, the sandbox program), `[env]`, `[stop]`, `[tailnet]`, and `[development]` (switches for a
+  `roots`, `favorites`, `logging`, `default_attach_mode`, `empty_grace_ms`, `keep_awake`; tables `[pi]`, `[env]`, `[stop]`, `[tailnet]`, and `[development]` (switches for a
   development install, in [development.md](development.md)), which the pi package reads through
   `piton config resolve --global` on whichever machine pi runs.
 - **`config.client.toml`, global only:** the apps' preferences (`text_font`, `code_font`; themes and keybindings
@@ -666,7 +667,8 @@ the line. A host or client file has one schema and is read whole.
   mise environment; a pi started outside Piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
-  - `sandbox.base`, `groups`, `bypass`, `network.profile`: the global `config.toml` only.
+  - `sandbox.expose` (lifting a built-in credential deny) and the `mise` preset's `install = "allow"` (writing the
+    tools the host runs): the global `config.toml` only, so a repository can't open them to itself.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
     repository's.
   - `web_search.api_key`: a `config.local.toml` only (a secret).
@@ -674,9 +676,10 @@ the line. A host or client file has one schema and is read whole.
     tier, which is yours alone.
   - Everything else, keep-awake included: either file, any level.
 - **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
-  - `[sandbox]`: grant lists (`allow`, `read`, `read_file`, `allow_file`, `deny`, `unix_socket`) only add. The
-    daemon's `sandbox` module, the only code that knows the backend, translates the merged table and the
-    protected-file rules into a nono profile for each launch.
+  - `[sandbox]`: lists (`presets`, `allow`, `allow_file`, `deny`, `expose`) only add; a preset named at several
+    levels takes each option from the nearest level that sets it. The daemon's `launch/sandbox`
+    module, the only code that knows the backend, resolves the merged table with the built-in policy into each
+    launch's rules ("Agent access").
   - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
     and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
@@ -711,7 +714,7 @@ the line. A host or client file has one schema and is read whole.
 
   Outside it, and using its API: `commands/config.rs` (the `piton config` command), `apps/settings.rs` (the apps' settings
   list), `daemon/` (reloading the global files: the daemon's options from the host file alone, so a broken client
-  file stops only the apps' list), `launch/sandbox.rs` (`[sandbox]` into a nono profile), and `state/` (the state
+  file stops only the apps' list), `launch/sandbox/` (`[sandbox]` into a launch's rules), and `state/` (the state
   database).
 
 #### Config and state together
@@ -759,7 +762,7 @@ local drafts) as versioned Codable files in Application Support, moved aside whe
 #### A new or second Mac
 
 A host: clone the dotfiles (the global tier) and repositories, then run `piton setup` (the Mac app runs it on first
-launch). It's idempotent: it checks `pi`, `nono`, `mise`, and `tailscale`; validates the global configuration and
+launch). It's idempotent: it checks `pi`, `mise`, and `tailscale`; validates the global configuration and
 that its `.local` files stay out of Git; installs the `piton` command and creates the database; and reports the
 tailnet address for clients. Registering the daemon to run at login is the Mac app's step. A client needs only a host's address. What doesn't travel is by design: this host's
 state (a replacement Mac imports it, above), `.local` files (secrets, per-host values, local preferences; recreated
@@ -771,10 +774,53 @@ session list grouped by host. Hosts stay independent; nothing syncs between them
 
 #### Agent access
 
-A sandboxed agent reads its whole chain (the daemon adds read grants for the source's `.piton/`, each parent level,
-and the global tier) and writes only its workspace and `<source>/.piton/.local/`. It never reaches the state folder
-except `logs/` and `agent.sock`. `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the
-daemon after the mise environment.
+The sandbox follows what Claude Code, Codex, and Gemini CLI converged on: read broadly, write narrowly, deny
+credentials. Unlike them, Piton sandboxes the whole pi process, not each shell command: pi's file tools, every
+extension and pi package, local MCP servers, and whatever they start are inside one OS boundary, where per-command
+sandboxing would leave them all with the user's access behind application-level checks (OpenCode's experimental
+whole-agent sandbox still trusts its plugins and MCP servers). The cost: pi's own credentials are readable inside,
+and the network can't be closed without cutting pi off from its model provider.
+
+Each sandboxed launch gets an ordered list of rules (`launch/sandbox/`), the last matching one deciding, as Seatbelt
+does; `piton sandbox show` prints them and `piton sandbox why` names the one that decides an access:
+
+1. **Base:** everything is readable, nothing is writable, the network is open (pi has to reach its model provider;
+   fetch, MCP, and installs need it too).
+2. **Writes:** the workspace, `<source>/.piton/.local/`, the temp folders and `/dev`, the `presets`, `allow`, and
+   `allow_file`. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
+   (the Go build cache is linked straight into host builds), so a writable cache would run sandbox-written code on
+   the host. Each preset (`mise`, `rust`, `node`, `swift`) grants one toolchain's caches and state as an informed
+   opt-in, documented as such. A preset is a name or `{ name = "...", <options> }`; options are typed per preset.
+   With its default options no preset writes what the host executes or trusts (a unit test lists those paths):
+   `mise` writes its cache and install bookkeeping, never its installed tools or trusted configs. Its `install`
+   option is `"ask"` by default (installs approved per command and run on the host, through #241's confirmation gate;
+   until then they fail in the sandbox), `"deny"`, or `"allow"` (global only: the sandbox writes the installed tools).
+3. **Credentials:** nono's deny groups (`deny_credentials`, keychains, browser data, macOS private data, shell
+   history and rc files), vendored verbatim in `nono-deny-groups.json` at the `nono` version; `mise run
+   cli:nono-policy-check` reports upstream changes, and a test fails when the crate is bumped without re-vendoring.
+   Read, write, exec, and Unix connect are denied; metadata stays visible. `expose` (global only) lifts one, readable
+   then, writable with `allow`; exposing `~/Library/Keychains` also reopens the keychain Mach services the library
+   always closes.
+4. **pi's agent directory:** read-only, except its runtime state (`sessions/`, `auth.json`, `models-store.json`,
+   `mcp-auth.json`, `crashes.json`, `mcp.log`, and their locks: credentials and logs). Its settings, project trust
+   (`trust.json`), extensions, skills, prompts, themes, and packages decide what a later pi loads, host sessions
+   included. A workspace's `mise.toml` can
+   set `PI_CODING_AGENT_DIR`, so the launch is refused when it's the home folder or above it, inside the host's own
+   agent directory (the daemon's environment names it) or a checkout's `.pi/`, or overlaps a configuration level,
+   the state folder, or a denied path. The host's agent directory stays closed whichever one the launch uses.
+5. **The user's `deny`.**
+6. **Configuration:** every level of both chains, and what their entries link to (a dotfiles repository), is
+   write-denied; protected files (below) too. The workspace's own `.agents/` stays writable.
+7. **The daemon:** its state folder is closed (read, write, connect) except `logs/` for reading and `agent.sock` for
+   connecting; the control socket (`piton.sock`, or the configured `socket`) is denied to connect wherever it is.
+   With the network open, Seatbelt would otherwise let a sandboxed agent connect to it and act as a client:
+   approve its own protected writes, start host sessions.
+
+`PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
+
+Known limits: the network isn't restricted, so anything readable can leave (domain filtering:
+[#228](https://github.com/alex35mil/Piton/issues/228)); pi's own credentials are readable
+([#229](https://github.com/alex35mil/Piton/issues/229)); macOS only.
 
 **Protected files** are everything a later pi loads from the workspace that could widen what an agent may do without
 asking, or run code outside the sandbox: the source checkout's `.piton/` (except `.local/`); pi's project `.pi/`
@@ -786,15 +832,15 @@ skill can grant itself the tools it lists. Without protection, a sandboxed agent
 `[permissions.host]` in `.piton/config.toml`, and a host session in the same checkout would run any command without asking from its
 next tool call. Changes are gated where they're written:
 
-1. **OS sandbox.** The daemon adds raw Seatbelt rules to each sandboxed launch: `(deny file-write* ...)` with regexes
+1. **OS sandbox.** Each sandboxed launch carries raw Seatbelt rules: `(deny file-write* ...)` with regexes
    for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` at any depth in the checkout. Every
    protected name matches in any case (`.PI`, `.PITON`), since APFS is case-insensitive by
    default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
-   shell commands, scripts, `git checkout`, MCP servers, pi itself. nono's typed rules can't express a read-only
-   folder inside a writable one; its raw-rule field (`unsafe_macos_seatbelt_rules`) can, and nono emits it after the
-   allows so the deny wins. `agent/protected.rs` is the one definition; `piton config protected --seatbelt-rules`
-   prints the rules, and `cli/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames,
-   hard links, symlinks, other cases).
+   shell commands, scripts, `git checkout`, MCP servers, pi itself. The library's typed grants can't express a
+   read-only folder inside a writable one; its platform rules can, and it emits them after its allows so the deny
+   wins. `agent/protected.rs` is the one definition; `piton sandbox show` prints the rules, and
+   `cli/tests/probe/protected.sh` checks them on the host (writes, creates, deletes, renames, hard links, symlinks,
+   other cases, and the rest of the policy).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
    the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
    over `~/.local/state/piton/agent.sock` (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps
@@ -810,13 +856,14 @@ A rejected change never reaches disk. Limits: shell writes in host sessions aren
 its sandbox); the rule is macOS-only. Codex and Claude Code don't need step 2 because they sandbox each shell command and run their
 edit tools unsandboxed; Piton sandboxes the whole pi process.
 
-**Sandbox backend.** The nono CLI on PATH for development. The `nono` Rust crate (the sandbox core: `CapabilitySet`,
-`Sandbox::apply_auto`, `add_platform_rule`) could be linked into the daemon through a `piton sandbox-exec` helper,
-removing the PATH dependency and the profile file; but nono's policy groups and profile inheritance live in its CLI,
-so the daemon would carry and sync about 120 path entries itself. That's the step to take before Piton is
-distributed (#224). A typed write-deny with nested re-allow, which would replace the raw rules, is requested upstream
-([nono#2310](https://github.com/nolabs-ai/nono/issues/2310)). A custom Seatbelt launcher is rejected: keeping system and credential path lists correct across macOS releases is
-security work with no upstream sharing it.
+**Sandbox backend.** The `nono` Rust crate (Apache-2.0), linked into `piton`: the daemon starts a sandboxed pi as
+`<piton> sandbox-exec -- pi ...`, which applies the policy with `Sandbox::apply_auto` and execs pi. There's no nono
+CLI, PATH lookup, or profile file. Everything is readable through one typed grant of `/`; every other rule is a
+platform rule. The library has no policy of its own (groups and profiles are nono's CLI's); Piton vendors only the
+credential deny groups, since broad reads make the ~120 system-path allow entries unnecessary. A typed write-deny
+with nested re-allow is requested upstream ([nono#2310](https://github.com/nolabs-ai/nono/issues/2310)). A custom
+Seatbelt launcher is rejected: keeping the credential lists correct across macOS releases is security work nono
+shares.
 
 ### Deploying from a sandbox
 
@@ -830,7 +877,7 @@ that's what gates it: the daemon decides when a deploy may take effect, and an a
 The sandbox keeps every restriction it has. A deploy is a request, and the host does the work:
 
 - **Deploy socket.** The daemon listens on a second Unix socket (`~/.local/state/piton/deploy.sock`, `0600`), the
-  only Piton path the `piton` nono profile allows. It speaks one request, `{deploy: daemon | mac | iphone | ipad,
+  only Piton socket the sandbox allows besides `agent.sock`. It speaks one request, `{deploy: daemon | mac | iphone | ipad,
   checkout}`, and nothing else: no session control, no host-mode launches, no paths or arguments to run. The control
   socket stays out of the sandbox.
 - **Checkout.** The daemon builds from the checkout the request names, accepted only when it's a source or a worker

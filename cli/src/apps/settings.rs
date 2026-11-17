@@ -28,12 +28,13 @@ pub enum ValueType {
     Text,
     TextList,
     Integer,
-    IntegerList,
     Choice {
         options: &'static [&'static str],
     },
-    /// A network profile name, or `false` for no proxy filtering.
-    NetworkProfile,
+    /// Several of the listed options.
+    ChoiceList {
+        options: &'static [&'static str],
+    },
 }
 
 #[derive(Debug)]
@@ -89,7 +90,7 @@ fn null(_: &DaemonConfig) -> Value {
 }
 
 use Applies::{Live, Restart};
-use ValueType::{Bool, Integer, IntegerList, Text, TextList};
+use ValueType::{Bool, Integer, Text, TextList};
 
 pub static CATALOG: &[Entry] = &[
     host("keep_awake", Bool, Live, |c| json!(c.keep_awake)),
@@ -123,7 +124,6 @@ pub static CATALOG: &[Entry] = &[
     host("log", Text, Restart, |c| json!(c.log)),
     host("pi.command", TextList, Live, |c| json!(c.pi.command)),
     host("pi.args", TextList, Live, |c| json!(c.pi.args)),
-    host("sandbox.command", TextList, Live, |c| json!(c.sandbox.command)),
     host("env.login_shell", Bool, Restart, |c| json!(c.env.login_shell)),
     host("env.mise", Bool, Restart, |c| json!(c.env.mise)),
     host("stop.grace_ms", Integer, Live, |c| json!(c.stop.grace_ms)),
@@ -137,17 +137,17 @@ pub static CATALOG: &[Entry] = &[
     host("tailnet.retry_ms", Integer, Restart, |c| json!(c.tailnet.retry_ms)),
     entry_of(Scope::Client, "text_font", Text, Live, null),
     entry_of(Scope::Client, "code_font", Text, Live, null),
-    project("sandbox.base", Text, |_| json!(crate::launch::DEFAULT_SANDBOX_BASE)),
-    project("sandbox.groups", TextList, empty),
+    project(
+        "sandbox.presets",
+        ValueType::ChoiceList {
+            options: &["mise", "rust", "node", "swift"],
+        },
+        empty,
+    ),
     project("sandbox.allow", TextList, empty),
-    project("sandbox.read", TextList, empty),
-    project("sandbox.read_file", TextList, empty),
     project("sandbox.allow_file", TextList, empty),
     project("sandbox.deny", TextList, empty),
-    project("sandbox.bypass", TextList, empty),
-    project("sandbox.unix_socket", TextList, empty),
-    project("sandbox.network.open_port", IntegerList, empty),
-    project("sandbox.network.profile", ValueType::NetworkProfile, null),
+    project("sandbox.expose", TextList, empty),
     project("workers.skip", TextList, empty),
 ];
 
@@ -256,6 +256,15 @@ impl Snapshot {
         self.error = (!errors.is_empty()).then(|| errors.join("; "));
     }
 
+    /// Refuses a change to a value the apps show read-only because the file gives it options.
+    pub fn check_editable(&self, change: &Change) -> Result<(), SetError> {
+        let current = self.values.get(&(change.scope, change.change.key.as_str()));
+        match (entry(change.scope, &change.change.key), current) {
+            (Some(entry), Some(value)) if has_options(value) => Err(SetError::NotEditable { key: entry.key }),
+            (Some(_) | None, _) => Ok(()),
+        }
+    }
+
     pub fn info(&self) -> Vec<SettingInfo> {
         CATALOG
             .iter()
@@ -271,12 +280,12 @@ impl Snapshot {
                 SettingInfo {
                     key: entry.key,
                     scope: entry.scope,
-                    value,
                     placement: self.placements.get(&id).copied().flatten(),
                     local_choice: entry.scope.local_name().is_some(),
                     value_type: entry.value_type,
                     applies,
-                    editable: entry.editable,
+                    editable: entry.editable && !has_options(&value),
+                    value,
                 }
             })
             .collect()
@@ -355,6 +364,12 @@ pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> 
     })
 }
 
+/// A list with an entry that isn't a name, such as `presets = [{ name = "mise", install = "allow" }]`: the apps' list
+/// control can't show the options, so the value is edited in the file.
+fn has_options(value: &Value) -> bool {
+    value.as_array().is_some_and(|items| items.iter().any(Value::is_object))
+}
+
 /// The value has the entry's type, so the apps' controls and the file agree.
 fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
     let integer = |value: &Value| value.as_i64().is_some_and(|n| n >= 0);
@@ -366,20 +381,17 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
             "a list of strings",
         ),
         Integer => (integer(value), "a whole number"),
-        IntegerList => (
-            value.as_array().is_some_and(|items| items.iter().all(integer)),
-            "a list of whole numbers",
-        ),
         ValueType::Choice { options } => (
             value.as_str().is_some_and(|choice| options.contains(&choice)),
             "one of the listed choices",
         ),
-        ValueType::NetworkProfile => (
-            match value {
-                Value::String(_) | Value::Bool(false) => true,
-                Value::Null | Value::Bool(true) | Value::Number(_) | Value::Array(_) | Value::Object(_) => false,
-            },
-            "a profile name, or false",
+        ValueType::ChoiceList { options } => (
+            value.as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .all(|item| item.as_str().is_some_and(|c| options.contains(&c)))
+            }),
+            "a list of the listed choices",
         ),
     };
     match ok {
@@ -425,14 +437,13 @@ mod tests {
             // Not the default, so reading it back proves the file's value reached the list.
             let default = (entry.default)(&defaults);
             let sample = match entry.value_type {
-                ValueType::NetworkProfile => json!(false),
+                ValueType::ChoiceList { options } => json!([options[0]]),
                 Bool => json!(default != json!(true)),
                 Text => json!("/x"),
                 // `workers.skip` takes relative paths, `[sandbox]` absolute ones.
                 TextList if entry.key == "workers.skip" => json!(["x"]),
                 TextList => json!(["~/x"]),
                 Integer => json!(default.as_u64().unwrap_or(0) + 1),
-                IntegerList => json!([1]),
                 ValueType::Choice { options } => {
                     json!(
                         options
@@ -560,5 +571,34 @@ mod tests {
         let list = snapshot.info();
         assert_eq!(info(&list, Scope::Host, "roots").value, json!(["~/b"]));
         assert_eq!(info(&list, Scope::Client, "text_font").value, json!("Inter"));
+    }
+
+    /// Presets with options are edited in the file: the apps' list control would drop the options.
+    #[test]
+    fn presets_with_options_are_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::create_dir_all(&paths.global).unwrap();
+        let config = paths.global.join("config.toml");
+        std::fs::write(&config, "[sandbox]\npresets = [\"rust\"]\n").unwrap();
+        let mut snapshot = Snapshot::new(&paths);
+        let presets = |s: &Snapshot| info(&s.info(), Scope::Project, "sandbox.presets").clone();
+        assert!(presets(&snapshot).editable);
+        let change = validate(Scope::Project, "sandbox.presets", &json!(["rust", "swift"]), None).unwrap();
+        assert!(snapshot.check_editable(&change).is_ok());
+
+        std::fs::write(
+            &config,
+            "[sandbox]\npresets = [\"rust\", { name = \"mise\", install = \"allow\" }]\n",
+        )
+        .unwrap();
+        snapshot.reload(&paths);
+        let shown = presets(&snapshot);
+        assert!(!shown.editable);
+        assert_eq!(shown.value, json!(["rust", {"install": "allow", "name": "mise"}]));
+        assert!(matches!(
+            snapshot.check_editable(&change),
+            Err(SetError::NotEditable { .. })
+        ));
     }
 }

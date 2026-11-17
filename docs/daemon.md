@@ -5,7 +5,7 @@
 ```sh
 mise run cli:build
 cli/target/debug/piton daemon                # foreground; ctrl-c stops every pi
-cli/target/debug/piton start ~/Projects/foo  # new session in the nono sandbox (profile piton)
+cli/target/debug/piton start ~/Projects/foo  # new session in the sandbox
 cli/target/debug/piton start ~/Projects/foo --host --prompt "hello"
 cli/target/debug/piton ls
 cli/target/debug/piton stop --session <pi session id | session file | piton key>
@@ -29,7 +29,8 @@ piton worker delete ../<repo>--fix-login [--force]
 ```
 
 Per-project settings live in `.piton/config.toml` in the source checkout (read only from there, never from a worker):
-`[workers] skip` lists paths not copied into new workers, `[sandbox]` adds grants for sandboxed pis.
+`[workers] skip` lists paths not copied into new workers, `[sandbox]` adds grants for sandboxed pis (see "Sandbox"
+below).
 
 ## pi.nvim
 
@@ -91,9 +92,6 @@ retry_ms = 10000          # while Tailscale isn't up, try again this often
 command = ["pi"]
 args = []                 # added after `--mode rpc`
 
-[sandbox]
-command = ["nono"]        # the sandbox program; its policy is in config.toml
-
 [env]
 login_shell = true        # base environment from `$SHELL -l`
 mise = true               # plus `mise env -C <workspace>`
@@ -103,24 +101,80 @@ grace_ms = 15000          # after closing stdin, before SIGTERM
 term_grace_ms = 3000      # after SIGTERM, before SIGKILL
 ```
 
-The sandbox policy every project inherits, in the global `config.toml`:
+A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after the workspace's mise
+environment.
+
+### Sandbox
+
+A sandboxed pi works with no configuration. Piton's built-in policy, the same idea as Claude Code's, Codex's, and
+Gemini CLI's:
+
+- **Reads:** everything, except credentials and private data: SSH and GPG keys, cloud and registry credentials
+  (`~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.npmrc`, `~/.netrc`, ...), keychains and password
+  managers, browser profiles, Mail and Messages, shell history and rc files. The list is nono's deny groups, vendored.
+- **Writes:** the workspace, the source's `.piton/.local`, temp folders, and pi's runtime state (sessions, auth,
+  models store). Not user caches: host tools reuse what's in them without checking, so a writable cache would let a
+  sandboxed agent run code on the host. Not pi's settings, extensions, or packages, which host sessions load.
+- **Always closed:** protected files (`.piton/`, `.pi/`) and every configuration level, the daemon's state folder
+  (except `logs/` for reading and `agent.sock`), and the daemon's control socket.
+- **Network:** open: pi has to reach its model provider, and fetch, web search, MCP, and installs need it too.
+
+`[sandbox]` adds to that, in any `config.toml` of the chain; lists only add across levels:
 
 ```toml
 [sandbox]
-base = "piton"            # the nono profile it extends: your ~/.config/nono/profiles/piton.json, or a built-in
-                          # one such as "mise-dev" once its grants are in this table
-groups = []               # extra nono groups, e.g. ["git_config"]
-allow = []                # read-write grants; also read, read_file, allow_file, deny, unix_socket
-bypass = []               # lift a base-profile deny for a path granted above
-[sandbox.network]
-open_port = []            # e.g. [0]: every localhost port
-# profile = false         # no proxy filtering, or a nono network profile name
+presets = []     # toolchains whose caches and state may be written: "mise", "rust", "node", "swift".
+                 # Host builds reuse what the sandbox writes there; turn on the ones you build with.
+allow = []       # more writable folders
+allow_file = []  # more writable files
+deny = []        # paths closed like the credentials: no read, write, or connect
+expose = []      # global config.toml only: lift a built-in deny for a path (readable then; writable with allow)
 ```
 
-Every sandboxed launch gets a nono profile the daemon generates in its state folder: `sandbox.base` extended with the
-merged `[sandbox]` grants of every level, read access to the configuration chain, the source's `.piton/.local`, and
-the protected-file rules. A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after
-the workspace's mise environment.
+Paths are absolute, `~/...`, or `$VAR/...` from the daemon's login-shell environment (never the workspace's).
+
+A preset is its name, or a table with its name and options. No preset, with its default options, lets the sandbox
+write what the host runs or trusts (installed tools, `~/.cargo/bin`, rustup's toolchains, mise's trusted configs).
+The `mise` preset writes mise's cache and its install bookkeeping; its `install` option says how a sandboxed agent
+installs tools:
+
+```toml
+presets = ["rust", { name = "mise", install = "ask" }]
+```
+
+- `"ask"` (the default): each `mise install` is approved by you and run on the host. That needs the confirmation
+  gate of [#241](https://github.com/alex35mil/Piton/issues/241); until it exists, installs fail in the sandbox and you
+  run them on the host.
+- `"deny"`: installs fail in the sandbox.
+- `"allow"`: the sandbox may write mise's installed tools, so installs just work, and an agent can replace binaries
+  your host shell runs. Global `config.toml` only.
+
+Across levels, a preset's options are the nearest level's that sets them, so a project can turn `install` to `"deny"`.
+The apps edit `presets` as a list of names; a value with options is shown read-only and edited in the file.
+
+A recommended global configuration for a developer Mac:
+
+```toml
+[sandbox]
+presets = ["mise", "rust", "node"]
+expose = ["~/.ssh/config", "~/.ssh/known_hosts"]  # git over SSH; the agent socket is reachable already
+```
+
+And per project, in its `.piton/config.toml`, what its builds need, e.g. `presets = ["swift"]`.
+
+`piton sandbox why PATH [--write | --connect] [--workspace DIR]` says whether a sandboxed pi there may read, write, or
+connect to PATH, and which rule decides; `piton sandbox show` prints every rule.
+
+Known limits:
+
+- The network isn't restricted: anything the agent can read can leave the machine. Filtering by domain is planned in
+  [#228](https://github.com/alex35mil/Piton/issues/228); say so there if you need it.
+- pi's own credentials (its `auth.json`, provider keys in its environment) are readable: the whole pi process is
+  sandboxed, and pi needs them ([#229](https://github.com/alex35mil/Piton/issues/229)).
+- macOS only.
+
+Keys of the earlier nono-CLI backend (`base`, `groups`, `bypass`, `read`, `read_file`, `unix_socket`,
+`[sandbox.network]`, and `[sandbox] command` in `config.host.toml`) are refused with what replaces them.
 
 ### State
 
@@ -148,4 +202,7 @@ cd cli && node tests/probe/probe.mjs <scenario>      # pi RPC probes, see pi-fin
 ```
 
 The e2e tests use pi's faux provider through `cli/tests/fixtures/faux-extension.ts`, so they need no credentials.
-They run in host mode because nono can't start inside a nono sandbox.
+They run pi in host mode; in a sandboxed session a sandboxed launch can't start (sandboxes don't nest), so the worker
+test checks its sandbox through `piton sandbox show`. `sh cli/tests/probe/protected.sh` checks the applied sandbox on
+the host. `mise run cli:nono-policy-check` compares the vendored deny groups with nono's at the `nono` version in
+`Cargo.lock`; a unit test fails when the crate is bumped without re-vendoring.
