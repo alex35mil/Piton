@@ -22,7 +22,12 @@ import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "
 import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "../integrations/config.js"
 import { initialPhase } from "../integrations/phase.js"
 import type { RecoveryReads } from "../integrations/plan-publication.js"
-import { trackerReference, type TrackerObject, type TrackerRecord } from "../integrations/records.js"
+import {
+    requireTrackerItem,
+    trackerReference,
+    type TrackerObject,
+    type TrackerRecord,
+} from "../integrations/records.js"
 import type { ProviderEvidence } from "../integrations/resource-id-operations.js"
 import { EvidenceSchema } from "../integrations/resource-id-tool.js"
 import { githubPublication } from "../integrations/tracker-publication-github.js"
@@ -237,6 +242,12 @@ export function restoreEpicPlanSource(cwd: string, input: RestoreEpicPlanSourceI
     const directory = resolveEntityDirectory(root, cwd, input.entityDir)
     const status = readEntityStatus(directory)
     if (status.entity !== "epic") throw new Error("plan source restore requires an Epic")
-    const plan = publishedPlan(configured, status.tracker, status.title, input.pages, tools)
+    const plan = publishedPlan(
+        configured,
+        requireTrackerItem(status.tracker, "Epic plan restore"),
+        status.title,
+        input.pages,
+        tools,
+    )
     return { source: plan.source, routing: plan.routing }
 }

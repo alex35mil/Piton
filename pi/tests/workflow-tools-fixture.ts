@@ -35,6 +35,7 @@ export const expectedWorkflowTools = [
     "preflight_gig",
     "init_github_gig",
     "init_linear_gig",
+    "init_local_gig",
     "restore_epic",
     "restore_epic_plan_source",
     "begin_resource_creation",

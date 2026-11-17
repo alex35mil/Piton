@@ -8,7 +8,8 @@ import { workflowTools } from "../__lib/tools.js"
 import * as project from "../../../extensions/__lib/project.js"
 import { observeMcpTools, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import { acceptEpicTasks } from "../__lib/epic-acceptance.js"
-import { type EntityStatus, readEntityStatus, resolveEntityDirectory } from "../__lib/entity.js"
+import { readEntityStatus, resolveEntityDirectory } from "../__lib/entity.js"
+import { type EntityTracker, requireTrackerItem } from "./records.js"
 import { loadIntegrationRoles, requireForge, requireTracker, roleContext, type TrackerConfig } from "./config.js"
 import { GateSchema, type WorkflowKind } from "./labels.js"
 import {
@@ -83,7 +84,13 @@ const ProjectionVerificationValidator = compile(ProjectionVerificationSchema)
 
 export const RenderProviderBodySchema = Type.Object(
     {
-        entityDir: Type.String({ minLength: 1 }),
+        entityDir: Type.Optional(
+            Type.String({
+                minLength: 1,
+                description:
+                    "The entity whose plan or result this is. Required for a tracker body; optional for a PR body, which then has no closing reference.",
+            }),
+        ),
         destination: Type.Enum(["tracker", "pullRequest"], { type: "string" }),
         source: Type.String(),
     },
@@ -564,7 +571,11 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
     assertArtifactPersistencePrepared(cwd)
     if (persistsEntityArtifacts(operation)) assertWorkerArtifactsLinked(cwd)
     const entity = entityDir ? readWorkflowEntity(cwd, entityDir) : undefined
-    if (entity && configuredTracker && role !== "forge") assertEntityTracker(entity.status, configuredTracker)
+    // A local Gig has no tracker item: tracker steps refuse for it, and others treat the tracker as off.
+    const trackedEntity = entity?.status.tracker.provider !== "local"
+    if (entity && role === "tracker") requireTrackerItem(entity.status.tracker, name)
+    const entityTracker = trackedEntity ? configuredTracker : undefined
+    if (entity && entityTracker && role !== "forge") assertEntityTracker(entity.status, entityTracker)
     if (entity && configuredForge && role !== "tracker") assertEntityForge(entity.status, configuredForge)
     if ((operation === "shippingRead" || operation === "shippingMerge") && entity?.status.entity === "epic")
         throw new Error("shipping operations require a Task or Gig")
@@ -588,7 +599,12 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
                       reason: "shipping requires locally recorded PR resource IDs; investigate and record the exact PR first",
                   }
     }
-    const tracker = role === "forge" ? undefined : roleContext("tracker", roles.tracker, (config) => config.provider)
+    const tracker =
+        role === "forge"
+            ? undefined
+            : trackedEntity
+              ? roleContext("tracker", roles.tracker, (config) => config.provider)
+              : { state: "disabled" as const, reason: "This Gig is local: it has no tracker item." }
     const phaseMutation =
         input.operation === "trackerMutation" && input.change === "phase"
             ? planPhaseMutation(
@@ -626,20 +642,16 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
     return {
         state: "enabled" as const,
         operation,
-        ...(entity && configuredTracker && role !== "forge" && operation !== "artifactProjection"
+        ...(entity && entityTracker && role !== "forge" && operation !== "artifactProjection"
             ? {
-                  phaseProjection: phaseProjectionContract(
-                      entity.status.phase,
-                      configuredTracker,
-                      entity.status.entity,
-                  ),
+                  phaseProjection: phaseProjectionContract(entity.status.phase, entityTracker, entity.status.entity),
               }
             : {}),
         ...(phaseMutation ? { phaseMutation } : {}),
         ...(queueLabels ? { labels: queueLabels } : {}),
         ...(labelMutation ? { labelMutation } : {}),
-        ...(configuredTracker && role !== "forge"
-            ? { projection: planProjectionContract(configuredTracker, entity?.status) }
+        ...(configuredTracker && trackedEntity && role !== "forge"
+            ? { projection: planProjectionContract(configuredTracker, entity?.status.tracker) }
             : {}),
         roles: {
             ...(tracker ? { tracker } : {}),
@@ -652,7 +664,7 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
 }
 
 /** How plan publication works on the configured tracker, with the entity's publication state. */
-function planProjectionContract(configured: TrackerConfig, status: EntityStatus | undefined) {
+function planProjectionContract(configured: TrackerConfig, bound: EntityTracker | undefined) {
     const github = configured.provider === "github"
     return {
         source: "the current epic.md or plan.md",
@@ -661,11 +673,7 @@ function planProjectionContract(configured: TrackerConfig, status: EntityStatus 
         rendering: github
             ? "Call prepare_tracker_publication with the complete source; execute its exact registered comment mutation and save first-creation evidence with record_tracker_publication. A published plan returns reads-required: pass those comment reads to prepare_tracker_publication_update with a one-line summary of the change, record the plan update, then post and record the returned plan-update note. None of these need user approval. Preserve issue title/description. Workflow publication code applies communication attribution; keep source artifacts signature-free."
             : "Call prepare_tracker_publication with the complete source; execute its exact registered document mutation and save first-creation evidence with record_tracker_publication. Published documents require prepare_tracker_publication_update with exact get_document and parent reads and a one-line summary of the change; record the plan update, then post and record the returned Project or issue comment. None of these need user approval. Preserve issue/Project title/name and description. Workflow publication code applies communication attribution; keep source artifacts signature-free.",
-        ...(status
-            ? status.tracker.provider === "github"
-                ? { planComment: status.tracker.planComment }
-                : { planDocument: status.tracker.planDocument }
-            : {}),
+        ...planPublicationState(bound),
         attribution:
             "AI-assisted text is signed by workflow publication code using current runtime identity. Automatically select local __pi_authorship: user-verbatim for complete unchanged user-written messages, without special user opt-out wording; generated or reworded content remains ai-assisted. Code strips the local mode before sending. Use complete text, not patches or template-only content.",
         authority: "local artifact" as const,
@@ -675,6 +683,19 @@ function planProjectionContract(configured: TrackerConfig, status: EntityStatus 
             ? "for a pending creation, pass the source and complete registered comment pages to recover_tracker_publication. One marked comment is recorded; no marked comment returns the same create with the saved token, which you run; several stop for the maintainer. For uncertain updates, read the exact saved comment body and retry only confirmed non-application."
             : "for a pending creation, pass the source, an exact parent UUID/identifier read, complete list_documents cursor pages, and the full get_document reads requested for the parent's Plan documents to recover_tracker_publication. Listings truncate content. Documents carry no marker: one Plan document matching the pending fingerprint is recorded; no Plan document returns a create for the source, which you run; any other Plan document, several, or incomplete evidence stop. After uncertain or partial updates, read the exact saved document and reconcile before retrying only confirmed non-application.",
         discussion: "keep discussion in comments; requirements and agreed decisions belong in the source artifact",
+    }
+}
+
+/** The entity's saved plan publication state, keyed by how its tracker publishes plans. */
+function planPublicationState(bound: EntityTracker | undefined) {
+    if (!bound) return {}
+    switch (bound.provider) {
+        case "github":
+            return { planComment: bound.planComment }
+        case "linear":
+            return { planDocument: bound.planDocument }
+        case "local":
+            return {}
     }
 }
 
@@ -722,12 +743,21 @@ function planLabelMutation(
     return { provider: "linear" as const, ...update }
 }
 
+/**
+ * Renders a provider body. A tracker body is an entity's plan, so it needs the entity and the tracker. A PR body needs
+ * only the forge; with an entity, it's checked against the entity and closes the entity's same-repository issue.
+ */
 export function renderEntityProviderBody(
     ctx: ExtensionContext,
-    input: { entityDir: string; destination: "tracker" | "pullRequest"; source: string },
+    input: { entityDir?: string; destination: "tracker" | "pullRequest"; source: string },
 ): string {
-    assertArtifactPersistencePrepared(ctx.cwd)
     const roles = loadIntegrationRoles(ctx.cwd)
+    if (input.entityDir === undefined) {
+        if (input.destination === "tracker") throw new Error("a tracker body is an entity's plan: pass its entityDir")
+        requireForge(roles, "PR body rendering")
+        return renderProviderBody(input.source, { kind: "github-pull-request" })
+    }
+    assertArtifactPersistencePrepared(ctx.cwd)
     const entity = readWorkflowEntity(ctx.cwd, input.entityDir)
 
     if (input.destination === "tracker") {

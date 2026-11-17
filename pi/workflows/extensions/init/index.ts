@@ -9,7 +9,10 @@ import {
     GigInitializationPropertiesSchema,
     GigPreflightSchema,
     initializeEntity,
+    initializeLocalGig,
     type InitializedEntity,
+    LocalGigInitializationSchema,
+    LocalGigInitializationValidator,
     preflightEntity,
     PreflightValidator,
     TaskInitializationPropertiesSchema,
@@ -116,6 +119,21 @@ export default function (pi: ExtensionAPI): void {
     }
 
     tools.registerTool({
+        name: "init_local_gig",
+        label: "init_local_gig",
+        description:
+            "Initialize an approved Gig with no tracker item, for a project without a tracker or work the user keeps off it. Names the directory and branch from today's date and the slug (<YYYYMMDD>-<slug>), starting from and targeting the repository default branch. A local Gig has no Phase, lifecycle, Priority, labels, or plan publication; every tracker step refuses for it.",
+        parameters: LocalGigInitializationSchema,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const initialized = initializeLocalGig(parse(LocalGigInitializationValidator, params), { cwd: ctx.cwd })
+            return {
+                content: [{ type: "text" as const, text: formatInitializedEntity(initialized) }],
+                details: initialized,
+            }
+        },
+    })
+
+    tools.registerTool({
         name: "restore_epic",
         label: "restore_epic",
         description:
@@ -147,10 +165,14 @@ export function formatInitializedEntity(initialized: Pick<InitializedEntity, "di
     const branch = initialized.status.branch
     // A new entity starts with a metadata Phase exactly when the tracker configures Phase.
     const phase = initialized.status.phase === undefined ? "" : " Phase,"
+    const board =
+        initialized.status.tracker.provider === "local"
+            ? "This Gig is local: skip board setup and every tracker step."
+            : `Next: set up the board (Project membership, Status, Priority,${phase} Assignee, labels when configured).`
     return [
         `Initialized ${initialized.directory}.`,
         `Branch: ${branch.name}`,
         `Start/target: ${branch.start}`,
-        `Next: set up the board (Project membership, Status, Priority,${phase} Assignee, labels when configured). Switch to the stored branch before implementation. Do not push it automatically.`,
+        `${board} Switch to the stored branch before implementation. Do not push it automatically.`,
     ].join("\n")
 }

@@ -6,6 +6,7 @@ allowed-tools:
     - "preflight_gig"
     - "init_github_gig"
     - "init_linear_gig"
+    - "init_local_gig"
     - "review_gig"
     - "record_review_response"
     - "prepare_artifacts"
@@ -67,5 +68,11 @@ Follow the intake in [artifacts](../../references/artifacts.md#initialization-in
 2. **Adoption:** read the tracker reference ([GitHub](../../references/integrations/tracker/github.md#adopt-selected-queued-work) or [Linear](../../references/integrations/tracker/linear.md#queue-intake-and-explicit-adoption)) and the [discussion rules](../../references/integrations/shared.md#provider-bodies), and complete its Gig preflight; on Linear, the issue must have no Project.
 3. **Initialize:** call `init_github_gig` or `init_linear_gig` with the intake values, the Request as `request`, the slug, and the issue as `object`. The Gig starts from and targets the repository default.
 4. **Before planning,** finish board setup.
+
+### Local Gig
+
+When the tracker is off, or the user wants the Gig kept off the tracker, call `init_local_gig` with the intake values instead. Skip the tracker item, board setup, and Priority.
+
+A local Gig follows the same lifecycle with every tracker step skipped: Phase, gates, plan publication, lifecycle, Priority, and labels. Submission and shipping still use the forge when it's on.
 
 A Gig must never contain parent Epic fields or be converted into a Task.

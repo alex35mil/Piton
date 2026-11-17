@@ -21,6 +21,7 @@ import { prepareArtifactPersistence } from "../workflows/extensions/__lib/projec
 import {
     EntityInitializationValidator,
     initializeEntity,
+    initializeLocalGig,
     preflightEntity,
 } from "../workflows/extensions/init/entity.ts"
 import { formatInitializedEntity } from "../workflows/extensions/init/index.ts"
@@ -406,6 +407,7 @@ describe("workflow domain", () => {
             assert.equal(linearEpic.directory, ".piton/.local/epics/20261002-rollout")
             assert.equal(linearEpic.status.branch.name, "20261002-rollout")
             assert.equal(linearEpic.status.branch.source, "tracker")
+            assert.ok(linearEpic.status.tracker.provider === "linear")
             assert.deepEqual(linearEpic.status.tracker.external, {
                 projectId: "project-uuid",
                 createdAt: project.createdAt,
@@ -475,6 +477,56 @@ describe("workflow domain", () => {
             assert.equal(wired.directory, ".piton/.local/epics/20261002-rollout/tasks/ENG-8-wire-it")
             assert.equal(wired.status.branch.name, "alex/eng-8-wire-it")
             assert.equal(wired.resourceIds[0].scope.entity, "ENG-8-wire-it")
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("initializes a local Gig without a tracker item under every branch format", () => {
+        const now = new Date("2026-11-17T23:30:00Z")
+        const local = { title: "Offline work", slug: "offline-work", request: "Offline work.", kind: "chore" as const }
+        for (const [format, branch] of [
+            ["identifier-title", "20261117-offline-work"],
+            ["username/identifier-title", "alex/20261117-offline-work"],
+            ["tracker", "20261117-offline-work"],
+        ] as const) {
+            const cwd = temporaryRepository("linear")
+            try {
+                // No tracker at all: a local Gig doesn't need one.
+                writeProjectConfig(cwd, { branchFormat: format, tracker: { provider: "none" }, username: "alex" })
+                prepareArtifactPersistence(cwd)
+                const created = initializeLocalGig(local, { cwd, now })
+                assert.equal(created.directory, ".piton/.local/gigs/20261117-offline-work")
+                assert.equal(created.status.branch.name, branch)
+                assert.equal(created.status.branch.start, "main")
+                assert.deepEqual(created.status.tracker, { provider: "local", createdAt: now.toISOString() })
+                assert.equal("phase" in created.status, false)
+                assert.deepEqual(created.resourceIds, [])
+                assert.match(formatInitializedEntity(created), /local/)
+                assert.equal(git(cwd, ["rev-parse", "--verify", branch]).length, 40)
+                assert.deepEqual(readEntityStatus(path.join(cwd, created.directory)), created.status)
+                assert.throws(() => initializeLocalGig(local, { cwd, now }), /already exists/)
+            } finally {
+                fs.rmSync(cwd, { recursive: true, force: true })
+            }
+        }
+    })
+
+    it("refuses tracker-backed initialization with the tracker off, and local Epics or Tasks", () => {
+        const cwd = temporaryRepository()
+        try {
+            writeProjectConfig(cwd, { tracker: { provider: "none" } })
+            assert.throws(() => init(cwd, gig("Tracked", issue(3))), /needs the tracker, which is turned off/)
+            const created = initializeLocalGig(
+                { title: "Local", slug: "local", request: "Local.", kind: "chore" },
+                { cwd, now: new Date("2026-01-02T00:00:00Z") },
+            )
+            const metadata = JSON.parse(fs.readFileSync(path.join(cwd, created.directory, "metadata.json"), "utf-8"))
+            const epicDirectory = ".piton/.local/epics/20260102-local"
+            fs.mkdirSync(path.join(cwd, epicDirectory), { recursive: true })
+            const { kind: _kind, ...epicMetadata } = metadata
+            writeMetadata(cwd, epicDirectory, { ...epicMetadata, entity: "epic" })
+            assert.throws(() => readEntityStatus(path.join(cwd, epicDirectory)), /only a Gig can be local/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

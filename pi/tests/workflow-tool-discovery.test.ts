@@ -77,7 +77,7 @@ describe("workflow tool discovery", () => {
             events: createEventBus(),
             registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
         } as never)
-        assert.equal(tools.length, 10)
+        assert.equal(tools.length, 11)
         assert.ok(!tools.some((tool) => tool.name === "init" || tool.name === "preflight_task"))
         for (const tool of tools) {
             assert.ok(Type.IsObject(tool.parameters))
@@ -98,6 +98,9 @@ describe("workflow tool discovery", () => {
         assert.ok(accepts(github, { ...input, object: { ...issue, projectItemId: 456 } }))
         const linear = tools.find((tool) => tool.name === "init_linear_gig")!.parameters
         assert.ok(!accepts(linear, { ...input, object: issue }))
+        const local = tools.find((tool) => tool.name === "init_local_gig")!.parameters
+        assert.ok(accepts(local, input))
+        assert.ok(!accepts(local, { ...input, object: issue }))
         assert.ok(
             accepts(linear, {
                 ...input,

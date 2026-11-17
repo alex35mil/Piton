@@ -1,9 +1,10 @@
 import type { EntityStatus } from "../__lib/entity.js"
 import type { GitHubForge, TrackerConfig } from "./config.js"
+import { requireTrackerItem } from "./records.js"
 
-/** The entity's tracker item belongs to the configured tracker. */
+/** The entity has a tracker item, and it belongs to the configured tracker. */
 export function assertEntityTracker(status: EntityStatus, configured: TrackerConfig): void {
-    const tracker = status.tracker
+    const tracker = requireTrackerItem(status.tracker, "this tracker step")
     if (tracker.provider !== configured.provider)
         throw new Error(`${status.slug} is bound to ${tracker.provider}, not the configured tracker`)
     if (

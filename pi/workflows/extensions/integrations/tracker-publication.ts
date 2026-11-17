@@ -28,7 +28,7 @@ import {
     renderAnnouncement,
 } from "./plan-announcement.js"
 import type { PublicationAdapter, PublicationIdentity } from "./plan-publication.js"
-import type { TrackerRecord } from "./records.js"
+import { requireTrackerItem, type TrackerRecord } from "./records.js"
 import { EvidenceSchema } from "./resource-id-tool.js"
 import { githubPublication } from "./tracker-publication-github.js"
 import { linearPublication } from "./tracker-publication-linear.js"
@@ -209,7 +209,7 @@ export async function trackerPublication(cwd: string, raw: TrackerPublicationInp
         const configured = requireTracker(loadIntegrationRoles(root), "plan publication")
         const status = readEntityStatus(directory)
         assertEntityTracker(status, configured)
-        const tracker = status.tracker
+        const tracker = requireTrackerItem(status.tracker, "plan publication")
         const server = configured.mcpServer
         // Publication and announcement saves can follow each other in one call; each builds on the latest record.
         let current = tracker

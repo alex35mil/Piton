@@ -68,20 +68,34 @@ export type Priority = Static<typeof PrioritySchema>
 // Project, which has no number, its creation date so Epics still sort chronologically.
 export const LINEAR_IDENTIFIER_PATTERN = "^[A-Z][A-Z0-9]*-[1-9][0-9]*$"
 export const TIMESTAMP_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\\r\\n]+$"
+// A local Gig has no tracker object; its creation date names it, like a Linear Project.
 export type TrackerReference =
     | { provider: "github"; issueNumber: number }
     | { provider: "linear"; identifier: string }
     | { provider: "linear"; projectCreatedAt: string }
+    | { provider: "local"; createdAt: string }
 
 export function trackerReferenceLabel(reference: TrackerReference): string | undefined {
-    if (reference.provider === "github") return `#${reference.issueNumber}`
-    return "identifier" in reference ? reference.identifier : undefined
+    switch (reference.provider) {
+        case "github":
+            return `#${reference.issueNumber}`
+        case "linear":
+            return "identifier" in reference ? reference.identifier : undefined
+        case "local":
+            return undefined
+    }
 }
 
 export function entityName(reference: TrackerReference, slug: string): string {
-    if (reference.provider === "github") return `${reference.issueNumber}-${slug}`
-    if ("identifier" in reference) return `${reference.identifier}-${slug}`
-    return `${datePrefix(reference.projectCreatedAt)}-${slug}`
+    switch (reference.provider) {
+        case "github":
+            return `${reference.issueNumber}-${slug}`
+        case "linear":
+            if ("identifier" in reference) return `${reference.identifier}-${slug}`
+            return `${datePrefix(reference.projectCreatedAt)}-${slug}`
+        case "local":
+            return `${datePrefix(reference.createdAt)}-${slug}`
+    }
 }
 
 // The UTC calendar date of an ISO timestamp as YYYYMMDD.

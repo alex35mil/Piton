@@ -28,7 +28,7 @@ import registerIntegrations, {
 } from "../workflows/extensions/integrations/index.ts"
 
 import { verifyMarkdownProjection } from "../workflows/extensions/integrations/projection.ts"
-import { initializeEntity } from "../workflows/extensions/init/entity.ts"
+import { initializeEntity, initializeLocalGig } from "../workflows/extensions/init/entity.ts"
 import { linearPriorityNumber } from "../workflows/extensions/integrations/records.ts"
 
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
@@ -954,6 +954,12 @@ describe("workflow integration configuration", () => {
                 () => renderEntityProviderBody(ctx, { entityDir, destination: "tracker", source }),
                 /needs the tracker/,
             )
+            // A PR body needs no entity: an ad-hoc PR renders the same way, without a closing reference.
+            assert.equal(
+                renderEntityProviderBody(ctx, { destination: "pullRequest", source }),
+                renderEntityProviderBody(ctx, { entityDir, destination: "pullRequest", source }),
+            )
+            assert.throws(() => renderEntityProviderBody(ctx, { destination: "tracker", source }), /entityDir/)
 
             writeProjectConfig(cwd, { tracker: config(), forge: { provider: "none" } })
             assert.equal(
@@ -964,6 +970,49 @@ describe("workflow integration configuration", () => {
             assert.throws(
                 () => buildIntegrationContext(ctx, { operation: "pullRequest", entityDir }, mcpTools),
                 /needs the forge, which is turned off/,
+            )
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("treats a local Gig as tracker-off while the forge steps still run", () => {
+        const cwd = temporaryProject()
+        try {
+            prepareWorkflowProject(cwd)
+            prepareArtifactPersistence(cwd)
+            const ctx = { cwd } as ExtensionContext
+            const { directory: entityDir } = initializeLocalGig(
+                { title: "Local", slug: "local", request: "Local work.", kind: "chore" },
+                { cwd, now: new Date("2026-03-04T00:00:00Z") },
+            )
+            const resumed = buildIntegrationContext(ctx, { operation: "resume", entityDir }, mcpTools)
+            assert.equal(resumed.roles.tracker?.state, "disabled")
+            assert.equal(resumed.phaseProjection, undefined)
+            assert.equal(resumed.projection, undefined)
+            assert.equal(
+                buildIntegrationContext(ctx, { operation: "pullRequest", entityDir }, mcpTools).roles.forge?.state,
+                "enabled",
+            )
+            for (const operation of ["artifactProjection", "trackerMutation"] as const)
+                assert.throws(
+                    () =>
+                        buildIntegrationContext(
+                            ctx,
+                            operation === "trackerMutation"
+                                ? { operation, entityDir, change: "lifecycle" }
+                                : { operation, entityDir },
+                            mcpTools,
+                        ),
+                    /this Gig is local/,
+                )
+            assert.doesNotMatch(
+                renderEntityProviderBody(ctx, {
+                    entityDir,
+                    destination: "pullRequest",
+                    source: "# Result\n\n## Overview\n\nDone.\n\n## Verification\n\nRan.\n",
+                }),
+                /Closes/,
             )
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })

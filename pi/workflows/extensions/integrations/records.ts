@@ -155,6 +155,28 @@ export type TrackerRecord = Static<typeof TrackerRecordSchema>
 export type GitHubTrackerRecord = Static<typeof GitHubTrackerRecordSchema>
 export type LinearTrackerRecord = Exclude<TrackerRecord, GitHubTrackerRecord>
 
+// A local Gig: no tracker item. Its creation time names it, and every tracker step refuses for it.
+export const LocalTrackerRecordSchema = Type.Object(
+    { provider: Type.Literal("local"), createdAt: TimestampSchema },
+    { additionalProperties: false },
+)
+export type LocalTrackerRecord = Static<typeof LocalTrackerRecordSchema>
+
+/** An entity's tracker binding: its tracker item, or none for a local Gig. */
+export const EntityTrackerSchema = Type.Union([...TrackerRecordSchema.anyOf, LocalTrackerRecordSchema])
+export type EntityTracker = TrackerRecord | LocalTrackerRecord
+
+/** The entity's tracker item, for a step that works on it; a local Gig has none. */
+export function requireTrackerItem(tracker: EntityTracker, operation: string): TrackerRecord {
+    switch (tracker.provider) {
+        case "local":
+            throw new Error(`${operation} needs a tracker item, and this Gig is local (it has none)`)
+        case "github":
+        case "linear":
+            return tracker
+    }
+}
+
 export const ForgeRecordSchema = Type.Object(
     {
         provider: Type.Literal("github"),
@@ -166,7 +188,8 @@ export const ForgeRecordSchema = Type.Object(
 )
 export type ForgeRecord = Static<typeof ForgeRecordSchema>
 
-export function trackerReference(record: TrackerRecord | TrackerObject): TrackerReference {
+export function trackerReference(record: EntityTracker | TrackerObject): TrackerReference {
+    if (record.provider === "local") return { provider: "local", createdAt: record.createdAt }
     if (record.provider === "github")
         return {
             provider: "github",
@@ -240,9 +263,14 @@ export function trackerRecordFromObject(
 
 export function assertTrackerRecordInvariants(
     entity: "epic" | "task" | "gig",
-    tracker: TrackerRecord,
+    tracker: EntityTracker,
     fail: (message: string) => never,
 ): void {
+    if (tracker.provider === "local") {
+        // Epics create their Tasks' issues, and Tasks are those issues: only a Gig can be local.
+        if (entity !== "gig") fail(`only a Gig can be local; a ${entity} needs a tracker item`)
+        return
+    }
     if (tracker.provider === "github") {
         const comment = tracker.planComment
         if (comment.state === "published")

@@ -27,6 +27,7 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 | Gig | `preflight_gig` | `init_github_gig` | `init_linear_gig` |
 
 - Preflight runs the local checks and changes nothing. The init tools take the tracker object, newly created or selected for adoption, in `object`.
+- `init_local_gig` starts a Gig with no tracker item ([local Gigs](../skills/gig/SKILL.md#local-gig)). It needs no tracker.
 - `restore_epic` recreates a missing local Epic from its tracker read and published plan; `restore_epic_plan_source` returns an existing Epic's published plan as source without writing ([Epic restore](./epic.md#restore-an-epic)).
 - `accept_epic_tasks` saves an Epic's reviewed Task list as accepted after the user accepts it ([accepted Task list](./epic-tasks.md#accepted-task-list)).
 - `plan_epic_task_issues` reconciles an Epic's accepted Tasks with fresh child-issue facts into native steps, and `record_epic_task_issue` tags a Task with its issue's marker ([Epic Tasks](./epic-tasks.md#task-issue-processing)).
