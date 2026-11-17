@@ -109,11 +109,24 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
   continues the branch from the last persisted entry. So a client that saw the user message live won't find it after
   a crash: the conversation it rebuilds from the file is shorter.
 
-## nono
+## pi's agent directory
 
-- Running `nono run` from inside a nono sandbox fails: nono writes session state to `~/.local/state/nono`, which the
-  `piton` profile doesn't allow. The Piton daemon runs outside any sandbox (launchd), so this only affects running
-  Piton's sandbox mode from a sandboxed agent session. Tests of sandbox mode run on the host.
+What pi 1.5 writes in its agent directory (`PI_CODING_AGENT_DIR`, default `~/.pi/agent`), read from its source: the
+sandbox keeps exactly these writable ("Agent access" in design.md).
+
+- Runtime state: `sessions/`, `auth.json` (provider logins and token refreshes, locked with `proper-lockfile`:
+  `auth.json.lock/`), `models-store.json`, `mcp-auth.json`, `crashes.json`, `mcp.log`.
+- Configuration and code a later pi loads: `settings.json` (written when a setting changes in a session; a failed
+  write is recorded as a settings error and pi keeps running), `trust.json` (whether a folder's `.pi/` extensions,
+  settings, MCP servers, skills, and prompts load), `keybindings.json`, `models.json`, `extensions/`,
+  `skills/`, `prompts/`, `themes/`, `tools/`, `bin/` (managed `fd`, `rg`), `npm/` and `git/` (installed packages),
+  `tmp/` (package installs).
+
+## Sandboxes don't nest
+
+A process in a Seatbelt sandbox can't apply another one (`sandbox_init` fails with "Operation not permitted"). The
+Piton daemon runs outside any sandbox (launchd), so this only affects running Piton's sandbox mode from a sandboxed
+agent session. Tests of sandbox mode run on the host.
 
 ## Not yet verified
 

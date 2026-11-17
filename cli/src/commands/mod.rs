@@ -6,6 +6,7 @@ mod attach;
 mod config;
 mod control;
 mod logging;
+mod sandbox;
 mod sessions;
 mod worker;
 
@@ -48,7 +49,7 @@ enum Cmd {
     Start {
         /// Workspace (default: current directory).
         workspace: Option<PathBuf>,
-        /// Run pi on the host instead of in the nono sandbox.
+        /// Run pi on the host instead of in the sandbox.
         #[usage(long)]
         host: bool,
         /// First prompt to send.
@@ -82,6 +83,18 @@ enum Cmd {
     Config {
         #[usage(subcommand)]
         action: ConfigAction,
+    },
+    /// Show a workspace's sandbox, and why a path is allowed or denied in it.
+    Sandbox {
+        #[usage(subcommand)]
+        action: SandboxAction,
+    },
+    /// Apply the sandbox policy the daemon passes in the environment to this process, then run COMMAND (how the daemon
+    /// starts a sandboxed pi).
+    #[usage(name = "sandbox-exec", hide)]
+    SandboxExec {
+        #[usage(double_dash = "required")]
+        command: Vec<String>,
     },
     /// Check what this host needs (the Mac app's onboarding runs this), and do the steps piton can do itself.
     Setup {
@@ -218,15 +231,33 @@ enum ConfigAction {
         workspace: Option<PathBuf>,
     },
     /// Whether PATH is a protected file of the workspace, as JSON with `protected: true|false`. Every write to one asks
-    /// the user: through the daemon in sessions it launched, in pi itself outside piton. With --seatbelt-rules, prints
-    /// the sandbox rules a launch in the workspace gets instead (one per line; the host check
-    /// cli/tests/probe/protected.sh uses them).
+    /// the user: through the daemon in sessions it launched, in pi itself outside piton. `piton sandbox show` prints
+    /// the sandbox rules that also deny the writes.
     Protected {
-        path: Option<PathBuf>,
+        path: PathBuf,
         #[usage(long)]
         workspace: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommands)]
+enum SandboxAction {
+    /// Print the sandbox a launch in the workspace gets, as JSON: every rule in order, the last match deciding.
+    Show {
         #[usage(long)]
-        seatbelt_rules: bool,
+        workspace: Option<PathBuf>,
+    },
+    /// Whether a sandboxed pi in the workspace may read, write, or connect to PATH, and which rule decides.
+    Why {
+        path: PathBuf,
+        /// Check writing (default: reading).
+        #[usage(long)]
+        write: bool,
+        /// Check connecting to a Unix socket.
+        #[usage(long)]
+        connect: bool,
+        #[usage(long)]
+        workspace: Option<PathBuf>,
     },
 }
 
@@ -274,6 +305,12 @@ pub fn main() -> ExitCode {
     match &cli.command {
         Cmd::Service { action } => return service(action, cli.config_home.as_deref()),
         Cmd::Config { action } => return config::run(action),
+        Cmd::SandboxExec { command } => {
+            let command: Vec<std::ffi::OsString> = command.iter().map(Into::into).collect();
+            let error = crate::launch::sandbox::exec(&command);
+            eprintln!("piton sandbox-exec: {error}");
+            return ExitCode::from(126);
+        }
         Cmd::Completion { shell } => {
             let shell = match shell.as_str() {
                 "bash" => usage_rs::complete::Shell::Bash,
@@ -291,6 +328,7 @@ pub fn main() -> ExitCode {
         | Cmd::Worker { .. }
         | Cmd::State { .. }
         | Cmd::Setup { .. }
+        | Cmd::Sandbox { .. }
         | Cmd::Logging { .. } => {}
     }
     // Setup reports a broken configuration (its configuration step) instead of refusing to start over it.
@@ -304,8 +342,10 @@ pub fn main() -> ExitCode {
         | Cmd::Worker { .. }
         | Cmd::State { .. }
         | Cmd::Logging { .. }
+        | Cmd::Sandbox { .. }
         | Cmd::Service { .. }
         | Cmd::Config { .. }
+        | Cmd::SandboxExec { .. }
         | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
     };
     let config = match loaded {
@@ -338,9 +378,10 @@ pub fn main() -> ExitCode {
 
 async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
     match command {
-        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } => {
+        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } | Cmd::SandboxExec { .. } => {
             unreachable!("handled before the runtime starts")
         }
+        Cmd::Sandbox { action } => sandbox::run(action, &config).await,
         Cmd::Daemon => match crate::daemon::run(config).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

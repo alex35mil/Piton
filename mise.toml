@@ -4,9 +4,9 @@
 rust = { version = "1.99.0", components = "clippy,rustfmt,rust-analyzer,rust-src" }
 xcodegen = "2.46.0"
 
-# In a sandboxed agent worker (PITON_RUNTIME=sandbox, set by the nono profile), SwiftPM and the Swift compiler can't
-# start their own sandboxes (macOS doesn't nest them), so the Swift tasks turn those off: nono already confines the
-# process. On the host the flags are empty and the tools keep their sandboxes. See docs/development.md.
+# In a sandboxed agent worker (PITON_RUNTIME=sandbox, set by the daemon), SwiftPM and the Swift compiler can't
+# start their own sandboxes (macOS doesn't nest them), so the Swift tasks turn those off: Piton's sandbox already
+# confines the process. On the host the flags are empty and the tools keep their sandboxes. See docs/development.md.
 
 # pi package (pi/)
 
@@ -80,6 +80,27 @@ description = "Format Rust sources (pinned nightly rustfmt)"
 dir = "cli"
 depends = ["cli:fmt-toolchain"]
 run = "cargo +nightly-2026-11-13 fmt"
+
+[tasks."cli:nono-policy-check"]
+description = "Compare the vendored nono deny groups with nono-cli's at the nono version in Cargo.lock (needs network)"
+dir = "cli"
+run = '''
+set -euo pipefail
+version=$(awk '/^name = "nono"$/ {getline; gsub(/version = |"/, ""); print; exit}' Cargo.lock)
+vendored=src/launch/sandbox/nono-deny-groups.json
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/nono-policy.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+curl -fsSL "https://static.crates.io/crates/nono-cli/nono-cli-$version.crate" | tar xz -C "$scratch"
+upstream="$scratch/nono-cli-$version/data/policy.json"
+jq --arg v "$version" '{source: {crate: "nono-cli", version: $v, file: "data/policy.json", license: "Apache-2.0", repository: "https://github.com/nolabs-ai/nono"}, groups: (.groups | with_entries(select(.key | startswith("deny_"))))}' "$upstream" > "$scratch/expected.json"
+if diff -u "$vendored" "$scratch/expected.json"; then
+  echo "nono deny groups match nono-cli $version"
+else
+  echo "nono-cli $version changed its deny groups; review the diff, then: cp $scratch/expected.json $vendored" >&2
+  trap - EXIT
+  exit 1
+fi
+'''
 
 [tasks."cli:install"]
 description = "Install the stable piton binary into ~/.cargo/bin and (re)load its launchd agent (host only; ends all sessions)"

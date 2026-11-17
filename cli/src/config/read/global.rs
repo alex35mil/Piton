@@ -170,7 +170,7 @@ mod tests {
         std::fs::create_dir_all(&global).unwrap();
         std::fs::write(
             global.join("config.host.toml"),
-            "socket = \"/tmp/s.sock\"\nroots = [\"~/p\"]\ndefault_attach_mode = \"host\"\nlogging = \"debug\"\n[stop]\ngrace_ms = 5\n[sandbox]\ncommand = [\"/bin/nono\"]\n",
+            "socket = \"/tmp/s.sock\"\nroots = [\"~/p\"]\ndefault_attach_mode = \"host\"\nlogging = \"debug\"\n[stop]\ngrace_ms = 5\n",
         )
         .unwrap();
         std::fs::write(
@@ -181,7 +181,6 @@ mod tests {
         let config = daemon(Some(&global)).unwrap();
         assert_eq!(config.socket, PathBuf::from("/tmp/s.sock"));
         assert_eq!((config.stop.grace_ms, config.stop.term_grace_ms), (5, 7));
-        assert_eq!(config.sandbox.command, ["/bin/nono"]);
         assert_eq!(config.roots, ["~/p"]);
         assert_eq!(config.default_attach_mode, LaunchMode::Host);
         assert_eq!(config.logging.mode, crate::logging::Mode::Debug);

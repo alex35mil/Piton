@@ -167,11 +167,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 ExitCode::from(EXIT_INVALID)
             }
         },
-        ConfigAction::Protected {
-            path,
-            workspace,
-            seatbelt_rules,
-        } => {
+        ConfigAction::Protected { path, workspace } => {
             let dir = workspace
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
@@ -185,25 +181,11 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 source: canonical(workspace.source()),
                 checkout: canonical(&workspace.checkout),
             };
-            match (path, seatbelt_rules) {
-                (_, true) => {
-                    for rule in roots.seatbelt_rules() {
-                        println!("{rule}");
-                    }
-                    ExitCode::SUCCESS
-                }
-                (Some(path), false) => {
-                    let target = crate::agent::canonical_target(&workspace.path.join(path));
-                    let protected = roots.protected_root(&target).is_some();
-                    let output = serde_json::json!({"format": RESOLVE_FORMAT, "path": target, "protected": protected});
-                    println!("{output}");
-                    ExitCode::SUCCESS
-                }
-                (None, false) => {
-                    eprintln!("piton: give a path, or --seatbelt-rules");
-                    ExitCode::from(1)
-                }
-            }
+            let target = crate::agent::canonical_target(&workspace.path.join(path));
+            let protected = roots.protected_root(&target).is_some();
+            let output = serde_json::json!({"format": RESOLVE_FORMAT, "path": target, "protected": protected});
+            println!("{output}");
+            ExitCode::SUCCESS
         }
     }
 }

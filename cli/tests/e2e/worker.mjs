@@ -1,9 +1,10 @@
 // End-to-end tests of `piton worker` and worker-aware sandbox launches, through the daemon.
 // Usage (in cli/): cargo build && node tests/e2e/worker.mjs, or `mise run cli:test`.
 //
-// nono doesn't nest: the sandbox test records the actual argv at a fake `nono` boundary, then execs real pi.
+// Sandboxes don't nest: in a sandboxed session (PITON_RUNTIME=sandbox) the sandboxed launch is checked through
+// `piton sandbox show`, the daemon's own resolver, and the launch itself only on the host.
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, readFileSync, existsSync, lstatSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, readFileSync, existsSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
@@ -32,7 +33,7 @@ function setup() {
     mkdirSync(join(source, ".piton"));
     writeFileSync(
         join(source, ".piton/config.toml"),
-        '[workers]\nskip = ["apps/.build/index-build"]\n[sandbox]\nread = ["/source-grant"]\n',
+        '[workers]\nskip = ["apps/.build/index-build"]\n[sandbox]\nallow = ["/source-grant"]\n',
     );
     git(source, "add", ".");
     git(source, "commit", "-q", "-m", "init");
@@ -41,17 +42,10 @@ function setup() {
     git(source, "remote", "set-head", "origin", "main");
     mkdirSync(join(source, ".piton/.local"), { recursive: true });
     mkdirSync(join(source, "apps/.build/index-build"), { recursive: true });
-    // Fake nono: record the argv and the profile (removed when the session ends), drop everything up to `--`, and
-    // exec the rest (pi).
-    const bin = join(dir, "bin");
-    mkdirSync(bin);
-    writeFileSync(
-        join(bin, "nono"),
-        '#!/bin/sh\nprintf "%s\\n" "$@" > "$PITON_TEST_NONO_ARGS"\ncp "$4" "$PITON_TEST_NONO_ARGS.profile"\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n',
-    );
-    chmodSync(join(bin, "nono"), 0o755);
 
-    const socket = join(dir, "piton.sock");
+    // The daemon's state folder is its socket's: apart from pi's agent directory, which a sandbox may write.
+    mkdirSync(join(dir, "state"));
+    const socket = join(dir, "state/piton.sock");
     const log = join(dir, "piton.log");
     const config = writeConfig(dir, {
         daemon: {
@@ -59,14 +53,13 @@ function setup() {
             log,
             tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
-            sandbox: { command: [join(bin, "nono")] },
             env: { login_shell: false, mise: false },
             stop: { grace_ms: 3000, term_grace_ms: 1000 },
         },
         host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
-        project: { sandbox: { base: "mise-dev", allow: ["/global-grant"] } },
+        project: { sandbox: { presets: ["rust"], allow: ["/global-grant"] } },
     });
-    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_TEST_NONO_ARGS: join(dir, "nono-args") };
+    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
     return { dir, source, log, env };
 }
 
@@ -104,38 +97,45 @@ const tests = {
         // An agent edits its worker's grants to widen its sandbox: ignored.
         writeFileSync(join(worker, ".piton/config.toml"), '[sandbox]\nallow = ["/"]\n');
 
-        // Start a sandboxed session and check the argv nono actually received (not sensitive persistent logging).
+        // The worker's sandbox, as the daemon resolves it: the global and source grants and the source's artifacts,
+        // never the worker's edit; the worker's checkout is the protected `.pi/` root.
+        const shown = await cli(ctx, ["sandbox", "show", "--workspace", worker]);
+        assert.equal(shown.code, 0, shown.err);
+        const rules = JSON.parse(shown.out).policy.rules;
+        const writes = rules.filter((r) => r.effect === "allow" && r.access.includes("write")).map((r) => r.target.path);
+        for (const path of ["/global-grant", "/source-grant", join(ctx.source, ".piton/.local"), worker]) {
+            assert.ok(writes.includes(path), `${path} is writable`);
+        }
+        assert.ok(rules.some((r) => r.source.kind === "preset" && r.source.preset === "rust"), "the global preset");
+        assert.ok(!writes.includes("/"), "the worker's own grants are ignored");
+        const protectedRule = rules.find((r) => r.target.kind === "protected");
+        assert.deepEqual(protectedRule.target, { kind: "protected", source: ctx.source, checkout: worker });
+        const why = await cli(ctx, ["sandbox", "why", "--workspace", worker, "--write", join(worker, ".pi/settings.json")]);
+        assert.equal(why.code, 4, why.out);
+        assert.match(why.out, /protected file/);
+
+        // Start a sandboxed session through this binary's `sandbox-exec`. In a sandboxed session the helper can't
+        // apply a second sandbox, so pi doesn't come up there; on the host it answers.
         const started = await cli(ctx, ["start", worker, "--prompt", "hello"]);
         assert.equal(started.code, 0, started.err);
         await sleep(1500);
         const log = readFileSync(ctx.log, "utf8");
-        const args = readFileSync(ctx.env.PITON_TEST_NONO_ARGS, "utf8").trimEnd().split("\n");
-        assert.deepEqual(args.slice(0, 3), ["run", "-s", "--profile"]);
-        assert.deepEqual(args.slice(4, args.indexOf("--") + 1), ["--allow-cwd", "--"]);
-        // The generated profile: the global and source grants, the source's artifacts, never the worker's edit.
-        const profile = JSON.parse(readFileSync(ctx.env.PITON_TEST_NONO_ARGS + ".profile", "utf8"));
-        assert.equal(profile.extends, "mise-dev");
-        assert.deepEqual(profile.filesystem.allow, ["/global-grant", join(ctx.source, ".piton/.local")]);
-        assert.ok(profile.filesystem.read.includes("/source-grant"));
-        assert.ok(profile.filesystem.read.includes(join(ctx.source, ".piton")), "the chain is readable");
-        assert.ok(!JSON.stringify(profile).includes('"/"'), "the worker's own grants are ignored");
-        // Protected files: the source's .piton/ (not .local/), and .pi/ in the worker's checkout.
-        const rules = profile.unsafe_macos_seatbelt_rules;
-        assert.equal(rules.length, 2, "skills aren't protected");
-        const [configuration, pi] = rules;
-        // Paths are regex literals (a `.` escaped), every protected name in any case.
-        const source = ctx.source.replaceAll(".", "\\.");
-        assert.ok(configuration.includes(`(regex #"^${source}/\\.[pP][iI][tT][oO][nN](/|$)")`), configuration);
-        assert.ok(configuration.includes("(require-not (regex"), configuration);
-        assert.ok(pi.includes("\\.[pP][iI](/|$)"), pi);
-        assert.ok(pi.includes("--"), "the worker's checkout, not the source's");
         assert.ok(log.includes(`worker of ${ctx.source}`), "launch logs the relation");
+        const nested = process.env.PITON_RUNTIME === "sandbox";
 
         const listed = await cli(ctx, ["worker", "ls", "--json"]);
         assert.equal(listed.json.workers.length, 1);
-        assert.equal(listed.json.workers[0].sessions.length, 1, "the worker's live session is listed");
-        // The session says which project it belongs to, for the apps' grouping.
-        assert.deepEqual(listed.json.workers[0].sessions[0].checkout, { kind: "worker", source: ctx.source, name: "fix-x" });
+        if (nested) {
+            assert.match(log, /sandbox-exec: can't apply the sandbox|pi exited/, "the nested launch fails visibly");
+        } else {
+            assert.equal(listed.json.workers[0].sessions.length, 1, "the worker's live session is listed");
+            // The session says which project it belongs to, for the apps' grouping.
+            assert.deepEqual(listed.json.workers[0].sessions[0].checkout, {
+                kind: "worker",
+                source: ctx.source,
+                name: "fix-x",
+            });
+        }
 
         // Leftovers (the worker's own config.toml edit) refuse a delete; --force deletes and stops the session.
         const refused = await cli(ctx, ["worker", "delete", worker, "--json"]);
@@ -143,10 +143,9 @@ const tests = {
         assert.equal(refused.json.refusal.kind, "leftovers");
         const deleted = await cli(ctx, ["worker", "delete", worker, "--force", "--json"]);
         assert.equal(deleted.code, 0, deleted.err);
-        assert.equal(deleted.json.stopped, 1);
+        assert.equal(deleted.json.stopped, nested ? 0 : 1);
         assert.ok(!existsSync(worker));
         assert.ok(existsSync(join(ctx.source, ".piton/.local")), "source's artifacts survive");
-        assert.ok(!existsSync(args[3]), "the generated profile is removed when the session ends");
         const after = await cli(ctx, ["ls", "--json"]);
         assert.equal(after.json.length, 0);
     },

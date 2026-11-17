@@ -618,12 +618,9 @@ mod tests {
             &t.global.join("config.toml"),
             r#"
 [sandbox]
-base = "mise-dev"
-groups = ["git_config"]
+presets = ["rust"]
+expose = ["~/.ssh/config"]
 allow = ["~/.cargo/registry"]
-[sandbox.network]
-open_port = [0]
-profile = false
 
 [permissions]
 deny = ["bash(rm -rf *)"]
@@ -652,7 +649,8 @@ default_mode = "ask"
 [workers]
 skip = ["apps/.build"]
 [sandbox]
-read = ["/r"]
+deny = ["/r"]
+presets = ["swift"]
 [permissions]
 allow = ["read"]
 default_mode = "ask"
@@ -676,11 +674,10 @@ mcp_server = "linear"
         let r = run(&t, &source(repo.clone()), Runtime::Sandbox).unwrap();
         assert!(r.errors().is_empty(), "{:?}", r.errors());
         let s = r.sandbox.as_ref().unwrap();
-        assert_eq!(s.base.as_deref(), Some("mise-dev"));
-        assert_eq!(s.groups, ["git_config"]);
+        assert_eq!(s.presets, [crate::config::Preset::Rust, crate::config::Preset::Swift]);
+        assert_eq!(s.expose, ["~/.ssh/config"]);
         assert_eq!(s.allow, ["~/.cargo/registry", "~/Projects/work/.pi", "/local"]);
-        assert_eq!(s.read, ["/r"]);
-        assert_eq!(s.network.open_port, [0]);
+        assert_eq!(s.deny, ["/r"]);
         assert_eq!(r.workers.as_ref().unwrap().skip, ["apps/.build"]);
 
         // Sandbox runtime: the host table isn't read; the repository's default_mode is nearest.
@@ -747,7 +744,7 @@ mcp_server = "linear"
     fn scope_rules_are_enforced() {
         let t = tree();
         let repo = t.home.join("repo");
-        write(&repo.join(".piton/config.toml"), "[sandbox]\nbase = \"default\"\n");
+        write(&repo.join(".piton/config.toml"), "[sandbox]\nexpose = [\"~/.ssh\"]\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.sandbox, Err(ConfigError::GlobalOnly { .. })));
         assert!(r.permissions.is_ok());
@@ -801,13 +798,13 @@ mcp_server = "linear"
         // A typo in the global [branches] leaves [sandbox] readable, and launches with it.
         write(
             &t.global.join("config.toml"),
-            "[branches]\nformt = 1\n[sandbox]\nread = [\"/g\"]\n",
+            "[branches]\nformt = 1\n[sandbox]\nallow = [\"/g\"]\n",
         );
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.branches, Err(ConfigError::Invalid { .. })));
-        assert_eq!(r.sandbox.as_ref().unwrap().read, ["/g"]);
+        assert_eq!(r.sandbox.as_ref().unwrap().allow, ["/g"]);
         assert_eq!(
-            resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox.read,
+            resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox.allow,
             ["/g"]
         );
         std::fs::remove_file(t.global.join("config.toml")).unwrap();

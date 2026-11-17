@@ -1,0 +1,149 @@
+{
+  "source": {
+    "crate": "nono-cli",
+    "version": "0.82.0",
+    "file": "data/policy.json",
+    "license": "Apache-2.0",
+    "repository": "https://github.com/nolabs-ai/nono"
+  },
+  "groups": {
+    "deny_credentials": {
+      "description": "Block access to cryptographic keys, tokens, and cloud credentials",
+      "required": true,
+      "deny": {
+        "access": [
+          "~/.ssh",
+          "~/.gnupg",
+          "~/.aws",
+          "~/.azure",
+          "~/.config/gcloud",
+          "~/.gcloud",
+          "~/.kube",
+          "~/.docker",
+          "~/.git-credentials",
+          "~/.netrc",
+          "~/.npmrc",
+          "~/.bunfig.toml",
+          "~/.config/bun/bunfig.toml",
+          "~/.vault-token",
+          "~/.credentials",
+          "~/.secrets",
+          "~/.keys",
+          "~/.pki",
+          "~/.terraform.d",
+          "~/.config/op"
+        ]
+      }
+    },
+    "deny_keychains_macos": {
+      "description": "Block access to macOS keychains and password stores",
+      "required": true,
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Keychains",
+          "/Library/Keychains",
+          "~/.password-store",
+          "~/.1password",
+          "~/Library/Group Containers/2BUA8C4S2C.com.1password",
+          "~/Library/Application Support/1Password",
+          "~/Library/Containers/com.1password.1password"
+        ]
+      }
+    },
+    "deny_keychains_linux": {
+      "description": "Block access to Linux keyrings and password stores",
+      "required": true,
+      "platform": "linux",
+      "deny": {
+        "access": [
+          "~/.password-store",
+          "~/.1password",
+          "~/.op",
+          "~/.local/share/keyrings"
+        ]
+      }
+    },
+    "deny_browser_data_macos": {
+      "description": "Block access to macOS browser stored data (cookies, saved passwords, sessions)",
+      "required": true,
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Application Support/Google/Chrome",
+          "~/Library/Application Support/Chromium",
+          "~/Library/Application Support/Firefox",
+          "~/Library/Application Support/Microsoft Edge",
+          "~/Library/Application Support/Arc",
+          "~/Library/Application Support/BraveSoftware",
+          "~/Library/Application Support/Vivaldi",
+          "~/Library/Application Support/com.operasoftware.Opera",
+          "~/Library/Safari"
+        ]
+      }
+    },
+    "deny_browser_data_linux": {
+      "description": "Block access to Linux browser stored data (cookies, saved passwords, sessions)",
+      "required": true,
+      "platform": "linux",
+      "deny": {
+        "access": [
+          "~/.config/google-chrome",
+          "~/.config/chromium",
+          "~/.mozilla/firefox",
+          "~/.config/microsoft-edge",
+          "~/.config/BraveSoftware",
+          "~/.config/vivaldi",
+          "~/.config/opera"
+        ]
+      }
+    },
+    "deny_macos_private": {
+      "description": "Block access to macOS private data (messages, mail, cookies)",
+      "required": true,
+      "platform": "macos",
+      "deny": {
+        "access": [
+          "~/Library/Messages",
+          "~/Library/Mail",
+          "~/Library/Cookies",
+          "~/Library/Containers/com.apple.Safari",
+          "~/Library/Application Support/MobileSync"
+        ]
+      }
+    },
+    "deny_shell_history": {
+      "description": "Block access to shell command history files",
+      "required": true,
+      "deny": {
+        "access": [
+          "~/.bash_history",
+          "~/.zsh_history",
+          "~/.history",
+          "~/.python_history"
+        ]
+      }
+    },
+    "deny_shell_configs": {
+      "description": "Block access to shell configuration files that may embed secrets",
+      "required": true,
+      "deny": {
+        "access": [
+          "~/.zshrc",
+          "~/.zprofile",
+          "~/.zshenv",
+          "~/.zlogin",
+          "~/.zlogout",
+          "~/.bashrc",
+          "~/.bash_profile",
+          "~/.bash_login",
+          "~/.bash_logout",
+          "~/.profile",
+          "~/.config/fish",
+          "~/.env",
+          "~/.envrc"
+        ]
+      }
+    }
+  }
+}

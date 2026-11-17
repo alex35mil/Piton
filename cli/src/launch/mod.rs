@@ -1,7 +1,7 @@
 //! Building pi's environment and command line for a launch.
 
 mod mode;
-mod sandbox;
+pub mod sandbox;
 
 use std::{
     collections::BTreeMap,
@@ -10,7 +10,7 @@ use std::{
 
 use tokio::process::Command;
 
-pub use self::{mode::LaunchMode, sandbox::DEFAULT_BASE as DEFAULT_SANDBOX_BASE};
+pub use self::mode::LaunchMode;
 use crate::{
     config::{ConfigError, DaemonConfig, LaunchConfig},
     project::{self, ProjectError, Workspace},
@@ -26,8 +26,8 @@ pub enum LaunchError {
     Mise { workspace: PathBuf, stderr: String },
     #[error("can't run {program}: {source}")]
     Spawn { program: String, source: std::io::Error },
-    #[error("can't write the sandbox profile in {path}: {source}")]
-    Profile { path: PathBuf, source: std::io::Error },
+    #[error("can't find this piton binary to start the sandbox: {0}")]
+    Helper(std::io::Error),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -160,14 +160,9 @@ async fn mise_env(config: &DaemonConfig, base: &Env, workspace: &Path) -> Result
     Ok(env)
 }
 
-/// The full argument vector for pi in `mode`. `profile` is the generated sandbox profile (see [`write_profile`]),
-/// required for sandboxed launches.
-pub fn command_line(
-    config: &DaemonConfig,
-    mode: LaunchMode,
-    session: &SessionArg,
-    profile: Option<&Path>,
-) -> Vec<String> {
+/// The full argument vector for pi in `mode`. A sandboxed pi starts through `helper sandbox-exec` (this binary), which
+/// applies the policy in [`sandbox::POLICY_ENV`] and then runs pi.
+pub fn command_line(config: &DaemonConfig, mode: LaunchMode, session: &SessionArg, helper: &Path) -> Vec<String> {
     let mut pi: Vec<String> = config.pi.command.clone();
     pi.extend(["--mode".into(), "rpc".into()]);
     pi.extend(config.pi.args.iter().cloned());
@@ -181,59 +176,50 @@ pub fn command_line(
     match mode {
         LaunchMode::Host => pi,
         LaunchMode::Sandbox => {
-            let mut argv = config.sandbox.command.clone();
-            argv.extend(["run".into(), "-s".into(), "--profile".into()]);
-            argv.push(profile.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
-            argv.extend(["--allow-cwd".into(), "--".into()]);
+            let mut argv = vec![
+                helper.to_string_lossy().into_owned(),
+                "sandbox-exec".into(),
+                "--".into(),
+            ];
+            // The helper runs pi with `execvp`, which searches the PATH it was started with: pi's.
             argv.extend(pi);
             argv
         }
     }
 }
 
-/// Writes the launch's sandbox profile (see `sandbox`) to a file of its own (`key`), removed when the session ends
-/// ([`ProfileFile`]). The folder is the daemon's private state, which no sandbox reads; nono reads the profile before
-/// it applies the sandbox.
-/// `base` is the daemon's base environment (the login shell's): `$VAR` grants are expanded from it.
-pub fn write_profile(
+/// This binary: the sandbox helper. In Piton.app it's the bundled `piton`.
+pub fn helper() -> Result<PathBuf, LaunchError> {
+    std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(LaunchError::Helper)
+}
+
+/// The sandbox policy of a launch in `workspace`, with pi's environment `env`.
+pub fn sandbox_policy(
     config: &DaemonConfig,
     resolved: &LaunchConfig,
     base: &Env,
-    key: u64,
-) -> Result<ProfileFile, LaunchError> {
-    let profile = crate::launch::sandbox::profile(resolved, &config.paths.home, base, &config.agent_socket())?;
-    let dir = profiles_dir(config);
-    let write = || -> std::io::Result<PathBuf> {
-        crate::logging::private_dir(&dir)?;
-        let path = dir.join(format!("{key}.json"));
-        std::fs::write(&path, serde_json::to_vec_pretty(&profile).unwrap_or_default())?;
-        Ok(path)
-    };
-    write().map(ProfileFile).map_err(|source| LaunchError::Profile {
-        path: dir.clone(),
-        source,
-    })
-}
-
-/// Where generated profiles are written: next to the daemon's socket (its state folder), outside every sandbox.
-fn profiles_dir(config: &DaemonConfig) -> PathBuf {
-    config.state_dir().join("profiles")
-}
-
-/// A launch's generated sandbox profile; removed when dropped.
-#[derive(Debug)]
-pub struct ProfileFile(PathBuf);
-
-impl ProfileFile {
-    pub fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for ProfileFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+    env: &Env,
+    workspace: &Path,
+) -> Result<sandbox::Policy, LaunchError> {
+    let state = config.state_dir();
+    let agent_socket = config.agent_socket();
+    let logs = crate::logging::root();
+    Ok(sandbox::resolve(
+        resolved,
+        &sandbox::Facts {
+            home: &config.paths.home,
+            base_env: base,
+            launch_env: env,
+            workspace,
+            state_dir: &state,
+            control_socket: &config.socket,
+            agent_socket: &agent_socket,
+            logs: &logs,
+            write_roots: sandbox::WRITE_ROOTS,
+        },
+    )?)
 }
 
 /// Resolves a workspace path the way pi sees its cwd (symlinks resolved), and its relation to its project.
@@ -252,23 +238,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sandbox_wraps_pi_in_nono() {
+    fn sandbox_starts_pi_through_this_binary() {
         let config = DaemonConfig::for_tests();
         let argv = command_line(
             &config,
             LaunchMode::Sandbox,
             &SessionArg::Resume("/s.jsonl".into()),
-            Some(Path::new("/state/profiles/1.json")),
+            Path::new("/app/piton"),
         );
         assert_eq!(
             argv,
             [
-                "nono",
-                "run",
-                "-s",
-                "--profile",
-                "/state/profiles/1.json",
-                "--allow-cwd",
+                "/app/piton",
+                "sandbox-exec",
                 "--",
                 "pi",
                 "--mode",
@@ -306,7 +288,7 @@ mod tests {
     #[test]
     fn host_runs_pi_directly() {
         let config = DaemonConfig::for_tests();
-        let argv = command_line(&config, LaunchMode::Host, &SessionArg::New, None);
+        let argv = command_line(&config, LaunchMode::Host, &SessionArg::New, Path::new("/app/piton"));
         assert_eq!(argv, ["pi", "--mode", "rpc"]);
     }
 

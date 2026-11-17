@@ -286,20 +286,24 @@ pub struct LaunchSpec {
     pub mode: LaunchMode,
     pub session: SessionArg,
     pub env: Env,
-    /// The generated sandbox profile, for sandboxed launches; removed when the session ends.
-    pub profile: Option<launch::ProfileFile>,
+    /// The sandbox, for sandboxed launches: `piton sandbox-exec` reads it from the environment and removes it before
+    /// pi starts.
+    pub policy: Option<launch::sandbox::Policy>,
     /// What this session's protected files are (canonical source and checkout).
     pub protected: crate::agent::ProtectedRoots,
 }
 
 pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
-    let profile = spec.profile;
-    let argv = launch::command_line(
-        &config,
-        spec.mode,
-        &spec.session,
-        profile.as_ref().map(launch::ProfileFile::path),
-    );
+    let helper = launch::helper()?;
+    let argv = launch::command_line(&config, spec.mode, &spec.session, &helper);
+    let mut env = spec.env.clone();
+    if let Some(policy) = &spec.policy {
+        let policy = serde_json::to_string(policy).map_err(|e| LaunchError::Spawn {
+            program: "sandbox policy".into(),
+            source: std::io::Error::other(e),
+        })?;
+        env.insert(launch::sandbox::POLICY_ENV.into(), policy);
+    }
     // Argument values can contain provider credentials; only structural metadata belongs in persistent logs.
     crate::debug!(
         "session {}: launching {:?} with {} arguments",
@@ -308,13 +312,13 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         argv.len()
     );
     let (program, args) = argv.split_first().expect("command line is never empty");
-    // Look the program up in pi's PATH: under launchd the daemon's own PATH doesn't have nono or pi.
+    // Look the program up in pi's PATH: under launchd the daemon's own PATH doesn't have pi.
     let program = &launch::resolve_program(program, &spec.env);
     let mut child = Command::new(program)
         .args(args)
         .current_dir(&spec.workspace.path)
         .env_clear()
-        .envs(&spec.env)
+        .envs(&env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -375,7 +379,6 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         config,
         protected: spec.protected,
         protected_write: None,
-        _profile: profile,
         shared,
         hooks,
         pi_tx: Some(pi_tx),
@@ -461,8 +464,6 @@ struct SessionTask {
     protected: crate::agent::ProtectedRoots,
     /// The protected write waiting for the user: one per session.
     protected_write: Option<PendingWrite>,
-    /// The sandbox profile pi was launched with, removed when the session ends.
-    _profile: Option<launch::ProfileFile>,
     shared: Arc<Mutex<Shared>>,
     hooks: Hooks,
     pi_tx: Option<mpsc::UnboundedSender<String>>,

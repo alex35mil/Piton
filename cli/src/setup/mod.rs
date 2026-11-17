@@ -25,7 +25,7 @@ pub const FORMAT: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
-    /// The tools a host runs: the agent runtime (pi), mise, tailscale, nono.
+    /// The tools a host runs: the agent runtime (pi), mise, tailscale.
     Prerequisites,
     /// The global configuration folder exists, its files are valid, and its `.local` files stay out of Git.
     Configuration,
@@ -129,18 +129,16 @@ enum Tool {
     /// The agent runtime.
     Pi,
     Mise,
-    Nono,
     Tailscale,
 }
 
-const TOOLS: &[Tool] = &[Tool::Pi, Tool::Mise, Tool::Nono, Tool::Tailscale];
+const TOOLS: &[Tool] = &[Tool::Pi, Tool::Mise, Tool::Tailscale];
 
 impl Tool {
     fn name(self) -> &'static str {
         match self {
             Tool::Pi => "pi",
             Tool::Mise => "mise",
-            Tool::Nono => "nono",
             Tool::Tailscale => "tailscale",
         }
     }
@@ -149,7 +147,6 @@ impl Tool {
     fn program(self, config: &DaemonConfig) -> String {
         let configured = match self {
             Tool::Pi => config.pi.command.first().cloned(),
-            Tool::Nono => config.sandbox.command.first().cloned(),
             Tool::Tailscale => Some(config.tailnet.cli.clone()),
             Tool::Mise => None,
         };
@@ -162,7 +159,6 @@ impl Tool {
                 "the agent runtime: `npm install -g @earendil-works/pi-coding-agent` (or `mise use -g npm:@earendil-works/pi-coding-agent`)"
             }
             Tool::Mise => "per-project tool versions: `brew install mise`",
-            Tool::Nono => "the sandbox: `brew install nono` (or `mise use -g nono`)",
             Tool::Tailscale => "remote access for the phone: install Tailscale from tailscale.com and sign in",
         }
     }
@@ -518,7 +514,7 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        for tool in ["pi", "mise", "nono", "tailscale"] {
+        for tool in ["pi", "mise", "tailscale"] {
             let path = bin.join(tool);
             std::fs::write(&path, "#!/bin/sh\n").unwrap();
             use std::os::unix::fs::PermissionsExt;
@@ -624,7 +620,7 @@ mod tests {
         let f = fixture();
         let mut host = host(&f);
         // A missing tool names itself and how to install it.
-        std::fs::remove_file(f.root.join("bin/nono")).unwrap();
+        std::fs::remove_file(f.root.join("bin/mise")).unwrap();
         // The CLI link points to another piton.
         std::fs::create_dir_all(f.root.join(".local/bin")).unwrap();
         std::os::unix::fs::symlink("/elsewhere/piton", &host.link).unwrap();
@@ -647,8 +643,8 @@ mod tests {
         else {
             panic!("{report}")
         };
-        assert!(problems[0].contains("nono"));
-        assert!(instructions[0].starts_with("nono:"));
+        assert!(problems[0].contains("mise"));
+        assert!(instructions[0].starts_with("mise:"));
         assert!(matches!(
             status(&report, Step::Cli),
             Status::Missing {

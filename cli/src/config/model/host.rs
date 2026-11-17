@@ -32,8 +32,9 @@ pub struct HostFile {
     pub keep_awake: Option<bool>,
     #[serde(default, skip_serializing_if = "PiTable::is_empty")]
     pub pi: PiTable,
-    #[serde(default, skip_serializing_if = "SandboxProgram::is_empty")]
-    pub sandbox: SandboxProgram,
+    /// Removed: read only to say so (see `check`).
+    #[serde(default, skip_serializing)]
+    sandbox: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "EnvTable::is_empty")]
     pub env: EnvTable,
     #[serde(default, skip_serializing_if = "StopTable::is_empty")]
@@ -52,16 +53,6 @@ pub struct PiTable {
     pub command: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
-}
-
-/// `[sandbox]` here is only the sandbox program: an option of how the daemon runs. Sandbox policy (grants, the base
-/// profile) is in `config.toml`.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SandboxProgram {
-    /// The sandbox executable and leading arguments.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -116,14 +107,7 @@ macro_rules! is_empty {
         }
     )*};
 }
-is_empty!(
-    PiTable,
-    SandboxProgram,
-    EnvTable,
-    StopTable,
-    TailnetTable,
-    DevelopmentTable
-);
+is_empty!(PiTable, EnvTable, StopTable, TailnetTable, DevelopmentTable);
 
 impl HostFile {
     /// Values the schema accepts but piton can't use.
@@ -131,8 +115,8 @@ impl HostFile {
         if self.pi.command.as_ref().is_some_and(Vec::is_empty) {
             return Err("pi.command must not be empty".into());
         }
-        if self.sandbox.command.as_ref().is_some_and(Vec::is_empty) {
-            return Err("sandbox.command must not be empty".into());
+        if self.sandbox.is_some() {
+            return Err("sandbox.command was removed: Piton applies the sandbox itself and no longer runs nono".into());
         }
         Ok(())
     }
@@ -149,7 +133,7 @@ impl HostFile {
         nearer(&mut self.keep_awake, n.keep_awake);
         nearer(&mut self.pi.command, n.pi.command);
         nearer(&mut self.pi.args, n.pi.args);
-        nearer(&mut self.sandbox.command, n.sandbox.command);
+        nearer(&mut self.sandbox, n.sandbox);
         nearer(&mut self.env.login_shell, n.env.login_shell);
         nearer(&mut self.env.mise, n.env.mise);
         nearer(&mut self.stop.grace_ms, n.stop.grace_ms);
@@ -181,9 +165,8 @@ mod tests {
     fn empty_commands_are_refused() {
         let file: HostFile = toml::from_str("[pi]\ncommand = []\n").unwrap();
         assert!(file.check().is_err());
-        let file: HostFile = toml::from_str("[sandbox]\ncommand = []\n").unwrap();
-        assert!(file.check().is_err());
-        // Sandbox policy isn't here.
-        assert!(toml::from_str::<HostFile>("[sandbox]\nbase = \"x\"\n").is_err());
+        // Piton applies the sandbox itself: the program setting is gone.
+        let file: HostFile = toml::from_str("[sandbox]\ncommand = [\"nono\"]\n").unwrap();
+        assert!(file.check().unwrap_err().contains("no longer runs nono"));
     }
 }

@@ -22,12 +22,10 @@ extension SettingValueType {
         case .text: return .string(trimmed)
         case .integer: return Self.nonNegative(trimmed).map(JSON.integer)
         case .textList: return .array(lines.map(JSON.string))
-        case .integerList:
-            let numbers = lines.compactMap(Self.nonNegative)
-            return numbers.count == lines.count ? .array(numbers.map(JSON.integer)) : nil
-        case .networkProfile: return trimmed == "false" ? .bool(false) : .string(trimmed)
         case .bool: return ["true": JSON.bool(true), "false": .bool(false)][trimmed]
         case .choice(let options): return options.contains(trimmed) ? .string(trimmed) : nil
+        case .choiceList(let options):
+            return lines.allSatisfy(options.contains) ? .array(lines.map(JSON.string)) : nil
         }
     }
 
