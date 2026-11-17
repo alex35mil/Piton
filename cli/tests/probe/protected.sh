@@ -40,10 +40,29 @@ cleanup_real() {
 }
 trap 'cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
 
+# Every check runs in a shell of its own, so helpers are files, not shell functions.
+connect="$scratch/connect.py"
+echo 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' > "$connect"
+# Checks of a real path: "skip" when it doesn't exist (a missing file would fail as if denied), otherwise the given
+# expectation, or the policy's own decision for paths the user's configuration may expose.
+needs() { if [ -e "$1" ] || [ -S "$1" ]; then echo "$2"; else echo skip; fi; }
+policy_says() {
+    if "$piton" sandbox why --workspace "$src" "$1" >/dev/null 2>&1; then echo ok; else echo denied; fi
+}
+ssh_key=$(ls "$HOME"/.ssh/id_* 2>/dev/null | rg -v '\.pub$' | head -n 1 || true)
+keychain="$HOME/Library/Keychains/login.keychain-db"
+expect_ssh_key=$(needs "${ssh_key:-/nonexistent}" denied)
+expect_keychain=$(needs "$keychain" "$(policy_says "$keychain")")
+expect_history=$(needs "$HOME/.zsh_history" denied)
+expect_database=$(needs "$state/piton.db" denied)
+expect_control=$(needs "$state/piton.sock" denied)
+expect_agent=$(needs "$state/agent.sock" ok)
+
 # Each attempt: expectation (ok | denied), a description, and a shell command run in the sandbox from the checkout.
 cat > "$scratch/attempts.sh" <<'EOF'
 attempt() {
     expect=$1; what=$2; shift 2
+    if [ "$expect" = skip ]; then printf '%-5s %-7s %s\n' skip - "$what (not on this Mac)"; return; fi
     # No terminal: a tool that can't write asks before giving up (`rm`: "override rw-r--r--?") and would wait.
     if sh -c "$*" </dev/null >/dev/null 2>"$ERR"; then got=ok; else got=denied; fi
     if [ "$got" = "$expect" ]; then mark=pass; else mark=FAIL; fi
@@ -51,7 +70,6 @@ attempt() {
     # Why a check failed: the command's last error line.
     if [ "$mark" = FAIL ] && [ -s "$ERR" ]; then printf '      %s\n' "$(tail -n 1 "$ERR")"; fi
 }
-connect() { python3 -I -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' "$1"; }
 # Protected files.
 attempt ok     "read a protected file"                  'cat .piton/config.toml'
 attempt denied "overwrite a protected file"             'echo x > .piton/config.toml'
@@ -78,9 +96,10 @@ attempt ok     "swap a parent folder for a symlink"     "mv apps apps.bak && ln 
 # Reads: everything but credentials.
 attempt ok     "read system files"                      'cat /etc/hosts'
 attempt ok     "read git config"                        "test ! -e $HOME/.gitconfig || cat $HOME/.gitconfig"
-attempt denied "read an SSH key"                        "cat $HOME/.ssh/id_*"
-attempt denied "list the keychains' contents"           "cat $HOME/Library/Keychains/login.keychain-db"
-attempt denied "read shell history"                     "cat $HOME/.zsh_history"
+attempt "$EXPECT_SSH_KEY" "read an SSH key"              "cat '$SSH_KEY'"
+# Denied by default; allowed when the configuration exposes the keychains.
+attempt "$EXPECT_KEYCHAIN" "read the login keychain"     "cat $KEYCHAIN"
+attempt "$EXPECT_HISTORY" "read shell history"           "cat $HOME/.zsh_history"
 # Writes outside the workspace.
 attempt ok     "write temp"                             'mktemp'
 # `: >> file` opens a file for writing and writes nothing: denied or not, the file stays as it is.
@@ -92,15 +111,18 @@ attempt ok     "write pi's sessions"                    "mkdir -p $AGENT_DIR/ses
 attempt denied "write the global configuration"         ": >> $CONFIG_HOME/config.toml"
 # The daemon. The socket checks need python3 to run; if it can't, they all read "denied" and prove nothing.
 attempt ok     "run python3 (for the socket checks)"   'python3 -I -c pass'
-attempt denied "read the daemon's database"             "cat $STATE/piton.db"
+attempt "$EXPECT_DATABASE" "read the daemon's database"  "cat $STATE/piton.db"
 attempt ok     "read Piton's logs"                      "ls $STATE/logs"
-attempt denied "connect to the control socket"          "connect $STATE/piton.sock"
-attempt denied "connect to it through a symlink"        "ln -s $STATE/piton.sock ctl.sock && connect ctl.sock"
-attempt ok     "connect to the agent socket"            "connect $STATE/agent.sock"
+attempt "$EXPECT_CONTROL" "connect to the control socket" "python3 -I $CONNECT $STATE/piton.sock"
+attempt "$EXPECT_CONTROL" "connect to it through a symlink" "ln -s $STATE/piton.sock ctl.sock && python3 -I $CONNECT ctl.sock"
+attempt "$EXPECT_AGENT" "connect to the agent socket"    "python3 -I $CONNECT $STATE/agent.sock"
 EOF
 
 cd "$src"
 status=0
+EXPECT_SSH_KEY="$expect_ssh_key" SSH_KEY="$ssh_key" EXPECT_KEYCHAIN="$expect_keychain" KEYCHAIN="$keychain" \
+EXPECT_HISTORY="$expect_history" EXPECT_DATABASE="$expect_database" EXPECT_CONTROL="$expect_control" \
+EXPECT_AGENT="$expect_agent" CONNECT="$connect" \
 OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" CONFIG_HOME="$config_home" PROBE="$probe" ERR="$scratch/err" \
     PITON_SANDBOX_POLICY="$policy" "$piton" sandbox-exec -- sh "$scratch/attempts.sh" </dev/null \
     >"$scratch/out" 2>&1 || status=$?
