@@ -20,7 +20,7 @@ Both hold work that hasn't started. Adding work creates no `.piton` entity, arti
 3. **Draft the intake:** the title, the description, the tracker destination, Backlog or Todo, and a configured Priority or `not set`.
 4. **Entity type.** Require `epic` or `gig` before checking mutation capability.
    - Never queue a Task. To add one, change its Epic's Task list; acceptance creates the Task's issue ([Epic Tasks](./epic-tasks.md#progress-and-replanning)).
-   - Recommend a standalone Gig for independent workflow reports.
+   - Default to a Gig, even for multi-step work; use an Epic only when asked.
 5. **Kind and labels** (when `inspect_integrations` shows `labels.groups`):
    - Reuse the Kind the request states (Epic, or a Deliverable kind); otherwise recommend the best fit, or `not set`.
    - Pick a value for each other group from Project Policies and the request, and ask only when one can't be derived.
