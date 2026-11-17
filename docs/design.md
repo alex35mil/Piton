@@ -168,6 +168,9 @@ with `.piton/.local` linked to the source's.
     this worker, HEAD is detached at `headSha`, the index tree is `indexTree`, and the files on disk equal
     `diskCommit` with nothing untracked.
   - Any edit, untracked file, or staging change is still a leftover. Unpushed commits are reported as usual.
+  - A review in `rebasing`, `rebased`, `committingFixes`, or `committedFixes` is always a leftover. The tools keep
+    HEAD detached, so an unpublished fix commit, rebase result, or rebase in progress is on no branch, and Git
+    status can be clean.
 - **`piton tools`:** prints the registry of tools a repository can configure for itself, as JSON. The registry
   (`project/tools.rs`) covers environment managers (mise, direnv, Nix, devbox), agents (`AGENTS.md`, `.agents/`,
   `.pi/`, `.piton/`), and editors (Neovim, VS Code, Zed, JetBrains). Each entry lists the repository files the tool
