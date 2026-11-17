@@ -1,42 +1,60 @@
-//! The tools a repository can configure for itself: environment managers, agents, and editors. Each declares the
-//! repository files that make it run code or instruct an agent when a shell, editor, or session enters the checkout.
+//! The tools a repository can configure for itself: version control, environment managers, agents, and editors. Each
+//! declares the repository files that make it run code or instruct an agent when a shell, editor, or session enters
+//! the checkout.
 //!
 //! Incoming PR review keeps these files at a trusted revision on disk (the pi package's held paths), so reviewing a
-//! contribution never activates its configuration. `piton tools --json` prints this registry for the pi package.
+//! contribution never activates its configuration. `piton tools` prints this registry for the pi package.
 
 use serde::Serialize;
 
-/// Version of `piton tools --json`. Clients refuse a version they don't know.
+/// Version of `piton tools`. Clients refuse a version they don't know.
 pub const TOOLS_FORMAT: u32 = 1;
 
+/// A tool, by category. Operations that apply to one category take its inner enum, so a tool of another category
+/// can't reach them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "category", content = "tool", rename_all = "snake_case")]
 pub enum ProjectTool {
-    Git,
-    Mise,
-    Direnv,
-    Nix,
-    Devbox,
-    Agents,
-    Pi,
-    Piton,
-    Neovim,
-    VsCode,
-    Zed,
-    JetBrains,
+    /// Chooses which configured helpers (filters, diff and merge drivers) Git runs on the repository's files.
+    Vcs(VcsTool),
+    /// Sets up the shell or session environment, and can run commands while doing it.
+    Environment(EnvironmentTool),
+    /// Instructs or extends an agent.
+    Agent(AgentTool),
+    /// Configures an editor for the project.
+    Editor(EditorTool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolCategory {
-    /// Chooses which configured helpers (filters, diff and merge drivers) Git runs on the repository's files.
-    Vcs,
-    /// Sets up the shell or session environment (and can run commands while doing it).
-    Environment,
-    /// Instructs or extends an agent.
-    Agent,
-    /// Configures an editor for the project.
-    Editor,
+pub enum VcsTool {
+    Git,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentTool {
+    Mise,
+    Direnv,
+    Nix,
+    Devbox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTool {
+    Agents,
+    Pi,
+    Piton,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorTool {
+    Neovim,
+    VsCode,
+    Zed,
+    JetBrains,
 }
 
 /// One configuration location, matched at any depth in the checkout, case-insensitively (APFS is case-insensitive by
@@ -51,37 +69,57 @@ pub enum ConfigPath {
     Directory { path: &'static str },
 }
 
-pub const ALL: [ProjectTool; 12] = [
-    ProjectTool::Git,
-    ProjectTool::Mise,
-    ProjectTool::Direnv,
-    ProjectTool::Nix,
-    ProjectTool::Devbox,
-    ProjectTool::Agents,
-    ProjectTool::Pi,
-    ProjectTool::Piton,
-    ProjectTool::Neovim,
-    ProjectTool::VsCode,
-    ProjectTool::Zed,
-    ProjectTool::JetBrains,
+use ConfigPath::{Directory, File};
+
+pub const VCS_TOOLS: [VcsTool; 1] = [VcsTool::Git];
+pub const ENVIRONMENT_TOOLS: [EnvironmentTool; 4] = [
+    EnvironmentTool::Mise,
+    EnvironmentTool::Direnv,
+    EnvironmentTool::Nix,
+    EnvironmentTool::Devbox,
+];
+pub const AGENT_TOOLS: [AgentTool; 3] = [AgentTool::Agents, AgentTool::Pi, AgentTool::Piton];
+pub const EDITOR_TOOLS: [EditorTool; 4] = [
+    EditorTool::Neovim,
+    EditorTool::VsCode,
+    EditorTool::Zed,
+    EditorTool::JetBrains,
 ];
 
+/// Every tool, category by category.
+pub fn all() -> impl Iterator<Item = ProjectTool> {
+    VCS_TOOLS
+        .into_iter()
+        .map(ProjectTool::Vcs)
+        .chain(ENVIRONMENT_TOOLS.into_iter().map(ProjectTool::Environment))
+        .chain(AGENT_TOOLS.into_iter().map(ProjectTool::Agent))
+        .chain(EDITOR_TOOLS.into_iter().map(ProjectTool::Editor))
+}
+
 impl ProjectTool {
-    pub fn category(self) -> ToolCategory {
+    pub fn config_paths(self) -> &'static [ConfigPath] {
         match self {
-            Self::Git => ToolCategory::Vcs,
-            Self::Mise | Self::Direnv | Self::Nix | Self::Devbox => ToolCategory::Environment,
-            Self::Agents | Self::Pi | Self::Piton => ToolCategory::Agent,
-            Self::Neovim | Self::VsCode | Self::Zed | Self::JetBrains => ToolCategory::Editor,
+            Self::Vcs(tool) => tool.config_paths(),
+            Self::Environment(tool) => tool.config_paths(),
+            Self::Agent(tool) => tool.config_paths(),
+            Self::Editor(tool) => tool.config_paths(),
         }
     }
+}
 
+impl VcsTool {
     pub fn config_paths(self) -> &'static [ConfigPath] {
-        use ConfigPath::{Directory, File};
         match self {
             // A contribution's attributes could select filters and drivers the user configured for other repositories,
             // which then run whenever the user's own Git touches those files.
             Self::Git => &[File { path: ".gitattributes" }],
+        }
+    }
+}
+
+impl EnvironmentTool {
+    pub fn config_paths(self) -> &'static [ConfigPath] {
+        match self {
             Self::Mise => &[
                 File { path: "mise.toml" },
                 File { path: ".mise.toml" },
@@ -114,6 +152,13 @@ impl ProjectTool {
                 File { path: "default.nix" },
             ],
             Self::Devbox => &[File { path: "devbox.json" }, File { path: "devbox.lock" }],
+        }
+    }
+}
+
+impl AgentTool {
+    pub fn config_paths(self) -> &'static [ConfigPath] {
+        match self {
             Self::Agents => &[
                 File { path: "AGENTS.md" },
                 File {
@@ -124,6 +169,13 @@ impl ProjectTool {
             ],
             Self::Pi => &[Directory { path: ".pi" }],
             Self::Piton => &[Directory { path: ".piton" }],
+        }
+    }
+}
+
+impl EditorTool {
+    pub fn config_paths(self) -> &'static [ConfigPath] {
+        match self {
             // `.lazy.lua` is a lazy.nvim plugin spec, loaded as code.
             Self::Neovim => &[
                 File { path: ".nvim.lua" },
@@ -149,10 +201,11 @@ impl ConfigPath {
     }
 }
 
+/// One registry entry: the tool's `category` and `tool` names, its paths, and their pathspecs.
 #[derive(Serialize)]
 pub struct ToolEntry {
+    #[serde(flatten)]
     pub tool: ProjectTool,
-    pub category: ToolCategory,
     pub paths: &'static [ConfigPath],
     pub pathspecs: Vec<String>,
 }
@@ -166,11 +219,9 @@ pub struct Registry {
 pub fn registry() -> Registry {
     Registry {
         format: TOOLS_FORMAT,
-        tools: ALL
-            .iter()
-            .map(|&tool| ToolEntry {
+        tools: all()
+            .map(|tool| ToolEntry {
                 tool,
-                category: tool.category(),
                 paths: tool.config_paths(),
                 pathspecs: tool.config_paths().iter().map(|p| p.pathspec()).collect(),
             })
@@ -184,8 +235,10 @@ mod tests {
 
     #[test]
     fn every_tool_is_listed_once() {
-        for tool in ALL {
-            assert_eq!(ALL.iter().filter(|t| **t == tool).count(), 1);
+        let tools: Vec<ProjectTool> = all().collect();
+        assert_eq!(tools.len(), 12);
+        for tool in &tools {
+            assert_eq!(tools.iter().filter(|t| *t == tool).count(), 1);
             assert!(!tool.config_paths().is_empty(), "{tool:?} declares no paths");
         }
     }
@@ -210,11 +263,7 @@ mod tests {
             std::fs::write(file, "x").unwrap();
         }
         git(&["add", "-A", "-f"]);
-        let specs: Vec<String> = ALL
-            .iter()
-            .flat_map(|t| t.config_paths())
-            .map(|p| p.pathspec())
-            .collect();
+        let specs: Vec<String> = all().flat_map(|t| t.config_paths()).map(|p| p.pathspec()).collect();
         let mut args = vec!["ls-files", "-z", "--"];
         args.extend(specs.iter().map(String::as_str));
         git(&args)
@@ -275,12 +324,14 @@ mod tests {
         let json = serde_json::to_value(registry()).unwrap();
         assert_eq!(json["format"], TOOLS_FORMAT);
         let mise = &json["tools"][1];
-        assert_eq!(mise["tool"], "mise");
         assert_eq!(mise["category"], "environment");
+        assert_eq!(mise["tool"], "mise");
         assert_eq!(
             mise["paths"][0],
             serde_json::json!({"kind": "file", "path": "mise.toml"})
         );
         assert_eq!(mise["pathspecs"][0], ":(glob,icase)**/mise.toml");
+        assert_eq!(json["tools"][11]["category"], "editor");
+        assert_eq!(json["tools"][11]["tool"], "jet_brains");
     }
 }
