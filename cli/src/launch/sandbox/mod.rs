@@ -11,6 +11,8 @@ mod rules;
 
 use std::path::PathBuf;
 
+#[cfg(test)]
+pub use self::rules::{Effect, Rule, Target};
 pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
     policy::{Source, WRITE_ROOTS, nono_version},

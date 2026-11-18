@@ -94,6 +94,8 @@ pub struct ToolsTable {
     #[serde(default, skip_serializing_if = "ToolTable::is_empty")]
     pub mise: ToolTable,
     #[serde(default, skip_serializing_if = "ToolTable::is_empty")]
+    pub fnox: ToolTable,
+    #[serde(default, skip_serializing_if = "ToolTable::is_empty")]
     pub tailscale: ToolTable,
 }
 
@@ -153,7 +155,11 @@ impl HostFile {
         if self.sandbox.is_some() {
             return Err("sandbox.command was removed: Piton applies the sandbox itself and no longer runs nono".into());
         }
-        for (name, tool) in [("mise", &self.tools.mise), ("tailscale", &self.tools.tailscale)] {
+        for (name, tool) in [
+            ("mise", &self.tools.mise),
+            ("fnox", &self.tools.fnox),
+            ("tailscale", &self.tools.tailscale),
+        ] {
             if tool.command.as_ref().is_some_and(Vec::is_empty) {
                 return Err(format!("tools.{name}.command must not be empty"));
             }
@@ -182,6 +188,7 @@ impl HostFile {
         nearer(&mut self.tailnet.heartbeat_ms, n.tailnet.heartbeat_ms);
         nearer(&mut self.tailnet.retry_ms, n.tailnet.retry_ms);
         self.tools.mise.merge(n.tools.mise);
+        self.tools.fnox.merge(n.tools.fnox);
         self.tools.tailscale.merge(n.tools.tailscale);
         nearer(&mut self.development.session_analysis, n.development.session_analysis);
     }

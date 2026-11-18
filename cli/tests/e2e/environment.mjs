@@ -26,7 +26,11 @@ function setup() {
     mkdirSync(guarded);
     mkdirSync(join(dir, "state"));
     const config = writeConfig(dir, {
-        daemon: { socket: join(dir, "state/piton.sock"), env: { login_shell: false, mise: true } },
+        daemon: {
+            socket: join(dir, "state/piton.sock"),
+            env: { login_shell: false },
+            tools: { mise: { enabled: true } },
+        },
         project: { sandbox: { deny: [guarded] } },
     });
     const env = {

@@ -73,6 +73,7 @@ pub struct EnvConfig {
 #[derive(Debug, Clone)]
 pub struct ToolsConfig {
     pub mise: ToolConfig,
+    pub fnox: ToolConfig,
     pub tailscale: ToolConfig,
 }
 
@@ -152,6 +153,7 @@ impl DaemonConfig {
             },
             tools: ToolsConfig {
                 mise: ToolConfig::new(host.tools.mise, "mise"),
+                fnox: ToolConfig::new(host.tools.fnox, "fnox"),
                 tailscale: ToolConfig::new(host.tools.tailscale, "tailscale"),
             },
             logging: LoggingConfig {

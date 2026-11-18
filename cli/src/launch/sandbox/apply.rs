@@ -119,12 +119,22 @@ pub fn exec(command: &[std::ffi::OsString]) -> ApplyError {
         let policy: Policy = serde_json::from_str(&text).map_err(|e| ApplyError::Invalid(e.to_string()))?;
         let caps = capabilities(&policy)?;
         let (program, args) = command.split_first().ok_or(ApplyError::NoCommand)?;
+        // Behind fnox, pi's environment comes from the handoff (fnox itself ran with the daemon's base environment).
+        let handoff = crate::launch::handoff::from_process().map_err(|e| ApplyError::Invalid(e.to_string()))?;
         nono::Sandbox::apply_auto(&caps).map_err(|e| ApplyError::Sandbox(e.to_string()))?;
         use std::os::unix::process::CommandExt;
-        let source = std::process::Command::new(program)
-            .args(args)
-            .env_remove(POLICY_ENV)
-            .exec();
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args);
+        match handoff {
+            Some(env) => {
+                // With the environment replaced, the program is found through pi's PATH.
+                cmd.env_clear().envs(env).env_remove(POLICY_ENV);
+            }
+            None => {
+                cmd.env_remove(POLICY_ENV);
+            }
+        }
+        let source = cmd.exec();
         Err(ApplyError::Exec {
             program: program.to_string_lossy().into_owned(),
             source,

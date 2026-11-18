@@ -84,7 +84,7 @@ async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Res
     let tools = crate::tools::Tools::resolve(config, &base);
     launch::prepare_sandbox(config, &tools, &resolved, &base, &workspace.path)
         .await
-        .map(|(_, resolution)| resolution)
+        .map(|sandboxed| sandboxed.resolution)
         .map_err(|e| e.to_string())
 }
 

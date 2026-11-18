@@ -223,6 +223,15 @@ pub struct View {
     thinking_level: Option<String>,
     queue: Queue,
     state: Option<ViewState>,
+    /// A notice about how this pi started (secrets fnox couldn't read), not part of pi's conversation: it follows the
+    /// history, and comes back after it whenever the list is rebuilt.
+    startup_notice: Option<StartupNotice>,
+}
+
+struct StartupNotice {
+    text: String,
+    /// Its item in the current list, once added.
+    item: Option<ItemId>,
 }
 
 impl View {
@@ -244,6 +253,7 @@ impl View {
             thinking_level: None,
             queue: Queue::default(),
             state: None,
+            startup_notice: None,
         }
     }
 
@@ -383,6 +393,41 @@ impl View {
         });
     }
 
+    /// Sets the startup notice (a warning): changed in place when it's in the list, added at the end otherwise, or
+    /// after the history when a rebuild is in flight.
+    pub fn set_startup_notice(&mut self, text: String) -> Vec<Change> {
+        let item = self.startup_notice.as_ref().and_then(|n| n.item);
+        self.startup_notice = Some(StartupNotice {
+            text: text.clone(),
+            item,
+        });
+        if self.pending_reset.is_some() {
+            return Vec::new();
+        }
+        match item {
+            Some(id) => {
+                if let Some(Item::Notice { text: current, .. }) = self.get_mut(id) {
+                    *current = text;
+                }
+                self.replace(id).into_iter().collect()
+            }
+            None => self.push_startup_notice().into_iter().collect(),
+        }
+    }
+
+    /// Adds the startup notice, when there is one, at the end of the list.
+    fn push_startup_notice(&mut self) -> Option<Change> {
+        let id = self.next();
+        let notice = self.startup_notice.as_mut()?;
+        notice.item = Some(id);
+        let text = notice.text.clone();
+        Some(self.push(Item::Notice {
+            id,
+            level: NoticeLevel::Warning,
+            text,
+        }))
+    }
+
     /// Starts a rebuild: records are held until `finish_reset`.
     pub fn begin_reset(&mut self) {
         if self.pending_reset.is_none() {
@@ -441,6 +486,8 @@ impl View {
                 _ => {}
             }
         }
+        // After the history, before what pi is doing now.
+        self.push_startup_notice();
         for record in live {
             let kind = record
                 .get("type")
@@ -1192,6 +1239,51 @@ mod tests {
         let kinds: Vec<&str> = items.iter().map(|i| i["type"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["user", "assistant", "tool"]);
         assert_eq!(items[2]["status"], "error");
+    }
+
+    /// The startup notice (secrets fnox couldn't read) follows the loaded history, including when fnox's warning
+    /// arrives while the history is still loading, stays after it through later rebuilds, and changes in place.
+    #[test]
+    fn startup_notice_follows_the_history() {
+        let history = entries(vec![
+            json!({"type":"message","id":"e1","parentId":null,"message":{"role":"user","content":"hi","timestamp":1}}),
+        ]);
+        let kinds = |view: &View| -> Vec<String> {
+            view.snapshot(50)["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["type"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let mut view = View::new(1);
+        view.begin_reset();
+        assert!(
+            view.set_startup_notice("one".into()).is_empty(),
+            "waits for the history"
+        );
+        view.finish_reset(&history, &[]);
+        assert_eq!(kinds(&view), ["user", "notice"]);
+        let changes = view.set_startup_notice("two".into());
+        assert!(
+            matches!(&changes[..], [Change::Replace { item: Item::Notice { text, level: NoticeLevel::Warning, .. } }] if text == "two")
+        );
+        view.begin_reset();
+        view.finish_reset(&history, &[]);
+        assert_eq!(kinds(&view), ["user", "notice"]);
+        assert_eq!(view.snapshot(50)["items"][1]["text"], "two");
+        // After the history is loaded: appended at the end.
+        let mut view = View::new(1);
+        view.begin_reset();
+        view.finish_reset(&history, &[]);
+        let changes = view.set_startup_notice("late".into());
+        assert!(matches!(
+            &changes[..],
+            [Change::Append {
+                item: Item::Notice { .. }
+            }]
+        ));
+        assert_eq!(kinds(&view), ["user", "notice"]);
     }
 
     /// Compaction as pi 1.3.0 reports it (docs/pi-findings.md): a failure is a notice with pi's own message; a success

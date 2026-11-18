@@ -97,6 +97,12 @@ attempt denied "write .PITON/ (another case)"           'echo x > .PITON/config.
 # pi locks .pi/settings.json to read it: the lock folder alone is writable.
 attempt ok     "take and drop the project settings lock" 'mkdir apps/.pi/settings.json.lock && touch apps/.pi/settings.json.lock && rmdir apps/.pi/settings.json.lock'
 attempt denied "write inside the settings lock"         'mkdir apps/.pi/settings.json.lock && echo x > apps/.pi/settings.json.lock/f'
+# fnox's config files, at any depth and in any case: which secrets go where.
+attempt denied "create fnox.toml"                       'echo x > fnox.toml'
+attempt denied "create .config/fnox.local.toml"         'mkdir -p .config && echo x > .config/fnox.local.toml'
+attempt denied "create a profile's fnox file deeper"    'echo x > apps/sub/.fnox.dev.toml'
+attempt denied "write FNOX.TOML (another case)"         'echo x > FNOX.TOML'
+attempt ok     "write a file named like fnox but not"   'echo x > fnox.toml.bak && echo y > myfnox.toml'
 attempt ok     "write workflow artifacts"               'echo z > .piton/.local/x'
 attempt ok     "write .piton/.LOCAL (another case)"     'echo z > .piton/.LOCAL/y'
 attempt ok     "write a source file"                    'echo w > src/a.rs'

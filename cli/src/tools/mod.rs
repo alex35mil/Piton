@@ -1,4 +1,4 @@
-//! The external tools piton runs (mise, tailscale), and whether each is used.
+//! The external tools piton runs (mise, fnox, tailscale), and whether each is used.
 //!
 //! One rule for every tool: unset in `[tools.<name>]`, it's used when it's installed and off otherwise; `enabled =
 //! false` turns it off; `enabled = true` uses it, and when it isn't installed it's never run: the Settings list warns
@@ -20,16 +20,20 @@ use crate::{
 pub enum Tool {
     /// Per-project tool versions and environments: `mise env` for every launch, trust for workers.
     Mise,
+    /// The credential proxy every launch starts behind (experimental): pi holds placeholders, fnox puts the real secrets
+    /// into the requests its rules allow.
+    Fnox,
     /// Remote access: identifies this Mac and the devices that connect over the tailnet.
     Tailscale,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 2] = [Tool::Mise, Tool::Tailscale];
+    pub const ALL: [Tool; 3] = [Tool::Mise, Tool::Fnox, Tool::Tailscale];
 
     pub fn name(self) -> &'static str {
         match self {
             Tool::Mise => "mise",
+            Tool::Fnox => "fnox",
             Tool::Tailscale => "tailscale",
         }
     }
@@ -38,6 +42,7 @@ impl Tool {
     pub fn purpose(self) -> &'static str {
         match self {
             Tool::Mise => "per-project tool versions and environments",
+            Tool::Fnox => "a credential proxy, so pi holds placeholders instead of secrets (experimental)",
             Tool::Tailscale => "remote access for the phone",
         }
     }
@@ -45,6 +50,7 @@ impl Tool {
     pub fn install(self) -> &'static str {
         match self {
             Tool::Mise => "`brew install mise`",
+            Tool::Fnox => "`mise use -g fnox`",
             Tool::Tailscale => "install Tailscale from tailscale.com and sign in",
         }
     }
@@ -52,6 +58,7 @@ impl Tool {
     fn config(self, config: &DaemonConfig) -> &ToolConfig {
         match self {
             Tool::Mise => &config.tools.mise,
+            Tool::Fnox => &config.tools.fnox,
             Tool::Tailscale => &config.tools.tailscale,
         }
     }
@@ -143,6 +150,7 @@ pub fn resolve(tool: Tool, config: &DaemonConfig, env: &Env) -> ToolState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tools {
     pub mise: ToolState,
+    pub fnox: ToolState,
     pub tailscale: ToolState,
 }
 
@@ -150,6 +158,7 @@ impl Tools {
     pub fn resolve(config: &DaemonConfig, env: &Env) -> Self {
         Self {
             mise: resolve(Tool::Mise, config, env),
+            fnox: resolve(Tool::Fnox, config, env),
             tailscale: resolve(Tool::Tailscale, config, env),
         }
     }
@@ -157,6 +166,7 @@ impl Tools {
     pub fn get(&self, tool: Tool) -> &ToolState {
         match tool {
             Tool::Mise => &self.mise,
+            Tool::Fnox => &self.fnox,
             Tool::Tailscale => &self.tailscale,
         }
     }

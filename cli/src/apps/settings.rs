@@ -128,6 +128,8 @@ pub static CATALOG: &[Entry] = &[
     // Unset (`null`): used when installed. See `crate::tools`.
     host("tools.mise.enabled", Bool, Restart, null),
     host("tools.mise.command", TextList, Restart, |c| json!(c.tools.mise.command)),
+    host("tools.fnox.enabled", Bool, Restart, null),
+    host("tools.fnox.command", TextList, Restart, |c| json!(c.tools.fnox.command)),
     host("tools.tailscale.enabled", Bool, Restart, null),
     host("tools.tailscale.command", TextList, Restart, |c| {
         json!(c.tools.tailscale.command)
@@ -312,6 +314,7 @@ fn tool_warnings(tools: &crate::tools::Tools) -> BTreeMap<Id, String> {
         .filter_map(|&tool| {
             let key = match tool {
                 Tool::Mise => "tools.mise.enabled",
+                Tool::Fnox => "tools.fnox.enabled",
                 Tool::Tailscale => "tools.tailscale.enabled",
             };
             match tools.get(tool) {
@@ -461,6 +464,7 @@ mod tests {
         use crate::tools::{OffReason, ToolState};
         crate::tools::Tools {
             mise: ToolState::Off(OffReason::Disabled),
+            fnox: ToolState::Off(OffReason::Disabled),
             tailscale: ToolState::Off(OffReason::Disabled),
         }
     }

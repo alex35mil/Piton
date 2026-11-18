@@ -1,7 +1,9 @@
 //! Building pi's environment and command line for a launch.
 
 pub mod env;
+pub mod fnox;
 pub mod git;
+pub mod handoff;
 mod mode;
 pub mod sandbox;
 
@@ -52,6 +54,8 @@ pub enum LaunchError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Sandbox(#[from] crate::launch::sandbox::SandboxError),
+    #[error(transparent)]
+    Fnox(#[from] fnox::FnoxError),
 }
 
 /// Which session pi starts with.
@@ -114,10 +118,17 @@ fn parse_env0(bytes: &[u8]) -> Env {
         .collect()
 }
 
-/// A launch whose environment and, for a sandboxed one, policy are resolved.
+/// A launch whose environment, credential proxy, and, for a sandboxed one, policy are resolved.
 pub enum Prepared {
-    Host { env: Env },
-    Sandbox { env: Env, resolution: sandbox::Resolution },
+    Host { env: Env, proxy: Option<fnox::Proxy> },
+    Sandbox(Sandboxed),
+}
+
+/// A sandboxed launch's environment and policy, and the credential proxy it starts behind, checked against the policy.
+pub struct Sandboxed {
+    pub env: Env,
+    pub resolution: sandbox::Resolution,
+    pub proxy: Option<fnox::Proxy>,
 }
 
 /// Builds a launch in `workspace` in `mode`.
@@ -130,14 +141,28 @@ pub async fn prepare(
     mode: LaunchMode,
 ) -> Result<Prepared, LaunchError> {
     Ok(match mode {
-        LaunchMode::Host => Prepared::Host {
-            env: host_env(config, tools, base, workspace).await?,
-        },
-        LaunchMode::Sandbox => {
-            let (env, resolution) = prepare_sandbox(config, tools, resolved, base, workspace).await?;
-            Prepared::Sandbox { env, resolution }
+        LaunchMode::Host => {
+            let mut env = host_env(config, tools, base, workspace).await?;
+            let proxy = proxy_for(tools, base, workspace, &mut env).await?;
+            Prepared::Host { env, proxy }
         }
+        LaunchMode::Sandbox => Prepared::Sandbox(prepare_sandbox(config, tools, resolved, base, workspace).await?),
     })
+}
+
+/// The credential proxy for a launch in `workspace`, when fnox is used and a `[proxy]` applies there; pi's `FNOX_*`
+/// variables then come from the daemon's base environment only.
+async fn proxy_for(
+    tools: &crate::tools::Tools,
+    base: &Env,
+    workspace: &Path,
+    env: &mut Env,
+) -> Result<Option<fnox::Proxy>, LaunchError> {
+    let Some(program) = tools.fnox.optional()? else {
+        return Ok(None);
+    };
+    fnox::strip_workspace_variables(env, base);
+    Ok(fnox::prepare(program, base, workspace).await?)
 }
 
 /// pi's environment for a host launch in `workspace`: the base environment and the environment tools' for that folder,
@@ -154,15 +179,16 @@ async fn host_env(
 
 /// A sandboxed launch's environment and policy. The environment tools run inside the sandbox, under the launch's
 /// policy with the host's agent directory (none of their values yet); the launch's policy is then resolved from their
-/// environment, which accepts a widening value only from a file the agent can't write.
+/// environment, which accepts a widening value only from a file the agent can't write. A credential proxy is refused
+/// when the policy lets the sandbox change what fnox loads or read the keychain.
 pub async fn prepare_sandbox(
     config: &DaemonConfig,
-    tools: &crate::tools::Tools,
+    all_tools: &crate::tools::Tools,
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
-) -> Result<(Env, sandbox::Resolution), LaunchError> {
-    let tools = env::enabled(tools)?;
+) -> Result<Sandboxed, LaunchError> {
+    let tools = env::enabled(all_tools)?;
     let bootstrap = sandbox_policy(config, resolved, base, &env::SandboxEnv::daemon(base), workspace)?;
     let launch_env = match tools.is_empty() {
         true => env::SandboxEnv::daemon(base),
@@ -179,10 +205,12 @@ pub async fn prepare_sandbox(
         }
     };
     let resolution = sandbox_policy(config, resolved, base, &launch_env, workspace)?;
-    Ok((
-        with_piton_vars(config, launch_env.into_env(), LaunchMode::Sandbox),
-        resolution,
-    ))
+    let mut env = with_piton_vars(config, launch_env.into_env(), LaunchMode::Sandbox);
+    let proxy = proxy_for(all_tools, base, workspace, &mut env).await?;
+    if let Some(proxy) = &proxy {
+        proxy.check_sandbox(&resolution.policy, &config.paths.home)?;
+    }
+    Ok(Sandboxed { env, resolution, proxy })
 }
 
 /// What Piton decides, set last so a repository's environment can't override it: the runtime (which permissions

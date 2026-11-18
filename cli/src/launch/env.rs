@@ -403,6 +403,7 @@ mod tests {
         };
         let tools = |mise: ToolState| Tools {
             mise,
+            fnox: ToolState::Off(OffReason::Disabled),
             tailscale: ToolState::Off(OffReason::Disabled),
         };
         assert_eq!(

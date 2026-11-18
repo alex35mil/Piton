@@ -34,10 +34,12 @@ impl SourceGit {
             relation: Relation::Source,
         };
         let resolved = resolve_config(config, &workspace)?;
-        let (env, resolution) = prepare_sandbox(config, tools, &resolved, base, source).await?;
+        // A credential proxy that applies here is checked against this sandbox too (no keychain, no writable fnox
+        // files), so the user's hooks don't run where launches are refused. Git itself doesn't run behind the proxy.
+        let sandboxed = prepare_sandbox(config, tools, &resolved, base, source).await?;
         Ok(Self {
-            env,
-            policy: resolution.policy,
+            env: sandboxed.env,
+            policy: sandboxed.resolution.policy,
             containment: containment(),
             helper: helper()?,
         })

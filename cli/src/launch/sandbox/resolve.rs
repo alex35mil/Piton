@@ -1298,4 +1298,49 @@ mod tests {
         let r = resolve_env(&f, &sub, &Env::new(), &env).unwrap();
         assert!(allowed(&r.policy, &sub.join("agent/auth.json"), Access::Write));
     }
+
+    /// A launch behind fnox: the built-in policy passes its checks; a sandbox that can read the keychain or change a
+    /// fnox file doesn't (`launch/fnox.rs`).
+    #[test]
+    fn fnox_checks_against_resolved_policies() {
+        use crate::{
+            launch::fnox::{FnoxError, Proxy},
+            tools::Program,
+        };
+        let proxy = |files: Vec<PathBuf>| Proxy {
+            program: Program {
+                program: "fnox".into(),
+                args: vec![],
+            },
+            files,
+            env: Env::new(),
+        };
+        let f = fixture("", "");
+        let global = f.home.join(".config/fnox/config.toml");
+        let built_in = policy(&f);
+        assert!(proxy(vec![global.clone()]).check_sandbox(&built_in, &f.home).is_ok());
+        // An import of an ordinary workspace file.
+        let imported = f.repo.join("config/secrets.toml");
+        assert!(matches!(
+            proxy(vec![global.clone(), imported]).check_sandbox(&built_in, &f.home),
+            Err(FnoxError::WritableConfig { .. })
+        ));
+        // The workspace's own fnox file is protected.
+        assert!(
+            proxy(vec![f.repo.join("fnox.toml")])
+                .check_sandbox(&built_in, &f.home)
+                .is_ok()
+        );
+        let exposed = fixture("[sandbox]\nexpose = [\"~/Library/Keychains\"]\n", "");
+        assert!(matches!(
+            proxy(vec![]).check_sandbox(&policy(&exposed), &exposed.home),
+            Err(FnoxError::Keychain)
+        ));
+        // Exposing the whole Library opens the keychains too.
+        let library = fixture("[sandbox]\nexpose = [\"~/Library\"]\n", "");
+        assert!(matches!(
+            proxy(vec![]).check_sandbox(&policy(&library), &library.home),
+            Err(FnoxError::Keychain)
+        ));
+    }
 }

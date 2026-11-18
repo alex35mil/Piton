@@ -401,13 +401,13 @@ impl Daemon {
         prepared: launch::Prepared,
         launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
-        let (mode, mut env, policy) = match prepared {
-            launch::Prepared::Host { env } => (LaunchMode::Host, env, None),
-            launch::Prepared::Sandbox { env, resolution } => {
+        let (mode, mut env, policy, proxy) = match prepared {
+            launch::Prepared::Host { env, proxy } => (LaunchMode::Host, env, None, proxy),
+            launch::Prepared::Sandbox(launch::Sandboxed { env, resolution, proxy }) => {
                 for link in &resolution.links {
                     crate::log!("sandbox in {}: {link}", workspace.path.display());
                 }
-                (LaunchMode::Sandbox, env, Some(resolution.policy))
+                (LaunchMode::Sandbox, env, Some(resolution.policy), proxy)
             }
         };
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
@@ -451,6 +451,7 @@ impl Daemon {
             env,
             policy,
             protected,
+            proxy,
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),
