@@ -9,7 +9,7 @@ import * as path from "node:path"
 import { describe, it } from "node:test"
 import { createEventBus, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
+import { prepareArtifactPersistence, PROJECT_POLICY_PRECEDENCE } from "../workflows/extensions/__lib/project-config.ts"
 import { buildReviewerArgs, renderReviewTranscript } from "../workflows/extensions/review/agent.ts"
 import {
     parseReviewReport,
@@ -860,8 +860,7 @@ describe("workflow reviewer isolation", () => {
             })
             assert.ok(deliverablePrompt.includes(policies))
             for (const reviewPrompt of [prompt, deliverablePrompt]) {
-                assert.match(reviewPrompt, /user decisions override Project Policies/)
-                assert.match(reviewPrompt, /Project Policies override reusable workflow skills and references/)
+                assert.ok(reviewPrompt.includes(PROJECT_POLICY_PRECEDENCE))
                 // Every entity reviewer launches with git_read, so every entity prompt names it.
                 assert.match(reviewPrompt, /git_read/)
                 // Both reviewers use the same two severities.

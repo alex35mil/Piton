@@ -12,6 +12,7 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent"
 import registerPermission from "../extensions/permissions/index.ts"
 import registerRules from "../extensions/rules/index.ts"
 import registerIntegrations from "../workflows/extensions/integrations/index.ts"
+import { PROJECT_POLICY_PRECEDENCE } from "../workflows/extensions/__lib/project-config.ts"
 import { WORKFLOW_CONTEXT } from "../workflows/extensions/integrations/workflow-context.ts"
 import { answer, call, failure, nativeSessionFixture, requestText } from "./native-session-fixture.ts"
 
@@ -105,6 +106,62 @@ describe("native rules model delivery", () => {
                             break
                         case "absent":
                             assert.doesNotMatch(text, /<workflows>/)
+                            break
+                    }
+                    return answer("Done")
+                })
+                await h.prompt("What should I know?")
+            } finally {
+                await h.cleanup()
+            }
+        })
+
+    const policy = "Fixture policy: the AGENTS.md setup doesn't apply to Piton workflows."
+    for (const policies of ["present", "absent", "unreadable", "without integrations"] as const)
+        it(`sends Project Policies with their precedence when they are ${policies}`, async () => {
+            const h = await nativeSessionFixture({
+                extensions: [...extensions, registerIntegrations],
+                setup(root) {
+                    setup(root)
+                    if (policies !== "without integrations") writeConfig(root, { tracker: {} })
+                    const file = path.join(root, ".piton/policies.md")
+                    fs.mkdirSync(path.dirname(file), { recursive: true })
+                    switch (policies) {
+                        case "present":
+                        case "without integrations":
+                            fs.writeFileSync(file, `${policy}\n`)
+                            break
+                        case "unreadable":
+                            // A directory in place of the file fails only the policies part.
+                            fs.mkdirSync(file)
+                            break
+                        case "absent":
+                            break
+                    }
+                },
+                tools: ["read", "codemode"],
+            })
+            try {
+                h.respond((context) => {
+                    const system = getCurrentSystemMessage(context.messages)
+                    assert.ok(system, "the request has a system message")
+                    const text = getSystemMessageText(system)
+                    switch (policies) {
+                        case "present":
+                            assert.ok(text.includes(`<project_policies>\n${PROJECT_POLICY_PRECEDENCE}\n\n${policy}\n`))
+                            assert.ok(text.includes(`<workflows>\n${WORKFLOW_CONTEXT}\n</workflows>`))
+                            break
+                        case "unreadable":
+                            // A broken file never silently drops the policies; the reason comes with the precedence.
+                            assert.match(
+                                text,
+                                /<project_policies>\n[^<]*can't be read; tell the user[^<]*policies\.md[^<]*<\/project_policies>/,
+                            )
+                            assert.ok(text.includes(`<project_policies>\n${PROJECT_POLICY_PRECEDENCE}`))
+                            break
+                        case "absent":
+                        case "without integrations":
+                            assert.doesNotMatch(text, /<project_policies>/)
                             break
                     }
                     return answer("Done")

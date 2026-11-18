@@ -40,4 +40,4 @@ Ask the user only for clarifications and decisions. Do everything else and repor
 - Sending or editing a message to people, such as an issue, PR, review, or Linear comment, body, description, document, or status update, needs approval of its text and destination. When sending one, read [sending messages](./communication.md#sending-messages).
 - Workflow publications need no approval: the intake tracker item, the plan and its plan-update notes, and the PR body rendered from the result.
 - Discovering a tool, preparing arguments, or a passing review grants no approval.
-- Current explicit user instructions override `.piton/policies.md`, which overrides these reusable workflow files.
+- Precedence: the user's current instructions, `.piton/policies.md`, context files (`AGENTS.md`), these workflow files.

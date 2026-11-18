@@ -134,13 +134,48 @@ export function developmentCheckout(): string {
 }
 
 /**
- * Project Policies: every `policies.md` in piton's configuration chain, farthest (global) first, each under a heading
- * naming its file; nearer parts take precedence where they conflict. Empty when there are none.
+ * Where Project Policies rank for workflow behavior, for the session prompt and the reviewers alike. pi puts
+ * repository context files such as `AGENTS.md` in the system prompt, so the order has to name them.
  */
+export const PROJECT_POLICY_PRECEDENCE =
+    "For workflow behavior, the user's explicit decisions come first, then Project Policies (`policies.md`), then repository context files (`AGENTS.md` and equivalents), then the reusable workflow skills and references. When a Project Policy conflicts with a context file, the policy wins: follow it, and never propose editing the context file to resolve the conflict."
+
+/** The resolved Project Policies: their combined text, none, or why they can't be read. */
+export type ProjectPolicies =
+    | { kind: "present"; text: string }
+    | { kind: "absent" }
+    | { kind: "unreadable"; error: string }
+
+/**
+ * Project Policies: every `policies.md` in piton's configuration chain, farthest (global) first, each under a heading
+ * naming its file when there are several; nearer parts take precedence where they conflict.
+ */
+export function loadProjectPolicies(cwd: string): ProjectPolicies {
+    let policies: { path: string; value: string }[]
+    try {
+        policies = section(resolveSettings(cwd).policies).filter((policy) => policy.value.trim().length > 0)
+    } catch (error) {
+        return { kind: "unreadable", error: error instanceof Error ? error.message : String(error) }
+    }
+    if (policies.length === 0) return { kind: "absent" }
+    if (policies.length === 1) return { kind: "present", text: policies[0]!.value }
+    return {
+        kind: "present",
+        text: policies.map((policy) => `## From ${policy.path}\n\n${policy.value.trim()}`).join("\n\n"),
+    }
+}
+
+/** Project Policies as text for a reviewer: empty when there are none; throws when they can't be read. */
 export function readProjectPolicies(cwd: string): string {
-    const policies = section(resolveSettings(cwd).policies).filter((policy) => policy.value.trim().length > 0)
-    if (policies.length === 1) return policies[0]!.value
-    return policies.map((policy) => `## From ${policy.path}\n\n${policy.value.trim()}`).join("\n\n")
+    const policies = loadProjectPolicies(cwd)
+    switch (policies.kind) {
+        case "present":
+            return policies.text
+        case "absent":
+            return ""
+        case "unreadable":
+            throw new Error(policies.error)
+    }
 }
 
 /** The repository whose `.piton/` holds the workflow artifacts: the source checkout (a worker links to it). */

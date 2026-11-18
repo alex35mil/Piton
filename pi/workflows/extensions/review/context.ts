@@ -1,9 +1,11 @@
 import * as fs from "node:fs"
 
+import { PROJECT_POLICY_PRECEDENCE } from "../__lib/project-config.js"
+
 export const MAX_EMBEDDED_FILE_BYTES = 80 * 1024
 export const REVIEW_AUTHORITY_INSTRUCTIONS = [
     "The shared permission extension enforces the same project and global permission settings as the parent agent.",
-    "Within workflow guidance, established user decisions override Project Policies, and Project Policies override reusable workflow skills and references.",
+    PROJECT_POLICY_PRECEDENCE,
 ] as const
 
 // Entity reviewers launch with the read-only `git_read` tool (see `git-read.ts`).
