@@ -276,6 +276,7 @@ describe("managed Linear plan documents", () => {
                     tools,
                 )
                 assert.equal(context.state, "enabled")
+                assert.ok(context.projection)
                 assert.match(context.projection.rendering, /tracker_publication/)
                 readEntityStatus(path.join(f.root, f.directory))
             } finally {
@@ -624,7 +625,9 @@ describe("managed Linear plan documents", () => {
             write({ state: "pending", fingerprint })
             assert.throws(() => readEntityStatus(path.join(f.root, f.directory)), /requires a published plan/)
             write({ state: "published", id: documentId, url })
-            assert.deepEqual(readEntityStatus(path.join(f.root, f.directory)).tracker.planAnnouncement, pending)
+            const saved = readEntityStatus(path.join(f.root, f.directory)).tracker
+            assert.ok(saved.provider === "linear")
+            assert.deepEqual(saved.planAnnouncement, pending)
         } finally {
             f.dispose()
         }

@@ -21,8 +21,8 @@ import {
 import { assertAcceptedTaskList } from "../__lib/epic-acceptance.js"
 import { type EpicTask, readEpicTasks, tagEpicTask } from "../__lib/epic-tasks.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
-import { assertConfiguredPriority, loadIntegrationConfig, type TrackerConfig } from "./config.js"
-import { assertEntityEnvironment, resolveWorkflowEnvironment } from "./policy.js"
+import { assertConfiguredPriority, loadIntegrationRoles, requireTracker, type TrackerConfig } from "./config.js"
+import { assertEntityTracker } from "./policy.js"
 import { linearPriorityNumber } from "./records.js"
 import { completeSelection, LabelSelectionFailure, selectedLabelNames } from "./label-selection.js"
 import { EvidenceSchema } from "./resource-id-tool.js"
@@ -115,16 +115,16 @@ interface Context {
 function context(cwd: string, entityDir: string, tools: McpToolCatalog): Context {
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
-    const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
+    const tracker = requireTracker(loadIntegrationRoles(root), "Task issue processing")
     const directory = resolveEntityDirectory(root, cwd, entityDir)
     const status = readEntityStatus(directory)
     if (status.entity !== "epic") throw new Error("Task issue processing requires an Epic")
-    assertEntityEnvironment(status, environment)
+    assertEntityTracker(status, tracker)
     const epicPath = path.join(directory, "epic.md")
     if (!fs.existsSync(epicPath)) throw new Error("Epic has no epic.md")
     // Only an accepted Task list creates, links, or cancels issues.
     assertAcceptedTaskList(status, fs.readFileSync(epicPath, "utf-8"))
-    return { root, directory, status, tracker: environment.tracker, tools }
+    return { root, directory, status, tracker, tools }
 }
 
 // Reconciles the whole accepted plan against fresh tracker facts. It keeps no saved

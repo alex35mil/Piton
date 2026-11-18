@@ -6,7 +6,7 @@ import type { EntityType } from "../__lib/domain.js"
 import type { EntityStatus } from "../__lib/entity.js"
 import type { GitHubPhaseField, LinearTracker, TrackerConfig } from "./config.js"
 import type { LinearPhaseGroup, LinearPhaseGroups } from "./labels.js"
-import { assertEntityEnvironment, type WorkflowEnvironment } from "./policy.js"
+import { assertEntityTracker } from "./policy.js"
 
 const NameSchema = Type.String({ minLength: 1 })
 const NullableNameSchema = Type.Union([NameSchema, Type.Null()])
@@ -142,17 +142,11 @@ export function requirePhase(tracker: TrackerConfig): PhaseRepresentation {
     }
 }
 
-export function setWorkflowPhase(status: EntityStatus, environment: WorkflowEnvironment, input: SetWorkflowPhaseInput) {
+export function setWorkflowPhase(status: EntityStatus, tracker: TrackerConfig, input: SetWorkflowPhaseInput) {
     parse(SetWorkflowPhaseValidator, input)
-    assertEntityEnvironment(status, environment)
+    assertEntityTracker(status, tracker)
     if (input.lifecycle !== "inProgress") throw new Error("setting workflow Phase requires fresh native In Progress")
-    const phaseMutation = planPhaseMutation(
-        environment.tracker,
-        status.entity,
-        input.phase,
-        input.lifecycle,
-        input.native,
-    )
+    const phaseMutation = planPhaseMutation(tracker, status.entity, input.phase, input.lifecycle, input.native)
     return { status: { ...status, phase: input.phase }, changed: status.phase !== input.phase, phaseMutation }
 }
 

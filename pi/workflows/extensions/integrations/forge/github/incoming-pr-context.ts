@@ -12,7 +12,14 @@ import {
 import * as project from "../../../../../extensions/__lib/project.js"
 import { PROJECT_LOCAL_ROOT } from "../../../__lib/domain.js"
 import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "../../../__lib/project-config.js"
-import { loadIntegrationConfig, type GitHubForge } from "../../config.js"
+import {
+    loadIntegrationRoles,
+    requireForge,
+    type Role,
+    roleOffReason,
+    type GitHubForge,
+    type TrackerConfig,
+} from "../../config.js"
 import type { ProviderEvidence } from "../../resource-id-operations.js"
 
 export interface Repository {
@@ -70,31 +77,10 @@ export function incomingPullRequestContext(cwd: string, reference: string, tools
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
     assertWorkerArtifactsLinked(root)
-    const { forge, tracker } = loadIntegrationConfig(root)
+    const roles = loadIntegrationRoles(root)
+    const forge = requireForge(roles, "incoming PR handling")
     const selected = parseIncomingReference(reference, forge.repository)
-    const board =
-        tracker.provider === "github"
-            ? {
-                  state: "enabled" as const,
-                  mcpServer: tracker.mcpServer,
-                  project: tracker.project,
-                  status: tracker.fields.status,
-                  lookup: {
-                      ...resolveMcpTool(tracker.mcpServer, "projects_list", tools),
-                      arguments: {
-                          method: "list_project_items",
-                          owner: tracker.project.owner,
-                          owner_type: tracker.project.ownerType,
-                          project_number: tracker.project.number,
-                          query: `repo:${selected.repository.owner}/${selected.repository.repo} is:pr`,
-                          field_names: [tracker.fields.status.field],
-                      },
-                  },
-              }
-            : {
-                  state: "disabled" as const,
-                  reason: "The tracker isn't a GitHub Project; forge-only inspection remains available.",
-              }
+    const board = incomingBoard(roles.tracker, selected, tools)
     return {
         state: "enabled" as const,
         operation: "incomingPullRequest" as const,
@@ -109,40 +95,83 @@ export function incomingPullRequestContext(cwd: string, reference: string, tools
                 arguments: { method: "get", ...selected.repository, pullNumber: selected.number },
             },
         },
-        safety: {
-            approval:
-                "Conversational approval of exact content, verdict, operation and revision; existing tool permissions still apply.",
-            checkout: {
-                tools: INCOMING_CHECKOUT_TOOLS,
-                orchestration:
-                    "Discover and use the named registered checkout operations, which work in the current checkout (normally the PR's worker): preparation and fetch, contributor-review setup, validated transitions, held-configuration release and hold, restore, and approved standard rebase with immediate SHA-pinned --force-with-lease PR update. Configuration that tools and agents load (the piton tools registry) stays at the checkout's starting version on disk unless its release is approved. GitHub fetch/remote-tip observation/push use SSH with existing authentication; configure no HTTPS credentials and change no global Git configuration. Saved unpublished rebase results recover through approved publish_incoming_pr_rebase with their original lease, without another rebase. Approved commit_incoming_pr_fixes and separate publish_incoming_pr_fixes preserve additive history and advance the managed baseline; fixes publication is non-forced. An exact request to ship and merge includes shared repository merge, confirmed Project Done and restoring the checkout without another cleanup question. Keep private evidence and contributor branches. Never reconstruct this Git orchestration in Bash or fall back after refusal/unavailability.",
-                scale: [
-                    { score: 1, label: "malicious", meaning: "Clear malicious behavior found." },
-                    { score: 2, label: "suspicious", meaning: "Strong suspicious indicators." },
-                    { score: 3, label: "inconclusive", meaning: "Inconclusive or insufficient inspection." },
-                    { score: 4, label: "concerns", meaning: "No clear malicious behavior, but unresolved concerns." },
-                    {
-                        score: 5,
-                        label: "safe",
-                        meaning: "No malicious indicators found in the inspected contribution.",
+        safety: incomingSafety(),
+    }
+}
+
+/** The incoming PR's Project board: a GitHub tracker's Project, or disabled with the reason. */
+function incomingBoard(tracker: Role<TrackerConfig>, selected: IncomingPullRequest, tools: McpToolCatalog) {
+    switch (tracker.state) {
+        case "off":
+            return {
+                state: "disabled" as const,
+                reason: `The tracker ${roleOffReason("tracker", tracker)}; forge-only inspection remains available.`,
+            }
+        case "on":
+            break
+    }
+    const configured = tracker.config
+    switch (configured.provider) {
+        case "linear":
+            return {
+                state: "disabled" as const,
+                reason: "The tracker isn't a GitHub Project; forge-only inspection remains available.",
+            }
+        case "github":
+            return {
+                state: "enabled" as const,
+                mcpServer: configured.mcpServer,
+                project: configured.project,
+                status: configured.fields.status,
+                lookup: {
+                    ...resolveMcpTool(configured.mcpServer, "projects_list", tools),
+                    arguments: {
+                        method: "list_project_items",
+                        owner: configured.project.owner,
+                        owner_type: configured.project.ownerType,
+                        project_number: configured.project.number,
+                        query: `repo:${selected.repository.owner}/${selected.repository.repo} is:pr`,
+                        field_names: [configured.fields.status.field],
                     },
-                ],
-                assessment:
-                    "Before materializing source, present Checkout safety: N/5 (label), using the scale's label; for example, Checkout safety: 5/5 (safe). Include exact-revision evidence and coverage limitations. A 5 is not a guarantee.",
-                approval:
-                    "Every score requires explicit checkout approval for the exact revision/path. No automatic threshold or durable approval token.",
-                phases: "Contributor-only review first (HEAD at the merge base, the PR staged); then the clean contributor head for approved fixes. Approved standard rebase and conflict resolution run in a private scratch worktree and immediately publish using the pinned lease, before later approved uncommitted fixes and maintainer testing. Restore returns the checkout to its starting branch and revision.",
-                rebase: "Observe actual target/contributor tips separately from unchanged provider evidence. Approval covers exact standard rebase plus immediate PR update, with consent/access established first. Never use plain --force, refresh a rejected lease automatically, or execute contributor code. Later fix commits/push, testing, publication and GitHub merge retain separate approvals.",
-            },
-            project:
-                "Use incomingPullRequestProject for scoped native Project plans. Existing membership is preserved; explicit missing intake chooses Backlog/Todo, review start sets In Review and keeps it through contributor/fix activity until confirmed merge/Done or unmerged close/Canceled. Do not infer activity or set In Progress/Phase.",
-            execution:
-                "Approved checkout and static fixes are supported. Git hooks, filters and helpers stay disabled, and tool and agent configuration stays at its trusted version on disk. Editors and language servers can still run project code when files open; call such changes out in the safety assessment. Executing contributor code needs separate command and appropriately isolated environment approval. Report unavailable runtime checks as not run; a checkout is not a sandbox.",
-            identity:
-                "Review/merge use the base repository; contributor-branch writes require the actual head repository/ref, consent and effective access.",
-            publication:
-                "Call configured registered MCP tools directly; never bypass denial/failure with HTTP, gh or another client. Existing code-owned attribution applies.",
+                },
+            }
+    }
+}
+
+function incomingSafety() {
+    return {
+        approval:
+            "Conversational approval of exact content, verdict, operation and revision; existing tool permissions still apply.",
+        checkout: {
+            tools: INCOMING_CHECKOUT_TOOLS,
+            orchestration:
+                "Discover and use the named registered checkout operations, which work in the current checkout (normally the PR's worker): preparation and fetch, contributor-review setup, validated transitions, held-configuration release and hold, restore, and approved standard rebase with immediate SHA-pinned --force-with-lease PR update. Configuration that tools and agents load (the piton tools registry) stays at the checkout's starting version on disk unless its release is approved. GitHub fetch/remote-tip observation/push use SSH with existing authentication; configure no HTTPS credentials and change no global Git configuration. Saved unpublished rebase results recover through approved publish_incoming_pr_rebase with their original lease, without another rebase. Approved commit_incoming_pr_fixes and separate publish_incoming_pr_fixes preserve additive history and advance the managed baseline; fixes publication is non-forced. An exact request to ship and merge includes shared repository merge, confirmed Project Done and restoring the checkout without another cleanup question. Keep private evidence and contributor branches. Never reconstruct this Git orchestration in Bash or fall back after refusal/unavailability.",
+            scale: [
+                { score: 1, label: "malicious", meaning: "Clear malicious behavior found." },
+                { score: 2, label: "suspicious", meaning: "Strong suspicious indicators." },
+                { score: 3, label: "inconclusive", meaning: "Inconclusive or insufficient inspection." },
+                { score: 4, label: "concerns", meaning: "No clear malicious behavior, but unresolved concerns." },
+                {
+                    score: 5,
+                    label: "safe",
+                    meaning: "No malicious indicators found in the inspected contribution.",
+                },
+            ],
+            assessment:
+                "Before materializing source, present Checkout safety: N/5 (label), using the scale's label; for example, Checkout safety: 5/5 (safe). Include exact-revision evidence and coverage limitations. A 5 is not a guarantee.",
+            approval:
+                "Every score requires explicit checkout approval for the exact revision/path. No automatic threshold or durable approval token.",
+            phases: "Contributor-only review first (HEAD at the merge base, the PR staged); then the clean contributor head for approved fixes. Approved standard rebase and conflict resolution run in a private scratch worktree and immediately publish using the pinned lease, before later approved uncommitted fixes and maintainer testing. Restore returns the checkout to its starting branch and revision.",
+            rebase: "Observe actual target/contributor tips separately from unchanged provider evidence. Approval covers exact standard rebase plus immediate PR update, with consent/access established first. Never use plain --force, refresh a rejected lease automatically, or execute contributor code. Later fix commits/push, testing, publication and GitHub merge retain separate approvals.",
         },
+        project:
+            "Use incomingPullRequestProject for scoped native Project plans. Existing membership is preserved; explicit missing intake chooses Backlog/Todo, review start sets In Review and keeps it through contributor/fix activity until confirmed merge/Done or unmerged close/Canceled. Do not infer activity or set In Progress/Phase.",
+        execution:
+            "Approved checkout and static fixes are supported. Git hooks, filters and helpers stay disabled, and tool and agent configuration stays at its trusted version on disk. Editors and language servers can still run project code when files open; call such changes out in the safety assessment. Executing contributor code needs separate command and appropriately isolated environment approval. Report unavailable runtime checks as not run; a checkout is not a sandbox.",
+        identity:
+            "Review/merge use the base repository; contributor-branch writes require the actual head repository/ref, consent and effective access.",
+        publication:
+            "Call configured registered MCP tools directly; never bypass denial/failure with HTTP, gh or another client. Existing code-owned attribution applies.",
     }
 }
 

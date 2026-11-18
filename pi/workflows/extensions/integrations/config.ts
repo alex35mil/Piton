@@ -145,12 +145,78 @@ export type TrackerConfig = Static<typeof TrackerConfigSchema>
 export const GitHubForgeSchema = Type.Object(GitHubRoleProperties, { additionalProperties: false })
 export type GitHubForge = Static<typeof GitHubForgeSchema>
 
-export const IntegrationConfigSchema = Type.Object(
-    { tracker: TrackerConfigSchema, forge: GitHubForgeSchema },
+/** `provider = "none"` and nothing else: turns a role off, also over a farther level's table. */
+export const DisabledRoleSchema = Type.Object(
+    { provider: Type.Enum(["none"], { type: "string" }) },
     { additionalProperties: false },
 )
-export const IntegrationConfigValidator = compile(IntegrationConfigSchema)
-export type IntegrationConfig = Static<typeof IntegrationConfigSchema>
+export type DisabledRole = Static<typeof DisabledRoleSchema>
+const TrackerTableValidator = compile(Type.Union([TrackerConfigSchema, DisabledRoleSchema]))
+const ForgeTableValidator = compile(Type.Union([GitHubForgeSchema, DisabledRoleSchema]))
+
+/** Why a role is off: no table anywhere in the chain, or a table that turns it off. */
+export type RoleOff = { state: "off"; reason: "absent" } | { state: "off"; reason: "disabled"; file: string }
+export type Role<T> = { state: "on"; config: T } | RoleOff
+
+/** The project's two integration roles. Each is optional: a step that needs one refuses when it's off. */
+export interface IntegrationRoles {
+    tracker: Role<TrackerConfig>
+    forge: Role<GitHubForge>
+}
+
+export type RoleName = "tracker" | "forge"
+
+/** A step that needs a role that's off. Names the role, why it's off, and the step. */
+export class RoleUnavailableError extends Error {
+    constructor(
+        readonly role: RoleName,
+        readonly off: RoleOff,
+        readonly operation: string,
+    ) {
+        super(`${operation} needs the ${role}, which ${roleOffReason(role, off)}`)
+        this.name = "RoleUnavailableError"
+    }
+}
+
+/** Why a role is off, as a sentence ending for messages: "the tracker <reason>". */
+export function roleOffReason(role: RoleName, off: RoleOff): string {
+    switch (off.reason) {
+        case "absent":
+            return `isn't configured: no [${role}] in ${repositoryConfigFile("shared")} or a parent folder's`
+        case "disabled":
+            return `is turned off (provider = "none" in ${off.file})`
+    }
+}
+
+export function requireTracker(roles: IntegrationRoles, operation: string): TrackerConfig {
+    const tracker = roles.tracker
+    switch (tracker.state) {
+        case "on":
+            return tracker.config
+        case "off":
+            throw new RoleUnavailableError("tracker", tracker, operation)
+    }
+}
+
+export function requireForge(roles: IntegrationRoles, operation: string): GitHubForge {
+    const forge = roles.forge
+    switch (forge.state) {
+        case "on":
+            return forge.config
+        case "off":
+            throw new RoleUnavailableError("forge", forge, operation)
+    }
+}
+
+/** A role as context results report it: `on` with its config, or `off` with the reason. */
+export function roleContext<P extends string, T>(role: RoleName, value: Role<T>, provider: (config: T) => P) {
+    switch (value.state) {
+        case "on":
+            return { state: "enabled" as const, provider: provider(value.config), config: value.config }
+        case "off":
+            return { state: "disabled" as const, reason: `The ${role} ${roleOffReason(role, value)}.` }
+    }
+}
 
 export function assertConfiguredPriority(config: TrackerConfig, priority: string): void {
     if (config.provider === "linear") {
@@ -216,20 +282,22 @@ export function integrationsToFile(value: unknown): unknown {
     return snakeKeys(value, integrationDataKeys)
 }
 
-// Workflows need both a tracker and a GitHub forge: the nearest `[tracker]` and `[forge]` in piton's configuration
-// chain, each whole.
-export function loadIntegrationConfig(cwd: string): IntegrationConfig {
+/**
+ * The nearest `[tracker]` and `[forge]` in piton's configuration chain, each whole and each optional. A missing table
+ * or `provider = "none"` turns that role off; an invalid table fails, so a typo never silently disables a role.
+ */
+export function loadIntegrationRoles(cwd: string): IntegrationRoles {
     const settings = resolveSettings(cwd)
     const tracker = section(settings.tracker)
     const forge = section(settings.forge)
-    if (!tracker || !forge) {
-        const missing = [!tracker && "[tracker]", !forge && "[forge]"].filter(Boolean).join(" and ")
-        throw new Error(
-            `missing required ${missing}: configure a tracker and a forge in ${repositoryConfigFile("shared")} or a parent folder's`,
-        )
+    return {
+        tracker: tracker
+            ? validateTracker(integrationsFromFile(tracker.value), tracker.path)
+            : { state: "off", reason: "absent" },
+        forge: forge
+            ? validateForge(integrationsFromFile(forge.value), forge.path)
+            : { state: "off", reason: "absent" },
     }
-    const files = [...new Set([tracker.path, forge.path])].join(" and ")
-    return validateIntegrationConfig(integrationsFromFile({ tracker: tracker.value, forge: forge.value }), files)
 }
 
 export type IntegrationPresence = { kind: "configured" } | { kind: "absent" } | { kind: "unreadable"; error: string }
@@ -265,26 +333,54 @@ function filePath(pointer: string): string {
     return named.length > 0 ? named.join(".") : "(top level)"
 }
 
-/** Validates the merged `[tracker]` and `[forge]`; errors name `files`, where they came from. */
-function validateIntegrationConfig(value: unknown, files: string): IntegrationConfig {
-    if (!IntegrationConfigValidator.check(value)) {
-        // Errors name keys as the file has them: `tracker.fields.status.values.in_progress`.
-        const details = IntegrationConfigValidator.errors(value)
-            .map((error) => `${filePath(error.path)}: ${error.message}`)
-            .join("; ")
-        throw new Error(`invalid ${files}: ${details}`)
+type TableValidator<T> = {
+    check(value: unknown): value is T
+    errors(value: unknown): { path: string; message: string }[]
+}
+
+/** Checks one role's table; errors name the file and keys as the file has them (`tracker.fields.status.values.in_progress`). */
+function checkTable<T>(validator: TableValidator<T>, role: RoleName, value: unknown, file: string): T {
+    if (validator.check(value)) return value
+    const details = validator
+        .errors(value)
+        .map((error) => `${filePath(`/${role}${error.path}`)}: ${error.message}`)
+        .join("; ")
+    throw new Error(`invalid ${file}: ${details}`)
+}
+
+function validateTracker(value: unknown, file: string): Role<TrackerConfig> {
+    const tracker = checkTable(TrackerTableValidator, "tracker", value, file)
+    switch (tracker.provider) {
+        case "none":
+            return { state: "off", reason: "disabled", file }
+        case "github":
+        case "linear":
+            break
     }
     try {
-        if (value.tracker.provider === "github") assertGitHubTrackerInvariants(value.tracker)
-        if (value.tracker.provider === "linear") {
-            assertLinearLabels(value.tracker.labels, value.tracker.phase)
-            assertDistinctStatuses("Linear", "issue", value.tracker.statuses.issues)
-            assertDistinctStatuses("Linear", "Project", value.tracker.statuses.projects)
+        switch (tracker.provider) {
+            case "github":
+                assertGitHubTrackerInvariants(tracker)
+                break
+            case "linear":
+                assertLinearLabels(tracker.labels, tracker.phase)
+                assertDistinctStatuses("Linear", "issue", tracker.statuses.issues)
+                assertDistinctStatuses("Linear", "Project", tracker.statuses.projects)
+                break
         }
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`invalid ${files}: ${message}`)
+        throw new Error(`invalid ${file}: ${message}`)
     }
+    return { state: "on", config: tracker }
+}
 
-    return value
+function validateForge(value: unknown, file: string): Role<GitHubForge> {
+    const forge = checkTable(ForgeTableValidator, "forge", value, file)
+    switch (forge.provider) {
+        case "none":
+            return { state: "off", reason: "disabled", file }
+        case "github":
+            return { state: "on", config: forge }
+    }
 }

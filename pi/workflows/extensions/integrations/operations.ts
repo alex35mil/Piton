@@ -15,7 +15,7 @@ import {
     type EntityStatus,
 } from "../__lib/entity.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
-import { loadIntegrationConfig } from "./config.js"
+import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "./config.js"
 import {
     SetWorkflowPhaseSchema,
     SetWorkflowPhaseValidator,
@@ -25,19 +25,19 @@ import {
     linearPhaseFacts,
 } from "./phase.js"
 import { GitHubPhaseInputSchema, GitHubPhaseInputValidator, githubPhaseFacts } from "./github-phase-evidence.js"
-import { resolveWorkflowEnvironment, type WorkflowEnvironment } from "./policy.js"
 
 async function updateEntity<T extends { status: EntityStatus; changed: boolean }>(
     cwd: string,
     raw: string,
-    operation: (status: EntityStatus, environment: WorkflowEnvironment, directory: string) => T,
+    name: string,
+    operation: (status: EntityStatus, tracker: TrackerConfig, directory: string) => T,
 ) {
     const root = project.resolveRootDir(cwd)
     const directory = resolveEntityDirectory(root, cwd, raw.replace(/^@/, ""))
     return withFileMutationQueue(path.join(directory, ENTITY_METADATA_FILE), async () => {
         assertArtifactPersistencePrepared(root)
-        const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
-        const result = operation(readEntityStatus(directory), environment, directory)
+        const tracker = requireTracker(loadIntegrationRoles(root), name)
+        const result = operation(readEntityStatus(directory), tracker, directory)
         if (result.changed) writeEntityStatus(directory, result.status)
         const { status, ...outcome } = result
         return { entity: path.basename(directory), ...(status.phase ? { phase: status.phase } : {}), ...outcome }
@@ -63,21 +63,17 @@ export function registerWorkflowOperations(pi: ExtensionAPI, mcpTools: McpToolCa
             description: `Set In Progress workflow Phase and calculate reconciliation from ${facts}. Local metadata only; apply a changed assignment through the configured MCP tool. Does not change lifecycle or grant approval.`,
             parameters,
             async execute(_id, params, _signal, _update, ctx) {
-                const result = await updateEntity(ctx.cwd, params.entityDir, (status, environment, directory) => {
+                const result = await updateEntity(ctx.cwd, params.entityDir, name, (status, tracker, directory) => {
                     const native =
                         name === "set_github_workflow_phase"
                             ? githubPhaseFacts(
-                                  environment.tracker,
+                                  tracker,
                                   { name: path.basename(directory), status },
                                   parse(GitHubPhaseInputValidator, params.native),
                                   mcpTools,
                               )
                             : linearPhaseFacts(parse(LinearPhaseInputValidator, params.native))
-                    return setWorkflowPhase(
-                        status,
-                        environment,
-                        parse(SetWorkflowPhaseValidator, { ...params, native }),
-                    )
+                    return setWorkflowPhase(status, tracker, parse(SetWorkflowPhaseValidator, { ...params, native }))
                 })
                 return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }
             },

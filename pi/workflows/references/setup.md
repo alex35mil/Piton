@@ -77,7 +77,10 @@ username = "alex"
 
 ## Integration configuration
 
-Both roles are required: `[tracker]` (GitHub or Linear) and `[forge]` (GitHub) in `.piton/config.toml`.
+Both roles are optional: `[tracker]` (GitHub or Linear) and `[forge]` (GitHub) in `.piton/config.toml`. A missing table turns the role off ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
+
+- `provider = "none"`, with no other key, turns a role off explicitly, including one a parent folder configures. A person can set it in `.piton/config.local.toml` to work without the tracker.
+- An invalid table fails; it never turns a role off silently.
 
 - `configure_project` writes them from the objects the setup tools return. The examples below show those objects; the file holds the same values, its keys in snake_case (`mcp_server`).
 - Each role is read whole from the nearest folder that sets it: a repository's `[tracker]` replaces a parent folder's.

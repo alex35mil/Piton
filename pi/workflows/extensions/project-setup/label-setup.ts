@@ -2,7 +2,7 @@ import { type Static, type TSchema, Type } from "typebox"
 
 import { compile, describeErrors } from "../../../extensions/__lib/schema.js"
 import { resolveSettings, section } from "../../../extensions/__lib/settings.js"
-import { type IntegrationConfig, integrationsFromFile, TrackerConfigValidator } from "../integrations/config.js"
+import { integrationsFromFile, type TrackerConfig, TrackerConfigValidator } from "../integrations/config.js"
 import {
     assertGitHubLabels,
     assertLinearLabels,
@@ -189,7 +189,7 @@ interface ProviderAdapter {
     readCatalog(): Promise<TrackerLabel[]>
     apply(action: CatalogAction, resolveParent: (key: string | null) => string | null): Promise<string | undefined>
     /** Whether a saved tracker configuration describes this target, so its managed set applies. */
-    sameTarget(tracker: IntegrationConfig["tracker"]): Promise<boolean>
+    sameTarget(tracker: TrackerConfig): Promise<boolean>
 }
 
 export async function runLabelSetup(
@@ -349,7 +349,7 @@ async function readPrevious(cwd: string, adapter: ProviderAdapter) {
         return null
     }
     if (!TrackerConfigValidator.check(value)) return null
-    const tracker: IntegrationConfig["tracker"] = value
+    const tracker: TrackerConfig = value
     if (!(await adapter.sameTarget(tracker))) return null
     return tracker.provider === "github"
         ? { labels: tracker.labels ?? {}, phase: undefined, entries: githubManagedEntries(tracker.labels) }

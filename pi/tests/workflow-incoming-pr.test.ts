@@ -268,8 +268,12 @@ describe("incoming PR identity and context", () => {
             )
             writeConfig(f.root, { tracker: {} })
             assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools))
-            writeConfig(f.root, { tracker: null, forge: null })
-            assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools), /missing required/)
+            writeConfig(f.root, { tracker: null })
+            const forgeOnly = incomingPullRequestContext(f.root, "#12", mcpTools)
+            assert.equal(forgeOnly.project.state, "disabled")
+            assert.equal(forgeOnly.roles.forge.state, "enabled")
+            writeConfig(f.root, { forge: { provider: "none" } })
+            assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools), /needs the forge/)
         } finally {
             f.close()
         }

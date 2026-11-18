@@ -11,20 +11,26 @@ import {
     type Sharing,
 } from "../../../extensions/__lib/settings.js"
 import { BranchFormatSchema } from "../__lib/domain.js"
-import { GitHubForgeSchema, integrationsToFile, TrackerConfigSchema } from "../integrations/config.js"
+import {
+    DisabledRoleSchema,
+    GitHubForgeSchema,
+    integrationsToFile,
+    TrackerConfigSchema,
+} from "../integrations/config.js"
 import { ensureLocalSettingsExclusion } from "./local-settings.js"
 import { setupRoot } from "./root.js"
 
 /**
  * The approved workflow configuration of a repository. Each part is optional: omitted parts stay as they are. The
  * tracker and forge are the exact objects the setup tools returned (`trackerConfig`, label setup's `configuration`), in
- * the tools' own key names; they're written as `[tracker]` and `[forge]` with the file's key names.
+ * the tools' own key names, or `{ provider: "none" }` to turn a role off; they're written as `[tracker]` and `[forge]`
+ * with the file's key names.
  */
 export const ProjectConfigurationSchema = Type.Object(
     {
         branchFormat: Type.Optional(BranchFormatSchema),
-        tracker: Type.Optional(TrackerConfigSchema),
-        forge: Type.Optional(GitHubForgeSchema),
+        tracker: Type.Optional(Type.Union([TrackerConfigSchema, DisabledRoleSchema])),
+        forge: Type.Optional(Type.Union([GitHubForgeSchema, DisabledRoleSchema])),
         /** Personal: written to `.piton/config.local.toml`, which stays outside Git. */
         username: Type.Optional(Type.String({ minLength: 1, pattern: "^[^\\s/]+$" })),
     },

@@ -1,4 +1,3 @@
-import * as cp from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 
@@ -33,7 +32,9 @@ import {
 } from "../__lib/review-rounds.js"
 import { executeReviewRound, recordEntityResponses, renderReviewRoundResult, REVIEW_REPORT_FILE } from "./round.js"
 import { reviewerEnvironment } from "./model.js"
+import { branchDiff } from "./diff.js"
 import { registerPullRequestReview } from "./pull-request.js"
+import { registerStandaloneReview } from "./standalone.js"
 import { buildEpicReviewPrompt } from "./epic.js"
 import { reviewAgentOutputInstructions, ReviewResponseSchema } from "./findings.js"
 import {
@@ -54,8 +55,6 @@ import {
     REVIEW_GIT_INSTRUCTIONS,
     truncate,
 } from "./context.js"
-
-const MAX_DIFF_BYTES = 180 * 1024
 
 /** Review categories whose rounds copy the reviewed document into `candidate.md`. */
 type SnapshotPhase = "plan" | "final"
@@ -223,6 +222,7 @@ const PASS_MODEL =
 export default function (pi: ExtensionAPI) {
     const tools = workflowTools(pi, "reviews")
     registerPullRequestReview(pi)
+    registerStandaloneReview(pi)
     const reviews = [
         ["epic", Type.Omit(EpicReviewRequestSchema, ["entity"])],
         ["task", deliverableToolParameters(TASK_DIRECTORY)],
@@ -917,63 +917,6 @@ async function readParentEpicContext(cwd: string, deliverableDir: string): Promi
 
 async function readProjectPolicies(cwd: string): Promise<string> {
     return truncate(readPolicies(cwd), MAX_EMBEDDED_FILE_BYTES)
-}
-
-/** Where the branch's own changes start: the merge base with the target, remote-tracking when it exists. */
-type BranchBase = { state: "found"; ref: string; commit: string } | { state: "missing"; target: string }
-
-function branchBase(cwd: string, target: string): BranchBase {
-    for (const ref of [`refs/remotes/origin/${target}`, `refs/heads/${target}`]) {
-        if (!Git.succeeds(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) continue
-        const commit = Git.tryRun(cwd, ["merge-base", ref, "HEAD"])
-        if (commit) return { state: "found", ref, commit }
-    }
-    return { state: "missing", target }
-}
-
-/**
- * Everything the branch changes: the diff from the merge base with the target to the working tree,
- * so locally committed steps are reviewed with uncommitted work. `git status` names untracked files.
- */
-export async function branchDiff(cwd: string, target: string): Promise<string> {
-    const base = branchBase(cwd, target)
-    const status = await git(cwd, ["status", "--short"])
-    let from: string
-    let heading: string
-    switch (base.state) {
-        case "found":
-            from = base.commit
-            heading = `Changes from the merge base with ${base.ref} (${base.commit}) to the working tree: committed, staged, and unstaged.`
-            break
-        case "missing":
-            from = "HEAD"
-            heading = `No merge base with target ${base.target} was found, so this shows only uncommitted changes against HEAD. Use git_read to inspect the branch's commits.`
-            break
-    }
-    const stat = await git(cwd, ["diff", "--stat", from])
-    const diff = await git(cwd, ["diff", from])
-
-    return truncate(
-        [
-            heading,
-            "## git status --short",
-            fence(status || "(clean)", "text"),
-            `## git diff --stat ${from}`,
-            fence(stat || "(empty)", "text"),
-            `## git diff ${from}`,
-            fence(diff || "(empty)", "diff"),
-        ].join("\n\n"),
-        MAX_DIFF_BYTES,
-    )
-}
-
-async function git(cwd: string, args: string[]): Promise<string> {
-    return new Promise((resolve) => {
-        cp.execFile("git", args, { cwd, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-            if (error) resolve((stdout || stderr || String(error)).trim())
-            else resolve(stdout.trim())
-        })
-    })
 }
 
 function textResult(text: string, isError = false, details?: unknown) {

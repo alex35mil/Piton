@@ -20,9 +20,9 @@ import { AcceptedTaskSchema, readEpicTasks } from "./epic-tasks.js"
 import { writeTextAtomically } from "./files.js"
 import {
     assertTrackerRecordInvariants,
+    EntityTrackerSchema,
     ForgeRecordSchema,
     trackerReference,
-    TrackerRecordSchema,
 } from "../integrations/records.js"
 
 const OneLineSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
@@ -79,7 +79,8 @@ const baseMetadataProperties = {
     // Absent when the tracker doesn't configure Phase, and until the first Phase is set.
     phase: Type.Optional(PhaseSchema),
     branch: ReadyBranchContractSchema,
-    tracker: TrackerRecordSchema,
+    // The tracker item, or `local` for a Gig kept off the tracker.
+    tracker: EntityTrackerSchema,
     forge: Type.Optional(ForgeRecordSchema),
 }
 // Routing lives in the published plan (`Task target:` and `Epic branch:` in epic.md). The accepted

@@ -1,11 +1,21 @@
 # Integration roles
 
-Every project configures both integration roles:
+A project has two optional integration roles:
 
 - **tracker** (GitHub or Linear): external work items, Backlog and Todo queues, lifecycle, Priority, hierarchy, and plan publication. Its object is the entity's identity.
 - **forge** (GitHub): pull requests.
 
 The local entity artifacts stay authoritative for everything else.
+
+## When a role is off
+
+A role is off when its table is missing, or set to `provider = "none"` ([setup](../setup.md#integration-configuration)). `inspect_integrations` and every context report each role as `enabled` or `disabled` with the reason.
+
+- **Steps that need an off role refuse** and name the role and why. Report it in one line and continue with the steps that don't need it. Never work around a refusal.
+- **Tracker off:** skip the tracker item, board setup, lifecycle, Priority, Phase, labels, gates, and plan publication. Start Gigs with `init_local_gig` ([local Gig](../../skills/gig/SKILL.md#local-gig)). Epics and Tasks need the tracker: say so and stop.
+- **Forge off:** stop after the local commits. Submission and shipping need the forge.
+- **A local Gig** has no tracker item, so it treats the tracker as off even when one is configured.
+- Reviews, verification, commits, and the standalone `review` need neither role.
 
 - A configured role isn't proof its provider tools are available. Follow each role's provider reference.
 - Lifecycle and Priority live only on the tracker; nothing local replaces them.

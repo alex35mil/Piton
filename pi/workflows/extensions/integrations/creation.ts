@@ -12,7 +12,7 @@ import * as project from "../../../extensions/__lib/project.js"
 import { ENTITY_METADATA_FILE, readEntityStatus, resolveEntityDirectory, writeEntityStatus } from "../__lib/entity.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
 import { readReviewCycle, unfinishedCycleReason } from "../__lib/review-rounds.js"
-import { loadIntegrationConfig } from "./config.js"
+import { loadIntegrationRoles, requireForge } from "./config.js"
 import { gitHubResourceNumber, parseResourceIds, recordResourceIds } from "./resource-ids.js"
 import { resolveResourceIdsContext, type ProviderEvidence } from "./resource-id-operations.js"
 
@@ -35,7 +35,7 @@ function pullRequestCreateArguments(
 export async function beginPullRequestCreation(cwd: string, entityDir: string, tools: McpToolCatalog) {
     const root = project.resolveRootDir(cwd)
     assertArtifactPersistencePrepared(root)
-    const forge = loadIntegrationConfig(root).forge
+    const forge = requireForge(loadIntegrationRoles(root), "PR creation")
     const directory = resolveEntityDirectory(root, cwd, entityDir)
     return withFileMutationQueue(path.join(directory, ENTITY_METADATA_FILE), async () => {
         const status = readEntityStatus(directory)

@@ -6,8 +6,9 @@ Reusable Epic/Task/Gig planning and delivery for pi.
 - **Task**: a Deliverable belonging to exactly one Epic.
 - **Gig**: a standalone Deliverable.
 - **Deliverable**: the shared Task/Gig lifecycle, with Feature, Bugfix, Refactor, Research, Audit, and Chore strategies.
-- **Tracker**: required GitHub or Linear work tracking. The tracker object (`#12`, `ENG-12`, or a Linear Project) is the entity's identity and holds native lifecycle, Phase, and Priority.
-- **Forge**: required GitHub pull requests. Every Deliverable ships through a merged PR.
+- **Tracker**: optional GitHub or Linear work tracking. The tracker object (`#12`, `ENG-12`, or a Linear Project) is the entity's identity and holds native lifecycle, Phase, and Priority. Without one, Gigs run locally (`<YYYYMMDD>-<slug>`); Epics and Tasks need it.
+- **Forge**: optional GitHub pull requests. With one, every Deliverable ships through a merged PR; without one, work stops after local commits.
+- **Standalone tools**: steps such as `review` work in any session, without an entity, tracker, or forge. The Epic/Task/Gig lifecycle composes them.
 - **Artifacts**: plans, notes, and reviews live under `.piton/.local/` and never enter Git.
 
 ## Commands
@@ -24,7 +25,11 @@ Reusable Epic/Task/Gig planning and delivery for pi.
 
 New work creates the tracker object first; the local entity is named after it (`12-<slug>`, `ENG-12-<slug>`, or `<YYYYMMDD>-<slug>` for a Linear Epic, dated by the Project's creation). Planned Tasks and queued Backlog/Todo objects get a local entity only when explicitly started. `/todo` and `/backlog` queue only Epics and Gigs; a new Task comes from replanning its Epic.
 
-`/pr` reviews an existing contribution privately. It uses the configured GitHub forge and needs no initialized entity.
+A local Gig, started without a tracker or kept off it, is named from its creation date (`<YYYYMMDD>-<slug>`) and skips every tracker step.
+
+Ask for a review of any change (uncommitted work, a commit, a range, a branch, or files) and the agent runs the standalone `review`: the same independent reviewer, findings in chat, nothing saved.
+
+`/pr` reviews an existing contribution privately. It uses the configured GitHub forge and needs no initialized entity or tracker.
 
 - **Before checkout:** you get a 1–5 malicious-code safety score with evidence and limitations. Every score needs your explicit approval before anything is checked out.
 - **Checkout:** registered tools review the PR in the current checkout, normally a worker the Neovim picker created for it. HEAD sits at the merge base with the PR staged, so the editor shows the contribution as a staged diff. Tool and agent configuration (mise, direnv, Nix, `AGENTS.md`, `.agents`, `.pi`, editor project files) stays at the checkout's starting version on disk unless you approve releasing the PR's. Preparation refuses existing work and never stashes; restore returns the checkout to where it started. The agent never reconstructs that Git work in Bash.
@@ -41,7 +46,7 @@ See [incoming PR handling](references/pr/incoming.md).
 Run `/project-setup`, invoke `/skill:project-setup`, or ask the agent to help set up project workflows. Guided setup previews changes and asks for approval; it never stages files. It supports:
 
 - one branch format for every entity: `identifier-title`, `username/identifier-title`, or Linear's own naming;
-- the tracker and forge, with official MCP registration;
+- the tracker and forge, each optional, with official MCP registration (`provider = "none"` turns one off);
 - read-only Linear workspace discovery, plus separately approved creation of missing Linear statuses;
 - separately approved label catalog setup for both trackers, including Linear Phase groups;
 - separately approved GitHub Project/field provisioning and recovery;

@@ -43,8 +43,7 @@ import {
     assertWorkerArtifactsLinked,
     type ProjectConfig,
 } from "../__lib/project-config.js"
-import { resolveWorkflowEnvironment, type WorkflowEnvironment } from "../integrations/policy.js"
-import { loadIntegrationConfig } from "../integrations/config.js"
+import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "../integrations/config.js"
 import {
     completeSelection,
     LabelSelectionFailure,
@@ -164,23 +163,29 @@ export interface InitializedEntity {
 interface Prepared {
     root: string
     projectConfig: ProjectConfig
-    environment: WorkflowEnvironment
+    tracker: TrackerConfig
     slug: string
     start: string
     parent?: ParentEpic
 }
 
-function prepare(input: PreflightInput | EntityInitialization, options: InitializeEntityOptions): Prepared {
-    const root = project.resolveRootDir(options.cwd)
+/** The local checks every initialization runs before anything is created. */
+function prepareRepository(cwd: string) {
+    const root = project.resolveRootDir(cwd)
     assertGitRepository(root)
     const projectConfig = assertArtifactPersistencePrepared(root)
     assertWorkerArtifactsLinked(root)
-    const environment = resolveWorkflowEnvironment(loadIntegrationConfig(root))
+    return { root, projectConfig }
+}
+
+function prepare(input: PreflightInput | EntityInitialization, options: InitializeEntityOptions): Prepared {
+    const { root, projectConfig } = prepareRepository(options.cwd)
+    const tracker = requireTracker(loadIntegrationRoles(root), `${input.entity} initialization from a tracker item`)
     const slug = slugify(input.slug)
     const parent = input.entity === "task" ? readParentEpic(root, input) : undefined
     const start = parent ? parent.branch : resolveDefaultBranch(root)
     assertCloneBranch(root, start)
-    return { root, projectConfig, environment, slug, start, parent }
+    return { root, projectConfig, tracker, slug, start, parent }
 }
 
 // Runs every local check that doesn't need the tracker object, so a failure stops
@@ -188,8 +193,7 @@ function prepare(input: PreflightInput | EntityInitialization, options: Initiali
 export function preflightEntity(input: PreflightInput, options: InitializeEntityOptions) {
     parse(PreflightValidator, input)
     const prepared = prepare(input, options)
-    const { environment, projectConfig, slug } = prepared
-    const tracker = environment.tracker
+    const { tracker, projectConfig } = prepared
     if (projectConfig.branches.format === "tracker" && tracker.provider !== "linear")
         throw new Error("the tracker branch format requires a Linear tracker")
     const itemType = input.entity === "epic" ? "epic" : "deliverable"
@@ -223,8 +227,8 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
         throw new Error(`invalid entity initialization: ${details}`)
     }
     const prepared = prepare(input, options)
-    const { root, environment, slug, start, parent } = prepared
-    const object = trackerObject(input, environment)
+    const { root, tracker: configured, slug, start, parent } = prepared
+    const object = trackerObject(input, configured)
     if (
         object.provider === "linear" &&
         object.resource === "task-issue" &&
@@ -252,7 +256,7 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
     )
     const tracker = trackerRecordFromObject(
         object,
-        environment.tracker.provider === "github" ? environment.tracker.repository : undefined,
+        configured.provider === "github" ? configured.repository : undefined,
     )
 
     let createdBranch: string | undefined
@@ -263,7 +267,7 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
             slug,
             title: input.title.trim(),
             createdAt: (options.now ?? new Date()).toISOString(),
-            ...initialPhase(environment.tracker, "planning"),
+            ...initialPhase(configured, "planning"),
             branch: contract,
             tracker,
         }
@@ -277,7 +281,7 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
         return {
             directory: relativeDirectory,
             status: readEntityStatus(absoluteDirectory),
-            resourceIds: resourceIdsFromTrackerObject(object, environment, name),
+            resourceIds: resourceIdsFromTrackerObject(object, configured, name),
         }
     } catch (error) {
         fs.rmSync(absoluteDirectory, { recursive: true, force: true })
@@ -286,8 +290,59 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
     }
 }
 
-function trackerObject(input: EntityInitialization, environment: WorkflowEnvironment): TrackerObject {
-    const provider = environment.tracker.provider
+export const LocalGigInitializationSchema = Type.Object(
+    { ...baseProperties, ...gigProperties },
+    { additionalProperties: false },
+)
+export const LocalGigInitializationValidator = compile(LocalGigInitializationSchema)
+export type LocalGigInitialization = Static<typeof LocalGigInitializationSchema>
+
+/**
+ * Initializes a Gig with no tracker item, whether or not a tracker is configured. Its creation date names it
+ * (`<YYYYMMDD>-<slug>`); it has no Phase and records no Resource IDs. Every tracker step refuses for it.
+ */
+export function initializeLocalGig(input: LocalGigInitialization, options: InitializeEntityOptions): InitializedEntity {
+    parse(LocalGigInitializationValidator, input)
+    const { root, projectConfig } = prepareRepository(options.cwd)
+    const slug = slugify(input.slug)
+    const start = resolveDefaultBranch(root)
+    assertCloneBranch(root, start)
+    const createdAt = (options.now ?? new Date()).toISOString()
+    const tracker = { provider: "local" as const, createdAt }
+    const name = entityName(trackerReference(tracker), slug)
+    const relativeDirectory = path.join(GIG_ROOT, name)
+    const absoluteDirectory = path.join(root, relativeDirectory)
+    if (fs.existsSync(absoluteDirectory)) throw new Error(`entity directory already exists: ${relativeDirectory}`)
+    // No tracker names its branch, so the `tracker` format falls back to the dated name, as a Linear Project Epic does.
+    const format = projectConfig.branches.format
+    const branch = format === "tracker" ? name : formatBranchName(name, format, projectConfig.branches.username)
+    assertBranchAvailable(root, branch, start)
+    const contract = readyBranch(branch, start, "generated")
+
+    let createdBranch: string | undefined
+    try {
+        createBranch(root, contract)
+        createdBranch = contract.name
+        const status = parse(EntityStatusValidator, {
+            slug,
+            title: input.title.trim(),
+            createdAt,
+            branch: contract,
+            tracker,
+            entity: "gig",
+            kind: input.kind,
+        })
+        createEntityArtifacts(absoluteDirectory, { entity: "gig", request: input.request }, status)
+        return { directory: relativeDirectory, status: readEntityStatus(absoluteDirectory), resourceIds: [] }
+    } catch (error) {
+        fs.rmSync(absoluteDirectory, { recursive: true, force: true })
+        if (createdBranch) deleteCreatedBranch(root, createdBranch)
+        throw error
+    }
+}
+
+function trackerObject(input: EntityInitialization, tracker: TrackerConfig): TrackerObject {
+    const provider = tracker.provider
     if (provider === "github") {
         if (!GitHubTrackerObjectValidator.check(input.object))
             throw new Error("initialization requires a GitHub issue for the configured GitHub tracker")
@@ -323,7 +378,11 @@ function branchFor(prepared: Prepared, name: string, object: TrackerObject): str
     return object.gitBranchName
 }
 
-function createEntityArtifacts(absoluteDirectory: string, input: EntityInitialization, status: EntityStatus): void {
+function createEntityArtifacts(
+    absoluteDirectory: string,
+    input: Pick<EntityInitialization, "entity" | "request">,
+    status: EntityStatus,
+): void {
     const directories =
         input.entity === "epic"
             ? [LOCAL_REVIEWS_DIR, LOCAL_SCRATCH_DIR, "tasks"]

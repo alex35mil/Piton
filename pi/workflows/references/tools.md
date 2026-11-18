@@ -27,6 +27,7 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 | Gig | `preflight_gig` | `init_github_gig` | `init_linear_gig` |
 
 - Preflight runs the local checks and changes nothing. The init tools take the tracker object, newly created or selected for adoption, in `object`.
+- `init_local_gig` starts a Gig with no tracker item ([local Gigs](../skills/gig/SKILL.md#local-gig)). It needs no tracker.
 - `restore_epic` recreates a missing local Epic from its tracker read and published plan; `restore_epic_plan_source` returns an existing Epic's published plan as source without writing ([Epic restore](./epic.md#restore-an-epic)).
 - `accept_epic_tasks` saves an Epic's reviewed Task list as accepted after the user accepts it ([accepted Task list](./epic-tasks.md#accepted-task-list)).
 - `plan_epic_task_issues` reconciles an Epic's accepted Tasks with fresh child-issue facts into native steps, and `record_epic_task_issue` tags a Task with its issue's marker ([Epic Tasks](./epic-tasks.md#task-issue-processing)).
@@ -69,6 +70,7 @@ None of these call providers or turn identity, lifecycle, or merge facts into ca
 - **GitHub provisioning:** `inspect_github_repository_setup`, `inspect_github_project_setup`, `inspect_github_project`, `preview_github_project_setup`, `apply_github_project_setup`. Preview and apply keep the full specification, approval hash, and credential isolation.
 - **Linear statuses:** `preview_linear_status_setup`, `apply_linear_status_setup`. Apply takes the approved `planHash` and only creates statuses.
 - **Label catalog:** `inspect_label_setup`, `preview_label_setup`, `apply_label_setup`, for both trackers.
+- **Standalone review:** `review` reviews uncommitted work, a commit, a range, a branch, or paths, with optional stated requirements. It needs no entity, tracker, or forge, and saves nothing ([review](./review.md#standalone-review)).
 - **Reviews:** `review_epic`, `review_task`, `review_gig`, and `record_review_response`. The review tool chooses between a review and a verification pass ([review](./review.md)). The reviewer uses an explicit model override or the configured startup default, not the current session's model, and loads only the selected Claude Code extension with rules and permissions.
   - Task and Gig reviews also have `conflict-plan` and `conflict-merge` categories for [conflict resolution](./deliverable/conflicts.md).
   - Epic, Task, and Gig reviewers read files with `read`, `grep`, `find`, and `ls`, and Git with the read-only `git_read`. They run headless under your permission settings, so with `default_mode = "ask"` those tools must be allowed. Incoming-PR reviewers get file reads only.
