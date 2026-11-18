@@ -91,7 +91,7 @@ The tracker object comes first; the local entity is named from it. New work and 
 
 **When something fails:**
 
-- **Uncertain create:** nothing local exists yet. Before any new create for the same intake, search the tracker for the exact approved title ([recovery](./recovery.md#uncertain-tracker-creation)). One match continues at step 3; none allows a retry; several stop for the user.
+- **Uncertain create:** nothing local exists yet. Before any new create for the same intake, look up the exact approved title on the tracker ([recovery](./recovery.md#uncertain-tracker-creation)). One match continues at step 3; none allows a retry; several stop for the user.
 - **Initialization fails after a clear create:** never create again. Report the created object and the failure, fix the cause (for example a name collision), and call initialization again with the same object.
 - **Board setup incomplete on resume:** read fresh Project membership, Status, Priority, and Phase, and apply what's missing. Skip assignment. When native Priority is unset, ask the user for it; it isn't kept locally.
 

@@ -46,7 +46,7 @@ A [plan-update note](./shared.md#plan-update-notes) carries an opaque token: a h
 
 A returned error can follow creation or partial application. Nothing local exists yet, so the intake is the only record.
 
-- **GitHub:** search by the exact intake title, repository, and required relationship. Complete pagination and require exactly one match.
+- **GitHub:** list the configured repository's issues with registered `list_issues`, since just before the create attempt and newest first, with complete pagination. Compare titles locally and require exactly one exact match with the required relationship. Don't use `search_issues`: its free-text matching can return an empty result for issues that exist.
 - **Linear:** search the exact intake title or name, configured team, and exact Task Project or projectless Gig relationship.
 
 Initialize from the object when exactly one is confirmed. Retry the create only after confirmed absence. Never add markers, choose the first result, or create a replacement on ambiguous or denied evidence.

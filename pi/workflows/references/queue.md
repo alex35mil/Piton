@@ -33,7 +33,7 @@ Both hold work that hasn't started. Adding work creates no `.piton` entity, arti
 
 **Creating:**
 
-- Intake is a direct create. Don't search for duplicates first. Search only when the user asks to adopt something or a create result is uncertain.
+- Intake is a direct create. Don't check for duplicates first; look up existing work only for an adoption or an uncertain create.
 - **GitHub:** create an ordinary issue. Add it to the configured Project, then set Status and Priority with named writes addressed by issue. When an item ID is needed, follow the [Project item ID rule](./integrations/tracker/github.md#project-item-ids).
 - **Linear:** create only the selected Project or projectless Gig, with team, state, Priority, and labels together.
 - Reuse returned identities and outcome proof; read only missing required facts. No cache or recovery state is kept.
