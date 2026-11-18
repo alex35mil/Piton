@@ -11,6 +11,7 @@ import {
     type LinearStatus,
     type LinearStatusDefinition,
     type LinearTeam,
+    projectStatusesForTeam,
 } from "../integrations/tracker/linear.js"
 import { planHash } from "./label-catalog.js"
 
@@ -209,8 +210,7 @@ export interface LinearStatusSetupOptions {
 
 async function readCatalog(client: LinearClient, team: LinearTeam): Promise<Catalog> {
     const [issues, projects] = await Promise.all([client.listTeamIssueStatuses(team.id), client.listProjectStatuses()])
-    // A Project uses workspace statuses plus any its lead team defines; other teams' statuses don't apply.
-    return { issues, projects: projects.filter((status) => status.team === null || status.team.id === team.id) }
+    return { issues, projects: projectStatusesForTeam(projects, team) }
 }
 
 async function previewFor(client: LinearClient, input: PreviewInput) {

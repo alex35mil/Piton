@@ -63,14 +63,16 @@ Read this when configuring a Linear tracker: the tracker object `configure_proje
 
 **Workspace inspection:**
 
-- During guided setup, `inspect_linear_workspace` reads the workspace, the authenticated viewer, accessible teams, team issue statuses, and Project statuses, through Linear's public GraphQL API, without mutating anything. It also returns `statusDefaults`, the suggested definition for each lifecycle key.
+- During guided setup, `inspect_linear_workspace` reads the workspace, the authenticated viewer, accessible teams, team issue statuses, and Project statuses, through Linear's public GraphQL API, without mutating anything. It also returns `statusDefaults`, the definition for each lifecycle key, and, for each team, a `statusProposal` mapping issue and Project statuses.
 - `viewer.name` is the Full Name; `viewer.displayName` is the workspace-unique Username and is returned as `viewer.username`.
 - Setup saves only the team, status names, Phase groups, and label groups the user selects. Provider IDs, viewer identity, and credentials stay out of configuration.
 - A recognized official MCP registration supplies its credential environment-variable name, never its value.
 
 ## Status setup
 
-- For each lifecycle key, the user picks an existing status or a new one, starting from `statusDefaults`. Setup never matches defaults to existing statuses on its own.
+- Setup proposes the team's `statusProposal`, and the user confirms it or changes single entries. Nothing is saved or created before that confirmation.
+- For each key, the proposal takes the existing status with the default's name and native type, ignoring case; else the only unclaimed status of that native type; else the default to create.
+- A conflict means the default's name is taken by a status that doesn't fit; the user picks another existing status or name.
 - `preview_linear_status_setup` plans the creates: issue statuses in the team, Project statuses at workspace level, each placed after the status of the previous lifecycle key. It blocks on an ambiguous or unknown existing name, a new name that already exists, or repeated names. Nothing is written.
 - `apply_linear_status_setup` takes the approved `planHash`, creates Project statuses first, verifies every mapping, and returns `statuses`. Save that as `tracker.statuses`.
 - Existing statuses are never renamed, reordered, archived, or deleted. A created status can't be deleted through the API, only archived.

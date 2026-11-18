@@ -43,9 +43,8 @@ const STATUS_DESCRIPTIONS = {
 } as const
 
 /**
- * Suggested definitions for each lifecycle key, offered like the default Kind label group. They're
- * editable suggestions for statuses the user chooses to create; setup never matches them to
- * existing statuses on its own.
+ * The definition for each lifecycle key: the status to create when none matches, and, by its name and
+ * native type, what `proposeStatuses` matches existing statuses against.
  */
 export const LINEAR_STATUS_DEFAULTS = {
     issues: {
@@ -103,9 +102,77 @@ export interface LinearWorkspaceInspection {
         name: string
         username: string
     }
-    teams: Array<LinearTeam & { issueStatuses: LinearStatus[] }>
+    teams: Array<LinearTeam & { issueStatuses: LinearStatus[]; statusProposal: StatusProposal }>
     projectStatuses: LinearProjectStatus[]
     statusDefaults: typeof LINEAR_STATUS_DEFAULTS
+}
+
+type StatusScope = keyof typeof LINEAR_STATUS_DEFAULTS
+type StatusKey = keyof typeof STATUS_DESCRIPTIONS
+
+/** The lifecycle keys in order; the type pass gives earlier keys the first pick. */
+const STATUS_KEYS = Object.keys(STATUS_DESCRIPTIONS) as StatusKey[]
+
+/**
+ * One proposed mapping entry: an existing status, the default to create, or a default whose name is
+ * already taken in the scope by a status that doesn't fit, which the user must resolve.
+ */
+export type StatusProposalEntry =
+    | { existing: string }
+    | { create: LinearStatusDefinition }
+    | { conflict: { name: string } }
+
+export type StatusProposal = Record<StatusScope, Record<StatusKey, StatusProposalEntry>>
+
+/**
+ * Proposes a status for each lifecycle key in one scope. A status fits a key when its native type is the
+ * default's type. First, the one status named like the default (ignoring case) that fits; then, in
+ * lifecycle order, the one unclaimed status that fits; otherwise the default to create. Each status is
+ * claimed once, and only statuses whose name is unique in the scope are proposed, so a proposal without
+ * conflicts is a valid `preview_linear_status_setup` mapping. The user confirms it before anything is used.
+ */
+export function proposeStatuses(
+    scope: StatusScope,
+    statuses: readonly Pick<LinearStatus, "name" | "type">[],
+): Record<StatusKey, StatusProposalEntry> {
+    const defaults = LINEAR_STATUS_DEFAULTS[scope]
+    const folded = (name: string) => name.toLowerCase()
+    const nameCounts = new Map<string, number>()
+    for (const status of statuses) nameCounts.set(folded(status.name), (nameCounts.get(folded(status.name)) ?? 0) + 1)
+    const candidates = statuses.filter((status) => nameCounts.get(folded(status.name)) === 1)
+    const claimed = new Map<StatusKey, (typeof statuses)[number]>()
+    const isClaimed = (status: (typeof statuses)[number]) => [...claimed.values()].includes(status)
+
+    for (const key of STATUS_KEYS) {
+        const { name, type } = defaults[key]
+        const match = candidates.find((status) => folded(status.name) === folded(name) && status.type === type)
+        if (match) claimed.set(key, match)
+    }
+    for (const key of STATUS_KEYS) {
+        if (claimed.has(key)) continue
+        const fitting = candidates.filter((status) => status.type === defaults[key].type && !isClaimed(status))
+        if (fitting.length === 1) claimed.set(key, fitting[0])
+    }
+
+    const proposal = {} as Record<StatusKey, StatusProposalEntry>
+    for (const key of STATUS_KEYS) {
+        const match = claimed.get(key)
+        const definition = defaults[key]
+        proposal[key] = match
+            ? { existing: match.name }
+            : nameCounts.has(folded(definition.name))
+              ? { conflict: { name: definition.name } }
+              : { create: { ...definition } }
+    }
+    return proposal
+}
+
+/** A Project uses workspace statuses plus any its lead team defines; other teams' statuses don't apply. */
+export function projectStatusesForTeam(
+    statuses: readonly LinearProjectStatus[],
+    team: Pick<LinearTeam, "id">,
+): LinearProjectStatus[] {
+    return statuses.filter((status) => status.team === null || status.team.id === team.id)
 }
 
 export interface LinearWorkspaceInspectionOptions {
@@ -138,10 +205,18 @@ export async function inspectLinearWorkspace(
     return {
         workspace: workspace.workspace,
         viewer: workspace.viewer,
-        teams: teams.map((team) => ({
-            ...team,
-            issueStatuses: sortStatuses(statusesByTeam.get(team.id) ?? []),
-        })),
+        teams: teams.map((team) => {
+            const teamIssueStatuses = sortStatuses(statusesByTeam.get(team.id) ?? [])
+            const teamProjectStatuses = projectStatusesForTeam(workspace.projectStatuses, team)
+            return {
+                ...team,
+                issueStatuses: teamIssueStatuses,
+                statusProposal: {
+                    issues: proposeStatuses("issues", teamIssueStatuses),
+                    projects: proposeStatuses("projects", teamProjectStatuses),
+                },
+            }
+        }),
         projectStatuses: sortProjectStatuses(workspace.projectStatuses),
         statusDefaults: LINEAR_STATUS_DEFAULTS,
     }

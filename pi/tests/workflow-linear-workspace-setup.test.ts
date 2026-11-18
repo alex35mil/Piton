@@ -3,7 +3,11 @@ import "./host-runtime.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { inspectLinearWorkspace, LINEAR_STATUS_DEFAULTS } from "../workflows/extensions/integrations/tracker/linear.ts"
+import {
+    inspectLinearWorkspace,
+    LINEAR_STATUS_DEFAULTS,
+    proposeStatuses,
+} from "../workflows/extensions/integrations/tracker/linear.ts"
 import {
     applyLinearStatusSetup,
     previewLinearStatusSetup,
@@ -317,6 +321,89 @@ describe("Linear status setup", () => {
         )
         assert.equal(result.statusDefaults.issues.inReview.type, "started")
         assert.equal(result.statusDefaults.projects.done.name, "Completed")
+    })
+
+    it("inspection proposes a mapping per team from its own and workspace Project statuses", async () => {
+        const fake = new FakeLinear()
+        const result = await inspectLinearWorkspace(
+            { credentialEnv: "LINEAR_TEST_KEY" },
+            { fetch: fake.fetch, env: { LINEAR_TEST_KEY: "linear-api-key" } },
+        )
+        const alpha = result.teams.find((team) => team.key === "ALP")
+        const zeta = result.teams.find((team) => team.key === "ZET")
+        assert.deepEqual(alpha?.statusProposal.issues.backlog, { existing: "Backlog" })
+        assert.deepEqual(alpha?.statusProposal.projects.todo, { existing: "Planned" })
+        // Only Alpha's Projects can use Alpha Review; the started type is claimed by In Progress first.
+        assert.deepEqual(alpha?.statusProposal.projects.inProgress, { existing: "In Progress" })
+        assert.deepEqual(alpha?.statusProposal.projects.inReview, { existing: "Alpha Review" })
+        assert.ok(zeta && "create" in zeta.statusProposal.projects.inReview)
+    })
+
+    it("proposes the request's example: names first, then a single fitting type, else create", async () => {
+        const fake = new FakeLinearStatuses()
+        const issues = proposeStatuses("issues", [
+            ...fake.issues,
+            { id: "s-review", name: "In Review", type: "started", color: "#8250DF", position: 2.5 },
+        ])
+        assert.deepEqual(issues, {
+            backlog: { existing: "Backlog" },
+            todo: { existing: "Todo" },
+            inProgress: { existing: "In Progress" },
+            inReview: { existing: "In Review" },
+            done: { existing: "Done" },
+            canceled: { existing: "Canceled" },
+        })
+        const projects = proposeStatuses("projects", fake.projects)
+        assert.deepEqual(projects, {
+            backlog: { existing: "Backlog" },
+            todo: { existing: "Planned" },
+            inProgress: { existing: "In Progress" },
+            inReview: { create: LINEAR_STATUS_DEFAULTS.projects.inReview },
+            done: { existing: "Completed" },
+            canceled: { existing: "Canceled" },
+        })
+
+        // The proposal is a ready preview input as it stands.
+        const setup = defaultSetup()
+        setup.statuses.projects = projects as Mapping
+        const preview = await previewLinearStatusSetup(setup, fake.options())
+        assert.equal(preview.state, "ready")
+    })
+
+    it("matches names ignoring case and never claims a status twice", () => {
+        const proposal = proposeStatuses("issues", [
+            { name: "BACKLOG", type: "backlog" },
+            { name: "Doing", type: "started" },
+            { name: "Shipped", type: "completed" },
+        ])
+        assert.deepEqual(proposal.backlog, { existing: "BACKLOG" })
+        // Doing fits both started keys; In Progress comes first in lifecycle order.
+        assert.deepEqual(proposal.inProgress, { existing: "Doing" })
+        assert.ok("create" in proposal.inReview)
+        assert.deepEqual(proposal.done, { existing: "Shipped" })
+        assert.ok("create" in proposal.todo)
+    })
+
+    it("leaves a key to create when several statuses fit its type", () => {
+        const proposal = proposeStatuses("issues", [
+            { name: "Ready", type: "unstarted" },
+            { name: "Next", type: "unstarted" },
+        ])
+        assert.deepEqual(proposal.todo, { create: LINEAR_STATUS_DEFAULTS.issues.todo })
+    })
+
+    it("reports a conflict instead of a create the preview would block", async () => {
+        const unfitting = proposeStatuses("issues", [{ name: "In review", type: "unstarted" }])
+        assert.deepEqual(unfitting.inReview, { conflict: { name: "In Review" } })
+        // The unfitting status still fits todo by type.
+        assert.deepEqual(unfitting.todo, { existing: "In review" })
+
+        const repeated = proposeStatuses("projects", [
+            { name: "In Review", type: "started" },
+            { name: "In Review", type: "started" },
+        ])
+        assert.deepEqual(repeated.inReview, { conflict: { name: "In Review" } })
+        assert.ok("create" in repeated.inProgress)
     })
 
     it("previews only the missing statuses, positioned after their lifecycle predecessor", async () => {
