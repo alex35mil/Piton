@@ -10,7 +10,7 @@ mod socket;
 mod write;
 
 pub use self::{
-    protected::{ProtectedRoots, canonical_target},
+    protected::{ProtectedRoots, canonical_target, lexical},
     socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, serve},
     write::{WriteDecision, WriteOutcome, WriteRequest, write_approved, write_dialog},
 };

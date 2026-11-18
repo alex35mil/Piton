@@ -170,6 +170,12 @@ And per project, in its `.piton/config.toml`, what its builds need, e.g. `preset
 `piton sandbox why PATH [--write | --connect] [--workspace DIR]` says whether a sandboxed pi there may read, write, or
 connect to PATH, and which rule decides; `piton sandbox show` prints every rule.
 
+A grant doesn't follow a symlink a sandboxed agent could have made: the path itself, or a link inside the project's
+checkout or another grant. When a granted folder (say `~/Library/Developer/Xcode/DerivedData`, or pi's `sessions/`) is a
+link to somewhere else, grant the real path; `piton sandbox show` warns about each grant it doesn't follow, and the
+daemon logs it. Opening a sandboxed session through a symlink inside a checkout that leads out of it is refused: open
+the real folder.
+
 Known limits:
 
 - The network isn't restricted: anything the agent can read can leave the machine. Filtering by domain is planned in

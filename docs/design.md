@@ -819,6 +819,18 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    With the network open, Seatbelt would otherwise let a sandboxed agent connect to it and act as a client:
    approve its own protected writes, start host sessions.
 
+**Symlinks.** Seatbelt compares real paths, so each rule also gets its real-path form (`/var` is `/private/var`). A
+deny follows every symlink: it closes what a link points to as well. A grant follows only links no sandboxed session
+of the project could have made, since one it made would move the next launch's grant wherever it pointed (pi's
+`crashes.json` replaced with a link to `~/.zshrc`). A grant never follows its own last component, and never a link
+inside the launch's checkout or source checkout (a session in the whole checkout writes there, even when this
+launch's workspace is a subfolder) or covered by another write grant, as written or resolved, computed to a fixed
+point. Below a link it doesn't follow, it keeps the rest as written, which matches nothing while the link is there.
+The daemon logs each such grant and `piton sandbox show` warns about it; a user who links a granted folder elsewhere
+grants the real path. A link outside the checkout made by a session elsewhere whose `allow` was wider is still
+followed when this launch's grants don't cover it. A sandboxed launch is refused when the workspace path given goes
+through a symlink inside a git checkout that leads out of it; the user's own links outside any checkout work.
+
 `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
 
 Known limits: the network isn't restricted, so anything readable can leave (domain filtering:

@@ -79,16 +79,7 @@ impl ProtectedRoots {
 /// canonical, with the rest appended (a new file, possibly in new folders). `..` and `.` are resolved first, so a
 /// request can't step out of a protected folder by name.
 pub fn canonical_target(path: &Path) -> PathBuf {
-    let mut clean = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                clean.pop();
-            }
-            Component::CurDir => {}
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => clean.push(component),
-        }
-    }
+    let clean = lexical(path);
     if let Ok(real) = std::fs::canonicalize(&clean) {
         return real;
     }
@@ -101,6 +92,21 @@ pub fn canonical_target(path: &Path) -> PathBuf {
         base = parent;
         if let Ok(real) = std::fs::canonicalize(base) {
             return rest.iter().rev().fold(real, |path, name| path.join(name));
+        }
+    }
+    clean
+}
+
+/// `path` with `.` and `..` resolved by name, following no symlink.
+pub fn lexical(path: &Path) -> PathBuf {
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                clean.pop();
+            }
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => clean.push(component),
         }
     }
     clean

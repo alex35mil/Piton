@@ -409,10 +409,15 @@ impl Daemon {
             self.config().agent_socket().to_string_lossy().into_owned(),
         );
         let policy = match mode {
-            LaunchMode::Sandbox => Some(
-                launch::sandbox_policy(&self.config(), &launch_config, &self.base_env, &env, &workspace.path)
-                    .inspect_err(|e| crate::log!("launch refused: {e}"))?,
-            ),
+            LaunchMode::Sandbox => {
+                let resolution =
+                    launch::sandbox_policy(&self.config(), &launch_config, &self.base_env, &env, &workspace.path)
+                        .inspect_err(|e| crate::log!("launch refused: {e}"))?;
+                for link in &resolution.links {
+                    crate::log!("sandbox in {}: {link}", workspace.path.display());
+                }
+                Some(resolution.policy)
+            }
             LaunchMode::Host => None,
         };
         let weak = Arc::downgrade(self);
@@ -474,6 +479,12 @@ impl Daemon {
         mode: LaunchMode,
         session: SessionArg,
     ) -> Result<SessionHandle, LaunchError> {
+        match mode {
+            LaunchMode::Sandbox => {
+                launch::check_workspace_links(workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
+            }
+            LaunchMode::Host => {}
+        }
         let workspace = launch::resolve_workspace(workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let config = self.config();
         let launch_config =

@@ -9,8 +9,15 @@
 //! 5. every configuration level, and what its entries link to, is read-only; protected files are read-only;
 //! 6. the daemon's state folder is closed (reads, writes, connects) except its logs and the agent socket, and its
 //!    control socket can't be connected to, wherever it is.
+//!
+//! Seatbelt compares real paths, so each rule also gets its real-path form. A deny's follows every symlink: it closes
+//! what a link points to as well. An allow's follows only links no sandboxed session of the project can replace
+//! (`/var` is `/private/var`): one it could replace would let it move the grant wherever it likes.
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
 
 use super::{
     SandboxError,
@@ -18,7 +25,7 @@ use super::{
     rules::{Access, Effect, Policy, Rule, Target},
 };
 use crate::{
-    agent::canonical_target,
+    agent::{canonical_target, lexical},
     config::{LOCAL_DIR, LaunchConfig, expand_home},
     launch::Env,
 };
@@ -46,8 +53,43 @@ pub struct Facts<'a> {
 
 const AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
+/// The most symlinks one path's resolution follows, as the kernel's limit; past it, the rest is kept as written.
+const MAX_LINKS: usize = 40;
+
+/// A launch's policy, and the grants it doesn't resolve as their paths suggest.
+#[derive(Debug)]
+pub struct Resolution {
+    pub policy: Policy,
+    pub links: Vec<UnfollowedLink>,
+}
+
+/// A grant whose path goes through a symlink a sandboxed session could have made, so the grant doesn't follow it: it
+/// covers the path as written, which matches nothing while the link is there. A user who links a granted folder
+/// elsewhere grants the real path instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfollowedLink {
+    pub link: PathBuf,
+    pub grant: PathBuf,
+    pub source: Source,
+}
+
+impl std::fmt::Display for UnfollowedLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = match self.grant == self.link {
+            true => "is a symlink".to_string(),
+            false => format!("goes through the symlink {}", self.link.display()),
+        };
+        write!(
+            f,
+            "the sandbox grant {} {what}, which a sandboxed session could have made, so it isn't followed: grant the \
+             real path instead",
+            self.grant.display(),
+        )
+    }
+}
+
 /// The launch's policy, or why the launch is refused.
-pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Policy, SandboxError> {
+pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, SandboxError> {
     let table = &config.sandbox;
     let expand = |grant: &str| expand_grant(grant, facts.home, facts.base_env);
     let mut rules = Rules::default();
@@ -138,10 +180,16 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Policy, SandboxEr
     let user_denied: Vec<PathBuf> = table.deny.iter().map(|g| expand(g)).collect::<Result<_, _>>()?;
     denied.extend(user_denied.iter().cloned());
 
-    // 3. pi's agent directories.
+    // 3. pi's agent directories: as named, so the runtime grants below resolve like every other grant.
     let host_agent = agent_dir(facts.base_env, facts.home);
     let agent = agent_dir(facts.launch_env, facts.home);
-    check_agent_dir(&agent, &host_agent, config, facts, &denied)?;
+    check_agent_dir(
+        &canonical_target(&agent),
+        &canonical_target(&host_agent),
+        config,
+        facts,
+        &denied,
+    )?;
     rules.push(
         Effect::Deny,
         &[Access::Write],
@@ -150,7 +198,7 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Policy, SandboxEr
             what: "pi's agent directory: extensions, settings, and packages host sessions load".into(),
         },
     );
-    if agent != host_agent {
+    if canonical_target(&agent) != canonical_target(&host_agent) {
         // A per-folder agent directory (even one inside the workspace) is loaded by host sessions in that folder too.
         rules.push(
             Effect::Deny,
@@ -193,17 +241,17 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Policy, SandboxEr
         rules.push(Effect::Deny, &[Access::Write], subpath(&target), config_level.clone());
     }
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    rules.rules.push(Rule {
-        effect: Effect::Deny,
-        access: vec![Access::Write],
-        target: Target::Protected {
+    rules.push(
+        Effect::Deny,
+        &[Access::Write],
+        Target::Protected {
             source: canonical(&config.source),
             checkout: canonical(&config.checkout),
         },
-        source: Source::Piton {
+        Source::Piton {
             what: "a protected file (.piton/ or .pi/): changed only with the user's approval".into(),
         },
-    });
+    );
 
     // 6. The daemon.
     rules.push(
@@ -243,45 +291,225 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Policy, SandboxEr
     let keychain = exposed
         .iter()
         .any(|e| keychains.starts_with(e) || e.starts_with(&keychains));
-    Ok(Policy {
-        rules: rules.rules,
-        keychain,
+    let (rules, links) = rules.finish(&[&config.checkout, &config.source]);
+    Ok(Resolution {
+        policy: Policy { rules, keychain },
+        links,
     })
 }
 
+/// The rules as written, in order; [`Rules::finish`] adds their real-path forms.
 #[derive(Default)]
 struct Rules {
     rules: Vec<Rule>,
 }
 
 impl Rules {
-    /// Adds a rule, and the same rule for the canonical path when it differs: Seatbelt compares resolved paths
-    /// (`/var` is `/private/var`), a connect may compare the path as given.
     fn push(&mut self, effect: Effect, access: &[Access], target: Target, source: Source) {
-        let canonical = match &target {
-            Target::Subpath { path } => Some(Target::Subpath {
-                path: canonical_target(path),
-            }),
-            Target::Literal { path } => Some(Target::Literal {
-                path: canonical_target(path),
-            }),
-            Target::Prefix { path } => Some(Target::Prefix {
-                path: canonical_target(path),
-            }),
-            Target::Protected { .. } => None,
-        };
-        let rule = Rule {
+        self.rules.push(Rule {
             effect,
             access: access.to_vec(),
             target,
             source,
-        };
-        let canonical = canonical
-            .filter(|c| *c != rule.target)
-            .map(|target| Rule { target, ..rule.clone() });
-        self.rules.push(rule);
-        self.rules.extend(canonical);
+        });
     }
+
+    /// Every rule, followed by the same rule for its real path when that differs: Seatbelt compares real paths (`/var`
+    /// is `/private/var`), a connect may compare the path as given.
+    ///
+    /// What a sandboxed session of this project can replace: the `checkouts` (a session whose workspace is the whole
+    /// checkout writes there, even when this launch's is a subfolder) and what this launch's write grants cover, as
+    /// written or resolved. A resolved grant can make more replaceable (`~/l/b` with `~/l -> ~/x` covers `~/x/b`), which
+    /// can stop another grant's resolution, so it's computed to a fixed point. The set only grows, which only follows
+    /// fewer links, and it's bounded (each grant resolves to one of finitely many stopping points), so it ends.
+    fn finish(self, checkouts: &[&Path]) -> (Vec<Rule>, Vec<UnfollowedLink>) {
+        let mut replaceable: Vec<Target> = checkouts
+            .iter()
+            .map(|c| subpath(&canonical_target(c)))
+            .chain(self.rules.iter().filter(|r| grants_write(r)).map(|r| r.target.clone()))
+            .collect();
+        loop {
+            let resolved: Vec<RealForm> = self.rules.iter().map(|r| real_form(r, &replaceable)).collect();
+            let mut grew = false;
+            for (rule, real) in self.rules.iter().zip(&resolved) {
+                if grants_write(rule)
+                    && let Some(target) = &real.target
+                    && !replaceable.contains(target)
+                {
+                    replaceable.push(target.clone());
+                    grew = true;
+                }
+            }
+            if grew {
+                continue;
+            }
+            let mut rules = Vec::with_capacity(self.rules.len() * 2);
+            let mut links: Vec<UnfollowedLink> = Vec::new();
+            for (rule, real) in self.rules.into_iter().zip(resolved) {
+                if let (Some(link), Some(grant)) = (real.unfollowed, rule_path(&rule.target)) {
+                    let report = UnfollowedLink {
+                        link,
+                        grant: grant.to_path_buf(),
+                        source: rule.source.clone(),
+                    };
+                    if !links.contains(&report) {
+                        links.push(report);
+                    }
+                }
+                let companion = real
+                    .target
+                    .filter(|t| *t != rule.target)
+                    .map(|target| Rule { target, ..rule.clone() });
+                rules.push(rule);
+                rules.extend(companion);
+            }
+            return (rules, links);
+        }
+    }
+}
+
+fn grants_write(rule: &Rule) -> bool {
+    match rule.effect {
+        Effect::Allow => rule.access.contains(&Access::Write),
+        Effect::Deny => false,
+    }
+}
+
+fn rule_path(target: &Target) -> Option<&Path> {
+    match target {
+        Target::Subpath { path } | Target::Literal { path } | Target::Prefix { path } => Some(path),
+        Target::Protected { .. } => None,
+    }
+}
+
+/// A rule's real-path target, and the link its resolution stopped at because a sandboxed session could have made it.
+struct RealForm {
+    target: Option<Target>,
+    unfollowed: Option<PathBuf>,
+}
+
+/// A deny follows every link: it closes what a link points to too. An allow follows only links outside `replaceable`,
+/// and a write grant never its own last component, which it can always replace.
+fn real_form(rule: &Rule, replaceable: &[Target]) -> RealForm {
+    let resolve = |path: &Path, keep_last: Last| match rule.effect {
+        Effect::Deny => Walk {
+            path: canonical_target(path),
+            unfollowed: None,
+        },
+        Effect::Allow => walk(path, keep_last, replaceable),
+    };
+    let last = match rule.access.contains(&Access::Write) {
+        true => Last::Kept,
+        false => Last::Followed,
+    };
+    let (target, walked) = match &rule.target {
+        Target::Subpath { path } => {
+            let walked = resolve(path, last);
+            (subpath(&walked.path), walked.unfollowed)
+        }
+        Target::Literal { path } => {
+            let walked = resolve(path, last);
+            (literal(&walked.path), walked.unfollowed)
+        }
+        // A name prefix isn't an entry: its folder is resolved, the prefix kept.
+        Target::Prefix { path } => match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => {
+                let walked = resolve(parent, Last::Followed);
+                (
+                    Target::Prefix {
+                        path: walked.path.join(name),
+                    },
+                    walked.unfollowed,
+                )
+            }
+            (None, _) | (_, None) => (rule.target.clone(), None),
+        },
+        Target::Protected { .. } => {
+            return RealForm {
+                target: None,
+                unfollowed: None,
+            };
+        }
+    };
+    RealForm {
+        target: Some(target),
+        unfollowed: walked,
+    }
+}
+
+/// Whether a walk follows a link at the path's last component.
+#[derive(Debug, Clone, Copy)]
+enum Last {
+    /// A write grant's own entry: always replaceable by the sandbox, never followed.
+    Kept,
+    /// Followed like any other component.
+    Followed,
+}
+
+struct Walk {
+    path: PathBuf,
+    unfollowed: Option<PathBuf>,
+}
+
+/// `path` resolved from `/`, following each symlink unless `replaceable` covers it (a sandboxed session could have made
+/// it), or it's the last component and `last` keeps it. Below a link that isn't followed, the agent decides what each
+/// name resolves to, so the rest is kept as written. Past [`MAX_LINKS`] links, the rest is kept too.
+fn walk(path: &Path, last: Last, replaceable: &[Target]) -> Walk {
+    let mut pending: std::collections::VecDeque<OsString> = names(&lexical(path)).collect();
+    // A relative path (an agent directory named relative) resolves against the working folder, as before.
+    let mut current = match path.is_absolute() {
+        true => PathBuf::from("/"),
+        false => PathBuf::new(),
+    };
+    let mut followed = 0;
+    while let Some(name) = pending.pop_front() {
+        if name == ".." {
+            current.pop();
+            continue;
+        }
+        let candidate = current.join(&name);
+        let is_link = candidate.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
+        if !is_link {
+            current = candidate;
+            continue;
+        }
+        let kept = match (last, pending.is_empty()) {
+            (Last::Kept, true) => true,
+            (Last::Kept, false) | (Last::Followed, _) => replaceable.iter().any(|t| t.covers(&candidate)),
+        };
+        let target = match kept || followed >= MAX_LINKS {
+            true => None,
+            false => std::fs::read_link(&candidate).ok(),
+        };
+        let Some(target) = target else {
+            let mut rest = candidate.clone();
+            rest.extend(pending);
+            return Walk {
+                path: rest,
+                unfollowed: kept.then_some(candidate),
+            };
+        };
+        followed += 1;
+        if target.is_absolute() {
+            current = PathBuf::from("/");
+        }
+        for name in names(&target).collect::<Vec<_>>().into_iter().rev() {
+            pending.push_front(name);
+        }
+    }
+    Walk {
+        path: current,
+        unfollowed: None,
+    }
+}
+
+/// A path's names, with `..` kept as `..` (a link's target may climb).
+fn names(path: &Path) -> impl Iterator<Item = OsString> + '_ {
+    path.components().filter_map(|c| match c {
+        Component::Normal(name) => Some(name.to_os_string()),
+        Component::ParentDir => Some(OsString::from("..")),
+        Component::CurDir | Component::RootDir | Component::Prefix(_) => None,
+    })
 }
 
 fn subpath(path: &Path) -> Target {
@@ -296,15 +524,15 @@ fn literal(path: &Path) -> Target {
     }
 }
 
-/// pi's agent directory in `env`: `PI_CODING_AGENT_DIR` (with `~`), else `~/.pi/agent`. Canonical, as Seatbelt
-/// compares paths.
+/// pi's agent directory in `env`: `PI_CODING_AGENT_DIR` (with `~`), else `~/.pi/agent`. As named, with no symlink
+/// followed: its rules get their real paths like every other rule.
 fn agent_dir(env: &Env, home: &Path) -> PathBuf {
     let dir = env
         .get(AGENT_DIR_ENV)
         .filter(|v| !v.is_empty())
         .map(|v| expand_home(v, home))
         .unwrap_or_else(|| home.join(".pi/agent"));
-    canonical_target(&dir)
+    lexical(&dir)
 }
 
 /// The launch's agent directory comes from the workspace's environment, so it can't be where it would open what the
@@ -457,6 +685,10 @@ mod tests {
     }
 
     fn policy_with(f: &Fixture, base: &Env, launch: &Env) -> Result<Policy, SandboxError> {
+        resolve_in(f, &f.repo, base, launch).map(|r| r.policy)
+    }
+
+    fn resolve_in(f: &Fixture, workspace: &Path, base: &Env, launch: &Env) -> Result<Resolution, SandboxError> {
         let control = f.state.join("piton.sock");
         let agent = f.state.join("agent.sock");
         let logs = f.state.join("logs");
@@ -466,7 +698,7 @@ mod tests {
                 home: &f.home,
                 base_env: base,
                 launch_env: launch,
-                workspace: &f.repo,
+                workspace,
                 state_dir: &f.state,
                 control_socket: &control,
                 agent_socket: &agent,
@@ -715,6 +947,132 @@ mod tests {
         std::os::unix::fs::symlink(dotfiles.join("config.toml"), &global).unwrap();
         let p = policy_with(&f, &Env::new(), &Env::new()).unwrap();
         assert!(!allowed(&p, &dotfiles.join("config.toml"), Access::Write));
+    }
+
+    fn link(target: &Path, at: &Path) {
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+
+    fn mkdir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+    }
+
+    fn reported(r: &Resolution) -> Vec<PathBuf> {
+        r.links.iter().map(|l| l.link.clone()).collect()
+    }
+
+    /// A runtime entry of pi's agent directory the agent replaced with a link doesn't move the grant to the link's
+    /// target: the next launch can't write the shell config through `crashes.json`.
+    #[test]
+    fn a_runtime_entry_replaced_with_a_link_grants_nothing() {
+        let f = fixture("", "");
+        let agent = f.home.join(".pi/agent");
+        std::fs::write(f.home.join(".zshrc"), "").unwrap();
+        std::fs::write(f.home.join("victim"), "").unwrap();
+        link(&f.home.join(".zshrc"), &agent.join("crashes.json"));
+        link(&f.home.join("victim"), &agent.join("mcp.log"));
+        let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
+        assert!(!allowed(&r.policy, &f.home.join(".zshrc"), Access::Write));
+        assert!(!allowed(&r.policy, &f.home.join("victim"), Access::Write));
+        assert!(allowed(&r.policy, &agent.join("auth.json"), Access::Write));
+        let links = reported(&r);
+        assert!(links.contains(&agent.join("crashes.json")), "{links:?}");
+        assert!(links.contains(&agent.join("mcp.log")), "{links:?}");
+    }
+
+    #[test]
+    fn an_allow_replaced_with_a_link_grants_nothing() {
+        let f = fixture("[sandbox]\nallow = [\"~/d/cache\"]\n", "");
+        mkdir(&f.home.join("victim"));
+        link(&f.home.join("victim"), &f.home.join("d/cache"));
+        let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
+        assert!(!allowed(&r.policy, &f.home.join("victim/x"), Access::Write));
+        assert_eq!(reported(&r), [f.home.join("d/cache")]);
+        assert_eq!(
+            r.links[0].source,
+            Source::Config {
+                key: "sandbox.allow".into()
+            }
+        );
+    }
+
+    /// A link the sandbox can't replace is followed: the user's own (a folder moved to another disk), like `/var`.
+    #[test]
+    fn a_link_above_every_grant_is_followed() {
+        let f = fixture("[sandbox]\nallow = [\"~/ln/cache\"]\n", "");
+        mkdir(&f.home.join("real/cache"));
+        link(&f.home.join("real"), &f.home.join("ln"));
+        let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
+        assert!(allowed(&r.policy, &f.home.join("real/cache/x"), Access::Write));
+        assert!(!allowed(&r.policy, &f.home.join("real/other"), Access::Write));
+        assert!(r.links.is_empty(), "{:?}", r.links);
+    }
+
+    /// An agent directory inside the workspace, below a folder the agent swapped for a link out of it.
+    #[test]
+    fn an_agent_directory_below_a_planted_link_stays_in_the_checkout() {
+        let f = fixture("", "");
+        let outside = f.home.join("outside");
+        mkdir(&outside.join("agent"));
+        link(&outside, &f.repo.join("tools"));
+        let launch = env(&[(AGENT_DIR_ENV, "~/p/repo/tools/agent")]);
+        let r = resolve_in(&f, &f.repo, &Env::new(), &launch).unwrap();
+        assert!(!allowed(&r.policy, &outside.join("agent/crashes.json"), Access::Write));
+        assert!(!allowed(
+            &r.policy,
+            &outside.join("agent/sessions/s.jsonl"),
+            Access::Write
+        ));
+        assert!(!allowed(
+            &r.policy,
+            &outside.join("agent/mcp-auth-refresh-x.lock"),
+            Access::Write
+        ));
+        assert!(reported(&r).contains(&f.repo.join("tools")));
+    }
+
+    /// A session in the whole checkout could have planted the link; a later one in a subfolder must not follow it.
+    #[test]
+    fn links_anywhere_in_the_checkout_are_never_followed() {
+        let f = fixture("", "");
+        let launch_agents = f.home.join("Library/LaunchAgents");
+        mkdir(&launch_agents);
+        mkdir(&f.repo.join("packages/web"));
+        link(&launch_agents, &f.repo.join(".pi-agent"));
+        let launch = env(&[(AGENT_DIR_ENV, "~/p/repo/.pi-agent")]);
+        let r = resolve_in(&f, &f.repo.join("packages/web"), &Env::new(), &launch).unwrap();
+        for entry in ["mcp-auth-refresh-x.plist", "crashes.json", "sessions/x.plist"] {
+            assert!(
+                !allowed(&r.policy, &launch_agents.join(entry), Access::Write),
+                "{entry}"
+            );
+        }
+    }
+
+    /// A resolved grant can make an entry replaceable that another grant's path goes through.
+    #[test]
+    fn what_resolved_grants_cover_is_replaceable_too() {
+        let f = fixture("[sandbox]\nallow = [\"~/l/b\", \"~/x/b/c/d\"]\n", "");
+        mkdir(&f.home.join("x/b"));
+        mkdir(&f.home.join("victim/d"));
+        link(&f.home.join("x"), &f.home.join("l"));
+        link(&f.home.join("victim"), &f.home.join("x/b/c"));
+        let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
+        assert!(allowed(&r.policy, &f.home.join("x/b/y"), Access::Write));
+        assert!(!allowed(&r.policy, &f.home.join("victim/d/z"), Access::Write));
+        assert_eq!(reported(&r), [f.home.join("x/b/c")]);
+    }
+
+    /// Denies follow every link: a deny named by a link closes its target.
+    #[test]
+    fn a_deny_closes_what_its_link_points_to() {
+        let f = fixture("[sandbox]\ndeny = [\"~/p/repo/secret\"]\n", "");
+        let secret = f.home.join("secret");
+        mkdir(&secret);
+        link(&secret, &f.repo.join("secret"));
+        let p = policy(&f);
+        assert!(!allowed(&p, &secret.join("k"), Access::Read));
     }
 
     /// Every rule is valid Seatbelt the library accepts.
