@@ -1129,11 +1129,7 @@ describe("workflow integration configuration", () => {
                     native: {
                         provider: "github",
                         current: "Planning",
-                        field: {
-                            name: "Phase",
-                            dataType: "SINGLE_SELECT",
-                            options: Object.values(phaseValues),
-                        },
+                        field: { name: "Phase", dataType: "SINGLE_SELECT" },
                     },
                 },
                 mcpTools,
@@ -1150,7 +1146,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("prepares GitHub Phase from the Project field and item reads as the MCP returns them", async () => {
+    it("prepares GitHub Phase from the Project item read as the MCP returns it", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
@@ -1177,10 +1173,10 @@ describe("workflow integration configuration", () => {
                 repository: { owner: "alex", repo: "example" },
                 issueNumber: 42,
             }
-            const prepare = (native: unknown, lifecycle = "inProgress") =>
+            const prepare = (native: unknown) =>
                 tools.get("prepare_github_phase_mutation")!.execute(
                     "phase",
-                    { entityDir, lifecycle, native },
+                    { entityDir, native },
                     undefined,
                     undefined,
                     withToolExecution({
@@ -1194,12 +1190,20 @@ describe("workflow integration configuration", () => {
                 value: "Execution",
                 changed: true,
             })
-            const cleared = await prepare(githubPhaseReads(target, null), "done")
+            // Lifecycle comes from the item's Status.
+            const cleared = await prepare(githubPhaseReads(target, null, "Done"))
             assert.deepEqual((cleared.details as { phaseMutation: unknown }).phaseMutation, {
                 provider: "github",
                 field: "Phase",
                 value: null,
                 changed: false,
+            })
+            const inReview = await prepare(githubPhaseReads(target, "Execution", "In Review"))
+            assert.deepEqual((inReview.details as { phaseMutation: unknown }).phaseMutation, {
+                provider: "github",
+                field: "Phase",
+                value: null,
+                changed: true,
             })
             await assert.rejects(prepare(githubPhaseReads({ ...target, issueNumber: 43 })), /durable issue/)
         } finally {

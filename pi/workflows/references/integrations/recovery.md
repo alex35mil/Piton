@@ -4,7 +4,7 @@ Read this only when a provider outcome is uncertain or partial, or a tool return
 
 ## Pending plan publication
 
-The first `prepare_tracker_publication` call for an unpublished plan saves pending state before returning its non-idempotent create: a token on GitHub, the sent plan's fingerprint on Linear. Any later call returns `recovery-required` instead of another create. Recovery then reads the provider and decides from what it finds; never create a replacement on your own.
+The first `prepare_tracker_publication` call for an unpublished plan saves pending state before returning its non-idempotent create: a token on GitHub, the sent plan's fingerprint on Linear. Any later call returns `recovery-required` instead of another create, labelled with `safeguard` as the intended response. Run its `lookups` as returned. Recovery then reads the provider and decides from what it finds; never create a replacement on your own.
 
 Call `recover_tracker_publication` with the `source` and the complete reads below:
 

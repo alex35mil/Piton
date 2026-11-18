@@ -1,6 +1,6 @@
 import * as path from "node:path"
 
-import { isMcpTool, mcpResponsePayload, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
+import { isMcpTool, mcpResponsePayload, resolveMcpTool, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import * as project from "../../../extensions/__lib/project.js"
 import { readEntityStatus, resolveEntityDirectory, type EntityStatus } from "../__lib/entity.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
@@ -112,6 +112,90 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
             throw new Error("unknown resource kind")
     }
     return { directory, status, scope }
+}
+
+/** What evidence is for: recording IDs from a read or mutation, or proving cached IDs stale. */
+export type EvidencePurpose = "record" | "invalidate"
+
+interface AcceptedEvidence {
+    resource: ResourceKind
+    server: string
+    operation: string
+    method?: string
+}
+
+// The evidence each resource kind takes, for one purpose. Invalidation needs a read that can show a
+// changed relationship, which only Project items and PRs have.
+function evidenceFor(resource: ResourceKind, server: string, purpose: EvidencePurpose): AcceptedEvidence[] {
+    const accepted = (operation: string, method?: string) => ({ resource, server, operation, method })
+    switch (resource) {
+        case "github-issue":
+            return purpose === "record" ? [accepted("issue_read", "get")] : []
+        case "github-project-item":
+            return purpose === "record"
+                ? [accepted("projects_get", "get_project_item"), accepted("projects_write", "add_project_item")]
+                : [accepted("projects_get", "get_project_item")]
+        case "linear-project":
+            return purpose === "record" ? [accepted("get_project")] : []
+        case "linear-issue":
+            return purpose === "record" ? [accepted("get_issue")] : []
+        case "github-pull-request":
+            return [accepted("pull_request_read", "get")]
+        default:
+            return resource satisfies never
+    }
+}
+
+/**
+ * The resource kind that evidence identifies, from its registered tool and `method`, among the kinds
+ * this entity's tracker and forge have. A rejection lists every accepted tool and method.
+ */
+export function evidenceResourceKind(
+    cwd: string,
+    entityDir: string,
+    evidence: Pick<ProviderEvidence, "tool" | "arguments">,
+    purpose: EvidencePurpose,
+    tools: McpToolCatalog,
+): ResourceKind {
+    const root = project.resolveRootDir(cwd)
+    const roles = loadIntegrationRoles(root)
+    const tracker = readEntityStatus(resolveEntityDirectory(root, cwd, entityDir)).tracker
+    const kinds: Array<{ resource: ResourceKind; server: string }> = []
+    if (roles.tracker.state === "on") {
+        const server = roles.tracker.config.mcpServer
+        switch (tracker.provider) {
+            case "github":
+                kinds.push({ resource: "github-issue", server }, { resource: "github-project-item", server })
+                break
+            case "linear":
+                kinds.push({ resource: tracker.resource === "project" ? "linear-project" : "linear-issue", server })
+                break
+            case "local":
+                break
+        }
+    }
+    if (roles.forge.state === "on")
+        kinds.push({ resource: "github-pull-request", server: roles.forge.config.mcpServer })
+    const accepted = kinds.flatMap(({ resource, server }) => evidenceFor(resource, server, purpose))
+    const metadata = tools.get(evidence.tool)
+    const match = accepted.find(
+        (candidate) =>
+            metadata?.serverName === candidate.server &&
+            metadata.serverToolName === candidate.operation &&
+            (candidate.method === undefined || evidence.arguments.method === candidate.method),
+    )
+    if (match) return match.resource
+    const names = accepted.map((candidate) => {
+        const address = resolveMcpTool(candidate.server, candidate.operation, tools)
+        const tool = address.state === "available" ? address.tool : `${candidate.server}/${candidate.operation}`
+        return candidate.method === undefined ? tool : `${tool} (method ${candidate.method})`
+    })
+    const method = typeof evidence.arguments.method === "string" ? ` (method ${evidence.arguments.method})` : ""
+    throw new Error(
+        names.length
+            ? `${purpose === "record" ? "recording" : "invalidating"} resource IDs doesn't accept evidence from ${evidence.tool}${method}; accepted evidence: ${names.join(", ")}`
+            : `this entity has no resource IDs to ${purpose}`,
+    )
 }
 
 function responseObject(evidence: ProviderEvidence): Record<string, unknown> {

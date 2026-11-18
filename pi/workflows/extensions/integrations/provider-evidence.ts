@@ -14,7 +14,8 @@ export interface ProviderCall {
 /**
  * Proves that evidence comes from the configured registered tool, called with the expected arguments.
  * `label` names the evidence in errors, for example "plan publication" or "Project"; a wrong tool's
- * error names the expected registered tool.
+ * error names the expected registered tool and its required `method`, and a mismatched argument names
+ * the expected and received values.
  */
 export function requireProviderCall(
     evidence: Pick<ProviderEvidence, "tool" | "arguments">,
@@ -22,13 +23,22 @@ export function requireProviderCall(
     tools: McpToolCatalog,
     label: string,
 ): void {
-    requireMcpTool(evidence.tool, call.server, call.operation, tools, `${label} evidence`)
+    const method = call.expected.method
+    try {
+        requireMcpTool(evidence.tool, call.server, call.operation, tools, `${label} evidence`)
+    } catch (error) {
+        if (typeof method !== "string" || !(error instanceof Error)) throw error
+        throw new Error(`${error.message} (method ${method})`)
+    }
     for (const [key, value] of Object.entries(call.expected)) {
         const actual = evidence.arguments[key]
         const matches =
             caseInsensitiveArguments.has(key) && typeof actual === "string" && typeof value === "string"
                 ? actual.toLowerCase() === value.toLowerCase()
                 : isDeepStrictEqual(actual, value)
-        if (!matches) throw new Error(`${label} evidence argument ${key} does not match the required scope`)
+        if (!matches)
+            throw new Error(
+                `${label} evidence argument ${key} must be ${JSON.stringify(value)}, got ${actual === undefined ? "nothing" : JSON.stringify(actual)}`,
+            )
     }
 }

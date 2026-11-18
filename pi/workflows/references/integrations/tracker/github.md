@@ -61,7 +61,7 @@ When a create result is uncertain, read [recovery](../recovery.md#uncertain-trac
 ## Resume and mutations
 
 1. Call `resume_integration` with `entityDir`, then read fresh Project membership, Status, Priority, and Phase. Finish any board setup that's missing; ask the user for Priority when it's unset.
-2. Reconcile Phase against the Project field definition and current selection. A cached Project-item ID reaches the current fields directly; that response must confirm the issue and Project.
+2. Reconcile Phase from the item read with Status and Phase. A cached Project-item ID reaches the current fields directly; that response must confirm the issue and Project.
 3. Investigate missing or confirmed-stale Resource IDs through the configured tools, and record the actual response afterward. Network or permission errors don't prove absence. Ordinary resume never discovers PRs.
 
 **What's projected:**
@@ -73,7 +73,7 @@ When a create result is uncertain, read [recovery](../recovery.md#uncertain-trac
 **Changing values:**
 
 - Use `prepare_tracker_mutation` with exactly one change: `lifecycle`, `priority`, or Task `hierarchy`. Labels change through `prepare_label_mutation`, with the issue's label names as its current facts, and apply as one `issue_write` update.
-- For Phase, use `prepare_github_phase_mutation` with this operation's Phase field and item reads ([fresh native facts](../../phase.md#fresh-native-facts)), and apply only a changed field value.
+- For Phase, use `prepare_github_phase_mutation` with an item read taken after any Status change ([fresh native facts](../../phase.md#fresh-native-facts)), and apply only a changed field value.
 - Priority follows its configured Project or issue scope.
 - Lifecycle and Priority are provider authority: never cached and never replaced by a local fallback.
 - A user's request to assign an issue is an ordinary `issue_write` update; resume never reads or repairs assignees.

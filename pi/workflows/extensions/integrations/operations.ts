@@ -46,37 +46,53 @@ async function updateEntity<T extends { status: EntityStatus; changed: boolean }
 
 export function registerWorkflowOperations(pi: ExtensionAPI, mcpTools: McpToolCatalog): void {
     const tools = workflowTools(pi, "integrations")
-    const properties = Type.Omit(SetWorkflowPhaseSchema, ["native"]).properties
-    const phaseOperations = [
-        ["set_github_workflow_phase", GitHubPhaseInputSchema, "the actual Project field and item reads"],
-        [
-            "set_linear_workflow_phase",
-            LinearPhaseInputSchema,
-            "fresh label catalog and selection facts; omit only genuinely empty native leaf values",
-        ],
-    ] as const
-    for (const [name, nativeSchema, facts] of phaseOperations) {
-        const parameters = Type.Object({ ...properties, native: nativeSchema }, { additionalProperties: false })
-        tools.registerTool({
-            name,
-            label: name,
-            description: `Set In Progress workflow Phase and calculate reconciliation from ${facts}. Local metadata only; apply a changed assignment through the configured MCP tool. Does not change lifecycle or grant approval.`,
-            parameters,
-            async execute(_id, params, _signal, _update, ctx) {
-                const result = await updateEntity(ctx.cwd, params.entityDir, name, (status, tracker, directory) => {
-                    const native =
-                        name === "set_github_workflow_phase"
-                            ? githubPhaseFacts(
-                                  tracker,
-                                  { name: path.basename(directory), status },
-                                  parse(GitHubPhaseInputValidator, params.native),
-                                  mcpTools,
-                              )
-                            : linearPhaseFacts(parse(LinearPhaseInputValidator, params.native))
-                    return setWorkflowPhase(status, tracker, parse(SetWorkflowPhaseValidator, { ...params, native }))
-                })
-                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }
-            },
-        })
-    }
+    const { entityDir, phase, lifecycle } = SetWorkflowPhaseSchema.properties
+    const description = (facts: string) =>
+        `Set In Progress workflow Phase and calculate reconciliation from ${facts}. Local metadata only; apply a changed assignment through the configured MCP tool. Does not change lifecycle or grant approval.`
+
+    const name = "set_github_workflow_phase"
+    tools.registerTool({
+        name,
+        label: name,
+        description: description(
+            "the actual Project item read, which gives both lifecycle (its Status) and the current Phase",
+        ),
+        parameters: Type.Object({ entityDir, phase, native: GitHubPhaseInputSchema }, { additionalProperties: false }),
+        async execute(_id, params, _signal, _update, ctx) {
+            const result = await updateEntity(ctx.cwd, params.entityDir, name, (status, tracker, directory) => {
+                const facts = githubPhaseFacts(
+                    tracker,
+                    { name: path.basename(directory), status },
+                    parse(GitHubPhaseInputValidator, params.native),
+                    mcpTools,
+                )
+                return setWorkflowPhase(
+                    status,
+                    tracker,
+                    parse(SetWorkflowPhaseValidator, { ...params, lifecycle: facts.lifecycle, native: facts.native }),
+                )
+            })
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
+
+    const linear = "set_linear_workflow_phase"
+    tools.registerTool({
+        name: linear,
+        label: linear,
+        description: description(
+            "fresh lifecycle and label catalog and selection facts; omit only genuinely empty native leaf values",
+        ),
+        parameters: Type.Object(
+            { entityDir, phase, lifecycle, native: LinearPhaseInputSchema },
+            { additionalProperties: false },
+        ),
+        async execute(_id, params, _signal, _update, ctx) {
+            const result = await updateEntity(ctx.cwd, params.entityDir, linear, (status, tracker) => {
+                const native = linearPhaseFacts(parse(LinearPhaseInputValidator, params.native))
+                return setWorkflowPhase(status, tracker, parse(SetWorkflowPhaseValidator, { ...params, native }))
+            })
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
 }

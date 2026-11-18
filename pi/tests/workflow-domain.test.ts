@@ -154,6 +154,28 @@ describe("workflow domain", () => {
             () => parse(validator, { ...value, extra: true }),
             (error) => error instanceof SchemaValidationError && /\/extra: unknown field/.test(error.message),
         )
+        // An unknown field lists the fields accepted where it appeared, across union branches and nesting.
+        assert.throws(
+            () => parse(validator, { ...value, extra: true }),
+            /\/extra: unknown field \(accepted: name, count\)/,
+        )
+        const nested = compile(
+            Type.Union([
+                Type.Object(
+                    {
+                        kind: Type.Literal("a"),
+                        inner: Type.Object({ x: Type.Number() }, { additionalProperties: false }),
+                    },
+                    { additionalProperties: false },
+                ),
+                Type.Object({ kind: Type.Literal("b"), y: Type.Number() }, { additionalProperties: false }),
+            ]),
+        )
+        assert.throws(
+            () => parse(nested, { kind: "a", inner: { x: 1, z: 2 } }),
+            /\/inner\/z: unknown field \(accepted: x\)/,
+        )
+        assert.throws(() => parse(nested, { kind: "b", y: 1, source: "s" }), /accepted: kind, inner, y/)
         assert.throws(
             () => parse(validator, { ...value, count: "3" }),
             (error) =>

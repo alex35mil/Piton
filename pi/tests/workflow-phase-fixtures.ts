@@ -71,8 +71,15 @@ export interface GitHubPhaseReadsTarget {
     issueNumber: number
 }
 
-/** `projects_get` Phase reads in the shape the GitHub MCP returns them; `current: null` omits `value`. */
-export function githubPhaseReads(target: GitHubPhaseReadsTarget, current: string | null = "Planning") {
+/**
+ * The `projects_get` item read that GitHub Phase tools take, in the shape the GitHub MCP returns it, with
+ * Status and Phase; `current: null` omits the Phase `value`.
+ */
+export function githubPhaseReads(
+    target: GitHubPhaseReadsTarget,
+    current: string | null = "Planning",
+    status = "In Progress",
+) {
     const address = {
         owner: target.project.owner,
         owner_type: target.project.ownerType,
@@ -80,22 +87,6 @@ export function githubPhaseReads(target: GitHubPhaseReadsTarget, current: string
     }
     const tool = `mcp__${target.server}__projects_get`
     return {
-        field: {
-            tool,
-            arguments: { method: "get_project_field", ...address, field_id: 427 },
-            response: {
-                id: 427,
-                node_id: "PVTSSF_phase",
-                name: "Phase",
-                data_type: "single_select",
-                options: Object.values(phaseValues).map((raw, index) => ({
-                    id: `option-${index}`,
-                    color: "BLUE",
-                    description: { raw: "", html: "" },
-                    name: { raw, html: raw },
-                })),
-            },
-        },
         item: {
             tool,
             arguments: { method: "get_project_item", ...address, item_id: 291, field_names: ["Status", "Phase"] },
@@ -114,7 +105,7 @@ export function githubPhaseReads(target: GitHubPhaseReadsTarget, current: string
                         id: 418,
                         name: "Status",
                         data_type: "single_select",
-                        value: { id: "in-progress", name: "In Progress", color: "YELLOW" },
+                        value: { id: "status", name: status, color: "YELLOW" },
                     },
                     {
                         id: 427,

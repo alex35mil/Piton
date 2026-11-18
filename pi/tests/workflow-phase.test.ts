@@ -20,7 +20,7 @@ import {
     trackerPhase,
     type NativePhaseFacts,
 } from "../workflows/extensions/integrations/phase.ts"
-import { itemFieldValue, singleSelectField } from "../workflows/extensions/integrations/github-project-reads.ts"
+import { itemFieldEntry, itemFieldValue } from "../workflows/extensions/integrations/github-project-reads.ts"
 import { requireProviderCall } from "../workflows/extensions/integrations/provider-evidence.ts"
 import { resourceIdsFromRead } from "../workflows/extensions/integrations/resource-id-operations.ts"
 import type { EntityStatus } from "../workflows/extensions/__lib/entity.ts"
@@ -66,11 +66,7 @@ const linear = parse(LinearTrackerValidator, {
 })
 const githubFacts: Extract<NativePhaseFacts, { provider: "github" }> = {
     provider: "github",
-    field: {
-        name: "Phase",
-        dataType: "SINGLE_SELECT",
-        options: Object.values(phaseValues),
-    },
+    field: { name: "Phase", dataType: "SINGLE_SELECT" },
     current: null,
 }
 function linearFacts(): Extract<NativePhaseFacts, { provider: "linear" }> {
@@ -204,11 +200,10 @@ describe("shared workflow Phase", () => {
         assert.equal(planPhaseMutation(github, "gig", "selfReview", "done", githubFacts).changed, false)
     })
 
-    it("requires the exact GitHub field type and all configured options", () => {
+    it("requires the exact GitHub field name and type", () => {
         for (const field of [
             { ...githubFacts.field, name: "Other" },
             { ...githubFacts.field, dataType: "TEXT" },
-            { ...githubFacts.field, options: ["Planning", "Execution"] },
         ])
             assert.throws(
                 () =>
@@ -243,17 +238,26 @@ describe("shared workflow Phase", () => {
             return reads
         }
 
-        it("extracts facts from the field and item reads as the MCP returns them", () => {
+        const plan = (reads: Reads) => {
+            const { lifecycle, native } = facts(reads)
+            return planPhaseMutation(github, "gig", "planning", lifecycle, native)
+        }
+
+        it("extracts lifecycle and Phase from one item read as the MCP returns it", () => {
             const selected = facts(githubPhaseReads(target, "Execution"))
             assert.deepEqual(selected, {
-                provider: "github",
-                field: { name: "Phase", dataType: "single_select", options: Object.values(phaseValues) },
-                current: "Execution",
+                lifecycle: "inProgress",
+                native: {
+                    provider: "github",
+                    field: { name: "Phase", dataType: "single_select" },
+                    current: "Execution",
+                },
             })
-            assert.equal(planPhaseMutation(github, "gig", "execution", "inProgress", selected).changed, false)
-            const empty = facts(githubPhaseReads(target, null))
-            assert.equal(empty.provider === "github" && empty.current, null)
-            assert.deepEqual(planPhaseMutation(github, "gig", "planning", "inProgress", empty), {
+            assert.equal(
+                planPhaseMutation(github, "gig", "execution", selected.lifecycle, selected.native).changed,
+                false,
+            )
+            assert.deepEqual(plan(githubPhaseReads(target, null)), {
                 provider: "github",
                 field: "Phase",
                 value: "Planning",
@@ -262,40 +266,37 @@ describe("shared workflow Phase", () => {
             // Complete native MCP results are accepted as well as decoded JSON.
             const reads = githubPhaseReads(target)
             const wrapped = {
-                field: {
-                    ...reads.field,
-                    response: { content: [{ type: "text", text: JSON.stringify(reads.field.response) }] },
-                },
                 item: {
                     ...reads.item,
                     response: { content: [{ type: "text", text: JSON.stringify(reads.item.response) }] },
                 },
             }
-            assert.equal(facts(wrapped as unknown as Reads).provider, "github")
+            assert.equal(facts(wrapped as unknown as Reads).native.provider, "github")
+        })
+
+        it("clears Phase when the item read, taken after a Status change, shows another lifecycle", () => {
+            const reads = githubPhaseReads(target, "Self-Review", "In Review")
+            assert.equal(facts(reads).lifecycle, "inReview")
+            assert.deepEqual(plan(reads), { provider: "github", field: "Phase", value: null, changed: true })
+            assert.throws(() => facts(githubPhaseReads(target, "Planning", "Blocked")), /configured: Backlog, Todo/)
+            assert.throws(
+                () => facts(edit((r) => delete (r.item.response.fields[0] as { value?: unknown }).value)),
+                /no Status/,
+            )
         })
 
         it("rejects reads outside the configured field, Project, or entity issue", () => {
             const rejected: Array<[string, Reads, RegExp]> = [
                 // Wrong-tool errors name the expected registered tool (#156).
                 [
-                    "field server",
-                    edit((r) => (r.field.tool = "mcp__other__projects_get")),
-                    /must come from mcp__github__projects_get/,
-                ],
-                [
                     "item server",
                     edit((r) => (r.item.tool = "mcp__other__projects_get")),
                     /must come from mcp__github__projects_get/,
                 ],
-                ["field owner_type", edit((r) => (r.field.arguments.owner_type = "org")), /required Project/],
                 ["item owner_type", edit((r) => (r.item.arguments.owner_type = "org")), /required Project/],
-                ["field method", edit((r) => (r.field.arguments.method = "get_project_item")), /method/],
-                ["field Project", edit((r) => (r.field.arguments.project_number = 9)), /project_number/],
+                ["item method", edit((r) => (r.item.arguments.method = "get_project_field")), /get_project_item/],
                 ["item Project", edit((r) => (r.item.arguments.project_number = 9)), /project_number/],
-                ["field_id", edit((r) => (r.field.arguments.field_id = 1)), /single-select/],
-                ["field name", edit((r) => (r.field.response.name = "Status")), /single-select/],
-                ["field type", edit((r) => (r.field.response.data_type = "text")), /single-select/],
-                ["missing option", edit((r) => r.field.response.options.pop()), /option is missing/],
+                ["Phase type", edit((r) => (r.item.response.fields[1].data_type = "text")), /single-select/],
                 ["other issue", githubPhaseReads({ ...target, issueNumber: 8 }), /durable issue/],
                 [
                     "other repository",
@@ -304,12 +305,17 @@ describe("shared workflow Phase", () => {
                 ],
                 ["pull request item", edit((r) => (r.item.response.content_type = "PullRequest")), /durable issue/],
                 ["item_id", edit((r) => (r.item.arguments.item_id = 1)), /item_id/],
-                ["field_names", edit((r) => (r.item.arguments.field_names = ["Status"])), /field_names/],
+                ["field_names Phase", edit((r) => (r.item.arguments.field_names = ["Status"])), /missing Phase/],
+                ["field_names Status", edit((r) => (r.item.arguments.field_names = ["Phase"])), /missing Status/],
                 ["no Phase entry", edit((r) => r.item.response.fields.pop()), /no Phase entry/],
-                ["item Phase ID", edit((r) => (r.item.response.fields[1].id = 1)), /Ambiguous/],
+                ["no Status entry", edit((r) => r.item.response.fields.shift()), /no Status entry/],
+                [
+                    "duplicate Phase",
+                    edit((r) => r.item.response.fields.push({ ...r.item.response.fields[1] })),
+                    /Ambiguous/,
+                ],
             ]
-            // Both tools parse the reads, then plan the mutation, which validates the configured options.
-            const plan = (reads: Reads) => planPhaseMutation(github, "gig", "planning", "inProgress", facts(reads))
+            // Both tools parse the read, then plan the mutation, which validates the field's name and type.
             for (const [name, reads, error] of rejected) assert.throws(() => plan(reads), error, name)
             assert.throws(
                 () => githubPhaseFacts(linear, entity, githubPhaseReads(target), mcpTools),
@@ -318,11 +324,8 @@ describe("shared workflow Phase", () => {
         })
 
         it("accepts Phase reads that omit the optional owner_type", () => {
-            const reads = edit((r) => {
-                delete (r.field.arguments as { owner_type?: string }).owner_type
-                delete (r.item.arguments as { owner_type?: string }).owner_type
-            })
-            assert.equal(facts(reads).provider, "github")
+            const reads = edit((r) => delete (r.item.arguments as { owner_type?: string }).owner_type)
+            assert.equal(facts(reads).native.provider, "github")
         })
 
         it("accepts and rejects the same item reads as resource-ID recording", () => {
@@ -349,7 +352,7 @@ describe("shared workflow Phase", () => {
             }
         })
 
-        it("shares one provider-call check and Project field parsing", () => {
+        it("shares one provider-call check and Project item field parsing", () => {
             const reads = githubPhaseReads(target)
             const call = (expected: Record<string, unknown>) => () =>
                 requireProviderCall(
@@ -359,11 +362,21 @@ describe("shared workflow Phase", () => {
                     "Project",
                 )
             assert.doesNotThrow(call({ owner: "EXAMPLE", method: "get_project_item" }))
-            assert.throws(call({ method: "GET_PROJECT_ITEM" }), /method/)
-            assert.throws(call({ project_number: 2 }), /project_number/)
-            const project = { mcpServer: "github", ...github.project }
-            assert.equal(singleSelectField(project, reads.field, "Phase", mcpTools).id, 427)
+            // A mismatch names the expected and received values.
+            assert.throws(
+                call({ method: "GET_PROJECT_ITEM" }),
+                /method must be "GET_PROJECT_ITEM", got "get_project_item"/,
+            )
+            assert.throws(call({ project_number: 2 }), /project_number must be 2, got 1/)
+            assert.throws(call({ field_id: 2 }), /field_id must be 2, got nothing/)
             const response = reads.item.response as unknown as Record<string, unknown>
+            assert.deepEqual(itemFieldEntry(response, "Phase"), {
+                state: "present",
+                id: 427,
+                dataType: "single_select",
+                value: "Planning",
+            })
+            assert.deepEqual(itemFieldEntry(response, "Priority"), { state: "absent" })
             assert.deepEqual(itemFieldValue(response, { id: 427, name: "Phase" }), {
                 state: "present",
                 value: "Planning",

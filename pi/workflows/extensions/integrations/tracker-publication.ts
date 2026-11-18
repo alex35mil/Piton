@@ -72,6 +72,15 @@ interface PublicationContext<I, P, Q extends PublicationIdentity<I>> {
     resolveOrigin(input: AnnouncementInput["origin"]): string | undefined
 }
 
+/**
+ * Carried by every `recovery-required` result. Repeating a call whose earlier mutation may already have
+ * run gets recovery instead of another create, because the tool can't tell a create that never ran from
+ * one whose outcome was lost, and a duplicate would block recovery. It's the designed response, not a
+ * workflow defect; session analysis excludes it unless the instructions invited the repeat.
+ */
+export const PUBLICATION_SAFEGUARD =
+    "Intended safeguard, not a workflow defect: an earlier mutation may have run, so this returns recovery instead of a duplicate create. Run `lookups` exactly as returned and pass the responses to recover_tracker_publication."
+
 function runPublication<I, P, Q extends PublicationIdentity<I>>(
     input: TrackerPublicationInput,
     context: PublicationContext<I, P, Q>,
@@ -82,6 +91,7 @@ function runPublication<I, P, Q extends PublicationIdentity<I>>(
     const announcementPending = (pending: Extract<PlanAnnouncement, { state: "announcing" }>) => ({
         state: "recovery-required" as const,
         reason: "the plan update landed but its announcement isn't confirmed; post or recover it first",
+        safeguard: PUBLICATION_SAFEGUARD,
         mutation: announcements().create(pending.body),
         lookups: announcements().lookups(),
     })
@@ -91,6 +101,7 @@ function runPublication<I, P, Q extends PublicationIdentity<I>>(
             return {
                 state: "recovery-required" as const,
                 reason: "first publication creation is pending; recover before another publication",
+                safeguard: PUBLICATION_SAFEGUARD,
                 lookups: adapter.recoveryLookups(),
             }
         if (announcement?.state === "announcing") return announcementPending(announcement)

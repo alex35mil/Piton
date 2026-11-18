@@ -21,6 +21,7 @@ Read this when a finished workflow's `inspect_session_analysis` returns `enabled
 ## Triage
 
 1. Keep a candidate only when Piton's workflow instructions or tools contributed to it. Exclude user choices, project code, provider outages, and one-off agent mistakes that no instruction or tool invited.
+   - A result with a `safeguard` field is designed behavior, not a defect. Keep it only when workflow instructions told the agent to make the call that triggered it.
 2. When it helps, confirm the cause in the workflow files this session loaded, in the source checkout the pi package runs from.
 3. Keep only findings that are addressable and worth a tracker item.
 4. List the workflow tracker's open issues once, numbers and titles only, with complete pagination, and compare each finding against them. On GitHub, use `list_issues`, not `search_issues`: its free-text matching can return an empty result for issues that exist.

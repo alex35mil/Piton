@@ -80,6 +80,29 @@ export function singleSelectField(
     return { id, name, dataType: response.data_type, options }
 }
 
+/** A named field's entry on an item read: its identity and type, and its current single-select value. */
+export type ItemFieldEntry =
+    | { state: "absent" }
+    | { state: "present"; id: number; dataType: string; value: string | null }
+
+/** Finds the named field's entry in an item read's `fields`, without a separate field read. */
+export function itemFieldEntry(response: Record<string, unknown>, name: string): ItemFieldEntry {
+    if (!Array.isArray(response.fields)) throw new Error(`Read the configured ${name} field on this exact item`)
+    const entries = response.fields
+        .map((value) => object(value, "Project item field"))
+        .filter((value) => value.name === name)
+    if (entries.length === 0) return { state: "absent" }
+    if (entries.length > 1) throw new Error(`Ambiguous Project ${name} identity`)
+    const [entry] = entries
+    const value = entry.value
+    return {
+        state: "present",
+        id: positiveInteger(entry.id, `${name} field ID`),
+        dataType: text(entry.data_type),
+        value: value == null ? null : text(object(value, `${name} value`).name),
+    }
+}
+
 /** Finds the field's entry in an item read's `fields`, matched by name and checked against the field read's ID. */
 export function itemFieldValue(response: Record<string, unknown>, field: { id: number; name: string }): ItemFieldValue {
     if (!Array.isArray(response.fields)) throw new Error(`Read the configured ${field.name} field on this exact item`)
