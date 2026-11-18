@@ -43,6 +43,9 @@ pub enum LaunchError {
         link: PathBuf,
         checkout: PathBuf,
     },
+    /// A tool the launch needs is enabled but not installed.
+    #[error(transparent)]
+    Tool(#[from] crate::tools::Unavailable),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -120,6 +123,7 @@ pub enum Prepared {
 /// Builds a launch in `workspace` in `mode`.
 pub async fn prepare(
     config: &DaemonConfig,
+    tools: &crate::tools::Tools,
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
@@ -127,10 +131,10 @@ pub async fn prepare(
 ) -> Result<Prepared, LaunchError> {
     Ok(match mode {
         LaunchMode::Host => Prepared::Host {
-            env: host_env(config, base, workspace).await?,
+            env: host_env(config, tools, base, workspace).await?,
         },
         LaunchMode::Sandbox => {
-            let (env, resolution) = prepare_sandbox(config, resolved, base, workspace).await?;
+            let (env, resolution) = prepare_sandbox(config, tools, resolved, base, workspace).await?;
             Prepared::Sandbox { env, resolution }
         }
     })
@@ -138,8 +142,13 @@ pub async fn prepare(
 
 /// pi's environment for a host launch in `workspace`: the base environment and the environment tools' for that folder,
 /// run on the host (a host session trusts the project by choice), then Piton's own variables.
-async fn host_env(config: &DaemonConfig, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
-    let env = env::host(&env::enabled(&config.env), base, workspace).await?;
+async fn host_env(
+    config: &DaemonConfig,
+    tools: &crate::tools::Tools,
+    base: &Env,
+    workspace: &Path,
+) -> Result<Env, LaunchError> {
+    let env = env::host(&env::enabled(tools)?, base, workspace).await?;
     Ok(with_piton_vars(config, env, LaunchMode::Host))
 }
 
@@ -148,12 +157,13 @@ async fn host_env(config: &DaemonConfig, base: &Env, workspace: &Path) -> Result
 /// environment, which accepts a widening value only from a file the agent can't write.
 pub async fn prepare_sandbox(
     config: &DaemonConfig,
+    tools: &crate::tools::Tools,
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
 ) -> Result<(Env, sandbox::Resolution), LaunchError> {
+    let tools = env::enabled(tools)?;
     let bootstrap = sandbox_policy(config, resolved, base, &env::SandboxEnv::daemon(base), workspace)?;
-    let tools = env::enabled(&config.env);
     let launch_env = match tools.is_empty() {
         true => env::SandboxEnv::daemon(base),
         false => {
@@ -350,7 +360,6 @@ mod tests {
     #[test]
     fn piton_variables_win_over_the_workspace_environment() {
         let mut config = DaemonConfig::for_tests();
-        config.env.mise = false;
         config.paths.global = PathBuf::from("/global/piton");
         let base: Env = [
             ("PITON_RUNTIME".to_string(), "sandbox".to_string()),

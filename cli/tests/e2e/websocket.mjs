@@ -39,8 +39,9 @@ function setup() {
             socket: join(dir, "piton.sock"),
             log,
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
-            env: { login_shell: false, mise: false },
-            tailnet: { port: 0, heartbeat_ms: 300, retry_ms: 200, cli: fakeTailscale },
+            env: { login_shell: false },
+            tailnet: { port: 0, heartbeat_ms: 300, retry_ms: 200 },
+            tools: { mise: { enabled: false }, tailscale: { enabled: true, command: [fakeTailscale] } },
         },
         host: { default_attach_mode: "host", empty_grace_ms: 60000, roots: [root] },
     });

@@ -20,7 +20,7 @@ use std::path::PathBuf;
 pub use self::{
     check::portability::warnings as portability_warnings,
     model::{
-        daemon::{DaemonConfig, EnvConfig, TailnetConfig},
+        daemon::{DaemonConfig, TailnetConfig, ToolChoice, ToolConfig},
         paths::{AGENTS_DIR, LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
         tables::{InstallMode, Preset},
     },

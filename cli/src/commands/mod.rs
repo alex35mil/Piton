@@ -445,14 +445,14 @@ async fn setup(action: SetupAction, json: bool, config: &crate::config::DaemonCo
         Some(env) => env,
         None => std::env::vars().collect(),
     };
-    let tailscale = crate::launch::resolve_program(&config.tailnet.cli, &env);
+    let tailnet = crate::setup::TailnetCheck::run(config, &env).await;
     let host = crate::setup::Host {
         config,
         env: &env,
         binary,
         link,
         daemon_running: tokio::net::UnixStream::connect(&config.socket).await.is_ok(),
-        tailnet: crate::apps::tailnet_self_node(&tailscale).await,
+        tailnet,
     };
     match action {
         SetupAction::Check { .. } => {

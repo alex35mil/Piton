@@ -124,6 +124,22 @@
           "kind": "live"
         },
         "editable": true
+      },
+      {
+        "key": "tools.tailscale.enabled",
+        "scope": "host",
+        "value": true,
+        "placement": "shared",
+        "local_choice": true,
+        "value_type": {
+          "kind": "bool"
+        },
+        "applies": {
+          "kind": "restart",
+          "pending": false
+        },
+        "editable": true,
+        "warning": "tailscale is enabled ([tools.tailscale] enabled = true) but \"tailscale\" isn't installed"
       }
     ],
     "settings_error": null

@@ -70,7 +70,7 @@ or `PITON_CONFIG_HOME` for tests). Every key has the default shown.
   daemon reads its `[sandbox]` and `[workers]` for each launch.
 
 Unknown keys are refused. The daemon watches the files: a change applies to the next session at once, and the apps
-show `log`, `[env]`, and `[tailnet]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
+show `log`, `[env]`, `[tailnet]`, and `[tools]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
 that file's last good values and the apps say why. The apps change the keys below (`socket` shown read-only), keeping
 your comments and order, writing through a symlink into a dotfiles repository, and moving a key to the `.local` file
 when you check Local. The whole layout, including repository and parent-folder levels and where each key may be set,
@@ -95,9 +95,8 @@ keep_awake = true         # hold the Mac awake while sessions are live; toggled 
                           # (put it in config.host.local.toml to keep toggles out of a dotfiles diff)
 
 [tailnet]
-enabled = true            # the apps' WebSocket on this Mac's Tailscale addresses
+enabled = true            # the apps' WebSocket on this Mac's Tailscale addresses (needs the tailscale tool)
 port = 7357
-cli = "tailscale"
 heartbeat_ms = 10000      # ping each app this often; drop it after three unanswered pings
 retry_ms = 10000          # while Tailscale isn't up, try again this often
 
@@ -107,11 +106,18 @@ args = []                 # added after `--mode rpc`
 
 [env]
 login_shell = true        # base environment from `$SHELL -l`
-mise = true               # plus `mise env -C <workspace>`, inside the sandbox for sandboxed launches
 
 [stop]
 grace_ms = 15000          # after closing stdin, before SIGTERM
 term_grace_ms = 3000      # after SIGTERM, before SIGKILL
+
+[tools.mise]              # `mise env -C <workspace>` for every launch, trust for workers
+enabled = true            # unset: used when installed, off otherwise
+command = ["mise"]        # found through the login shell's PATH
+
+[tools.tailscale]         # remote access (`[tailnet]`)
+enabled = true
+command = ["tailscale"]
 ```
 
 A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after the workspace's mise
@@ -124,6 +130,19 @@ environment and use fnox ([#229](https://github.com/alex35mil/Piton/issues/229))
 
 Everything in pi's environment is visible to the agent and every command it runs. `[permissions]` rules steer the
 agent; in sandboxed sessions they aren't the boundary, the sandbox is.
+### External tools
+
+Piton runs mise and tailscale when they're there and works without them. Each has a `[tools.<name>]` table:
+
+- **Unset `enabled`:** used when its command is installed, off otherwise. A Mac with neither works with both off:
+  pi gets the login shell's environment, and only this Mac connects.
+- **`enabled = false`:** off.
+- **`enabled = true`:** used, and an error when it isn't installed: piton never runs it, the apps' Settings show a
+  warning on the setting, and each operation that needs it fails with an error naming the setting (a launch or a
+  worker for mise; remote access for tailscale).
+
+The daemon decides each tool's state when it starts, so changes apply after a restart. `piton setup check` requires
+only pi and lists the tools with their state.
 
 ### Sandbox
 

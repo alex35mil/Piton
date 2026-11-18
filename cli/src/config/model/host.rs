@@ -41,6 +41,9 @@ pub struct HostFile {
     pub stop: StopTable,
     #[serde(default, skip_serializing_if = "TailnetTable::is_empty")]
     pub tailnet: TailnetTable,
+    /// The external tools piton runs, each used only when enabled and available (`crate::tools`).
+    #[serde(default, skip_serializing_if = "ToolsTable::is_empty")]
+    pub tools: ToolsTable,
     #[serde(default, skip_serializing_if = "DevelopmentTable::is_empty")]
     pub development: DevelopmentTable,
 }
@@ -60,8 +63,6 @@ pub struct PiTable {
 pub struct EnvTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_shell: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mise: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -81,11 +82,37 @@ pub struct TailnetTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cli: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_ms: Option<u64>,
+}
+
+/// `[tools.<name>]` for each external tool.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolsTable {
+    #[serde(default, skip_serializing_if = "ToolTable::is_empty")]
+    pub mise: ToolTable,
+    #[serde(default, skip_serializing_if = "ToolTable::is_empty")]
+    pub tailscale: ToolTable,
+}
+
+/// One tool: whether to use it (unset: when it's available) and how to run it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolTable {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The executable and leading arguments, found through the login shell's PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+}
+
+impl ToolTable {
+    fn merge(&mut self, n: Self) {
+        nearer(&mut self.enabled, n.enabled);
+        nearer(&mut self.command, n.command);
+    }
 }
 
 /// Switches that apply only to a development install (the pi package running from a git checkout of piton).
@@ -107,7 +134,15 @@ macro_rules! is_empty {
         }
     )*};
 }
-is_empty!(PiTable, EnvTable, StopTable, TailnetTable, DevelopmentTable);
+is_empty!(
+    PiTable,
+    EnvTable,
+    StopTable,
+    TailnetTable,
+    ToolsTable,
+    ToolTable,
+    DevelopmentTable
+);
 
 impl HostFile {
     /// Values the schema accepts but piton can't use.
@@ -117,6 +152,11 @@ impl HostFile {
         }
         if self.sandbox.is_some() {
             return Err("sandbox.command was removed: Piton applies the sandbox itself and no longer runs nono".into());
+        }
+        for (name, tool) in [("mise", &self.tools.mise), ("tailscale", &self.tools.tailscale)] {
+            if tool.command.as_ref().is_some_and(Vec::is_empty) {
+                return Err(format!("tools.{name}.command must not be empty"));
+            }
         }
         Ok(())
     }
@@ -135,14 +175,14 @@ impl HostFile {
         nearer(&mut self.pi.args, n.pi.args);
         nearer(&mut self.sandbox, n.sandbox);
         nearer(&mut self.env.login_shell, n.env.login_shell);
-        nearer(&mut self.env.mise, n.env.mise);
         nearer(&mut self.stop.grace_ms, n.stop.grace_ms);
         nearer(&mut self.stop.term_grace_ms, n.stop.term_grace_ms);
         nearer(&mut self.tailnet.enabled, n.tailnet.enabled);
         nearer(&mut self.tailnet.port, n.tailnet.port);
-        nearer(&mut self.tailnet.cli, n.tailnet.cli);
         nearer(&mut self.tailnet.heartbeat_ms, n.tailnet.heartbeat_ms);
         nearer(&mut self.tailnet.retry_ms, n.tailnet.retry_ms);
+        self.tools.mise.merge(n.tools.mise);
+        self.tools.tailscale.merge(n.tools.tailscale);
         nearer(&mut self.development.session_analysis, n.development.session_analysis);
     }
 }
@@ -168,5 +208,18 @@ mod tests {
         // Piton applies the sandbox itself: the program setting is gone.
         let file: HostFile = toml::from_str("[sandbox]\ncommand = [\"nono\"]\n").unwrap();
         assert!(file.check().unwrap_err().contains("no longer runs nono"));
+        let file: HostFile = toml::from_str("[tools.mise]\ncommand = []\n").unwrap();
+        assert!(file.check().unwrap_err().contains("tools.mise.command"));
+    }
+
+    #[test]
+    fn tools_merge_per_key() {
+        let mut base: HostFile = toml::from_str("[tools.mise]\nenabled = true\ncommand = [\"/a/mise\"]\n").unwrap();
+        base.merge(toml::from_str("[tools.mise]\nenabled = false\n").unwrap());
+        assert_eq!(base.tools.mise.enabled, Some(false));
+        assert_eq!(base.tools.mise.command, Some(vec!["/a/mise".to_string()]));
+        // The replaced keys are unknown now.
+        assert!(toml::from_str::<HostFile>("[env]\nmise = false\n").is_err());
+        assert!(toml::from_str::<HostFile>("[tailnet]\ncli = \"tailscale\"\n").is_err());
     }
 }

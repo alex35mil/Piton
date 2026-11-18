@@ -58,6 +58,8 @@ enum HostSettingGroup: String, CaseIterable, Identifiable {
             let table = setting.key.split(separator: ".").count > 1 ? setting.key.split(separator: ".").first : nil
             switch table.map(String.init) {
             case "tailnet": self = .tailnet
+            // `[tools.tailscale]` is remote access's tool; the other tools are the daemon's.
+            case "tools": self = setting.key.hasPrefix("tools.tailscale.") ? .tailnet : .daemon
             case "pi", "sandbox", "env", "stop": self = .daemon
             case .some, nil:
                 switch setting.key {
@@ -101,6 +103,11 @@ struct HostSettingRow: View {
                             .help("Keep this value in the .local file: this host only, not shared through dotfiles")
                         #endif
                 }
+            }
+            if let warning = setting.warning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(Theme.alert)
             }
         }
         .disabled(saving)

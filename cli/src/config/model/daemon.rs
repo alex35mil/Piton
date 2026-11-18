@@ -27,6 +27,8 @@ pub struct DaemonConfig {
     /// How long a pi with no messages, no run, and no pending dialog may stay without clients.
     pub empty_grace_ms: u64,
     pub tailnet: TailnetConfig,
+    /// The external tools piton runs; whether each is used depends on what's installed (`crate::tools`).
+    pub tools: ToolsConfig,
     pub logging: LoggingConfig,
     /// Folders whose workspaces the native apps may browse and start sessions in. None by default: the apps can't
     /// start sessions until the owner lists some. `piton attach` and the CLI aren't limited. A leading `~/` is
@@ -41,8 +43,6 @@ pub struct DaemonConfig {
 pub struct TailnetConfig {
     pub enabled: bool,
     pub port: u16,
-    /// The tailscale CLI.
-    pub cli: String,
     /// How often to ping each client; one that answers none of three pings in a row is dropped.
     pub heartbeat_ms: u64,
     /// While Tailscale isn't up (not started yet at login, logged out), how often to try again to listen.
@@ -67,8 +67,44 @@ pub struct PiConfig {
 pub struct EnvConfig {
     /// Start from the login shell's environment (captured once at daemon start) instead of the daemon's own.
     pub login_shell: bool,
-    /// Add the workspace's mise environment (`mise env`) for every launch; inside the sandbox for sandboxed ones.
-    pub mise: bool,
+}
+
+/// `[tools]`: one setting per external tool.
+#[derive(Debug, Clone)]
+pub struct ToolsConfig {
+    pub mise: ToolConfig,
+    pub tailscale: ToolConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolConfig {
+    pub choice: ToolChoice,
+    /// The executable and leading arguments, found through the login shell's PATH.
+    pub command: Vec<String>,
+}
+
+/// Whether to use a tool: `enabled` in the file, or unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolChoice {
+    /// Unset: used when it's installed, off otherwise.
+    Auto,
+    /// `enabled = true`: used, and an error when it isn't installed.
+    On,
+    /// `enabled = false`.
+    Off,
+}
+
+impl ToolConfig {
+    fn new(table: super::host::ToolTable, name: &str) -> Self {
+        Self {
+            choice: match table.enabled {
+                None => ToolChoice::Auto,
+                Some(true) => ToolChoice::On,
+                Some(false) => ToolChoice::Off,
+            },
+            command: table.command.unwrap_or_else(|| vec![name.into()]),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +138,6 @@ impl DaemonConfig {
             },
             env: EnvConfig {
                 login_shell: host.env.login_shell.unwrap_or(true),
-                mise: host.env.mise.unwrap_or(true),
             },
             stop: StopConfig {
                 grace_ms: host.stop.grace_ms.unwrap_or(15_000),
@@ -112,9 +147,12 @@ impl DaemonConfig {
             tailnet: TailnetConfig {
                 enabled: host.tailnet.enabled.unwrap_or(true),
                 port: host.tailnet.port.unwrap_or(7357),
-                cli: host.tailnet.cli.unwrap_or_else(|| "tailscale".into()),
                 heartbeat_ms: host.tailnet.heartbeat_ms.unwrap_or(10_000),
                 retry_ms: host.tailnet.retry_ms.unwrap_or(10_000),
+            },
+            tools: ToolsConfig {
+                mise: ToolConfig::new(host.tools.mise, "mise"),
+                tailscale: ToolConfig::new(host.tools.tailscale, "tailscale"),
             },
             logging: LoggingConfig {
                 mode: host.logging.unwrap_or_default(),
@@ -137,6 +175,19 @@ impl DaemonConfig {
             global: home.join(".config/piton"),
             home,
         })
+    }
+
+    /// A host file's text with the defaults applied, for a fixed home.
+    #[cfg(test)]
+    pub fn from_host_toml(text: &str) -> Self {
+        let host: HostFile = toml::from_str(text).expect("a valid host file");
+        Self::new(
+            &host,
+            Paths {
+                home: "/h".into(),
+                global: "/h/.config/piton".into(),
+            },
+        )
     }
 
     /// The daemon's state folder: next to its socket, outside every sandbox.

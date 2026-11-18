@@ -125,12 +125,17 @@ pub static CATALOG: &[Entry] = &[
     host("pi.command", TextList, Live, |c| json!(c.pi.command)),
     host("pi.args", TextList, Live, |c| json!(c.pi.args)),
     host("env.login_shell", Bool, Restart, |c| json!(c.env.login_shell)),
-    host("env.mise", Bool, Restart, |c| json!(c.env.mise)),
+    // Unset (`null`): used when installed. See `crate::tools`.
+    host("tools.mise.enabled", Bool, Restart, null),
+    host("tools.mise.command", TextList, Restart, |c| json!(c.tools.mise.command)),
+    host("tools.tailscale.enabled", Bool, Restart, null),
+    host("tools.tailscale.command", TextList, Restart, |c| {
+        json!(c.tools.tailscale.command)
+    }),
     host("stop.grace_ms", Integer, Live, |c| json!(c.stop.grace_ms)),
     host("stop.term_grace_ms", Integer, Live, |c| json!(c.stop.term_grace_ms)),
     host("tailnet.enabled", Bool, Restart, |c| json!(c.tailnet.enabled)),
     host("tailnet.port", Integer, Restart, |c| json!(c.tailnet.port)),
-    host("tailnet.cli", Text, Restart, |c| json!(c.tailnet.cli)),
     host("tailnet.heartbeat_ms", Integer, Restart, |c| {
         json!(c.tailnet.heartbeat_ms)
     }),
@@ -170,6 +175,9 @@ pub struct SettingInfo {
     pub value_type: ValueType,
     pub applies: AppliesInfo,
     pub editable: bool,
+    /// Something the user should fix, shown with the setting: a tool enabled but not installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// When a change takes effect, and for a restart-only key whether it changed since the daemon started.
@@ -191,17 +199,20 @@ pub struct Snapshot {
     placements: BTreeMap<Id, Option<Sharing>>,
     /// Restart-only values the daemon started with.
     started: BTreeMap<Id, Value>,
+    /// Warnings by setting: each enabled tool that isn't installed, on its `enabled` key.
+    warnings: BTreeMap<Id, String>,
     /// Why some file's latest version can't be used (its values are the last good ones).
     pub error: Option<String>,
 }
 
 impl Snapshot {
-    /// Reads the global files as the daemon starts.
-    pub fn new(paths: &Paths) -> Self {
+    /// Reads the global files as the daemon starts. `tools` is each tool's state the daemon decided at start.
+    pub fn new(paths: &Paths, tools: &crate::tools::Tools) -> Self {
         let mut snapshot = Self {
             values: BTreeMap::new(),
             placements: BTreeMap::new(),
             started: BTreeMap::new(),
+            warnings: tool_warnings(tools),
             error: None,
         };
         snapshot.reload(paths);
@@ -285,11 +296,30 @@ impl Snapshot {
                     value_type: entry.value_type,
                     applies,
                     editable: entry.editable && !has_options(&value),
+                    warning: self.warnings.get(&id).cloned(),
                     value,
                 }
             })
             .collect()
     }
+}
+
+/// The warning for each tool enabled but not installed, on its `enabled` key.
+fn tool_warnings(tools: &crate::tools::Tools) -> BTreeMap<Id, String> {
+    use crate::tools::{Tool, ToolState};
+    Tool::ALL
+        .iter()
+        .filter_map(|&tool| {
+            let key = match tool {
+                Tool::Mise => "tools.mise.enabled",
+                Tool::Tailscale => "tools.tailscale.enabled",
+            };
+            match tools.get(tool) {
+                ToolState::Unavailable(unavailable) => Some(((Scope::Host, key), unavailable.to_string())),
+                ToolState::Off(_) | ToolState::Used(_) => None,
+            }
+        })
+        .collect()
 }
 
 /// A file's values in its own shape.
@@ -426,6 +456,35 @@ mod tests {
         list.iter().find(|s| s.scope == scope && s.key == key).unwrap()
     }
 
+    /// Every tool off: no warnings.
+    fn no_tools() -> crate::tools::Tools {
+        use crate::tools::{OffReason, ToolState};
+        crate::tools::Tools {
+            mise: ToolState::Off(OffReason::Disabled),
+            tailscale: ToolState::Off(OffReason::Disabled),
+        }
+    }
+
+    /// A tool enabled but not installed shows its warning on its `enabled` key, and nowhere else.
+    #[test]
+    fn unavailable_tools_are_warned_about() {
+        use crate::tools::{Tool, ToolState, Unavailable};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let mut tools = no_tools();
+        tools.tailscale = ToolState::Unavailable(Unavailable {
+            tool: Tool::Tailscale,
+            program: "tailscale".into(),
+        });
+        let list = Snapshot::new(&paths, &tools).info();
+        let warning = info(&list, Scope::Host, "tools.tailscale.enabled")
+            .warning
+            .clone()
+            .unwrap();
+        assert!(warning.contains("tailscale"), "{warning}");
+        assert_eq!(list.iter().filter(|s| s.warning.is_some()).count(), 1);
+    }
+
     #[test]
     fn every_catalog_key_is_a_key_of_its_file() {
         // Writing each key to an empty file of its scope must parse: the catalog can't name a key the schema lacks.
@@ -465,7 +524,7 @@ mod tests {
                 placement: Placement::Current,
             };
             write(&paths, &change).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
-            let snapshot = Snapshot::new(&paths);
+            let snapshot = Snapshot::new(&paths, &no_tools());
             assert_eq!(snapshot.error, None, "{}", entry.key);
             assert_eq!(
                 info(&snapshot.info(), entry.scope, entry.key).value,
@@ -482,7 +541,7 @@ mod tests {
         let paths = paths(dir.path());
         std::fs::create_dir_all(&paths.global).unwrap();
         std::fs::write(paths.global.join("config.host.toml"), "roots = [\"~/a\"]\n").unwrap();
-        let mut snapshot = Snapshot::new(&paths);
+        let mut snapshot = Snapshot::new(&paths, &no_tools());
 
         assert!(matches!(
             validate(Scope::Host, "nope", &json!(1), None),
@@ -581,7 +640,7 @@ mod tests {
         std::fs::create_dir_all(&paths.global).unwrap();
         let config = paths.global.join("config.toml");
         std::fs::write(&config, "[sandbox]\npresets = [\"rust\"]\n").unwrap();
-        let mut snapshot = Snapshot::new(&paths);
+        let mut snapshot = Snapshot::new(&paths, &no_tools());
         let presets = |s: &Snapshot| info(&s.info(), Scope::Project, "sandbox.presets").clone();
         assert!(presets(&snapshot).editable);
         let change = validate(Scope::Project, "sandbox.presets", &json!(["rust", "swift"]), None).unwrap();

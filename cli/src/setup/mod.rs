@@ -25,7 +25,7 @@ pub const FORMAT: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
-    /// The tools a host runs: the agent runtime (pi), mise, tailscale.
+    /// The agent runtime (pi), which every host needs, and the optional tools (mise, tailscale) with their state.
     Prerequisites,
     /// The global configuration folder exists, its files are valid, and its `.local` files stay out of Git.
     Configuration,
@@ -120,49 +120,36 @@ pub struct Host<'a> {
     /// Whether the daemon answers on its socket.
     pub daemon_running: bool,
     /// This host's tailnet identity, or why it's unknown.
-    pub tailnet: Result<crate::apps::SelfNode, crate::apps::TailnetError>,
+    pub tailnet: TailnetCheck,
 }
 
-/// A tool a host needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tool {
-    /// The agent runtime.
-    Pi,
-    Mise,
-    Tailscale,
+/// What setup learned about this host on the tailnet.
+#[derive(Debug)]
+pub enum TailnetCheck {
+    /// The tailscale tool is off (turned off, or not installed and unset): remote access isn't available.
+    ToolOff(crate::tools::OffReason),
+    /// The tailscale tool is enabled but not installed.
+    ToolUnavailable(crate::tools::Unavailable),
+    /// Asked tailscale: this Mac's identity, or why it's unknown.
+    Asked(Result<crate::apps::SelfNode, crate::apps::TailnetError>),
 }
 
-const TOOLS: &[Tool] = &[Tool::Pi, Tool::Mise, Tool::Tailscale];
-
-impl Tool {
-    fn name(self) -> &'static str {
-        match self {
-            Tool::Pi => "pi",
-            Tool::Mise => "mise",
-            Tool::Tailscale => "tailscale",
-        }
-    }
-
-    /// The command the daemon runs: the configured one where piton has a setting for it.
-    fn program(self, config: &DaemonConfig) -> String {
-        let configured = match self {
-            Tool::Pi => config.pi.command.first().cloned(),
-            Tool::Tailscale => Some(config.tailnet.cli.clone()),
-            Tool::Mise => None,
-        };
-        configured.unwrap_or_else(|| self.name().to_string())
-    }
-
-    fn install(self) -> &'static str {
-        match self {
-            Tool::Pi => {
-                "the agent runtime: `npm install -g @earendil-works/pi-coding-agent` (or `mise use -g npm:@earendil-works/pi-coding-agent`)"
+impl TailnetCheck {
+    /// Asks tailscale when the tool is used.
+    pub async fn run(config: &DaemonConfig, env: &crate::launch::Env) -> Self {
+        match crate::tools::resolve(crate::tools::Tool::Tailscale, config, env) {
+            crate::tools::ToolState::Off(reason) => TailnetCheck::ToolOff(reason),
+            crate::tools::ToolState::Unavailable(unavailable) => TailnetCheck::ToolUnavailable(unavailable),
+            crate::tools::ToolState::Used(program) => {
+                TailnetCheck::Asked(crate::apps::tailnet_self_node(&program).await)
             }
-            Tool::Mise => "per-project tool versions: `brew install mise`",
-            Tool::Tailscale => "remote access for the phone: install Tailscale from tailscale.com and sign in",
         }
     }
 }
+
+/// How to install the agent runtime, the one tool every host needs.
+const PI_INSTALL: &str = "the agent runtime: `npm install -g @earendil-works/pi-coding-agent` (or `mise use -g \
+                          npm:@earendil-works/pi-coding-agent`)";
 
 pub fn check(host: &Host) -> Report {
     Report {
@@ -225,21 +212,41 @@ fn state_version(db: &Path) -> Result<(), String> {
     crate::state::check(db).map_err(|e| e.to_string())
 }
 
+/// pi is required; each optional tool is reported with its state, and only one enabled but not installed is a problem.
 fn prerequisites(host: &Host) -> Status {
+    use crate::tools::{OffReason, Tool, ToolState};
     let mut problems = Vec::new();
     let mut instructions = Vec::new();
     let mut found = Vec::new();
-    for &tool in TOOLS {
-        let name = tool.name();
-        let program = tool.program(host.config);
-        let resolved = crate::launch::resolve_program(&program, host.env);
-        if is_executable(Path::new(&resolved)) {
-            found.push(format!("{name}: {resolved}"));
-        } else {
+    let pi = host.config.pi.command.first().map(String::as_str).unwrap_or("pi");
+    let resolved = crate::launch::resolve_program(pi, host.env);
+    match crate::tools::is_executable(Path::new(&resolved)) {
+        true => found.push(format!("pi: {resolved}")),
+        false => {
             problems.push(format!(
-                "{name} isn't installed (looked for {program:?} on the login shell's PATH)"
+                "pi isn't installed (looked for {pi:?} on the login shell's PATH)"
             ));
-            instructions.push(format!("{name}: {}", tool.install()));
+            instructions.push(format!("pi: {PI_INSTALL}"));
+        }
+    }
+    let tools = crate::tools::Tools::resolve(host.config, host.env);
+    for tool in Tool::ALL {
+        let name = tool.name();
+        match tools.get(tool) {
+            ToolState::Used(program) => found.push(format!("{name}: {}", program.program)),
+            ToolState::Off(OffReason::Disabled) => found.push(format!("{name}: off ([tools.{name}] enabled = false)")),
+            ToolState::Off(OffReason::NotInstalled) => found.push(format!(
+                "{name}: not installed, so off (optional: {}; {})",
+                tool.purpose(),
+                tool.install()
+            )),
+            ToolState::Unavailable(unavailable) => {
+                problems.push(unavailable.to_string());
+                instructions.push(format!(
+                    "{name}: {}, or set [tools.{name}] enabled = false",
+                    tool.install()
+                ));
+            }
         }
     }
     match problems.is_empty() {
@@ -383,7 +390,25 @@ fn remote_access(host: &Host) -> Status {
         };
     }
     match &host.tailnet {
-        Ok(me) => {
+        TailnetCheck::ToolOff(crate::tools::OffReason::Disabled) => Status::Ok {
+            detail: "tailscale is turned off ([tools.tailscale] enabled = false): only this Mac connects".into(),
+        },
+        TailnetCheck::ToolOff(crate::tools::OffReason::NotInstalled) => Status::Ok {
+            detail: format!(
+                "tailscale isn't installed: only this Mac connects. For the phone, {}",
+                crate::tools::Tool::Tailscale.install()
+            ),
+        },
+        TailnetCheck::ToolUnavailable(unavailable) => Status::Missing {
+            problems: vec![unavailable.to_string()],
+            fix: Fix::Manual {
+                instructions: vec![format!(
+                    "{}, or set [tools.tailscale] enabled = false",
+                    crate::tools::Tool::Tailscale.install()
+                )],
+            },
+        },
+        TailnetCheck::Asked(Ok(me)) => {
             let address = me
                 .dns_name
                 .clone()
@@ -393,7 +418,7 @@ fn remote_access(host: &Host) -> Status {
                 detail: format!("clients connect to {address}, port {port}"),
             }
         }
-        Err(reason) => Status::Missing {
+        TailnetCheck::Asked(Err(reason)) => Status::Missing {
             problems: vec![reason.to_string()],
             fix: Fix::Manual {
                 instructions: vec!["Start Tailscale and sign in with the account your phone uses".into()],
@@ -450,11 +475,6 @@ pub fn apply(host: &Host, name: &str) -> Result<StepReport, ApplyError> {
         step,
         status: check_step(host, step),
     })
-}
-
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 impl std::fmt::Display for Report {
@@ -547,7 +567,7 @@ mod tests {
             binary: f.root.join("Piton.app/Contents/MacOS/piton"),
             link: f.root.join(".local/bin/piton"),
             daemon_running: false,
-            tailnet: Err(crate::apps::TailnetError::NotRunning("Stopped".into())),
+            tailnet: TailnetCheck::Asked(Err(crate::apps::TailnetError::NotRunning("Stopped".into()))),
         }
     }
 
@@ -619,20 +639,20 @@ mod tests {
     fn reports_what_to_do() {
         let f = fixture();
         let mut host = host(&f);
-        // A missing tool names itself and how to install it.
-        std::fs::remove_file(f.root.join("bin/mise")).unwrap();
+        // A missing agent runtime names itself and how to install it.
+        std::fs::remove_file(f.root.join("bin/pi")).unwrap();
         // The CLI link points to another piton.
         std::fs::create_dir_all(f.root.join(".local/bin")).unwrap();
         std::os::unix::fs::symlink("/elsewhere/piton", &host.link).unwrap();
         // An invalid global file.
         std::fs::create_dir_all(&f.config.paths.global).unwrap();
         std::fs::write(f.config.paths.global.join("config.toml"), "[host\n").unwrap();
-        host.tailnet = Ok(crate::apps::SelfNode {
+        host.tailnet = TailnetCheck::Asked(Ok(crate::apps::SelfNode {
             user: 1,
             node: "n".into(),
             addresses: vec!["100.64.0.1".parse().unwrap()],
             dns_name: Some("my-mac.example.ts.net".into()),
-        });
+        }));
         host.daemon_running = true;
 
         let report = check(&host);
@@ -643,8 +663,8 @@ mod tests {
         else {
             panic!("{report}")
         };
-        assert!(problems[0].contains("mise"));
-        assert!(instructions[0].starts_with("mise:"));
+        assert!(problems[0].contains("pi isn't installed"), "{problems:?}");
+        assert!(instructions[0].starts_with("pi:"));
         assert!(matches!(
             status(&report, Step::Cli),
             Status::Missing {
@@ -666,6 +686,35 @@ mod tests {
         assert_eq!(detail, "clients connect to my-mac.example.ts.net, port 7357");
         // The link is repaired.
         assert!(matches!(apply(&host, "cli").unwrap().status, Status::Ok { .. }));
+    }
+
+    /// Optional tools: missing and unset is fine and reported as off; enabled but missing is the step's problem, and
+    /// remote access says what to do.
+    #[test]
+    fn optional_tools() {
+        let f = fixture();
+        std::fs::remove_file(f.root.join("bin/mise")).unwrap();
+        std::fs::remove_file(f.root.join("bin/tailscale")).unwrap();
+        let mut host = host(&f);
+        host.tailnet = TailnetCheck::ToolOff(crate::tools::OffReason::NotInstalled);
+        let report = check(&host);
+        let Status::Ok { detail } = status(&report, Step::Prerequisites) else {
+            panic!("{report}")
+        };
+        assert!(detail.contains("mise: not installed, so off"), "{detail}");
+        let Status::Ok { detail } = status(&report, Step::RemoteAccess) else {
+            panic!("{report}")
+        };
+        assert!(detail.contains("only this Mac connects"), "{detail}");
+
+        let mut config = f.config.clone();
+        config.tools.mise.choice = crate::config::ToolChoice::On;
+        host.config = &config;
+        let report = check(&host);
+        let Status::Missing { problems, .. } = status(&report, Step::Prerequisites) else {
+            panic!("{report}")
+        };
+        assert!(problems[0].contains("[tools.mise] enabled = true"), "{problems:?}");
     }
 
     #[test]

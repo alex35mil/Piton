@@ -1488,6 +1488,7 @@ mod tests {
                             value_type,
                             applies,
                             editable,
+                            warning: None,
                         };
                         vec![
                             setting(Scope::Host, "keep_awake", json!(true), Some(Sharing::Local), ValueType::Bool, AppliesInfo::Live, true),
@@ -1513,6 +1514,10 @@ mod tests {
                             ),
                             setting(Scope::Client, "text_font", json!("Inter"), Some(Sharing::Shared), ValueType::Text, AppliesInfo::Live, true),
                             setting(Scope::Project, "workers.skip", json!([".build"]), None, ValueType::TextList, AppliesInfo::Live, true),
+                            SettingInfo {
+                                warning: Some("tailscale is enabled ([tools.tailscale] enabled = true) but \"tailscale\" isn't installed".into()),
+                                ..setting(Scope::Host, "tools.tailscale.enabled", json!(true), Some(Sharing::Shared), ValueType::Bool, AppliesInfo::Restart { pending: false }, true)
+                            },
                         ]
                     },
                     settings_error: None,

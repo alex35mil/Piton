@@ -9,6 +9,7 @@ mod project;
 mod session;
 mod setup;
 mod state;
+mod tools;
 
 use std::process::ExitCode;
 

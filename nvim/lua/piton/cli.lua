@@ -29,6 +29,7 @@
 ---| { kind: "invalid_configuration", message: string }
 ---| { kind: "source_fetch", checkout: string, message: string }
 ---| { kind: "protected_update", checkout: string, upstream: string, target: string, files: string[] }
+---| { kind: "tool_unavailable", tool: string, program: string }
 ---| { kind: "failed", message: string }
 
 --- The answer to a `protected_update` refusal.
@@ -62,6 +63,7 @@ local REFUSAL_KINDS = {
     invalid_configuration = true,
     source_fetch = true,
     protected_update = true,
+    tool_unavailable = true,
     failed = true,
 }
 
@@ -304,6 +306,13 @@ function M.describe(refusal_value)
             r.upstream,
             table.concat(util.head(r.files, 15), "\n")
         )
+    elseif r.kind == "tool_unavailable" then
+        return r.tool
+            .. " is enabled ([tools."
+            .. r.tool
+            .. "] enabled = true) but "
+            .. r.program
+            .. " isn't installed; install it or turn it off"
     end
     error("unknown piton refusal: " .. vim.inspect(r))
 end

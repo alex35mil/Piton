@@ -18,7 +18,7 @@ use super::{
     Env, LaunchError, resolve_program,
     sandbox::{Contained, Containment, Policy, contained},
 };
-use crate::config::EnvConfig;
+use crate::tools::{Program, Tool, Tools, Unavailable};
 
 /// A tool the daemon runs to add a workspace's environment to pi's. Every operation matches it exhaustively, so a new
 /// tool can't be added without saying how it runs, contained, and how its values' sources are read.
@@ -43,9 +43,10 @@ impl EnvTool {
         }
     }
 
-    fn enabled(self, config: &EnvConfig) -> bool {
+    /// The external tool it is, whose `[tools.<name>]` setting decides whether it runs.
+    fn tool(self) -> Tool {
         match self {
-            Self::Mise => config.mise,
+            Self::Mise => Tool::Mise,
         }
     }
 
@@ -89,9 +90,26 @@ impl EnvTool {
     }
 }
 
-/// The tools `[env]` turns on.
-pub fn enabled(config: &EnvConfig) -> Vec<EnvTool> {
-    ENV_TOOLS.into_iter().filter(|tool| tool.enabled(config)).collect()
+/// An environment tool that runs for a launch, with its command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enabled {
+    pub tool: EnvTool,
+    pub program: Program,
+}
+
+/// The environment tools that run for every launch, by their `[tools]` state; an error when one is enabled but not
+/// installed.
+pub fn enabled(tools: &Tools) -> Result<Vec<Enabled>, Unavailable> {
+    let mut out = Vec::new();
+    for tool in ENV_TOOLS {
+        if let Some(program) = tools.get(tool.tool()).optional()? {
+            out.push(Enabled {
+                tool,
+                program: program.clone(),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Which file a tool says set a value.
@@ -185,9 +203,10 @@ enum Runner<'a> {
 
 type Invocation = Contained;
 
-fn invocation(tool: EnvTool, base: &Env, workspace: &Path, runner: &Runner) -> Result<Invocation, String> {
-    let program = resolve_program(tool.program(), base);
-    let args = tool.args(workspace);
+fn invocation(tool: &Enabled, base: &Env, workspace: &Path, runner: &Runner) -> Result<Invocation, String> {
+    let program = resolve_program(&tool.program.program, base);
+    let mut args: Vec<OsString> = tool.program.args.iter().map(OsString::from).collect();
+    args.extend(tool.tool.args(workspace));
     match runner {
         Runner::Host => Ok(Invocation {
             program,
@@ -203,13 +222,13 @@ fn invocation(tool: EnvTool, base: &Env, workspace: &Path, runner: &Runner) -> R
 }
 
 async fn run(
-    tool: EnvTool,
+    tool: &Enabled,
     base: &Env,
     workspace: &Path,
     runner: &Runner<'_>,
 ) -> Result<Vec<(String, String, ToolSource)>, LaunchError> {
     let failed = |stderr: String| LaunchError::EnvTool {
-        tool,
+        tool: tool.tool,
         workspace: workspace.to_path_buf(),
         stderr,
     };
@@ -229,14 +248,14 @@ async fn run(
     if !out.status.success() {
         return Err(failed(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
-    tool.parse(&out.stdout).map_err(failed)
+    tool.tool.parse(&out.stdout).map_err(failed)
 }
 
 /// pi's environment for a host launch: the base environment, then each tool's, run on the host.
-pub async fn host(tools: &[EnvTool], base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
+pub async fn host(tools: &[Enabled], base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
     let mut env = base.clone();
     for tool in tools {
-        for (name, value, _) in run(*tool, base, workspace, &Runner::Host).await? {
+        for (name, value, _) in run(tool, base, workspace, &Runner::Host).await? {
             env.insert(name, value);
         }
     }
@@ -246,7 +265,7 @@ pub async fn host(tools: &[EnvTool], base: &Env, workspace: &Path) -> Result<Env
 /// pi's environment for a sandboxed launch: the base environment, then each tool's, run inside `policy` (or the
 /// sandbox this process already runs in), each value with its source.
 pub async fn sandboxed(
-    tools: &[EnvTool],
+    tools: &[Enabled],
     base: &Env,
     workspace: &Path,
     policy: &Policy,
@@ -260,8 +279,17 @@ pub async fn sandboxed(
         containment,
     };
     for tool in tools {
-        for (name, value, source) in run(*tool, base, workspace, &runner).await? {
-            env.vars.insert(name, (value, Origin::Tool { tool: *tool, source }));
+        for (name, value, source) in run(tool, base, workspace, &runner).await? {
+            env.vars.insert(
+                name,
+                (
+                    value,
+                    Origin::Tool {
+                        tool: tool.tool,
+                        source,
+                    },
+                ),
+            );
         }
     }
     Ok(env)
@@ -309,8 +337,16 @@ mod tests {
         let workspace = Path::new("/w");
         for tool in ENV_TOOLS {
             assert!(listed(tool));
-            let applied = invocation(
+            // A configured command with leading arguments: they go before the tool's own.
+            let enabled = Enabled {
                 tool,
+                program: Program {
+                    program: tool.program().into(),
+                    args: vec!["--quiet".into()],
+                },
+            };
+            let applied = invocation(
+                &enabled,
                 &base,
                 workspace,
                 &Runner::Sandbox {
@@ -322,14 +358,19 @@ mod tests {
             .unwrap();
             assert_eq!(applied.program, "/app/piton", "{tool}");
             assert_eq!(
-                applied.args[..3],
-                ["sandbox-exec".into(), "--".into(), OsString::from(tool.program())]
+                applied.args[..4],
+                [
+                    "sandbox-exec".into(),
+                    "--".into(),
+                    OsString::from(tool.program()),
+                    "--quiet".into()
+                ]
             );
-            assert_eq!(applied.args[3..], tool.args(workspace)[..]);
+            assert_eq!(applied.args[4..], tool.args(workspace)[..]);
             assert!(applied.env.contains_key(POLICY_ENV), "{tool}");
 
             let inherited = invocation(
-                tool,
+                &enabled,
                 &base,
                 workspace,
                 &Runner::Sandbox {
@@ -350,6 +391,36 @@ mod tests {
                 .collect();
             assert_eq!(parsed, expected, "{tool}");
         }
+    }
+
+    /// Each environment tool runs when its `[tools]` state uses it; enabled but not installed refuses every launch.
+    #[test]
+    fn tools_state_decides_which_run() {
+        use crate::tools::{OffReason, ToolState};
+        let used = Program {
+            program: "/bin/mise".into(),
+            args: vec![],
+        };
+        let tools = |mise: ToolState| Tools {
+            mise,
+            tailscale: ToolState::Off(OffReason::Disabled),
+        };
+        assert_eq!(
+            enabled(&tools(ToolState::Used(used.clone()))).unwrap(),
+            [Enabled {
+                tool: EnvTool::Mise,
+                program: used
+            }]
+        );
+        assert_eq!(enabled(&tools(ToolState::Off(OffReason::NotInstalled))).unwrap(), []);
+        let unavailable = Unavailable {
+            tool: Tool::Mise,
+            program: "mise".into(),
+        };
+        assert_eq!(
+            enabled(&tools(ToolState::Unavailable(unavailable.clone()))),
+            Err(unavailable)
+        );
     }
 
     #[test]

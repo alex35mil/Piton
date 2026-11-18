@@ -20,6 +20,7 @@ use crate::{
     config::TailnetConfig,
     daemon::{Daemon, Hello, PROTOCOL_VERSION},
     session::lock,
+    tools::Program,
 };
 
 /// A client that answers none of this many pings in a row is dropped.
@@ -30,7 +31,7 @@ const RECHECK: Duration = Duration::from_secs(60);
 /// Serves the tailnet for as long as the daemon runs: listens on each of this Mac's tailnet addresses. Tailscale may
 /// not be up when the daemon starts (launchd starts it at login), so this keeps trying every `retry_ms`, and listens
 /// again when the addresses change. Connections already open are left alone.
-pub async fn serve_tailnet(daemon: Arc<Daemon>, cli: String, config: TailnetConfig) {
+pub async fn serve_tailnet(daemon: Arc<Daemon>, cli: Program, config: TailnetConfig) {
     let mut listening: Option<Listening> = None;
     let mut last_problem: Option<String> = None;
     loop {
@@ -88,7 +89,7 @@ impl Listening {
 /// Binds every tailnet address of `me` (all or none) and starts accepting.
 async fn listen(
     daemon: &Arc<Daemon>,
-    cli: &str,
+    cli: &Program,
     me: SelfNode,
     port: u16,
     heartbeat_ms: u64,
@@ -108,7 +109,7 @@ async fn listen(
     let mut accepting = Vec::new();
     for listener in listeners {
         bound.push(listener.local_addr().map_err(|e| e.to_string())?);
-        let (daemon, cli, me) = (daemon.clone(), cli.to_string(), me.clone());
+        let (daemon, cli, me) = (daemon.clone(), cli.clone(), me.clone());
         accepting.push(tokio::spawn(async move {
             accept_loop(daemon, cli, me, listener, heartbeat_ms).await;
         }));
@@ -120,7 +121,7 @@ async fn listen(
     })
 }
 
-async fn accept_loop(daemon: Arc<Daemon>, cli: String, me: SelfNode, listener: TcpListener, heartbeat_ms: u64) {
+async fn accept_loop(daemon: Arc<Daemon>, cli: Program, me: SelfNode, listener: TcpListener, heartbeat_ms: u64) {
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -132,7 +133,14 @@ async fn accept_loop(daemon: Arc<Daemon>, cli: String, me: SelfNode, listener: T
     }
 }
 
-async fn serve(daemon: Arc<Daemon>, cli: &str, me: &SelfNode, stream: TcpStream, peer: SocketAddr, heartbeat_ms: u64) {
+async fn serve(
+    daemon: Arc<Daemon>,
+    cli: &Program,
+    me: &SelfNode,
+    stream: TcpStream,
+    peer: SocketAddr,
+    heartbeat_ms: u64,
+) {
     let started = Instant::now();
     crate::debug!("tailnet: TCP accepted; identifying peer");
     let who = match tailnet::identify(cli, peer).await {

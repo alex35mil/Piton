@@ -23,7 +23,8 @@ function writeConfig(mode) {
             socket,
             log: join(dir, "piton.log"),
             tailnet: { enabled: false },
-            env: { login_shell: false, mise: false },
+            env: { login_shell: false },
+            tools: { mise: { enabled: false } },
         },
         host: mode ? { logging: mode } : {},
     });

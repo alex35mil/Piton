@@ -22,14 +22,19 @@ pub struct SourceGit {
 
 impl SourceGit {
     /// Resolves the sandbox of a launch in `source`, as [`prepare_sandbox`] does for pi (environment tools included).
-    pub async fn for_source(config: &DaemonConfig, base: &Env, source: &Path) -> Result<Self, LaunchError> {
+    pub async fn for_source(
+        config: &DaemonConfig,
+        tools: &crate::tools::Tools,
+        base: &Env,
+        source: &Path,
+    ) -> Result<Self, LaunchError> {
         let workspace = Workspace {
             path: source.to_path_buf(),
             checkout: source.to_path_buf(),
             relation: Relation::Source,
         };
         let resolved = resolve_config(config, &workspace)?;
-        let (env, resolution) = prepare_sandbox(config, &resolved, base, source).await?;
+        let (env, resolution) = prepare_sandbox(config, tools, &resolved, base, source).await?;
         Ok(Self {
             env,
             policy: resolution.policy,
