@@ -24,8 +24,9 @@ import {
     planLinearLabelUpdate,
     selectedLabelNames,
 } from "./label-selection.js"
-import { LifecycleStateSchema } from "../__lib/domain.js"
+import { type LifecycleState, LifecycleStateSchema } from "../__lib/domain.js"
 import {
+    type NativePhaseFacts,
     NativePhaseFactsSchema,
     LinearPhaseInputSchema,
     LinearPhaseInputValidator,
@@ -379,46 +380,62 @@ export default function (pi: ExtensionAPI): void {
             },
         })
     }
-    const phaseContexts = [
-        ["prepare_github_phase_mutation", GitHubPhaseInputSchema, "the actual Project field and item reads"],
-        [
-            "prepare_linear_phase_mutation",
-            LinearPhaseInputSchema,
-            "provider-specific label catalog and selection facts; omit only observed empty native leaves",
-        ],
-    ] as const
-    for (const [name, native, facts] of phaseContexts) {
-        const parameters = Type.Object(
-            { ...Type.Omit(phase, ["operation", "change", "native"]).properties, native },
-            { additionalProperties: false },
-        )
-        toolsApi.registerTool({
-            name,
-            label: name,
-            description: `Calculate the native Phase assignment from fresh lifecycle and ${facts}. Never execute a provider mutation or change lifecycle.`,
-            parameters,
-            async execute(_id, params, _signal, _onUpdate, ctx) {
-                const native =
-                    name === "prepare_github_phase_mutation"
-                        ? githubPhaseFacts(
-                              requireTracker(loadIntegrationRoles(project.resolveRootDir(ctx.cwd)), name),
-                              entityName(readWorkflowEntity(ctx.cwd, params.entityDir)),
-                              parse(GitHubPhaseInputValidator, params.native),
-                              tools,
-                          )
-                        : linearPhaseFacts(parse(LinearPhaseInputValidator, params.native))
-                const input = parse(IntegrationContextValidator, {
-                    ...params,
-                    operation: "trackerMutation",
-                    change: "phase",
-                    native,
-                })
-                resourceIdsMemo.reset()
-                const result = buildIntegrationContext(ctx, input, tools)
-                return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
-            },
+    const phaseMutation = (
+        ctx: ExtensionContext,
+        entityDir: string,
+        lifecycle: LifecycleState,
+        native: NativePhaseFacts,
+    ) => {
+        const input = parse(IntegrationContextValidator, {
+            operation: "trackerMutation",
+            change: "phase",
+            entityDir,
+            lifecycle,
+            native,
         })
+        resourceIdsMemo.reset()
+        const result = buildIntegrationContext(ctx, input, tools)
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
     }
+    const githubPhase = "prepare_github_phase_mutation"
+    toolsApi.registerTool({
+        name: githubPhase,
+        label: githubPhase,
+        description:
+            "Calculate the native Phase assignment from the actual Project item read, which gives both lifecycle (its Status) and the current Phase. Never execute a provider mutation or change lifecycle.",
+        parameters: Type.Object(
+            { entityDir: phase.properties.entityDir, native: GitHubPhaseInputSchema },
+            { additionalProperties: false },
+        ),
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+            const facts = githubPhaseFacts(
+                requireTracker(loadIntegrationRoles(project.resolveRootDir(ctx.cwd)), githubPhase),
+                entityName(readWorkflowEntity(ctx.cwd, params.entityDir)),
+                parse(GitHubPhaseInputValidator, params.native),
+                tools,
+            )
+            return phaseMutation(ctx, params.entityDir, facts.lifecycle, facts.native)
+        },
+    })
+    const linearPhase = "prepare_linear_phase_mutation"
+    toolsApi.registerTool({
+        name: linearPhase,
+        label: linearPhase,
+        description:
+            "Calculate the native Phase assignment from fresh lifecycle and provider-specific label catalog and selection facts; omit only observed empty native leaves. Never execute a provider mutation or change lifecycle.",
+        parameters: Type.Object(
+            {
+                entityDir: phase.properties.entityDir,
+                lifecycle: phase.properties.lifecycle,
+                native: LinearPhaseInputSchema,
+            },
+            { additionalProperties: false },
+        ),
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+            const native = linearPhaseFacts(parse(LinearPhaseInputValidator, params.native))
+            return phaseMutation(ctx, params.entityDir, params.lifecycle, native)
+        },
+    })
     const [intake, projectAction] = IncomingProjectContextSchema.anyOf
     const projects = [
         ["plan_incoming_pr_intake", "intake", intake],

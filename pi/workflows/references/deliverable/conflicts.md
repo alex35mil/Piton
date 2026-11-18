@@ -35,6 +35,6 @@ When the resolution needs a different approach than the approved plan, run `git 
 1. **Ask to push.** Show the final plain-words summary of the resolution, which becomes the PR comment. On request, show `git show --remerge-diff <merge>`.
 2. **After approval,** push the stored branch once, without force, so CI runs once.
 3. **Record it.** Call `prepare_merge_resolution_comment` with the approved summary and run the returned comment call unchanged; the push approval covers it.
-4. **In Review.** Return native Status to In Review and clear native Phase when configured.
+4. **In Review.** Return native Status to In Review and clear native Phase when configured ([Phase](../phase.md#fresh-native-facts)).
 
 Merging the new head needs a new request to ship. When the comment's outcome is uncertain, read the PR's comments for its marker before retrying.

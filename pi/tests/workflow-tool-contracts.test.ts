@@ -155,6 +155,19 @@ describe("workflow model-facing contracts", () => {
         const selection = tools.find((t) => t.name === "select_pull_request_resource")!.parameters
         assert.ok(Type.IsObject(selection))
         assert.deepEqual(Object.keys(selection.properties).sort(), ["entityDir", "evidence"])
+        // The resource kind comes from the evidence; GitHub Phase lifecycle comes from the item read.
+        const inputs = (name: string) => {
+            const parameters = tools.find((t) => t.name === name)!.parameters
+            assert.ok(Type.IsObject(parameters))
+            return Object.keys(parameters.properties).sort()
+        }
+        for (const name of ["record_resource_ids", "invalidate_resource_ids"])
+            assert.deepEqual(inputs(name), ["entityDir", "evidence"], name)
+        assert.deepEqual(inputs("resolve_resource_ids"), ["entityDir", "resource"])
+        assert.deepEqual(inputs("set_github_workflow_phase"), ["entityDir", "native", "phase"])
+        assert.deepEqual(inputs("prepare_github_phase_mutation"), ["entityDir", "native"])
+        assert.deepEqual(inputs("set_linear_workflow_phase"), ["entityDir", "lifecycle", "native", "phase"])
+        assert.deepEqual(inputs("prepare_linear_phase_mutation"), ["entityDir", "lifecycle", "native"])
         const mcp = tools.find((t) => t.name === "configure_mcp")!.parameters
         assert.ok(Type.IsObject(mcp))
         assert.ok("anyOf" in json(mcp).properties.registrations.items)
@@ -168,7 +181,9 @@ describe("workflow model-facing contracts", () => {
             issueNumber: 1,
         })
         assert.ok(GitHubPhaseInputValidator.check(github))
-        assert.equal(GitHubPhaseInputValidator.check({ field: github.field }), false)
+        // The Phase field read is no longer part of the input.
+        assert.equal(GitHubPhaseInputValidator.check({ ...github, field: github.item }), false)
+        assert.equal(GitHubPhaseInputValidator.check({}), false)
         assert.equal(
             GitHubPhaseInputValidator.check({
                 field: { name: "Phase", dataType: "SINGLE_SELECT", options: ["Planning"] },
@@ -457,7 +472,7 @@ describe("workflow model-facing contracts", () => {
                 ] as const) {
                     const native = JSON.stringify(githubPhaseReads(target, current))
                     await invoke(
-                        `text(await tools.set_github_workflow_phase({entityDir:${JSON.stringify(directory)},phase:${JSON.stringify(phase)},lifecycle:"inProgress",native:${native}}));`,
+                        `text(await tools.set_github_workflow_phase({entityDir:${JSON.stringify(directory)},phase:${JSON.stringify(phase)},native:${native}}));`,
                     )
                     assert.equal(JSON.parse(fs.readFileSync(metadataPath, "utf8")).phase, phase)
                 }

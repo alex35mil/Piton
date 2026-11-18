@@ -9,7 +9,7 @@ import {
     section,
     snakeKeys,
 } from "../../../extensions/__lib/settings.js"
-import { PRIORITY_NOT_SET } from "../__lib/domain.js"
+import { type LifecycleState, PRIORITY_NOT_SET } from "../__lib/domain.js"
 import {
     assertGitHubLabels,
     assertLinearLabels,
@@ -71,6 +71,17 @@ const StatusValuesSchema = Type.Object(
     },
     { additionalProperties: false },
 )
+export type StatusValues = Static<typeof StatusValuesSchema>
+
+/** The lifecycle a native Status name stands for, through the configured Status values. */
+export function lifecycleFromStatus(values: StatusValues, status: string): LifecycleState {
+    const match = (Object.entries(values) as Array<[LifecycleState, string]>).find(([, name]) => name === status)
+    if (!match)
+        throw new Error(
+            `Status ${JSON.stringify(status)} is not a configured lifecycle value; configured: ${Object.values(values).join(", ")}`,
+        )
+    return match[0]
+}
 
 const McpServerSchema = Type.String({ minLength: 1, pattern: "^[A-Za-z0-9_.-]+$" })
 const GitHubRepositorySchema = Type.Object(

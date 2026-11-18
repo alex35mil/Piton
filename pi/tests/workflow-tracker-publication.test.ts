@@ -266,7 +266,15 @@ describe("managed GitHub plan comments", () => {
             assert.ok(prepared.state === "mutation-needed")
             const pending = f.saved().tracker.planComment
             assert.equal(pending.state, "pending")
-            assert.equal((await f.prepare()).state, "recovery-required")
+            // A repeated prepare is the designed safeguard: it says so and returns the exact reads.
+            const repeated = await f.prepare()
+            assert.ok(repeated.state === "recovery-required")
+            assert.match(repeated.safeguard, /Intended safeguard/)
+            assert.deepEqual(repeated.lookups[0].arguments, f.page([], 1).arguments)
+            // A read made differently points at those reads.
+            const unpaged = f.page([], 1)
+            delete (unpaged.arguments as { perPage?: number }).perPage
+            await assert.rejects(f.recover([unpaged]), /run the returned lookups as given/)
 
             const reissued = await f.recover([f.page([f.remote("Discussion", 1)], 1, 1), f.page([], 2, 1)])
             assert.ok(reissued.state === "mutation-needed")

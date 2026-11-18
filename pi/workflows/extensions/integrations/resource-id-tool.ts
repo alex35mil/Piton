@@ -7,6 +7,7 @@ import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import { OperationResourceIdsMemo } from "./resource-ids.js"
 import { beginPullRequestCreation, recordPullRequestCreation } from "./creation.js"
 import {
+    evidenceResourceKind,
     invalidateStaleResourceIds,
     recordResourceIdsEvidence,
     selectPullRequestResourceIds,
@@ -46,12 +47,13 @@ export const ResourceIdsToolSchema = Type.Union([
         { additionalProperties: false },
     ),
     Type.Object({ ...common, action: Type.Literal("resolve") }, { additionalProperties: false }),
+    // The resource kind comes from the evidence's tool and method.
     Type.Object(
-        { ...common, action: Type.Literal("record"), evidence: EvidenceSchema },
+        { entityDir: common.entityDir, action: Type.Literal("record"), evidence: EvidenceSchema },
         { additionalProperties: false },
     ),
     Type.Object(
-        { ...common, action: Type.Literal("invalidate"), evidence: EvidenceSchema },
+        { entityDir: common.entityDir, action: Type.Literal("invalidate"), evidence: EvidenceSchema },
         { additionalProperties: false },
     ),
 ])
@@ -74,7 +76,7 @@ export function registerResourceIds(pi: ExtensionAPI, memo: OperationResourceIds
         toolsApi.registerTool({
             name,
             label: name,
-            description: `${name.replaceAll("_", " ")} for one initialized entity. Never execute or authorize provider calls. Record actual clear-success mutation/read evidence. Missing/stale IDs and uncertain outcomes require agent investigation through configured provider tools. Identity, lifecycle and merge state are not disposable cache values.`,
+            description: `${name.replaceAll("_", " ")} for one initialized entity.${action === "record" || action === "invalidate" ? " The resource kind comes from the evidence's tool and method; a rejection lists the accepted ones." : ""} Never execute or authorize provider calls. Record actual clear-success mutation/read evidence. Missing/stale IDs and uncertain outcomes require agent investigation through configured provider tools. Identity, lifecycle and merge state are not disposable cache values.`,
             parameters,
             async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
                 const input = parse(ResourceIdsToolValidator, {
@@ -90,17 +92,24 @@ export function registerResourceIds(pi: ExtensionAPI, memo: OperationResourceIds
                         for (const ids of recorded.resourceIds) memo.record(ids)
                         return recorded
                     }
-                    const context = resolveResourceIdsContext(ctx.cwd, entityDir, input.resource)
-                    if (input.action === "resolve") return resolveResourceIds(context, memo)
+                    if (input.action === "resolve")
+                        return resolveResourceIds(resolveResourceIdsContext(ctx.cwd, entityDir, input.resource), memo)
+                    if (input.action === "select") {
+                        const context = resolveResourceIdsContext(ctx.cwd, entityDir, input.resource)
+                        return {
+                            state: "resolved" as const,
+                            source: "user-selection" as const,
+                            resourceIds: await selectPullRequestResourceIds(context, input.evidence, memo, tools),
+                        }
+                    }
+                    const resource = evidenceResourceKind(ctx.cwd, entityDir, input.evidence, input.action, tools)
+                    const context = resolveResourceIdsContext(ctx.cwd, entityDir, resource)
                     if (input.action === "invalidate")
                         return invalidateStaleResourceIds(context, input.evidence, memo, tools)
                     return {
                         state: "resolved" as const,
-                        source: input.action === "select" ? ("user-selection" as const) : ("evidence" as const),
-                        resourceIds:
-                            input.action === "select"
-                                ? await selectPullRequestResourceIds(context, input.evidence, memo, tools)
-                                : await recordResourceIdsEvidence(context, input.evidence, memo, tools),
+                        source: "evidence" as const,
+                        resourceIds: await recordResourceIdsEvidence(context, input.evidence, memo, tools),
                     }
                 })()
                 return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }

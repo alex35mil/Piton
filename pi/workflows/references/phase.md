@@ -46,9 +46,9 @@ During In Progress, native Phase equals the metadata Phase. Outside In Progress,
 ## Reconciling
 
 1. **Lifecycle first.** For a required lifecycle change, update native Status and confirm the outcome. Never cache lifecycle in metadata.
-2. **Setting Phase during In Progress:** call `set_github_workflow_phase` or `set_linear_workflow_phase` with `entityDir`, the target `phase`, and fresh `lifecycle` and `native` facts (below); reuse reads from this operation.
+2. **Setting Phase during In Progress:** call `set_github_workflow_phase` or `set_linear_workflow_phase` with `entityDir`, the target `phase`, and fresh `native` facts (below); Linear also takes fresh `lifecycle`. Reuse reads from this operation, except that a GitHub item read must come after any Status change.
    - The tool validates before changing metadata and returns any native assignment. A matching Phase is a metadata no-op, not a reason to skip native reconciliation.
-3. **Projection only:** when clearing native Phase outside In Progress, keep metadata Phase. Call `prepare_github_phase_mutation` or `prepare_linear_phase_mutation` with `entityDir`, fresh `lifecycle`, and `native` facts.
+3. **Projection only:** when clearing native Phase outside In Progress, keep metadata Phase. Call `prepare_github_phase_mutation` or `prepare_linear_phase_mutation` with `entityDir` and fresh `native` facts; Linear also takes fresh `lifecycle`.
 4. **Apply a changed `phaseMutation`** through the configured MCP tool. On GitHub, write its `value`. On Linear, write its entire `labels` set; never replace the full set with only the Phase label. Skip unchanged assignments.
 5. Neither local tool calls providers or grants approval. A provider failure keeps metadata Phase and creates no local lifecycle substitute; report it in one line and continue.
 
@@ -56,7 +56,9 @@ During In Progress, native Phase equals the metadata Phase. Outside In Progress,
 
 ### Fresh native facts
 
-**GitHub:** pass the actual `projects_get` reads unchanged as evidence: `get_project_field` for the configured Phase field, and `get_project_item` for the entity's Project item with Phase in `field_names`. Code extracts the options and current selection, and checks the Project, issue, and field. The field must include every configured Phase option; extra options are kept.
+**GitHub:** pass one actual `projects_get` `get_project_item` read of the entity's Project item, unchanged, with the configured Status and Phase fields in `field_names`. Code takes lifecycle from its Status and the current Phase from its Phase entry, and checks the Project, issue, and field type. No field read is needed; setup validates the Phase options.
+
+- Read the item after any Status change in the same operation. An earlier read still shows the old Status, so Phase wouldn't clear.
 
 **Linear:** `{ catalog, applied }`, both required even when empty. Omit an optional field only when you actually read it and it was empty. Code turns that absence into null. Never omit a value you didn't read.
 

@@ -339,7 +339,7 @@ describe("managed Linear plan documents", () => {
                     f.read(body, "other-document"),
                 ])
                 assert.equal(replaced.state, "blocked")
-                await assert.rejects(f.update(f.read(body, "other-document")), /conflicting|does not match/)
+                await assert.rejects(f.update(f.read(body, "other-document")), /conflicting|argument id must be/)
             } finally {
                 f.dispose()
             }

@@ -21,7 +21,13 @@ import {
 import { assertAcceptedTaskList } from "../__lib/epic-acceptance.js"
 import { type EpicTask, readEpicTasks, tagEpicTask } from "../__lib/epic-tasks.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
-import { assertConfiguredPriority, loadIntegrationRoles, requireTracker, type TrackerConfig } from "./config.js"
+import {
+    assertConfiguredPriority,
+    lifecycleFromStatus,
+    loadIntegrationRoles,
+    requireTracker,
+    type TrackerConfig,
+} from "./config.js"
 import { assertEntityTracker } from "./policy.js"
 import { linearPriorityNumber } from "./records.js"
 import { completeSelection, LabelSelectionFailure, selectedLabelNames } from "./label-selection.js"
@@ -229,12 +235,8 @@ function requireChild(marker: string, r: Reconciliation): EpicChildIssue {
 
 function lifecycleOf(ctx: Context) {
     const values = ctx.tracker.provider === "github" ? ctx.tracker.fields.status.values : ctx.tracker.statuses.issues
-    return (status: string | undefined): LifecycleState | undefined => {
-        if (status === undefined) return undefined
-        const match = Object.entries(values).find(([, name]) => name === status)
-        if (!match) throw new Error(`Status ${JSON.stringify(status)} is not a configured lifecycle value`)
-        return match[0] as LifecycleState
-    }
+    return (status: string | undefined): LifecycleState | undefined =>
+        status === undefined ? undefined : lifecycleFromStatus(values, status)
 }
 
 interface NativeCalls {

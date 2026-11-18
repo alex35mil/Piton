@@ -16,14 +16,7 @@ export const NativePhaseFactsSchema = Type.Union([
     Type.Object(
         {
             provider: Type.Literal("github"),
-            field: Type.Object(
-                {
-                    name: NameSchema,
-                    dataType: NameSchema,
-                    options: Type.Array(NameSchema, { uniqueItems: true }),
-                },
-                { additionalProperties: false },
-            ),
+            field: Type.Object({ name: NameSchema, dataType: NameSchema }, { additionalProperties: false }),
             current: NullableNameSchema,
         },
         { additionalProperties: false },
@@ -188,12 +181,10 @@ export function validateGitHubPhaseField(
     configured: GitHubPhaseField,
     facts: Extract<NativePhaseFacts, { provider: "github" }>,
 ): void {
-    // GitHub spells the type SINGLE_SELECT in GraphQL and single_select through the MCP.
+    // GitHub spells the type SINGLE_SELECT in GraphQL and single_select through the MCP. Setup validates
+    // the options, and GitHub rejects a write of a missing one, so runtime checks only identity and type.
     if (facts.field.name !== configured.field || facts.field.dataType.toLowerCase() !== "single_select") {
         throw new Error("configured GitHub Phase requires its exact Project single-select field")
-    }
-    for (const name of Object.values(configured.values)) {
-        if (!facts.field.options.includes(name)) throw new Error(`GitHub Phase option is missing: ${name}`)
     }
 }
 

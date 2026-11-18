@@ -108,11 +108,7 @@ function native(provider: "github" | "linear"): NativePhaseFacts {
     if (provider === "github")
         return {
             provider,
-            field: {
-                name: "Phase",
-                dataType: "SINGLE_SELECT",
-                options: Object.values(phaseValues),
-            },
+            field: { name: "Phase", dataType: "SINGLE_SELECT" },
             current: "Planning",
         }
     const base = {
@@ -180,7 +176,7 @@ describe("workflow operations", () => {
             )
         const invalid = native("github")
         if (invalid.provider !== "github") assert.fail()
-        invalid.field.options = []
+        invalid.field.dataType = "TEXT"
         assert.throws(
             () =>
                 setWorkflowPhase(entity("github"), environment("github"), {
@@ -189,7 +185,7 @@ describe("workflow operations", () => {
                     lifecycle: "inProgress",
                     native: invalid,
                 }),
-            /option/,
+            /single-select/,
         )
         assert.throws(
             () =>
@@ -269,7 +265,7 @@ describe("workflow operations", () => {
                     .get("set_github_workflow_phase")!
                     .execute(
                         "other-issue",
-                        { entityDir: directory, phase: "execution", lifecycle: "inProgress", native: otherIssue },
+                        { entityDir: directory, phase: "execution", native: otherIssue },
                         undefined,
                         undefined,
                         ctx,
@@ -284,8 +280,8 @@ describe("workflow operations", () => {
                     {
                         entityDir: directory,
                         phase: "execution",
-                        lifecycle: "done",
-                        native: nativeInput,
+                        // Lifecycle comes from the item read's Status.
+                        native: githubPhaseReads(target, "Planning", "Done"),
                     },
                     undefined,
                     undefined,
@@ -299,7 +295,6 @@ describe("workflow operations", () => {
                 {
                     entityDir: directory,
                     phase: "execution",
-                    lifecycle: "inProgress",
                     native: nativeInput,
                 },
                 undefined,
@@ -323,7 +318,6 @@ describe("workflow operations", () => {
                 {
                     entityDir: directory,
                     phase: "execution",
-                    lifecycle: "inProgress",
                     native: githubPhaseReads(target, "Execution"),
                 },
                 undefined,

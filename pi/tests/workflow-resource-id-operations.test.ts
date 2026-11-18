@@ -19,6 +19,7 @@ import {
 } from "../workflows/extensions/integrations/resource-ids.ts"
 import { ResourceIdsToolValidator } from "../workflows/extensions/integrations/resource-id-tool.ts"
 import {
+    evidenceResourceKind,
     shippingReadDecision,
     invalidateStaleResourceIds,
     recordResourceIdsEvidence,
@@ -392,6 +393,48 @@ describe("resource ID operations", () => {
             const result = await invalidateStaleResourceIds(context, read(24), new OperationResourceIdsMemo(), mcpTools)
             assert.equal(result.state, "missing")
             assert.deepEqual(readResourceIdsCache(f.directory)!.resourceIds, [])
+        } finally {
+            f.cleanup()
+        }
+    })
+
+    it("derives the resource kind from the evidence tool and method, naming every accepted one on rejection", () => {
+        const f = fixture()
+        try {
+            const kind = (tool: string, method: string | undefined, purpose: "record" | "invalidate" = "record") =>
+                evidenceResourceKind(
+                    f.root,
+                    f.directory,
+                    { tool, arguments: method === undefined ? {} : { method } },
+                    purpose,
+                    mcpTools,
+                )
+            assert.equal(kind("mcp__github__issue_read", "get"), "github-issue")
+            assert.equal(kind("mcp__github__projects_get", "get_project_item"), "github-project-item")
+            assert.equal(kind("mcp__github__projects_write", "add_project_item"), "github-project-item")
+            assert.equal(kind("mcp__github__pull_request_read", "get"), "github-pull-request")
+            assert.equal(kind("mcp__github__projects_get", "get_project_item", "invalidate"), "github-project-item")
+            assert.throws(
+                () => kind("mcp__github__projects_list", "list_project_items"),
+                (error: Error) =>
+                    /doesn't accept evidence from mcp__github__projects_list \(method list_project_items\)/.test(
+                        error.message,
+                    ) &&
+                    /mcp__github__projects_get \(method get_project_item\)/.test(error.message) &&
+                    /mcp__github__projects_write \(method add_project_item\)/.test(error.message) &&
+                    /mcp__github__issue_read \(method get\)/.test(error.message) &&
+                    /mcp__github__pull_request_read \(method get\)/.test(error.message),
+            )
+            assert.throws(() => kind("mcp__github__projects_get", "get_project_field"), /accepted evidence/)
+            // An issue read can't prove stale IDs, so invalidation names only the reads that can.
+            assert.throws(
+                () => kind("mcp__github__issue_read", "get", "invalidate"),
+                (error: Error) =>
+                    !/issue_read/.test(error.message.split("accepted evidence:")[1]) &&
+                    /projects_get \(method get_project_item\)/.test(error.message),
+            )
+            // Linear tools aren't accepted for a GitHub-tracked entity.
+            assert.throws(() => kind("mcp__linear__get_issue", undefined), /accepted evidence/)
         } finally {
             f.cleanup()
         }

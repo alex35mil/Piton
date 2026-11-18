@@ -52,11 +52,12 @@ export function githubPublication(
         return { id, url: "html_url" in response ? response.html_url : response.url }
     }
     const commentPages = () => [call("issue_read", { method: "get_comments", ...address, page: 1, perPage: 100 })]
-    // Every comment on the issue, from complete explicit pages.
+    // Every comment on the issue, from complete explicit pages. Errors point at the returned reads.
+    const readsHint = `run the returned lookups as given (${JSON.stringify(commentPages()[0].arguments)}), then the next page until a short or empty one`
     const comments = (pages: ProviderEvidence[]) => {
         const perPage = pages[0].arguments.perPage
         if (typeof perPage !== "number" || !Number.isInteger(perPage) || perPage < 1 || perPage > 100)
-            throw new Error("comment reads require explicit perPage between 1 and 100")
+            throw new Error(`comment reads require explicit perPage between 1 and 100; ${readsHint}`)
         const all: Record<string, unknown>[] = []
         for (const [index, evidence] of pages.entries()) {
             requireCall(evidence, "issue_read", { method: "get_comments", ...address, page: index + 1, perPage })
@@ -65,7 +66,7 @@ export function githubPublication(
                 throw new Error("comment reads require native comment-array pages")
             if (index < pages.length - 1 ? response.length !== perPage : response.length === perPage)
                 throw new Error(
-                    "comment pagination is incomplete or inconsistent; include a terminal short or empty page",
+                    `comment pagination is incomplete or inconsistent; include a terminal short or empty page; ${readsHint}`,
                 )
             all.push(...response)
         }
