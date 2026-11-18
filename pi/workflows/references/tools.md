@@ -76,6 +76,7 @@ None of these call providers or turn identity, lifecycle, or merge facts into ca
   - Epic, Task, and Gig reviewers read files with `read`, `grep`, `find`, and `ls`, and Git with the read-only `git_read`. They run headless under your permission settings, so with `default_mode = "ask"` those tools must be allowed. Incoming-PR reviewers get file reads only.
 - **Delivery cleanup:** `cleanup_delivery_branch` takes the merged PR read as `evidence`. It doesn't establish Done or authorize cleanup outside the shipping gates.
 - **Conflict resolution comment:** `prepare_merge_resolution_comment` returns the PR comment call that records a pushed conflict resolution.
+- **User review:** `begin_user_review` puts a Task or Gig branch's diff in the worktree for the user, and `end_user_review` returns to the branch ([user review](./deliverable/user-review.md)).
 
 ## Incoming PRs
 

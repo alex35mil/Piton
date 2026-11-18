@@ -84,7 +84,7 @@ Every plan, interim, and final review follows [review](./review.md).
    - for a Task, any edit made to the parent `epic.md`, in one line;
    - that nothing is pushed, and whether commit steps were committed locally.
 
-   Then wait for "submit" or "ship it". Verification and the walkthrough stay in the artifact; they appear in the PR's folded sections.
+   Then wait for "submit" or "ship it". After commit steps, or on "show me the diff", read [user review](./deliverable/user-review.md).
 9. **A fix the user asks for now:** apply it, rerun the affected checks, and update the completion artifact. Run a new final review, with `newReview`, only when the fix changes behavior.
 10. When they ask to submit, read [submission](./deliverable/submission.md); when they ask to ship, read [shipping](./deliverable/shipping.md). Neither needs a prior acceptance of the completion artifact.
 

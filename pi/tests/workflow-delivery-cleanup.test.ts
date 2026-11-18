@@ -17,6 +17,7 @@ import {
     prepareMergeResolutionComment,
     renderMergeResolutionComment,
 } from "../workflows/extensions/deliverable/merge-resolution.ts"
+import { beginUserReview, endUserReview } from "../workflows/extensions/deliverable/user-review.ts"
 import { fixtureToolName, workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
 import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
 import { initializeEntity } from "../workflows/extensions/init/entity.ts"
@@ -168,14 +169,19 @@ function cloneBranchExists(root: string, branch: string): boolean {
 }
 
 describe("Deliverable branch cleanup", () => {
-    it("registers the cleanup and merge-resolution tools under the Deliverable extension", () => {
+    it("registers the cleanup, merge-resolution, and user-review tools under the Deliverable extension", () => {
         const tools: string[] = []
         registerDeliverable({
             on() {},
             events: { on: () => () => {} },
             registerTool: (tool: { name: string }) => tools.push(tool.name),
         } as unknown as ExtensionAPI)
-        assert.deepEqual(tools, ["cleanup_delivery_branch", "prepare_merge_resolution_comment"])
+        assert.deepEqual(tools, [
+            "cleanup_delivery_branch",
+            "prepare_merge_resolution_comment",
+            "begin_user_review",
+            "end_user_review",
+        ])
     })
 
     it("cleans a squash-merged branch in the current clone from verified PR evidence", () => {
@@ -614,3 +620,90 @@ function submittedGigWithoutPr(root: string): string {
         { cwd: root },
     ).directory
 }
+
+describe("Deliverable user review", () => {
+    // A Gig branch one commit ahead of main, which moved on after the branch started.
+    function reviewing() {
+        const { parent, root } = repository()
+        const gig = submittedGig(root, false)
+        const base = git(root, ["rev-parse", "main"])
+        git(root, ["switch", gig.branch])
+        fs.writeFileSync(path.join(root, "step.txt"), "step\n")
+        git(root, ["add", "step.txt"])
+        git(root, ["commit", "-m", "step"])
+        const head = git(root, ["rev-parse", "HEAD"])
+        git(root, ["switch", "main"])
+        fs.writeFileSync(path.join(root, "upstream.txt"), "upstream\n")
+        git(root, ["add", "upstream.txt"])
+        git(root, ["commit", "-m", "upstream"])
+        git(root, ["push", "origin", "main"])
+        git(root, ["switch", gig.branch])
+        return { root, gig, base, head, close: () => fs.rmSync(parent, { recursive: true, force: true }) }
+    }
+    const attached = (root: string) =>
+        cp.spawnSync("git", ["symbolic-ref", "-q", "HEAD"], { cwd: root }).stdout.toString().trim()
+
+    it("stages the branch diff over the merge base, keeps edits, and returns to the branch", () => {
+        const f = reviewing()
+        try {
+            fs.appendFileSync(path.join(f.root, "README.md"), "uncommitted\n")
+            assert.equal(beginUserReview(f.root, f.gig.directory).state, "ready")
+            assert.equal(git(f.root, ["rev-parse", "HEAD"]), f.base)
+            assert.equal(attached(f.root), "")
+            assert.equal(git(f.root, ["diff", "--cached", "--name-only"]), "step.txt")
+            assert.equal(fs.existsSync(path.join(f.root, "upstream.txt")), false)
+            assert.equal(beginUserReview(f.root, f.gig.directory).state, "ready", "Repeated begin is a no-op")
+            fs.appendFileSync(path.join(f.root, "step.txt"), "review edit\n")
+
+            assert.equal(endUserReview(f.root, f.gig.directory).state, "ended")
+            assert.equal(attached(f.root), `refs/heads/${f.gig.branch}`)
+            assert.equal(git(f.root, ["rev-parse", "HEAD"]), f.head)
+            assert.equal(git(f.root, ["diff", "--name-only"]), "README.md\nstep.txt")
+            assert.equal(git(f.root, ["diff", "--cached", "--name-only"]), "")
+            assert.deepEqual(endUserReview(f.root, f.gig.directory), { state: "notInReview" })
+        } finally {
+            f.close()
+        }
+    })
+
+    it("refuses to end after a commit during the review, changing nothing", () => {
+        const f = reviewing()
+        try {
+            beginUserReview(f.root, f.gig.directory)
+            git(f.root, ["commit", "-qm", "commit during review"])
+            const moved = git(f.root, ["rev-parse", "HEAD"])
+            assert.throws(() => endUserReview(f.root, f.gig.directory), /review base/)
+            assert.equal(git(f.root, ["rev-parse", "HEAD"]), moved)
+        } finally {
+            f.close()
+        }
+    })
+
+    it("refuses to begin off the branch or during a Git operation", () => {
+        const f = reviewing()
+        try {
+            git(f.root, ["switch", "main"])
+            assert.throws(() => beginUserReview(f.root, f.gig.directory), /starts on the branch/)
+            git(f.root, ["switch", f.gig.branch])
+            fs.writeFileSync(path.join(f.root, ".git", "MERGE_HEAD"), `${f.base}\n`)
+            assert.throws(() => beginUserReview(f.root, f.gig.directory), /MERGE_HEAD/)
+            assert.equal(git(f.root, ["rev-parse", "HEAD"]), f.head)
+        } finally {
+            f.close()
+        }
+    })
+
+    it("changes nothing when the branch has no commits ahead", () => {
+        const { parent, root } = repository()
+        try {
+            const gig = submittedGig(root, false)
+            git(root, ["switch", gig.branch])
+            const head = git(root, ["rev-parse", "HEAD"])
+            assert.equal(beginUserReview(root, gig.directory).state, "uncommitted")
+            assert.equal(attached(root), `refs/heads/${gig.branch}`)
+            assert.equal(git(root, ["rev-parse", "HEAD"]), head)
+        } finally {
+            fs.rmSync(parent, { recursive: true, force: true })
+        }
+    })
+})

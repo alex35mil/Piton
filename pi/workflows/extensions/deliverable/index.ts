@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { Type } from "typebox"
 
-import { parse } from "../../../extensions/__lib/schema.js"
+import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { observeMcpTools, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import * as project from "../../../extensions/__lib/project.js"
 import * as Git from "../__lib/git.js"
@@ -13,6 +14,13 @@ import {
     parseMergeResolutionCommentInput,
     prepareMergeResolutionComment,
 } from "./merge-resolution.js"
+import { beginUserReview, endUserReview } from "./user-review.js"
+
+const UserReviewInputSchema = Type.Object(
+    { entityDir: Type.String({ minLength: 1, description: "Task or Gig directory" }) },
+    { additionalProperties: false },
+)
+const UserReviewInputValidator = compile(UserReviewInputSchema)
 
 export default function (pi: ExtensionAPI): void {
     const tools = workflowTools(pi, "delivery")
@@ -45,6 +53,30 @@ export default function (pi: ExtensionAPI): void {
                 content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
                 details: result,
             }
+        },
+    })
+    tools.registerTool({
+        name: "begin_user_review",
+        label: "begin_user_review",
+        description:
+            "Put a Task or Gig branch's diff in the current checkout for the user's review ('show me the diff'): HEAD detaches at the merge base with the target, so committed work shows as staged. Only HEAD moves; uncommitted work stays as it was. With no commits ahead, returns `uncommitted` and changes nothing. End with end_user_review before committing, submitting, or applying a fix.",
+        parameters: UserReviewInputSchema,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const input = parse(UserReviewInputValidator, params)
+            const result = beginUserReview(ctx.cwd, input.entityDir)
+            return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
+    tools.registerTool({
+        name: "end_user_review",
+        label: "end_user_review",
+        description:
+            "End a Task or Gig user review in the current checkout: reattach HEAD to the branch. Only HEAD moves; edits made during the review stay as uncommitted changes on the branch. Refuses, changing nothing, when HEAD is no longer at the review base, such as after a commit during the review.",
+        parameters: UserReviewInputSchema,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const input = parse(UserReviewInputValidator, params)
+            const result = endUserReview(ctx.cwd, input.entityDir)
+            return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
         },
     })
 }
