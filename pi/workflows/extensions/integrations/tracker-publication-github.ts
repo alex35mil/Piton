@@ -52,7 +52,8 @@ export function githubPublication(
         return { id, url: "html_url" in response ? response.html_url : response.url }
     }
     const commentPages = () => [call("issue_read", { method: "get_comments", ...address, page: 1, perPage: 100 })]
-    // Every comment on the issue, from complete explicit pages. Errors point at the returned reads.
+    // Every comment on the issue, from complete numbered pages. GitHub serves page 1 when `page` is left out,
+    // so only the first read may omit it. Errors point at the returned reads.
     const readsHint = `run the returned lookups as given (${JSON.stringify(commentPages()[0].arguments)}), then the next page until a short or empty one`
     const comments = (pages: ProviderEvidence[]) => {
         const perPage = pages[0].arguments.perPage
@@ -60,7 +61,8 @@ export function githubPublication(
             throw new Error(`comment reads require explicit perPage between 1 and 100; ${readsHint}`)
         const all: Record<string, unknown>[] = []
         for (const [index, evidence] of pages.entries()) {
-            requireCall(evidence, "issue_read", { method: "get_comments", ...address, page: index + 1, perPage })
+            const page = index === 0 && evidence.arguments.page === undefined ? {} : { page: index + 1 }
+            requireCall(evidence, "issue_read", { method: "get_comments", ...address, ...page, perPage })
             const response = mcpResponseValue(evidence.response)
             if (!Array.isArray(response) || response.length > perPage || !response.every(isMcpRecord))
                 throw new Error("comment reads require native comment-array pages")

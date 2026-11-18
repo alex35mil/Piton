@@ -16,7 +16,7 @@ Still run every prepared mutation in the same step and never call prepare just t
 
 ### GitHub comment
 
-1. Read every page of the bound issue's comments with the registered `issue_read` `get_comments`. Use explicit page numbers, one consistent `perPage` (1–100), and continue until a short or empty page.
+1. Read every page of the bound issue's comments with the registered `issue_read` `get_comments`. Number every page after the first, use one consistent `perPage` (1–100), and continue until a short or empty page.
 2. Call `recover_tracker_publication` with all pages.
 3. Only one comment containing the saved marker establishes identity. For a pending plan, no match returns the create; duplicate matches, a missing published comment, or conflicting identity stop for maintainer direction.
 4. The tool returns the identified comment body; use it to compare an uncertain update.
