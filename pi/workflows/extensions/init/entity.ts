@@ -44,12 +44,7 @@ import {
     type ProjectConfig,
 } from "../__lib/project-config.js"
 import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "../integrations/config.js"
-import {
-    completeSelection,
-    LabelSelectionFailure,
-    LabelSelectionSchema,
-    selectedLabelNames,
-} from "../integrations/label-selection.js"
+import { LabelSelectionFailure, LabelSelectionSchema, selectedLabelNames } from "../integrations/label-selection.js"
 import {
     GitHubTrackerObjectSchema,
     GitHubTrackerObjectValidator,
@@ -200,12 +195,7 @@ export function preflightEntity(input: PreflightInput, options: InitializeEntity
     const kind = input.entity === "epic" ? "epic" : input.kind
     let labels: string[]
     try {
-        labels = selectedLabelNames(
-            tracker.labels,
-            itemType,
-            kind,
-            completeSelection(tracker.labels, itemType, input.labels ?? {}),
-        )
+        labels = selectedLabelNames(tracker.labels, itemType, kind, input.labels ?? {})
     } catch (error) {
         if (error instanceof LabelSelectionFailure) throw new Error(`labels: ${error.message}`)
         throw error

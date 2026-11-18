@@ -18,7 +18,6 @@ import {
     LabelSelectionSchema,
     type LabelFacts,
     type LabelSelection,
-    completeSelection,
     linearLabelFacts,
     planGitHubLabelUpdate,
     planLinearLabelUpdate,
@@ -164,7 +163,7 @@ export const IntegrationContextSchema = Type.Union([
             labels: Type.Optional(
                 Type.Union([LabelSelectionSchema], {
                     description:
-                        "The new selection. Omit it to keep the item's current selection, for example on a Kind change.",
+                        "The groups to change. Groups left out keep the item's labels; omit it entirely to change only the `kind` label, on a Kind change.",
                 }),
             ),
             current: LabelFactsSchema,
@@ -643,11 +642,7 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
                       configuredTracker!.labels,
                       input.entity === "epic" ? "epic" : "deliverable",
                       input.kind === "not set" ? undefined : input.kind,
-                      completeSelection(
-                          configuredTracker!.labels,
-                          input.entity === "epic" ? "epic" : "deliverable",
-                          input.labels ?? {},
-                      ),
+                      input.labels ?? {},
                   ),
               )
             : undefined
@@ -729,8 +724,7 @@ function labelsOrFailure<T>(plan: () => T): T | { state: "invalid"; reason: stri
 
 /**
  * The complete label set for an item, from its fresh labels. The `kind` label follows the item's
- * workflow Kind; without a new selection, the item's current selection is kept. A given selection
- * must name every group: on an existing item, a left-out group would silently drop its labels.
+ * workflow Kind; a group the selection leaves out keeps the item's current labels.
  */
 function planLabelMutation(
     tracker: TrackerConfig,
