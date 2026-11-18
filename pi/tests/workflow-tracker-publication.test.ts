@@ -275,6 +275,15 @@ describe("managed GitHub plan comments", () => {
             const unpaged = f.page([], 1)
             delete (unpaged.arguments as { perPage?: number }).perPage
             await assert.rejects(f.recover([unpaged]), /run the returned lookups as given/)
+            // GitHub serves page 1 when `page` is left out, so only a later page must name its number.
+            const first = f.page([f.remote("Discussion", 1)], 1, 1)
+            delete (first.arguments as { page?: number }).page
+            const later = f.page([], 2, 1)
+            delete (later.arguments as { page?: number }).page
+            await assert.rejects(f.recover([first, later]), /argument page must be 2, got nothing/)
+            const defaulted = await f.recover([first, f.page([], 2, 1)])
+            assert.ok(defaulted.state === "mutation-needed")
+            assert.deepEqual(defaulted.mutation, prepared.mutation)
 
             const reissued = await f.recover([f.page([f.remote("Discussion", 1)], 1, 1), f.page([], 2, 1)])
             assert.ok(reissued.state === "mutation-needed")
