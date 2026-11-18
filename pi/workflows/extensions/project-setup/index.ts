@@ -192,7 +192,7 @@ export default function (pi: ExtensionAPI): void {
         name: "inspect_linear_workspace",
         label: "inspect_linear_workspace",
         description:
-            "Read Linear workspace identity, viewer Full Name/Username, teams, issue statuses, Project statuses, and branch format through the public GraphQL API without exposing credentials or performing mutations.",
+            "Read Linear workspace identity, viewer Full Name/Username, teams, issue statuses, and Project statuses through the public GraphQL API without exposing credentials or performing mutations. Returns the status defaults and, per team, a proposed status mapping for the user to confirm.",
         parameters: LinearWorkspaceInspectionToolSchema,
         async execute(_toolCallId, params, signal) {
             const result = await inspectLinearWorkspace(params, { signal })

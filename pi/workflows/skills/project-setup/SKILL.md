@@ -136,14 +136,15 @@ Workflow work always stays local under `.piton/.local/`. When the user asks for 
 1. **Call `inspect_linear_workspace`** after the MCP server is active and before branch naming. Use the credential variable from the recognized registration, or ask for the variable's name only.
 2. **On a missing variable, denied access, or API failure,** report the exact error and ask whether to fix access or continue with manual team and status values. Never fall back silently.
 3. **Team and statuses:**
-   - Show teams as numbered choices. For the selected team, show its issue statuses and the workspace or team Project statuses, with native type and scope.
-   - For each of `backlog`, `todo`, `inProgress`, `inReview`, `done`, and `canceled`, the user picks an existing issue status and Project status, or a new one. Offer `statusDefaults` as editable definitions for new ones.
-   - Never infer lifecycle meaning from names or types. Each saved name must identify one status unambiguously. Native Priority needs no configuration.
+   - Show teams as numbered choices.
+   - For the selected team, show its `statusProposal` as one table: a row per lifecycle key, with the issue status and the Project status side by side. Mark each status to create, and each conflict as needing a choice.
+   - Ask the user to confirm it, or to change single entries to another existing status or a new one, using `statusDefaults` as editable definitions. They must resolve every conflict.
+   - Propose only the tool's mapping; never build one yourself. Native Priority needs no configuration.
 4. **Creating statuses:** read [status setup](../../references/setup/linear-tracker.md#status-setup).
    - Call `preview_linear_status_setup`. A blocked preview changes nothing; resolve its problems with the user.
    - Present every create (scope, name, type, color, position), the mappings, and any `permissionWarning`. Say created statuses can only be archived, never deleted.
    - Require approval of that exact `planHash`, call `apply_linear_status_setup`, and save only its returned `statuses`.
-   - With nothing to create, save the picked names without applying.
+   - With nothing to create, save the confirmed names without applying.
 5. **Phase groups:** read [Phase](../../references/phase.md#setup) and the [Linear tracker shape](../../references/setup/linear-tracker.md). Ask whether to track Phase; when declined, save no `phase`. Otherwise the user picks the group and child names, scope, and colors for Projects and for issues. The label step creates or checks them.
 
 ### 4. Branch naming
@@ -289,7 +290,7 @@ GitHub provisioning has its own preview and hash approval and must finish first.
 
 - **Permissions**, when selected: the target, the exact `allow` and `ask` additions, skipped rules, and conflicts. For local additions, note that `configure_permissions` keeps `.piton/config.local.toml` outside Git and ensures its exclude entry; unchanged permissions add no exclusion.
 
-Require explicit approval. Configuration contains no credentials. Never infer missing product rules, lifecycle mappings, field scopes, provider identities, or policy text.
+Require explicit approval. Configuration contains no credentials. Never infer missing product rules, field scopes, provider identities, or policy text.
 
 The configuration files are protected: under Piton, each write shows the user its diff to approve again. Never edit `.piton/config.toml` or `.piton/config.local.toml` by hand; the tools write them.
 
