@@ -61,7 +61,7 @@ Follow [initialize from the tracker object](../shared.md#initialize-from-the-tra
 
 Pass the returned UUID, identifier, URL, and, with tracker naming, `gitBranchName` to `init_linear_<entity>` as `object`. For an Epic, pass the Project UUID, URL, and `createdAt`; when the create response lacks `createdAt`, read the Project.
 
-**Board setup** (after initialization): for adopted objects and a started Task, move to In Progress, set `me` as the issue assignee or Project lead, and, when Phase is configured, apply Planning, reading and keeping the full applied label set and replacing only managed Phase labels. Pass the label IDs from that Phase result as `prepare_label_mutation`'s applied IDs ([labels](../shared.md#labels)), and save its returned set in one write, so Planning survives. Reuse state, Priority, and relationship proof from the create response; read only missing required facts.
+**Board setup** (after initialization): for adopted objects and a started Task, move to In Progress, set `me` as the issue assignee or Project lead, and, when Phase is configured, apply Planning, reading and keeping the full applied label set and replacing only managed Phase labels. Call `prepare_label_mutation` with only the groups whose values you derived, passing the label IDs from that Phase result as its applied IDs ([labels](../shared.md#labels)), and save its returned set in one write, so Planning survives. Reuse state, Priority, and relationship proof from the create response; read only missing required facts.
 
 Tracker records hold the object's identity, never branch copies or cached lifecycle or Priority.
 

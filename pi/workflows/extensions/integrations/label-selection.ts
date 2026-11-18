@@ -23,7 +23,7 @@ const KeySchema = Type.String({ pattern: "^[a-z][a-z0-9-]*$" })
 export const LabelSelectionSchema = Type.Record(KeySchema, Type.Array(KeySchema, { uniqueItems: true }), {
     additionalProperties: false,
     description:
-        "Value keys for every label group, other than `kind`, that applies to this item type; an empty list for an optional group with no value",
+        "Value keys for the label groups to set, never `kind`. A group left out has no value on new work and keeps its labels on an existing item; an empty list clears it",
 })
 export type LabelSelection = Static<typeof LabelSelectionSchema>
 
@@ -93,7 +93,6 @@ export function linearLabelsNamed(
 export type LabelSelectionError =
     | { kind: "kindInSelection" }
     | { kind: "unknownGroup"; group: string; groups: string[] }
-    | { kind: "missingGroup"; group: string; values: string[] }
     | { kind: "unknownValue"; group: string; value: string; values: string[] }
     | { kind: "cardinality"; group: string; cardinality: Cardinality; selected: string[] }
     | { kind: "missingLabel"; name: string }
@@ -111,8 +110,6 @@ function describe(reason: LabelSelectionError): string {
             return "the `kind` label comes from the item's Kind; leave it out of the selection"
         case "unknownGroup":
             return `label group ${JSON.stringify(reason.group)} doesn't apply to this item; groups: ${list(reason.groups)}`
-        case "missingGroup":
-            return `label group ${JSON.stringify(reason.group)} needs a selection (an empty list when optional); values: ${list(reason.values)}`
         case "unknownValue":
             return `label group ${JSON.stringify(reason.group)} has no value ${JSON.stringify(reason.value)}; values: ${list(reason.values)}`
         case "cardinality":
@@ -154,12 +151,17 @@ function cardinalityHolds(cardinality: Cardinality, count: number): boolean {
     }
 }
 
-/** The label names an item should carry: its selection checked against cardinality, plus its `kind` label. */
+/**
+ * The label names an item should carry, plus its `kind` label. Each group takes its values from the
+ * selection, or from `base` when the selection leaves it out: empty for new work, the item's current
+ * selection for an existing one. The result is checked against each group's cardinality.
+ */
 export function selectedLabelNames(
     labels: AnyLabels | undefined,
     itemType: LabelItemType,
     kind: WorkflowKind | undefined,
     selection: LabelSelection,
+    base: LabelSelection = {},
 ): string[] {
     if (KIND_GROUP_KEY in selection) throw new LabelSelectionFailure({ kind: "kindInSelection" })
     const groups = groupsFor(labels, itemType).filter(([key]) => key !== KIND_GROUP_KEY)
@@ -174,13 +176,7 @@ export function selectedLabelNames(
     const names: string[] = []
     for (const [key, group] of groups) {
         const values = groupValues(key, group, itemType)
-        const chosen = selection[key]
-        if (!chosen)
-            throw new LabelSelectionFailure({
-                kind: "missingGroup",
-                group: key,
-                values: values.map(([value]) => value),
-            })
+        const chosen = selection[key] ?? base[key] ?? []
         for (const value of chosen) {
             const match = values.find(([candidate]) => candidate === value)
             if (!match)
@@ -208,23 +204,6 @@ export function selectedLabelNames(
     return names
 }
 
-/**
- * A selection with every applicable group present: groups the partial selection leaves out are
- * empty, so a required group still fails its cardinality check. Unknown groups stay and fail.
- */
-export function completeSelection(
-    labels: AnyLabels | undefined,
-    itemType: LabelItemType,
-    partial: LabelSelection,
-): LabelSelection {
-    const empty = Object.fromEntries(
-        groupsFor(labels, itemType)
-            .filter(([key]) => key !== KIND_GROUP_KEY)
-            .map(([key]) => [key, [] as string[]]),
-    )
-    return { ...empty, ...partial }
-}
-
 /** The current selection an item's applied labels express, for changes that keep the other groups. */
 function selectionFromNames(labels: AnyLabels | undefined, itemType: LabelItemType, applied: readonly string[]) {
     const present = new Set(applied.map((name) => name.toLowerCase()))
@@ -248,8 +227,8 @@ export interface LabelUpdate<T> {
 }
 
 /**
- * The complete GitHub label set for an item: managed labels of its groups replaced by the selection,
- * every other label kept. Without a selection, the current one is kept and only `kind` follows the Kind.
+ * The complete GitHub label set for an item: managed labels of the selected groups replaced by the
+ * selection, every other label kept. Without a selection, only `kind` follows the Kind.
  */
 export function planGitHubLabelUpdate(
     labels: GitHubLabels | undefined,
@@ -262,7 +241,8 @@ export function planGitHubLabelUpdate(
         labels,
         itemType,
         kind,
-        selection ?? selectionFromNames(labels, itemType, current),
+        selection ?? {},
+        selectionFromNames(labels, itemType, current),
     )
     const managed = new Set(managedLabelNames(labels, itemType).map((name) => name.toLowerCase()))
     const kept = current.filter((name) => !managed.has(name.toLowerCase()))
@@ -319,7 +299,8 @@ export function planLinearLabelUpdate(
         labels,
         itemType,
         kind,
-        selection ?? selectionFromNames(labels, itemType, appliedNames),
+        selection ?? {},
+        selectionFromNames(labels, itemType, appliedNames),
     )
     const scopeTeam = (scope: "workspace" | "team") => (scope === "workspace" ? null : team)
     const find = (name: string, scope: "workspace" | "team") => linearLabelsNamed(facts.catalog, name, scope, team)

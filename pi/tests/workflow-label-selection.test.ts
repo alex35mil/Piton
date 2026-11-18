@@ -5,7 +5,6 @@ import { describe, it } from "node:test"
 
 import type { GitHubLabelGroup, GitHubLabels, LinearLabels } from "../workflows/extensions/integrations/labels.ts"
 import {
-    completeSelection,
     LabelSelectionFailure,
     planGitHubLabelUpdate,
     planLinearLabelUpdate,
@@ -84,30 +83,43 @@ describe("label selection", () => {
         )
     })
 
-    it("rejects unknown groups, missing groups, and a selection naming kind", () => {
+    it("rejects unknown groups and a selection naming kind", () => {
         assert.equal(
             failure(() => selectedLabelNames(labels, "deliverable", "bugfix", { ...valid, nope: [] })).kind,
             "unknownGroup",
         )
         assert.equal(failure(() => selectedLabelNames(labels, "epic", "epic", { perf: [] })).kind, "unknownGroup")
-        const { size: _size, ...withoutSize } = valid
-        assert.equal(
-            failure(() => selectedLabelNames(labels, "deliverable", "bugfix", withoutSize)).kind,
-            "missingGroup",
-        )
         assert.equal(
             failure(() => selectedLabelNames(labels, "deliverable", "bugfix", { ...valid, kind: ["feature"] })).kind,
             "kindInSelection",
         )
     })
 
-    it("completes a partial selection with empty optional groups, so required ones still fail", () => {
-        assert.deepEqual(completeSelection(labels, "deliverable", { size: ["s"] }), {
-            area: [],
-            perf: [],
-            size: ["s"],
-            team: [],
-        })
+    it("leaves an omitted group empty for new work, so only a required one fails", () => {
+        assert.deepEqual(selectedLabelNames(labels, "deliverable", "bugfix", { size: ["s"], team: ["core"] }), [
+            "Size: S",
+            "Team: Core",
+            "Kind: Bugfix",
+        ])
+        assert.deepEqual(
+            failure(() => selectedLabelNames(labels, "deliverable", "bugfix", { team: ["core"] })),
+            {
+                kind: "cardinality",
+                group: "size",
+                cardinality: "exactlyOne",
+                selected: [],
+            },
+        )
+    })
+
+    it("takes an omitted group from the base selection, and an empty list clears it", () => {
+        const base = { area: ["fe"], perf: ["perf"], size: ["s"], team: ["core"] }
+        assert.deepEqual(selectedLabelNames(labels, "deliverable", "bugfix", { area: ["be"], perf: [] }, base), [
+            "Area: BE",
+            "Size: S",
+            "Team: Core",
+            "Kind: Bugfix",
+        ])
     })
 })
 
@@ -131,6 +143,18 @@ describe("GitHub label update", () => {
         ])
         assert.equal(update.changed, true)
         assert.deepEqual(update.unknown, ["wontfix"], "kept and retired labels aren't unknown")
+    })
+
+    it("keeps the labels of groups a selection leaves out", () => {
+        const current = ["Kind: Feature", "Area: FE", "Perf", "Size: S", "Team: Core", "wontfix"]
+        const update = planGitHubLabelUpdate(labels, "deliverable", "feature", { area: ["be"] }, current)
+        assert.deepEqual(update.labels, ["wontfix", "Area: BE", "Perf", "Size: S", "Team: Core", "Kind: Feature"])
+        assert.equal(update.changed, true)
+        assert.equal(
+            planGitHubLabelUpdate(labels, "deliverable", "feature", { area: ["fe"] }, current).changed,
+            false,
+            "restating the current value changes nothing",
+        )
     })
 
     it("keeps the current selection on a Kind change, changing only the kind label", () => {
@@ -205,6 +229,22 @@ describe("Linear label update", () => {
         )
         assert.deepEqual(update.unknown, ["Customer"])
         assert.equal(update.changed, true)
+    })
+
+    it("keeps the labels of groups a selection leaves out", () => {
+        const facts = { catalog, applied: ["k-b", "fe", "planning"] }
+        const run = (selection: Record<string, string[]>) =>
+            planLinearLabelUpdate(
+                linearLabels,
+                linearPhaseGroup(),
+                "Engineering",
+                "deliverable",
+                "bugfix",
+                selection,
+                facts,
+            )
+        assert.equal(run({}).changed, false)
+        assert.deepEqual([...run({ area: [] }).labels].sort(), ["k-b", "planning"])
     })
 
     it("treats Phase-named labels as ordinary ones when Phase isn't configured", () => {
@@ -326,12 +366,14 @@ describe("gates", () => {
         assert.throws(() => gateOutcome(linear("team"), "plan", names("Gate: Plan")), /configured Linear tracker/)
     })
 
-    it("keeps the marker through a Kind change and removes it with an empty selection", () => {
+    it("keeps the marker through a Kind change and a selection without gate, and an empty list removes it", () => {
         const configured = { groups: { ...labels.groups, gate: gates } } as GitHubLabels
         const current = ["Kind: Feature", "Size: S", "Team: Core", "Gate: Plan"]
         const kindChange = planGitHubLabelUpdate(configured, "deliverable", "bugfix", undefined, current)
         assert.ok(kindChange.labels.includes("Gate: Plan"))
         assert.ok(kindChange.labels.includes("Kind: Bugfix"))
+        const areaOnly = planGitHubLabelUpdate(configured, "deliverable", "feature", { area: ["fe"] }, current)
+        assert.ok(areaOnly.labels.includes("Gate: Plan"))
         const cleared = planGitHubLabelUpdate(
             configured,
             "deliverable",
@@ -361,14 +403,7 @@ describe("Task Labels lines", () => {
     it("names kind as a selection error when the Task's labels are checked", () => {
         const [parsed] = parseEpicTasks(task("Labels: kind=bugfix\n"))
         assert.equal(
-            failure(() =>
-                selectedLabelNames(
-                    labels,
-                    "deliverable",
-                    parsed.kind,
-                    completeSelection(labels, "deliverable", parsed.labels),
-                ),
-            ).kind,
+            failure(() => selectedLabelNames(labels, "deliverable", parsed.kind, parsed.labels)).kind,
             "kindInSelection",
         )
     })

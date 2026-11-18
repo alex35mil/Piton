@@ -30,7 +30,7 @@ import {
 } from "./config.js"
 import { assertEntityTracker } from "./policy.js"
 import { linearPriorityNumber } from "./records.js"
-import { completeSelection, LabelSelectionFailure, selectedLabelNames } from "./label-selection.js"
+import { LabelSelectionFailure, selectedLabelNames } from "./label-selection.js"
 import { EvidenceSchema } from "./resource-id-tool.js"
 
 const OneLineSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
@@ -391,12 +391,7 @@ function nativeCalls(ctx: Context, epicPriority: string): NativeCalls {
 /** A Task issue's labels: its `kind` label and its `Labels:` selection, checked against the configuration. */
 function taskLabels(tracker: TrackerConfig, task: EpicTask): string[] {
     try {
-        return selectedLabelNames(
-            tracker.labels,
-            "deliverable",
-            task.kind,
-            completeSelection(tracker.labels, "deliverable", task.labels),
-        )
+        return selectedLabelNames(tracker.labels, "deliverable", task.kind, task.labels)
     } catch (error) {
         if (error instanceof LabelSelectionFailure)
             throw new Error(`Epic Task ${JSON.stringify(task.title)}: ${error.message}`)

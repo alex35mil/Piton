@@ -654,11 +654,12 @@ describe("workflow integration configuration", () => {
                 changed: true,
                 unknown: [],
             })
-            // A correction that leaves out a group fails instead of dropping that group's labels.
-            assert.deepEqual((plan({ area: [] }, ["Kind: Bugfix", "Area: FE", "Perf"]) as { error: unknown }).error, {
-                kind: "missingGroup",
-                group: "perf",
-                values: ["perf"],
+            // A correction that leaves out a group keeps that group's labels.
+            assert.deepEqual(plan({ area: [] }, ["Kind: Bugfix", "Area: FE", "Perf"]), {
+                provider: "github",
+                labels: ["Perf", "Kind: Bugfix"],
+                changed: true,
+                unknown: [],
             })
             assert.match(JSON.stringify(plan({ nope: [] }, [])), /"state":"invalid"/)
         } finally {

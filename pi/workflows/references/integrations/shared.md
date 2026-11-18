@@ -182,6 +182,7 @@ Adding work to Backlog or Todo creates no workflow artifact or saved recovery st
 - The `kind` value always comes from the item's Kind. `gate` values are the user's: keep them as the item has them, and set one at intake only when the user asks. Values for other groups come from Project Policies and the work; ask the user only when one can't be derived.
 - For new work, report the chosen labels with the other intake values.
 - New work gets its labels from preflight or queue intake. Existing work changes them only through `prepare_label_mutation`, which returns the complete label set; apply it only when `changed`.
-- On a Kind change, call `prepare_label_mutation` without a selection, so only the `kind` label changes. A correction passes a value for every group.
+- A selection names only the groups it sets, never `kind`. A group it leaves out has no value on new work and keeps its labels on existing work; `[]` clears a group.
+- On a Kind change, call `prepare_label_mutation` without a selection, so only the `kind` label changes.
 - An `invalid` result names the group and the problem. Report it and ask; never fix a value on your own.
 - Mention the `unknown` labels it returns and suggest `/project-setup`. Runtime never creates, edits, removes, or keeps catalog labels.
