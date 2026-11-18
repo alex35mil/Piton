@@ -80,7 +80,7 @@ The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is
 - `agent/`: the bridge between a sandboxed agent and the daemon: which files are protected and their Seatbelt rules
   (`protected`), `agent.sock` (`socket`), and a protected write asked of the user (`write`).
 - `project/`: a workspace's source or worker relation, and worker clones.
-- `tools/`: the external tools piton runs (mise, tailscale) and whether each is used.
+- `tools/`: the external tools piton runs (mise, fnox, tailscale) and whether each is used.
 - `setup/`: `piton setup` and the launchd agent. `logging/`: Piton's own logs, the logging policy, the collector.
 
 ### Packaging
@@ -103,7 +103,7 @@ LaunchAgent for development without the app. The CLI is symlinked onto `PATH`.
 **Onboarding.** On first launch the Mac app asks what this Mac does: host (runs the daemon; the app connects to its
 socket) or client (connects to another host over the tailnet, like the phone). The choice is kept on the Mac and can
 be changed in Settings > Connection. A host's onboarding lists the steps from `piton setup check --json`, run with
-the bundled binary: tools (pi, required; mise and tailscale, optional, with their state), the global configuration, the CLI link
+the bundled binary: tools (pi, required; mise, fnox, and tailscale, optional, with their state), the global configuration, the CLI link
 (`~/.local/bin/piton` to the bundled `piton`), start at login, the state database, and remote access (this host's
 tailnet name and port). Each is ok, missing with its fix, or failed: `piton setup apply <step>` does the steps
 Piton can (create the global folder, link the CLI, create the database), the app registers the daemon, and the rest
@@ -134,14 +134,41 @@ type only the sandboxed runner builds, carrying the file each value came from (m
 **pi's environment is visible to the agent** and to every command it runs, in either mode: the login shell's, the
 workspace's mise environment, provider keys. In sandboxed sessions the `[permissions]` rules steer the agent but
 aren't the boundary: a rule that hides `mise.local.toml` doesn't stop another command from printing the environment.
-Keep secrets out of the mise environment; secrets for sandboxed sessions go through fnox's proxy
-([#229](https://github.com/alex35mil/Piton/issues/229)).
-**External tools.** mise and tailscale are optional. `tools/` decides each one's state once at daemon start from
+Keep secrets out of the mise environment; with the credential proxy (below), pi holds placeholders instead.
+
+**External tools.** mise, fnox, and tailscale are optional. `tools/` decides each one's state once at daemon start from
 `[tools.<name>] enabled` and the login shell's PATH: unset means used when installed and off otherwise, `false` is
 off, and `true` uses it and is an error when it's missing. An enabled tool that's missing is never run: the apps'
 Settings show a warning on its setting, and every operation that needs it fails with a typed error (a launch, a
-worker, remote access). `Tool` is one enum matched exhaustively, so a new tool (direnv, Nix, fnox) answers every
+worker, remote access). `Tool` is one enum matched exhaustively, so a new tool (direnv, Nix) answers every
 decision.
+
+**Credential proxy (fnox, experimental).** When fnox is used and `fnox proxy rules` in the workspace finds a
+`[proxy]` table, the launch's command line (either mode) is wrapped as `fnox --non-interactive proxy run
+--no-sandbox -- ...` (`launch/fnox.rs`): pi's environment holds placeholders and fnox, outside the sandbox, injects
+the real secrets into the requests its rules allow. Before that:
+
+- fnox runs, and its checks run, with the daemon's base environment only: the workspace's mise environment can set
+  `HOME`, `XDG_CONFIG_HOME`, or `FNOX_*`, which pick the config fnox loads. pi's environment travels past fnox as
+  JSON in `PITON_LAUNCH_ENV` (`launch/handoff.rs`); `piton sandbox-exec` (or `piton launch-exec` for a host launch)
+  unpacks it and starts pi with it plus every change fnox made to the base (placeholders, proxy and certificate
+  variables, removed credentials). `FNOX_*` in pi's environment come only from the base.
+- `fnox proxy rules` validates the config without resolving secrets; any failure other than "no `[proxy]`" refuses
+  the launch with fnox's message.
+- For a sandboxed launch (`prepare_sandbox`), `fnox config-files` lists what fnox loads; a file the launch's policy
+  lets the agent write (an import, a config under an `allow`) refuses the launch. So does a policy that can read
+  `~/Library/Keychains` or reopens the keychain services: fnox runs inside the sandbox too, and could read its
+  provider credentials from the keychain without a prompt. Project fnox files are protected files ("Agent access").
+- The daemon's Git on a source checkout (`SourceGit`, for worker updates) is resolved through the same
+  `prepare_sandbox`, so it's refused where launches are, and hooks never run in a sandbox that can read the keychain.
+  That Git doesn't run behind the proxy: it authenticates as an agent's Git does without fnox.
+
+fnox starts the command even when a secret can't be resolved, and refuses only the requests that need it. The
+session reads fnox's startup warnings from stderr (`StartupLog`; the format of fnox 1.48, pinned by a unit test) and
+shows the unresolved secrets where the user looks: a warning `notice` in the session view, kept after the loaded
+history through rebuilds (it isn't in pi's session file); and for attached clients a `notify` warning plus a
+`setStatus` entry, both in pi's `extension_ui_request` format, so pi.nvim shows them unchanged and replay carries the
+status to later clients.
 
 Sessions started from nvim and from the phone get identical environments, and each worker clone gets its own mise
 environment (today a `:tcd` worker inherits the Neovide launch folder's environment).
@@ -908,13 +935,15 @@ through a symlink inside a git checkout that leads out of it; the user's own lin
 `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
 
 Known limits: the network isn't restricted, so anything readable can leave (domain filtering:
-[#228](https://github.com/alex35mil/Piton/issues/228)); pi's own credentials are readable
-([#229](https://github.com/alex35mil/Piton/issues/229)); macOS only.
+[#228](https://github.com/alex35mil/Piton/issues/228)); pi's own credentials are readable, except keys behind the
+credential proxy ("Launching pi"); macOS only.
 
 **Protected files** are everything a later pi loads from the workspace that could widen what an agent may do without
 asking, or run code outside the sandbox: the source checkout's `.piton/` (except `.local/`); pi's project `.pi/`
-folders (settings, MCP servers, extensions, skills, system prompts), which pi reads from the working folder. `.pi/` is
-protected at any depth in the workspace's checkout, since a session can start in a subfolder. `AGENTS.md`, rules, and
+folders (settings, MCP servers, extensions, skills, system prompts), which pi reads from the working folder; fnox's
+config files (`fnox.toml`, `.fnox.toml`, `.config/fnox.toml`, and their `.local` and `fnox.<profile>.toml` forms),
+which decide where secrets go and which commands fnox runs to fetch them. Both are protected at any depth in the
+workspace's checkout, since a session (and fnox) can start in a subfolder. `AGENTS.md`, rules, and
 `.agents/skills/` aren't protected: they change what the agent is told, not what it may do. A skill's `allowed-tools`
 grants nothing unless the user opts in with `skill_grants = true` in `[permissions]`; with it on, an agent that edits a
 skill can grant itself the tools it lists. Without protection, a sandboxed agent in the source checkout could add `allow = ["bash(*)"]` to
@@ -922,8 +951,9 @@ skill can grant itself the tools it lists. Without protection, a sandboxed agent
 next tool call. Changes are gated where they're written:
 
 1. **OS sandbox.** Each sandboxed launch carries raw Seatbelt rules: `(deny file-write* ...)` with regexes
-   for `<source>/.piton` (excluding `<source>/.piton/.local`), and `.pi` at any depth in the checkout (excluding
-   the `.pi/settings.json.lock` folder itself, which pi creates to read the project's settings). Every
+   for `<source>/.piton` (excluding `<source>/.piton/.local`), `.pi` at any depth in the checkout (excluding
+   the `.pi/settings.json.lock` folder itself, which pi creates to read the project's settings), and fnox's config
+   file names at any depth. Every
    protected name matches in any case (`.PI`, `.PITON`), since APFS is case-insensitive by
    default; the daemon's own path check compares the same way. So every write by any process in the sandbox fails:
    shell commands, scripts, `git checkout`, MCP servers, pi itself. The library's typed grants can't express a

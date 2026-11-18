@@ -115,6 +115,10 @@ term_grace_ms = 3000      # after SIGTERM, before SIGKILL
 enabled = true            # unset: used when installed, off otherwise
 command = ["mise"]        # found through the login shell's PATH
 
+[tools.fnox]              # experimental: every launch behind fnox's credential proxy (below)
+enabled = true
+command = ["fnox"]        # e.g. ["fnox", "-P", "agent"] for a profile
+
 [tools.tailscale]         # remote access (`[tailnet]`)
 enabled = true
 command = ["tailscale"]
@@ -126,23 +130,117 @@ environment.
 For a sandboxed launch, `mise env` runs inside the launch's sandbox, so whatever a workspace's mise configuration runs
 (`exec()` templates, `_.source` scripts) is contained. A configuration that reads a secret manager while `mise env`
 runs (`exec(op read …)`) fails there and the launch is refused with mise's error; keep secrets out of the mise
-environment and use fnox ([#229](https://github.com/alex35mil/Piton/issues/229)).
+environment and use the credential proxy (below).
 
 Everything in pi's environment is visible to the agent and every command it runs. `[permissions]` rules steer the
 agent; in sandboxed sessions they aren't the boundary, the sandbox is.
 ### External tools
 
-Piton runs mise and tailscale when they're there and works without them. Each has a `[tools.<name>]` table:
+Piton runs mise, fnox, and tailscale when they're there and works without them. Each has a `[tools.<name>]` table:
 
 - **Unset `enabled`:** used when its command is installed, off otherwise. A Mac with neither works with both off:
   pi gets the login shell's environment, and only this Mac connects.
 - **`enabled = false`:** off.
 - **`enabled = true`:** used, and an error when it isn't installed: piton never runs it, the apps' Settings show a
   warning on the setting, and each operation that needs it fails with an error naming the setting (a launch or a
-  worker for mise; remote access for tailscale).
+  worker for mise; every launch for fnox; remote access for tailscale).
 
 The daemon decides each tool's state when it starts, so changes apply after a restart. `piton setup check` requires
 only pi and lists the tools with their state.
+
+### Credential proxy (fnox, experimental)
+
+With [fnox](https://fnox.jdx.dev/guide/proxy)'s credential proxy, pi never holds your secrets: its environment has
+placeholders, and fnox, outside the sandbox, puts the real values (read from 1Password or another secret store) only
+into the requests its rules allow. An agent that reads `GITHUB_PERSONAL_ACCESS_TOKEN` gets `fnox_proxy_...`.
+
+When fnox is used (`[tools.fnox]`) and a fnox config with a `[proxy]` table applies to the workspace, every session,
+sandboxed or on the host, starts as `fnox --non-interactive proxy run --no-sandbox -- <the usual command>`. fnox finds
+its config itself: the global `~/.config/fnox/config.toml`, and `fnox.toml` files in the workspace and its parents.
+Where no `[proxy]` applies, launches run without it. `--no-sandbox` turns fnox's own sandbox off: Piton's applies.
+
+A global config for a Mac whose secrets live in 1Password:
+
+```toml
+# ~/.config/fnox/config.toml
+[providers.keychain]
+type = "keychain"
+service = "fnox"
+
+[providers.op]
+type = "1password"
+token = { secret = "OP_SERVICE_ACCOUNT_TOKEN" }  # a service account (below)
+
+[secrets]
+OP_SERVICE_ACCOUNT_TOKEN = { provider = "keychain", value = "OP_SERVICE_ACCOUNT_TOKEN", env = false }
+GITHUB_PERSONAL_ACCESS_TOKEN = { provider = "op", value = "op://Agent/github-token/credential", env = false }
+CLAUDE_CODE_OAUTH_TOKEN = { provider = "op", value = "op://Agent/claude-token/credential", env = false }
+
+[proxy]
+egress = "permissive"   # fnox's default, "strict", refuses every host without a rule: pi's model provider,
+                        # web fetches, installs. Use strict with `allow_domains` if you want an allowlist.
+
+[[proxy.rules]]
+secret = "GITHUB_PERSONAL_ACCESS_TOKEN"
+domain = "api.githubcopilot.com"   # the GitHub MCP server (`Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}`)
+header = "authorization"
+
+[[proxy.rules]]
+secret = "CLAUDE_CODE_OAUTH_TOKEN"
+domain = "api.anthropic.com"
+header = "authorization"
+placeholder = "sk-ant-oat01-placeholder"   # claude checks the token's shape
+```
+
+- **A service account, not the desktop app.** The 1Password app asks for approval for each new process, so a session
+  the daemon starts while you're away would wait for it. A [service account](https://developer.1password.com/docs/service-accounts/)
+  with access to one vault (`Agent` above) needs no prompt: store its token in the keychain once (`fnox set --global
+  --provider keychain OP_SERVICE_ACCOUNT_TOKEN`, which prompts for it), and fnox reads it at each launch (4-5 s). With several 1Password
+  accounts and the desktop app, set `account` on the provider, or `op` asks which one.
+- **Claude subscription.** `claude setup-token` makes a long-lived token for scripts; with it in
+  `CLAUDE_CODE_OAUTH_TOKEN` behind the proxy, the claude binary (and pi's claude-code models) work without reading the
+  keychain.
+- **Move secrets out of `mise.local.toml`** and other files pi's environment comes from: a secret still set there
+  reaches pi as a real value.
+- **Restart sessions after changing a secret.** fnox reads secrets when it starts a session; a running session keeps
+  the old value.
+- **Project fnox files are protected.** `fnox.toml`, `.fnox.toml`, `.config/fnox.toml`, their `.local` and profile
+  forms (`fnox.<profile>.toml`), at any depth in the checkout: an agent proposes changes and you approve each, as for
+  `.pi/`. A sandboxed launch is refused when fnox would load any other file the sandbox lets the agent change (an
+  `import` of a workspace file, a config under an `allow` path), naming it.
+- **What happens when something's wrong.** fnox enabled but not installed: no session starts. A broken fnox config:
+  the launch is refused with fnox's error. A secret fnox can't read (1Password unreachable, a wrong token, a missing
+  item): the session starts, and requests that need that secret are refused. The apps show a warning after the
+  conversation ("fnox couldn't read these secrets when this session started: NAME (reason)"), and pi.nvim a
+  notification and a status entry ("fnox: N secrets unavailable"). fnox retries a missing secret on the next request
+  that needs it; the warning clears when the session restarts.
+- fnox itself runs with the daemon's environment (the login shell's), never the workspace's: a repository's
+  `mise.toml` can't pick fnox's profile or config, or the `HOME` it finds its config in. pi still gets the
+  workspace's environment, with fnox's placeholders and proxy settings on top, except `FNOX_*` variables, which come
+  only from the daemon's environment.
+
+> [!WARNING]
+> **Keep the keychain closed to the sandbox.** fnox runs inside the sandbox like any program, and macOS lets it read
+> the keychain items it created without asking. If the sandbox can read your keychain, an agent can run `fnox get` and
+> read every secret your service account can. Piton refuses a sandboxed launch behind fnox when the sandbox can read
+> the keychain. So does the source update of a worker's creation, which runs your hooks in that sandbox (a deletion
+> leaves the source as it is, with a warning): remove
+> `~/Library/Keychains` (and any folder containing it, like `~/Library`) from `[sandbox] expose` and `allow` in your
+> configuration (the global `config.toml` or a `config.local.toml`; `piton config check` lists the files). With the
+> Claude token behind the proxy, the sandbox doesn't need it. Git over HTTPS authenticates through the keychain, so
+> with it closed, the sandbox's Git (an agent's, and worker updates) fetches over SSH.
+
+Limits:
+
+- Credentials pi manages itself (`auth.json`: `/login` providers, MCP OAuth) aren't covered.
+- A program that ignores the proxy variables or fnox's certificate sends the placeholder, and its request fails. Go
+  programs on macOS (`gh`, `terraform`) check certificates only against the system trust store and ignore
+  `SSL_CERT_FILE`, so they refuse fnox's: `gh` behind fnox fails with "certificate is not trusted". Give such a tool
+  its token another way, or run it on the host.
+- Git over HTTPS doesn't work behind fnox: Git signs in with `Authorization: Basic base64(user:token)`, and fnox 1.48
+  can't find a placeholder inside base64 (a proposal to add it, jdx/fnox#1151, was closed without merging). GitHub
+  refuses the token as `Bearer`. With fnox on, use SSH remotes.
+- fnox's daemon cache isn't used, since any process of yours can query it.
 
 ### Sandbox
 
@@ -244,7 +342,8 @@ Known limits:
 - The network isn't restricted: anything the agent can read can leave the machine. Filtering by domain is planned in
   [#228](https://github.com/alex35mil/Piton/issues/228); say so there if you need it.
 - pi's own credentials (its `auth.json`, provider keys in its environment) are readable: the whole pi process is
-  sandboxed, and pi needs them ([#229](https://github.com/alex35mil/Piton/issues/229)).
+  sandboxed, and pi needs them. Keys in its environment can be placeholders instead, with the credential proxy
+  (above).
 - macOS only.
 
 Keys of the earlier nono-CLI backend (`base`, `groups`, `bypass`, `read`, `read_file`, `unix_socket`,

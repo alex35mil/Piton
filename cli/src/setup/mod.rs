@@ -25,7 +25,7 @@ pub const FORMAT: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
-    /// The agent runtime (pi), which every host needs, and the optional tools (mise, tailscale) with their state.
+    /// The agent runtime (pi), which every host needs, and the optional tools (mise, fnox, tailscale) with their state.
     Prerequisites,
     /// The global configuration folder exists, its files are valid, and its `.local` files stay out of Git.
     Configuration,
