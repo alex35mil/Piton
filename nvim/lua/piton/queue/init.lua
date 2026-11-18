@@ -1,8 +1,9 @@
--- The source's queued (Todo and Backlog) tracker work, read from the nearest
--- `[tracker]` of piton's configuration chain (`config.toml`), with the
--- credential the tracker's MCP registration names. Both come from
--- `piton config get`; the plugin reads no configuration file itself. Keys are
--- as the file has them (snake_case: `mcp_server`, `owner_type`).
+-- The source's queue: queued (Todo and Backlog) work from the nearest
+-- `[tracker]` of piton's configuration chain (`config.toml`), and incoming
+-- pull requests from the nearest `[forge]`, each read with the credential its
+-- own MCP registration names. All of it comes from `piton config get`; the
+-- plugin reads no configuration file itself. Keys are as the file has them
+-- (snake_case: `mcp_server`, `owner_type`).
 
 ---@class QueueParent
 ---@field mention string How a workflow command names the Epic.
@@ -35,10 +36,26 @@
 ---@field url string
 ---@field kind QueueKind
 
----@class QueueTracker
+--- One configured role (`[tracker]` or `[forge]`) and how to reach it.
+---@class QueueConnection
 ---@field source string
----@field config table The `[tracker]` table of `config.toml`.
+---@field config table The role's table of `config.toml`.
 ---@field credential string Name of the environment variable holding the token.
+
+---@alias QueueTrackerRole
+---| { kind: "off", reason: string } Why there's no tracker, for the refusal when there's no forge either.
+---| { kind: "github", connection: QueueConnection }
+---| { kind: "linear", connection: QueueConnection }
+
+---@alias QueueForgeRole
+---| { kind: "none", reason: string } No forge that has pull requests to list: missing, off, or not GitHub.
+---| { kind: "github", connection: QueueConnection }
+
+--- What a tracker contributes: its queued issues in listing order, and the
+--- pull requests on its board (a GitHub Project), in board order.
+---@class QueueTrackerWork
+---@field issues QueueItem[]
+---@field board QueueItem[]
 
 local util = require("piton.util")
 local cli = require("piton.cli")
@@ -46,32 +63,112 @@ local cli = require("piton.cli")
 local M = {}
 
 --- Queued items, Todo before Backlog, each in tracker priority order, then
---- incoming pull requests. Refuses when the tracker can't be read.
+--- the forge's incoming pull requests. Refuses when a configured role can't be
+--- read, or when there's neither a tracker nor a GitHub forge.
 ---@param source string
 ---@return QueueItem[]
 function M.load(source)
+    local tracker = M.tracker(source)
+    local forge = M.forge(source)
+    if tracker.kind == "off" and forge.kind == "none" then
+        util.refuse(("No tracker or GitHub forge configured: %s; %s"):format(tracker.reason, forge.reason))
+    end
+    local work = M.tracker_work(tracker)
+    return M.group_by_section(vim.list_extend(work.issues, M.pull_requests(forge, work.board)))
+end
+
+---@param tracker QueueTrackerRole
+---@return QueueTrackerWork
+function M.tracker_work(tracker)
+    if tracker.kind == "off" then
+        return { issues = {}, board = {} }
+    elseif tracker.kind == "github" then
+        return require("piton.queue.github").load(tracker.connection)
+    elseif tracker.kind == "linear" then
+        return require("piton.queue.linear").load(tracker.connection)
+    end
+    error("unknown tracker role: " .. vim.inspect(tracker))
+end
+
+--- The forge's incoming pull requests, merged with the tracker's board ones.
+---@param forge QueueForgeRole
+---@param board QueueItem[]
+---@return QueueItem[]
+function M.pull_requests(forge, board)
+    if forge.kind == "none" then
+        return {}
+    elseif forge.kind == "github" then
+        local github = require("piton.queue.github")
+        local open, viewer = github.pull_requests(forge.connection)
+        local repository = forge.connection.config.repository
+        return github.incoming(repository.owner .. "/" .. repository.repo, board, open, viewer)
+    end
+    error("unknown forge role: " .. vim.inspect(forge))
+end
+
+--- The nearest `[tracker]`; refuses when it's unusable.
+---@param source string
+---@return QueueTrackerRole
+function M.tracker(source)
     local found = cli.config("tracker", source)
     if type(found) ~= "table" then
-        util.refuse("No tracker configured: no [tracker] in " .. source .. "/.piton/config.toml or its parent folders")
+        return { kind = "off", reason = "no [tracker] in " .. source .. "/.piton/config.toml or its parent folders" }
     end
     local file = tostring(found.path)
     local tracker = found.value
-    if type(tracker) == "table" and tracker.provider == "none" then
-        util.refuse("The tracker is turned off (provider = \"none\" in " .. file .. ")")
+    if type(tracker) ~= "table" then
+        util.refuse("Invalid [tracker] in " .. file)
     end
-    if type(tracker) ~= "table" or type(tracker.mcp_server) ~= "string" then
-        util.refuse("No tracker configured in " .. file)
+    if tracker.provider == "none" then
+        return { kind = "off", reason = "the tracker is turned off (provider = \"none\" in " .. file .. ")" }
     end
+    if tracker.provider ~= "github" and tracker.provider ~= "linear" then
+        util.refuse("Unsupported tracker provider in " .. file .. ": " .. tostring(tracker.provider))
+    end
+    return { kind = tracker.provider, connection = M.connect(source, "tracker", file, tracker) }
+end
 
-    ---@type QueueTracker
-    local queue_tracker = { source = source, config = tracker, credential = M.credential(source, tracker.mcp_server) }
-    if tracker.provider == "github" then
-        return require("piton.queue.github").load(queue_tracker)
-    elseif tracker.provider == "linear" then
-        return require("piton.queue.linear").load(queue_tracker)
+--- The nearest `[forge]`. Only a GitHub forge lists pull requests; any other
+--- is none. Refuses when a GitHub forge is unusable.
+---@param source string
+---@return QueueForgeRole
+function M.forge(source)
+    local found = cli.config("forge", source)
+    if type(found) ~= "table" then
+        return { kind = "none", reason = "no [forge] in " .. source .. "/.piton/config.toml or its parent folders" }
     end
-    util.refuse("Unsupported tracker provider in " .. file .. ": " .. tostring(tracker.provider))
-    error("unreachable")
+    local file = tostring(found.path)
+    local forge = found.value
+    if type(forge) ~= "table" then
+        util.refuse("Invalid [forge] in " .. file)
+    end
+    if forge.provider ~= "github" then
+        return {
+            kind = "none",
+            reason = ("the forge isn't GitHub (provider = %s in %s)"):format(vim.inspect(forge.provider), file),
+        }
+    end
+    local repository = forge.repository
+    if
+        type(repository) ~= "table"
+        or type(repository.owner) ~= "string"
+        or type(repository.repo) ~= "string"
+    then
+        util.refuse("The [forge] in " .. file .. " has no repository (owner and repo)")
+    end
+    return { kind = "github", connection = M.connect(source, "forge", file, forge) }
+end
+
+---@param source string
+---@param role "tracker"|"forge"
+---@param file string
+---@param config table
+---@return QueueConnection
+function M.connect(source, role, file, config)
+    if type(config.mcp_server) ~= "string" then
+        util.refuse("The [" .. role .. "] in " .. file .. " has no mcp_server")
+    end
+    return { source = source, config = config, credential = M.credential(source, config.mcp_server) }
 end
 
 --- The environment variable the MCP registration authorizes with, from the
@@ -104,19 +201,19 @@ end
 
 --- POST a GraphQL request with curl, inside the source's mise environment so
 --- the credential resolves there and never passes through Neovim.
----@param tracker QueueTracker
+---@param connection QueueConnection
 ---@param url string
 ---@param authorization string Authorization header, with `{{VAR}}` for the credential.
 ---@param query string
 ---@param variables table
 ---@return QueueResponse
-function M.post(tracker, url, authorization, query, variables)
-    local var = tracker.credential
+function M.post(connection, url, authorization, query, variables)
+    local var = connection.credential
     local result = util.exec({
         "mise",
         "exec",
         "-C",
-        tracker.source,
+        connection.source,
         "--",
         "curl",
         "--silent",
@@ -142,14 +239,14 @@ function M.post(tracker, url, authorization, query, variables)
     if result.code ~= 0 then
         local stderr = vim.trim(result.stderr or "")
         if stderr:find("Variable '" .. var .. "' import fail", 1, true) then
-            util.refuse(var .. " isn't set in the environment of " .. tracker.source)
+            util.refuse(var .. " isn't set in the environment of " .. connection.source)
         end
-        util.refuse("Tracker request failed: " .. stderr)
+        util.refuse("Request to " .. url .. " failed: " .. stderr)
     end
 
     local body, status = (result.stdout or ""):match("^(.*)\n(%d+)$")
     if not status then
-        util.refuse("Unexpected tracker response from " .. url)
+        util.refuse("Unexpected response from " .. url)
     end
     local ok, decoded = pcall(vim.json.decode, body, { luanil = { object = true, array = true } })
     return {
@@ -167,7 +264,7 @@ function M.data(url, response)
     local errors = type(body) == "table" and body.errors or nil
     if response.status ~= 200 or type(errors) == "table" or type(body) ~= "table" or type(body.data) ~= "table" then
         util.refuse(
-            ("Tracker request to %s failed (HTTP %d):\n%s"):format(url, response.status, M.error_detail(response))
+            ("Request to %s failed (HTTP %d):\n%s"):format(url, response.status, M.error_detail(response))
         )
     end
     return body.data
@@ -200,7 +297,7 @@ function M.paginate(page)
         end
         cursor = connection.pageInfo.endCursor
     end
-    util.refuse("Tracker returned too many pages")
+    util.refuse("Too many pages of results")
     error("unreachable")
 end
 

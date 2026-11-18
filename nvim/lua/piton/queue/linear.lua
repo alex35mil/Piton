@@ -31,8 +31,9 @@ query($team: String!, $state: String!, $cursor: String) {
   }
 }]]
 
----@param tracker QueueTracker
----@return QueueItem[]
+--- Linear has no board pull requests: incoming ones come from the forge.
+---@param tracker QueueConnection
+---@return QueueTrackerWork
 function M.load(tracker)
     local config = tracker.config
     local authorization = M.authorization(tracker)
@@ -58,7 +59,7 @@ function M.load(tracker)
         vim.list_extend(result, M.projects(fetch, config, status))
         vim.list_extend(result, M.issues(fetch, config, status))
     end
-    return result
+    return { issues = result, board = {} }
 end
 
 ---@alias LinearFetch fun(query: string, variables: table, field: string): table[]
@@ -113,7 +114,7 @@ end
 
 --- Linear API keys go in the header as is, OAuth tokens as `Bearer`; try
 --- the key form first, like piton's pi package does.
----@param tracker QueueTracker
+---@param tracker QueueConnection
 ---@return string
 function M.authorization(tracker)
     local failures = {}
