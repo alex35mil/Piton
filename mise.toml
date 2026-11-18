@@ -50,6 +50,7 @@ cargo test --quiet
 cargo build --quiet
 node tests/e2e/attach.mjs
 node tests/e2e/worker.mjs
+node tests/e2e/environment.mjs
 node tests/e2e/view.mjs
 node tests/e2e/websocket.mjs
 node tests/e2e/logging.mjs

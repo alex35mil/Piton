@@ -12,7 +12,7 @@ mod rules;
 use std::path::PathBuf;
 
 pub use self::{
-    apply::{POLICY_ENV, exec},
+    apply::{Containment, POLICY_ENV, containment, exec},
     policy::{Source, WRITE_ROOTS, nono_version},
     resolve::{Facts, Resolution, resolve},
     rules::{Access, Policy},
@@ -26,4 +26,16 @@ pub enum SandboxError {
     NotAbsolute { grant: String, expanded: String },
     #[error("PI_CODING_AGENT_DIR {path}: refused for a sandboxed launch: {reason}")]
     AgentDir { path: PathBuf, reason: String },
+    #[error(
+        "{var}={value}: refused for a sandboxed launch: set by {set_by}, which a sandboxed session can write, and it \
+         leads out of the checkout {checkout}; set it where the agent can't write (your shell or global mise \
+         configuration), or point it inside the checkout"
+    )]
+    Widening {
+        var: &'static str,
+        value: String,
+        /// The file that set it, or what the tool said when it named none.
+        set_by: String,
+        checkout: PathBuf,
+    },
 }

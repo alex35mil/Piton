@@ -27,7 +27,10 @@ use super::{
 use crate::{
     agent::{canonical_target, lexical},
     config::{LOCAL_DIR, LaunchConfig, expand_home},
-    launch::Env,
+    launch::{
+        Env,
+        env::{Origin, SandboxEnv, ToolSource, Widening},
+    },
 };
 
 /// What a launch is, beyond its configuration.
@@ -36,8 +39,8 @@ pub struct Facts<'a> {
     /// The daemon's base environment: `$VAR` grants and the host agent directory come from it, never from the
     /// workspace's (a repository's `mise.toml` can set variables).
     pub base_env: &'a Env,
-    /// pi's environment for this launch: the agent directory pi will use.
-    pub launch_env: &'a Env,
+    /// pi's environment for this launch, with where each value came from: the agent directory pi will use.
+    pub launch_env: &'a SandboxEnv,
     /// The workspace pi runs in.
     pub workspace: &'a Path,
     /// The daemon's state folder (`agent.sock`, `piton.sock`, the database, `logs/`).
@@ -50,8 +53,6 @@ pub struct Facts<'a> {
     /// folders are temp folders).
     pub write_roots: &'a [&'a str],
 }
-
-const AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
 /// The most symlinks one path's resolution follows, as the kernel's limit; past it, the rest is kept as written.
 const MAX_LINKS: usize = 40;
@@ -181,8 +182,17 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
     denied.extend(user_denied.iter().cloned());
 
     // 3. pi's agent directories: as named, so the runtime grants below resolve like every other grant.
-    let host_agent = agent_dir(facts.base_env, facts.home);
-    let agent = agent_dir(facts.launch_env, facts.home);
+    let host_agent = agent_dir(
+        facts
+            .base_env
+            .get(Widening::AgentDir.var())
+            .filter(|v| !v.is_empty())
+            .map(String::as_str),
+        facts.home,
+        facts.workspace,
+    );
+    let launch_agent = facts.launch_env.widening(Widening::AgentDir);
+    let agent = agent_dir(launch_agent.map(|(value, _)| value), facts.home, facts.workspace);
     check_agent_dir(
         &canonical_target(&agent),
         &canonical_target(&host_agent),
@@ -292,9 +302,59 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         .iter()
         .any(|e| keychains.starts_with(e) || e.starts_with(&keychains));
     let (rules, links) = rules.finish(&[&config.checkout, &config.source]);
-    Ok(Resolution {
-        policy: Policy { rules, keychain },
-        links,
+    let policy = Policy { rules, keychain };
+    if let Some((value, origin)) = launch_agent {
+        accept_widening(Widening::AgentDir, value, &agent, origin, &policy, config)?;
+    }
+    Ok(Resolution { policy, links })
+}
+
+/// A value that widens the sandbox is accepted from the daemon's environment, or from a file the agent can't write.
+/// One the agent could have written (or a tool that names no file) is accepted only while it leads into the
+/// checkout. `path` is the value as the policy uses it.
+fn accept_widening(
+    widening: Widening,
+    value: &str,
+    path: &Path,
+    origin: &Origin,
+    policy: &Policy,
+    config: &LaunchConfig,
+) -> Result<(), SandboxError> {
+    let set_by = match origin {
+        Origin::Daemon => return Ok(()),
+        Origin::Tool { tool, source } => match source {
+            ToolSource::File(file) => match agent_writable(file, policy, config) {
+                true => file.display().to_string(),
+                false => return Ok(()),
+            },
+            ToolSource::Unknown => format!("{tool}, which named no file"),
+        },
+    };
+    let checkout = canonical_target(&config.checkout);
+    match canonical_target(path).starts_with(&checkout) {
+        true => Ok(()),
+        false => Err(SandboxError::Widening {
+            var: widening.var(),
+            value: value.to_string(),
+            set_by,
+            checkout,
+        }),
+    }
+}
+
+/// Whether a sandboxed session of this project could have written `file`: this launch's policy lets it, as written or
+/// at its real path, or it's in the checkout or source checkout, where a session in the whole checkout writes even
+/// when this launch's workspace is a subfolder.
+fn agent_writable(file: &Path, policy: &Policy, config: &LaunchConfig) -> bool {
+    let written = lexical(file);
+    let real = canonical_target(file);
+    let roots = [canonical_target(&config.checkout), canonical_target(&config.source)];
+    [&written, &real].into_iter().any(|path| {
+        policy.decide(path, Access::Write).allowed
+            || roots.iter().any(|root| path.starts_with(root))
+            || [&config.checkout, &config.source]
+                .iter()
+                .any(|root| path.starts_with(root))
     })
 }
 
@@ -524,13 +584,12 @@ fn literal(path: &Path) -> Target {
     }
 }
 
-/// pi's agent directory in `env`: `PI_CODING_AGENT_DIR` (with `~`), else `~/.pi/agent`. As named, with no symlink
-/// followed: its rules get their real paths like every other rule.
-fn agent_dir(env: &Env, home: &Path) -> PathBuf {
-    let dir = env
-        .get(AGENT_DIR_ENV)
-        .filter(|v| !v.is_empty())
-        .map(|v| expand_home(v, home))
+/// pi's agent directory from `PI_CODING_AGENT_DIR` (with `~`; a relative one from the workspace, pi's working
+/// folder), else `~/.pi/agent`. As named, with no symlink followed: its rules get their real paths like every other
+/// rule.
+fn agent_dir(value: Option<&str>, home: &Path, workspace: &Path) -> PathBuf {
+    let dir = value
+        .map(|v| workspace.join(expand_home(v, home)))
         .unwrap_or_else(|| home.join(".pi/agent"));
     lexical(&dir)
 }
@@ -688,7 +747,12 @@ mod tests {
         resolve_in(f, &f.repo, base, launch).map(|r| r.policy)
     }
 
+    /// `launch` as values of the daemon's environment: the tests of what an agent directory may be.
     fn resolve_in(f: &Fixture, workspace: &Path, base: &Env, launch: &Env) -> Result<Resolution, SandboxError> {
+        resolve_env(f, workspace, base, &SandboxEnv::daemon(launch))
+    }
+
+    fn resolve_env(f: &Fixture, workspace: &Path, base: &Env, launch: &SandboxEnv) -> Result<Resolution, SandboxError> {
         let control = f.state.join("piton.sock");
         let agent = f.state.join("agent.sock");
         let logs = f.state.join("logs");
@@ -887,7 +951,7 @@ mod tests {
     fn the_agent_directory_comes_from_the_launch_but_cant_open_anything() {
         let f = fixture("", "");
         let h = f.home.to_string_lossy().into_owned();
-        let launch = |dir: &str| policy_with(&f, &Env::new(), &env(&[(AGENT_DIR_ENV, dir)]));
+        let launch = |dir: &str| policy_with(&f, &Env::new(), &env(&[(Widening::AgentDir.var(), dir)]));
 
         let p = launch("~/p/agents/one").unwrap();
         assert!(allowed(
@@ -926,7 +990,7 @@ mod tests {
             );
         }
         // The host's own, from the daemon's environment.
-        let base = env(&[(AGENT_DIR_ENV, &format!("{h}/.config/pi/agent"))]);
+        let base = env(&[(Widening::AgentDir.var(), &format!("{h}/.config/pi/agent"))]);
         let p = policy_with(&f, &base, &base).unwrap();
         assert!(allowed(&p, &f.home.join(".config/pi/agent/auth.json"), Access::Write));
         assert!(!allowed(
@@ -1016,7 +1080,7 @@ mod tests {
         let outside = f.home.join("outside");
         mkdir(&outside.join("agent"));
         link(&outside, &f.repo.join("tools"));
-        let launch = env(&[(AGENT_DIR_ENV, "~/p/repo/tools/agent")]);
+        let launch = env(&[(Widening::AgentDir.var(), "~/p/repo/tools/agent")]);
         let r = resolve_in(&f, &f.repo, &Env::new(), &launch).unwrap();
         assert!(!allowed(&r.policy, &outside.join("agent/crashes.json"), Access::Write));
         assert!(!allowed(
@@ -1040,7 +1104,7 @@ mod tests {
         mkdir(&launch_agents);
         mkdir(&f.repo.join("packages/web"));
         link(&launch_agents, &f.repo.join(".pi-agent"));
-        let launch = env(&[(AGENT_DIR_ENV, "~/p/repo/.pi-agent")]);
+        let launch = env(&[(Widening::AgentDir.var(), "~/p/repo/.pi-agent")]);
         let r = resolve_in(&f, &f.repo.join("packages/web"), &Env::new(), &launch).unwrap();
         for entry in ["mcp-auth-refresh-x.plist", "crashes.json", "sessions/x.plist"] {
             assert!(
@@ -1084,5 +1148,101 @@ mod tests {
         );
         let caps = super::super::apply::capabilities(&policy(&f)).unwrap();
         assert!(caps.platform_rules().iter().any(|r| r.contains("piton.sock")));
+    }
+
+    fn from_file(file: &Path) -> Origin {
+        Origin::Tool {
+            tool: crate::launch::env::EnvTool::Mise,
+            source: ToolSource::File(file.to_path_buf()),
+        }
+    }
+
+    fn agent_from(value: &str, origin: Origin) -> SandboxEnv {
+        SandboxEnv::for_tests(&[(Widening::AgentDir.var(), value, origin)])
+    }
+
+    /// A workspace's `mise.toml` the agent can write may set the agent directory only inside the checkout; a file it
+    /// can't write (a client folder's, above the checkout) may set it anywhere the existing checks allow.
+    #[test]
+    fn the_agent_directory_follows_the_file_that_set_it() {
+        let f = fixture("", "");
+        let own = f.repo.join("mise.toml");
+        let sub = f.repo.join("packages/web");
+        mkdir(&sub);
+        let refused = |workspace: &Path, env: &SandboxEnv| {
+            matches!(
+                resolve_env(&f, workspace, &Env::new(), env),
+                Err(SandboxError::Widening { .. })
+            )
+        };
+
+        // The workspace's own `mise.toml`: inside the checkout, also from a subfolder session.
+        let inside = agent_from("~/p/repo/.pi-agent", from_file(&own));
+        let r = resolve_env(&f, &sub, &Env::new(), &inside).unwrap();
+        assert!(allowed(
+            &r.policy,
+            &f.repo.join(".pi-agent/crashes.json"),
+            Access::Write
+        ));
+        assert!(refused(&f.repo, &agent_from("~/Library/LaunchAgents", from_file(&own))));
+        assert!(refused(&sub, &agent_from("~/Library/LaunchAgents", from_file(&own))));
+        // A subfolder's file, outside this launch's workspace but in the checkout.
+        assert!(refused(
+            &sub,
+            &agent_from("~/elsewhere", from_file(&f.repo.join("other/mise.toml")))
+        ));
+        // No file named: written by the agent.
+        let unknown = Origin::Tool {
+            tool: crate::launch::env::EnvTool::Mise,
+            source: ToolSource::Unknown,
+        };
+        assert!(refused(&f.repo, &agent_from("~/elsewhere", unknown)));
+
+        // A client folder's file above the checkout: the agent can't write it.
+        let client = f.home.join("p/mise.toml");
+        let shared = agent_from("~/p/shared-agent", from_file(&client));
+        let r = resolve_env(&f, &f.repo, &Env::new(), &shared).unwrap();
+        assert!(allowed(
+            &r.policy,
+            &f.home.join("p/shared-agent/crashes.json"),
+            Access::Write
+        ));
+        // The daemon's environment: trusted.
+        let daemon = SandboxEnv::daemon(&env(&[(Widening::AgentDir.var(), "~/elsewhere")]));
+        assert!(resolve_env(&f, &f.repo, &Env::new(), &daemon).is_ok());
+
+        // A file the launch's grants cover is writable wherever it is.
+        let g = fixture("[sandbox]\nallow = [\"~/shared\"]\n", "");
+        let granted = agent_from("~/elsewhere", from_file(&g.home.join("shared/mise.toml")));
+        assert!(matches!(
+            resolve_env(&g, &g.repo, &Env::new(), &granted),
+            Err(SandboxError::Widening { .. })
+        ));
+    }
+
+    /// mise names a file as written: a link in the checkout to a file the agent can't write is still the agent's.
+    #[test]
+    fn a_file_reached_through_a_checkout_link_is_the_agents() {
+        let f = fixture("", "");
+        let outside = f.home.join("dotfiles/mise.toml");
+        mkdir(outside.parent().unwrap());
+        std::fs::write(&outside, "").unwrap();
+        link(&outside, &f.repo.join("mise.toml"));
+        let env = agent_from("~/elsewhere", from_file(&f.repo.join("mise.toml")));
+        assert!(matches!(
+            resolve_env(&f, &f.repo, &Env::new(), &env),
+            Err(SandboxError::Widening { .. })
+        ));
+    }
+
+    /// pi resolves a relative agent directory from its working folder: the workspace.
+    #[test]
+    fn a_relative_agent_directory_is_the_workspaces() {
+        let f = fixture("", "");
+        let sub = f.repo.join("web");
+        mkdir(&sub);
+        let env = agent_from("./agent", from_file(&sub.join("mise.toml")));
+        let r = resolve_env(&f, &sub, &Env::new(), &env).unwrap();
+        assert!(allowed(&r.policy, &sub.join("agent/auth.json"), Access::Write));
     }
 }

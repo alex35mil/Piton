@@ -1,5 +1,5 @@
 //! `piton sandbox show|why`: the sandbox a launch in a workspace gets, resolved exactly as the daemon resolves it (the
-//! login shell's environment, the workspace's `mise env`), and the rule that decides one access.
+//! login shell's environment, the workspace's `mise env` run inside the sandbox), and the rule that decides one access.
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -7,7 +7,7 @@ use super::SandboxAction;
 use crate::{
     config::DaemonConfig,
     launch::{
-        self, LaunchMode,
+        self,
         sandbox::{Access, Resolution, Source},
     },
 };
@@ -81,10 +81,10 @@ async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Res
             .unwrap_or_else(|| std::env::vars().collect()),
         false => std::env::vars().collect(),
     };
-    let env = launch::workspace_env(config, &base, &workspace.path, LaunchMode::Sandbox)
+    launch::prepare_sandbox(config, &resolved, &base, &workspace.path)
         .await
-        .map_err(|e| e.to_string())?;
-    launch::sandbox_policy(config, &resolved, &base, &env, &workspace.path).map_err(|e| e.to_string())
+        .map(|(_, resolution)| resolution)
+        .map_err(|e| e.to_string())
 }
 
 fn explain(source: &Source) -> String {

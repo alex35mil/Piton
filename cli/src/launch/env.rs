@@ -1,0 +1,400 @@
+//! The environment tools the daemon runs to build pi's environment (mise today; direnv and Nix later), and the
+//! environment of a sandboxed launch with where each value came from.
+//!
+//! A workspace's tool configuration is written by whoever works in it, a sandboxed agent included, so for a sandboxed
+//! launch the tools run inside the launch's sandbox, and a value that widens the sandbox is read only through
+//! [`SandboxEnv::widening`], with the file that set it. Only this module builds a [`SandboxEnv`]: the policy can't be
+//! resolved from an environment the tools built on the host.
+
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
+
+use tokio::process::Command;
+
+use super::{
+    Env, LaunchError, resolve_program,
+    sandbox::{Containment, POLICY_ENV, Policy},
+};
+use crate::config::EnvConfig;
+
+/// A tool the daemon runs to add a workspace's environment to pi's. Every operation matches it exhaustively, so a new
+/// tool can't be added without saying how it runs, contained, and how its values' sources are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvTool {
+    Mise,
+}
+
+/// Every [`EnvTool`], in the order their environments are applied.
+pub const ENV_TOOLS: [EnvTool; 1] = [EnvTool::Mise];
+
+impl std::fmt::Display for EnvTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.program())
+    }
+}
+
+impl EnvTool {
+    fn program(self) -> &'static str {
+        match self {
+            Self::Mise => "mise",
+        }
+    }
+
+    fn enabled(self, config: &EnvConfig) -> bool {
+        match self {
+            Self::Mise => config.mise,
+        }
+    }
+
+    /// The arguments that print the workspace's environment with each value's source.
+    fn args(self, workspace: &Path) -> Vec<OsString> {
+        match self {
+            // `--json-extended`: `{ NAME: { value, source?, tool? } }`; `source` is the file that set it, as written.
+            Self::Mise => vec![
+                "env".into(),
+                "--json-extended".into(),
+                "-C".into(),
+                workspace.as_os_str().to_os_string(),
+            ],
+        }
+    }
+
+    /// The tool's output as values with their sources.
+    fn parse(self, stdout: &[u8]) -> Result<Vec<(String, String, ToolSource)>, String> {
+        match self {
+            Self::Mise => {
+                #[derive(serde::Deserialize)]
+                struct Entry {
+                    value: String,
+                    #[serde(default)]
+                    source: Option<String>,
+                }
+                let entries: BTreeMap<String, Entry> =
+                    serde_json::from_slice(stdout).map_err(|e| format!("unexpected mise output: {e}"))?;
+                Ok(entries
+                    .into_iter()
+                    .map(|(name, entry)| {
+                        let source = match entry.source.filter(|s| !s.is_empty()) {
+                            Some(file) => ToolSource::File(PathBuf::from(file)),
+                            None => ToolSource::Unknown,
+                        };
+                        (name, entry.value, source)
+                    })
+                    .collect())
+            }
+        }
+    }
+}
+
+/// The tools `[env]` turns on.
+pub fn enabled(config: &EnvConfig) -> Vec<EnvTool> {
+    ENV_TOOLS.into_iter().filter(|tool| tool.enabled(config)).collect()
+}
+
+/// Which file a tool says set a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolSource {
+    File(PathBuf),
+    /// The tool named none (a tool's own variables, `PATH`): treated as written by the agent.
+    Unknown,
+}
+
+/// Where a value of pi's environment came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// The daemon's base environment (the login shell's): never the workspace's.
+    Daemon,
+    Tool {
+        tool: EnvTool,
+        source: ToolSource,
+    },
+}
+
+/// A value the sandbox policy derives grants from. The policy reads these, and only these, from the launch's
+/// environment, each with its [`Origin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Widening {
+    /// pi's agent directory, whose runtime state the sandbox may write.
+    AgentDir,
+}
+
+impl Widening {
+    pub fn var(self) -> &'static str {
+        match self {
+            Self::AgentDir => "PI_CODING_AGENT_DIR",
+        }
+    }
+}
+
+/// pi's environment for a sandboxed launch, each value with its [`Origin`]. Built only here: from the daemon's base
+/// environment, or by [`sandboxed`], which runs the tools inside the launch's sandbox.
+#[derive(Debug, Clone)]
+pub struct SandboxEnv {
+    vars: BTreeMap<String, (String, Origin)>,
+}
+
+impl SandboxEnv {
+    /// The daemon's base environment, before any tool: what the bootstrap policy (the one the tools run under) uses.
+    pub fn daemon(base: &Env) -> Self {
+        Self {
+            vars: base
+                .iter()
+                .map(|(name, value)| (name.clone(), (value.clone(), Origin::Daemon)))
+                .collect(),
+        }
+    }
+
+    /// A widening value and where it came from. Empty counts as unset.
+    pub fn widening(&self, widening: Widening) -> Option<(&str, &Origin)> {
+        self.vars
+            .get(widening.var())
+            .filter(|(value, _)| !value.is_empty())
+            .map(|(value, origin)| (value.as_str(), origin))
+    }
+
+    /// The plain environment pi is started with.
+    pub fn into_env(self) -> Env {
+        self.vars.into_iter().map(|(name, (value, _))| (name, value)).collect()
+    }
+
+    #[cfg(test)]
+    pub fn for_tests(vars: &[(&str, &str, Origin)]) -> Self {
+        Self {
+            vars: vars
+                .iter()
+                .map(|(name, value, origin)| (name.to_string(), (value.to_string(), origin.clone())))
+                .collect(),
+        }
+    }
+}
+
+/// How a tool is started.
+enum Runner<'a> {
+    /// On the host, as the user would: host launches trust the project by choice.
+    Host,
+    /// Inside the launch's sandbox.
+    Sandbox {
+        helper: &'a Path,
+        policy: &'a Policy,
+        containment: Containment,
+    },
+}
+
+struct Invocation {
+    program: String,
+    args: Vec<OsString>,
+    env: Env,
+}
+
+fn invocation(tool: EnvTool, base: &Env, workspace: &Path, runner: &Runner) -> Result<Invocation, String> {
+    let program = resolve_program(tool.program(), base);
+    let args = tool.args(workspace);
+    Ok(match runner {
+        Runner::Host => Invocation {
+            program,
+            args,
+            env: base.clone(),
+        },
+        Runner::Sandbox {
+            helper,
+            policy,
+            containment,
+        } => match containment {
+            Containment::Apply => {
+                let mut env = base.clone();
+                let policy = serde_json::to_string(policy).map_err(|e| format!("can't encode the sandbox: {e}"))?;
+                env.insert(POLICY_ENV.into(), policy);
+                let mut sandboxed: Vec<OsString> = vec!["sandbox-exec".into(), "--".into(), program.into()];
+                sandboxed.extend(args);
+                Invocation {
+                    program: helper.to_string_lossy().into_owned(),
+                    args: sandboxed,
+                    env,
+                }
+            }
+            Containment::Inherited => Invocation {
+                program,
+                args,
+                env: base.clone(),
+            },
+        },
+    })
+}
+
+async fn run(
+    tool: EnvTool,
+    base: &Env,
+    workspace: &Path,
+    runner: &Runner<'_>,
+) -> Result<Vec<(String, String, ToolSource)>, LaunchError> {
+    let failed = |stderr: String| LaunchError::EnvTool {
+        tool,
+        workspace: workspace.to_path_buf(),
+        stderr,
+    };
+    let call = invocation(tool, base, workspace, runner).map_err(failed)?;
+    let out = Command::new(&call.program)
+        .args(&call.args)
+        .current_dir(workspace)
+        .env_clear()
+        .envs(&call.env)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|source| LaunchError::Spawn {
+            program: call.program.clone(),
+            source,
+        })?;
+    if !out.status.success() {
+        return Err(failed(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+    }
+    tool.parse(&out.stdout).map_err(failed)
+}
+
+/// pi's environment for a host launch: the base environment, then each tool's, run on the host.
+pub async fn host(tools: &[EnvTool], base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
+    let mut env = base.clone();
+    for tool in tools {
+        for (name, value, _) in run(*tool, base, workspace, &Runner::Host).await? {
+            env.insert(name, value);
+        }
+    }
+    Ok(env)
+}
+
+/// pi's environment for a sandboxed launch: the base environment, then each tool's, run inside `policy` (or the
+/// sandbox this process already runs in), each value with its source.
+pub async fn sandboxed(
+    tools: &[EnvTool],
+    base: &Env,
+    workspace: &Path,
+    policy: &Policy,
+    containment: Containment,
+    helper: &Path,
+) -> Result<SandboxEnv, LaunchError> {
+    let mut env = SandboxEnv::daemon(base);
+    let runner = Runner::Sandbox {
+        helper,
+        policy,
+        containment,
+    };
+    for tool in tools {
+        for (name, value, source) in run(*tool, base, workspace, &runner).await? {
+            env.vars.insert(name, (value, Origin::Tool { tool: *tool, source }));
+        }
+    }
+    Ok(env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sample of each tool's output, with what it must parse to.
+    fn fixture(tool: EnvTool) -> (&'static str, Vec<(&'static str, &'static str, ToolSource)>) {
+        match tool {
+            EnvTool::Mise => (
+                r#"{
+                    "A": {"source": "/w/mise.toml", "value": "1"},
+                    "B": {"source": "", "tool": "rust", "value": "2"},
+                    "PATH": {"value": "/bin"}
+                }"#,
+                vec![
+                    ("A", "1", ToolSource::File("/w/mise.toml".into())),
+                    ("B", "2", ToolSource::Unknown),
+                    ("PATH", "/bin", ToolSource::Unknown),
+                ],
+            ),
+        }
+    }
+
+    /// Fails to compile when a tool is added, until it's listed in [`ENV_TOOLS`].
+    fn listed(tool: EnvTool) -> bool {
+        match tool {
+            EnvTool::Mise => ENV_TOOLS.contains(&EnvTool::Mise),
+        }
+    }
+
+    /// Every tool runs through `sandbox-exec` with the launch's policy, runs directly inside a sandbox it inherits,
+    /// and gives each value its source.
+    #[test]
+    fn every_tool_runs_in_the_sandbox_and_reports_sources() {
+        let policy = Policy {
+            rules: Vec::new(),
+            keychain: false,
+        };
+        let base: Env = [("PATH".to_string(), "/nonexistent".to_string())].into();
+        let workspace = Path::new("/w");
+        for tool in ENV_TOOLS {
+            assert!(listed(tool));
+            let applied = invocation(
+                tool,
+                &base,
+                workspace,
+                &Runner::Sandbox {
+                    helper: Path::new("/app/piton"),
+                    policy: &policy,
+                    containment: Containment::Apply,
+                },
+            )
+            .unwrap();
+            assert_eq!(applied.program, "/app/piton", "{tool}");
+            assert_eq!(
+                applied.args[..3],
+                ["sandbox-exec".into(), "--".into(), OsString::from(tool.program())]
+            );
+            assert_eq!(applied.args[3..], tool.args(workspace)[..]);
+            assert!(applied.env.contains_key(POLICY_ENV), "{tool}");
+
+            let inherited = invocation(
+                tool,
+                &base,
+                workspace,
+                &Runner::Sandbox {
+                    helper: Path::new("/app/piton"),
+                    policy: &policy,
+                    containment: Containment::Inherited,
+                },
+            )
+            .unwrap();
+            assert_eq!(inherited.program, tool.program());
+            assert!(!inherited.env.contains_key(POLICY_ENV));
+
+            let (output, expected) = fixture(tool);
+            let parsed = tool.parse(output.as_bytes()).unwrap();
+            let expected: Vec<(String, String, ToolSource)> = expected
+                .into_iter()
+                .map(|(n, v, s)| (n.to_string(), v.to_string(), s))
+                .collect();
+            assert_eq!(parsed, expected, "{tool}");
+        }
+    }
+
+    #[test]
+    fn tool_values_override_the_daemons_and_keep_their_origin() {
+        let mut env = SandboxEnv::daemon(&[("PI_CODING_AGENT_DIR".to_string(), "/host".to_string())].into());
+        assert_eq!(env.widening(Widening::AgentDir), Some(("/host", &Origin::Daemon)));
+        let origin = Origin::Tool {
+            tool: EnvTool::Mise,
+            source: ToolSource::File("/w/mise.toml".into()),
+        };
+        env.vars
+            .insert("PI_CODING_AGENT_DIR".into(), ("/w/agent".into(), origin.clone()));
+        assert_eq!(env.widening(Widening::AgentDir), Some(("/w/agent", &origin)));
+        env.vars.insert("PI_CODING_AGENT_DIR".into(), (String::new(), origin));
+        assert_eq!(env.widening(Widening::AgentDir), None, "empty is unset");
+        assert_eq!(env.into_env()["PI_CODING_AGENT_DIR"], "");
+    }
+
+    #[test]
+    fn containment_follows_this_process() {
+        let expected = match std::env::var("PITON_RUNTIME").as_deref() {
+            Ok("sandbox") => Containment::Inherited,
+            Ok(_) | Err(_) => Containment::Apply,
+        };
+        assert_eq!(super::super::sandbox::containment(), expected);
+    }
+}

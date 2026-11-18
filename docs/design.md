@@ -114,9 +114,27 @@ service install`. DMG packaging, signing, and notarization are tracked separatel
 For every pi it starts, Piton:
 
 1. builds the environment: the user's login-shell environment captured at daemon start (launchd's environment is
-   minimal), plus `mise env -C <workspace> --json`, computed once per launch;
-2. reports an untrusted or failing mise config instead of launching;
+   minimal), plus the workspace's environment tools (`mise env -C <workspace> --json-extended`), computed once per
+   launch. A sandboxed launch runs them inside its own sandbox (`<piton> sandbox-exec`, under the launch's policy
+   with the host's agent directory), since a sandboxed agent can edit the workspace's `mise.toml` and its `exec()`
+   templates, `_.source` scripts, and includes run commands. A host launch runs them on the host. When `piton` itself
+   already runs sandboxed (an agent running `piton sandbox show`), the tools run inside that sandbox: macOS doesn't
+   reliably start a sandbox inside another one, and nothing inside can widen it. The kernel says which
+   (`sandbox_check`), never the environment;
+2. reports an untrusted or failing mise config instead of launching. In a sandboxed launch that includes a config
+   that reads a secret manager while `mise env` runs (`exec(op read …)`): the manager isn't reachable from the
+   sandbox;
 3. runs pi in the workspace, in the launch's mode (below).
+
+The environment tools are one enum (`launch/env.rs`) matched exhaustively, and a sandboxed launch's environment is a
+type only the sandboxed runner builds, carrying the file each value came from (mise reports it), so a later tool
+(direnv, Nix) can't skip the sandbox or the provenance check below.
+
+**pi's environment is visible to the agent** and to every command it runs, in either mode: the login shell's, the
+workspace's mise environment, provider keys. In sandboxed sessions the `[permissions]` rules steer the agent but
+aren't the boundary: a rule that hides `mise.local.toml` doesn't stop another command from printing the environment.
+Keep secrets out of the mise environment; secrets for sandboxed sessions go through fnox's proxy
+([#229](https://github.com/alex35mil/Piton/issues/229)).
 
 Sessions started from nvim and from the phone get identical environments, and each worker clone gets its own mise
 environment (today a `:tcd` worker inherits the Neovide launch folder's environment).
@@ -811,6 +829,13 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    set `PI_CODING_AGENT_DIR`, so the launch is refused when it's the home folder or above it, inside the host's own
    agent directory (the daemon's environment names it) or a checkout's `.pi/`, or overlaps a configuration level,
    the state folder, or a denied path. The host's agent directory stays closed whichever one the launch uses.
+   It also depends on the file that set it: from the daemon's environment, or a file the sandbox can't write (the
+   global mise config, a client folder's `mise.toml` above the checkout), it may name any folder the checks above
+   allow; from a file a sandboxed session could write (the launch's policy lets it, as written or at its real path,
+   or it's in the checkout or source checkout), or when mise names no file, it must lead into the checkout, or the
+   launch is refused naming the file. A relative value is the workspace's, as pi resolves it. Limit: whether a file
+   is writable is judged by this launch's policy, so a session opened in a parent folder can edit that folder's
+   `mise.toml` for later launches in projects below it, as with links planted from another workspace.
 5. **The user's `deny`.**
 6. **Configuration:** every level of both chains, and what their entries link to (a dotfiles repository), is
    write-denied; protected files (below) too. The workspace's own `.agents/` stays writable.

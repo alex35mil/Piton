@@ -391,11 +391,19 @@ impl Daemon {
     fn launch(
         self: &Arc<Self>,
         workspace: Workspace,
-        mode: LaunchMode,
         session: SessionArg,
-        mut env: Env,
+        prepared: launch::Prepared,
         launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
+        let (mode, mut env, policy) = match prepared {
+            launch::Prepared::Host { env } => (LaunchMode::Host, env, None),
+            launch::Prepared::Sandbox { env, resolution } => {
+                for link in &resolution.links {
+                    crate::log!("sandbox in {}: {link}", workspace.path.display());
+                }
+                (LaunchMode::Sandbox, env, Some(resolution.policy))
+            }
+        };
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
         // How this pi reaches the daemon for protected writes; set after the workspace's environment, so a
         // repository can't change it.
@@ -408,18 +416,6 @@ impl Daemon {
             crate::agent::SOCKET_ENV.into(),
             self.config().agent_socket().to_string_lossy().into_owned(),
         );
-        let policy = match mode {
-            LaunchMode::Sandbox => {
-                let resolution =
-                    launch::sandbox_policy(&self.config(), &launch_config, &self.base_env, &env, &workspace.path)
-                        .inspect_err(|e| crate::log!("launch refused: {e}"))?;
-                for link in &resolution.links {
-                    crate::log!("sandbox in {}: {link}", workspace.path.display());
-                }
-                Some(resolution.policy)
-            }
-            LaunchMode::Host => None,
-        };
         let weak = Arc::downgrade(self);
         let hooks = Hooks {
             ended: Box::new(move |key| {
@@ -489,10 +485,10 @@ impl Daemon {
         let config = self.config();
         let launch_config =
             launch::resolve_config(&config, &workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
-        let env = launch::workspace_env(&config, &self.base_env, &workspace.path, mode)
+        let prepared = launch::prepare(&config, &launch_config, &self.base_env, &workspace.path, mode)
             .await
             .inspect_err(|e| crate::log!("launch refused: {e}"))?;
-        self.launch(workspace, mode, session, env, launch_config)
+        self.launch(workspace, session, prepared, launch_config)
     }
 
     /// The live session that has `file` open, other than `except`.

@@ -27,6 +27,37 @@ pub enum ApplyError {
     Exec { program: String, source: std::io::Error },
 }
 
+/// How a command the daemon runs for a sandboxed launch is contained. macOS doesn't reliably start a sandbox inside
+/// another one, so it's decided by whether this process already runs in one, asked of the kernel, never of an
+/// environment variable a workspace could set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Containment {
+    /// This process isn't sandboxed: the command runs through `sandbox-exec` with the launch's policy.
+    Apply,
+    /// This process is already sandboxed (`piton sandbox show` run by an agent): the command runs directly and stays
+    /// inside the current sandbox, which nothing inside can widen.
+    Inherited,
+}
+
+/// This process's [`Containment`].
+pub fn containment() -> Containment {
+    match current_process_sandboxed() {
+        true => Containment::Inherited,
+        false => Containment::Apply,
+    }
+}
+
+#[allow(unsafe_code)]
+fn current_process_sandboxed() -> bool {
+    // libsystem_sandbox, part of libSystem: with no operation, nonzero when the process is sandboxed (-1 on error,
+    // which then tries to apply the sandbox and fails visibly if it can't).
+    unsafe extern "C" {
+        fn sandbox_check(pid: libc::pid_t, operation: *const libc::c_char, filter: libc::c_int, ...) -> libc::c_int;
+    }
+    // SAFETY: a null operation with the "no filter" type (0) takes no further arguments; the call only reads the pid.
+    unsafe { sandbox_check(libc::getpid(), std::ptr::null(), 0) > 0 }
+}
+
 /// The capability set for `policy`.
 pub fn capabilities(policy: &Policy) -> Result<CapabilitySet, ApplyError> {
     let sandbox = |e: nono::NonoError| ApplyError::Sandbox(e.to_string());
