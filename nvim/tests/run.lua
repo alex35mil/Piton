@@ -237,74 +237,214 @@ test("new-agent picker loads mocked queue without credentials or real providers"
     assert(picker.title:find("0 Todo", 1, true))
 end)
 
-test("GitHub queue lists incoming pull requests once, after issues, without the viewer's own", function()
-    local queue = require("piton.queue")
-    local github = require("piton.queue.github")
-    local function content(typename, number, title)
-        return {
+-- Queue fakes: `piton config get` answers for the tracker, the forge, and two MCP registrations, and one GraphQL
+-- endpoint per provider. Nothing reaches a real daemon or provider.
+local GITHUB_TRACKER = {
+    provider = "github",
+    mcp_server = "github-tracker",
+    repository = { owner = "o", repo = "r" },
+    project = { owner = "o", owner_type = "user", number = 1 },
+    fields = {
+        status = { field = "Status", values = { todo = "Todo", backlog = "Backlog" } },
+        priority = { field = "Priority", values = {} },
+    },
+    labels = { groups = { kind = { values = { epic = { name = "Kind: Epic" } } } } },
+}
+local LINEAR_TRACKER = {
+    provider = "linear",
+    mcp_server = "linear",
+    team = "ENG",
+    statuses = {
+        projects = { todo = "Planned", backlog = "Backlog" },
+        issues = { todo = "Todo", backlog = "Backlog" },
+    },
+}
+local GITHUB_FORGE = { provider = "github", mcp_server = "github", repository = { owner = "o", repo = "r" } }
+
+local function fake_roles(source, tracker, forge)
+    local function part(value)
+        if value == nil then
+            return { code = 0, stdout = "null" }
+        end
+        return { code = 0, stdout = vim.json.encode({ path = source .. "/.piton/config.toml", value = value }) }
+    end
+    local responses = {
+        tracker = part(tracker),
+        forge = part(forge),
+        mcp = {
+            code = 0,
+            stdout = vim.json.encode({
+                servers = {
+                    { name = "github", config = { headers = { Authorization = "Bearer ${FORGE_TOKEN}" } } },
+                    { name = "github-tracker", config = { headers = { Authorization = "Bearer ${TRACKER_TOKEN}" } } },
+                    { name = "linear", config = { headers = { Authorization = "Bearer ${LINEAR_KEY}" } } },
+                },
+            }),
+        },
+    }
+    replace(util, "exec", function(cmd)
+        equal({ "piton", "config", "get" }, { cmd[1], cmd[2], cmd[3] })
+        return assert(responses[cmd[4]], cmd[4])
+    end)
+end
+
+local function board_item(status, typename, number, title, repository)
+    return {
+        status = { name = status },
+        content = {
             __typename = typename,
             number = number,
             title = title,
             url = "https://github.com/o/r/" .. number,
             state = "OPEN",
-            repository = { nameWithOwner = "o/r" },
+            repository = { nameWithOwner = repository or "o/r" },
             labels = { nodes = {} },
-        }
-    end
-    local board = {
-        { status = { name = "Backlog" }, content = content("PullRequest", 7, "Board PR") },
-        { status = { name = "Todo" }, content = content("Issue", 3, "An issue") },
-        { status = { name = "Todo" }, content = content("PullRequest", 9, "My board PR") },
-    }
-    local open = {
-        { number = 5, title = "Off-board PR", url = "https://github.com/o/r/5", author = { login = "alice" } },
-        { number = 7, title = "Board PR", url = "https://github.com/o/r/7", author = { login = "bob" } },
-        { number = 8, title = "My PR", url = "https://github.com/o/r/8", author = { login = "me" } },
-        { number = 9, title = "My board PR", url = "https://github.com/o/r/9", author = { login = "me" } },
-        { number = 10, title = "Ghost PR", url = "https://github.com/o/r/10" },
-    }
-    replace(queue, "post", function(_, _, _, query)
-        if query:find("pullRequests", 1, true) then
-            return {
-                status = 200,
-                body = {
-                    data = {
-                        viewer = { login = "me" },
-                        repository = {
-                            pullRequests = { nodes = open, pageInfo = { hasNextPage = false } },
-                        },
-                    },
-                },
-            }
-        end
-        return {
-            status = 200,
-            body = { data = { owner = { projectV2 = { items = { nodes = board, pageInfo = { hasNextPage = false } } } } } },
-        }
-    end)
-    local items = github.load({
-        source = "/s",
-        credential = "TOKEN",
-        config = {
-            repository = { owner = "o", repo = "r" },
-            project = { owner = "o", owner_type = "user", number = 1 },
-            fields = {
-                status = { field = "Status", values = { todo = "Todo", backlog = "Backlog" } },
-                priority = { field = "Priority", values = {} },
-            },
-            labels = { groups = { kind = { values = { epic = { name = "Kind: Epic" } } } } },
         },
-    })
-    local summary = vim.tbl_map(function(item)
-        return { item.marker, item.section, item.kind.kind, item.kind.board }
+    }
+end
+
+local function pull_request(number, title, author)
+    return { number = number, title = title, url = "https://github.com/o/r/" .. number, author = author }
+end
+
+-- Answers each provider query and records which ones ran: { query, credential, detail }.
+local function fake_providers(responses)
+    local queue = require("piton.queue")
+    local requests = {}
+    replace(queue, "post", function(connection, _, _, query, variables)
+        local function ok(data)
+            return { status = 200, body = { data = data } }
+        end
+        local function page(nodes)
+            return { nodes = nodes, pageInfo = { hasNextPage = false } }
+        end
+        if query:find("pullRequests", 1, true) then
+            table.insert(requests, { "pull_requests", connection.credential, variables.owner .. "/" .. variables.repo })
+            return ok({ viewer = { login = "me" }, repository = { pullRequests = page(responses.open or {}) } })
+        elseif query:find("projectV2", 1, true) then
+            table.insert(requests, { "board", connection.credential })
+            return ok({ owner = { projectV2 = { items = page(responses.board or {}) } } })
+        elseif query:find("viewer { id }", 1, true) then
+            return ok({ viewer = { id = "u" } })
+        elseif query:find("projects(", 1, true) then
+            return ok({ projects = page({}) })
+        elseif query:find("issues(", 1, true) then
+            table.insert(requests, { "linear", connection.credential, variables.state })
+            return ok({ issues = page(variables.state == "Todo" and responses.linear or {}) })
+        end
+        error("unexpected query: " .. query)
+    end)
+    return requests
+end
+
+local function summary(items)
+    return vim.tbl_map(function(item)
+        return { item.id, item.section, item.kind.kind, item.kind.board }
     end, items)
+end
+
+local OPEN = {
+    pull_request(5, "Off-board PR", { login = "alice" }),
+    pull_request(7, "Board PR", { login = "bob" }),
+    pull_request(8, "My PR", { login = "me" }),
+    pull_request(9, "My board PR", { login = "me" }),
+    pull_request(10, "Ghost PR"),
+}
+
+test("GitHub tracker and forge list each incoming pull request once, board ones first with their Status", function()
+    local source = directory("github queue")
+    local queue = require("piton.queue")
+    fake_roles(source, GITHUB_TRACKER, GITHUB_FORGE)
+    local requests = fake_providers({
+        board = {
+            board_item("Backlog", "PullRequest", 7, "Board PR"),
+            board_item("Todo", "Issue", 3, "An issue"),
+            board_item("Todo", "PullRequest", 9, "My board PR"),
+            -- On the board, but not an open PR of the forge's repository.
+            board_item("Todo", "PullRequest", 11, "Merged PR"),
+            board_item("Todo", "PullRequest", 4, "Elsewhere", "o/other"),
+            board_item("Todo", "Issue", 6, "Other repository's issue", "o/other"),
+        },
+        open = OPEN,
+    })
+    local items = queue.load(source)
     equal({
-        { "#3", "todo", "gig", nil },
-        { "#7", "pull_requests", "pr", "backlog" },
-        { "#5", "pull_requests", "pr", nil },
-        { "#10", "pull_requests", "pr", nil },
-    }, summary)
+        { "github:o/r#3", "todo", "gig", nil },
+        { "github:o/r#7", "pull_requests", "pr", "backlog" },
+        { "github:o/r#5", "pull_requests", "pr", nil },
+        { "github:o/r#10", "pull_requests", "pr", nil },
+    }, summary(items))
     equal("/pr #7 Board PR ", queue.command(items[2]))
+    -- Each role reads with its own registration's credential.
+    equal({ { "board", "TRACKER_TOKEN" }, { "pull_requests", "FORGE_TOKEN", "o/r" } }, requests)
+end)
+
+test("Linear tracker with a GitHub forge lists the forge's incoming pull requests after the issues", function()
+    local source = directory("linear queue")
+    local queue = require("piton.queue")
+    fake_roles(source, LINEAR_TRACKER, {
+        provider = "github",
+        mcp_server = "github",
+        repository = { owner = "acme", repo = "app" },
+    })
+    local requests = fake_providers({
+        linear = {
+            {
+                id = "i1",
+                identifier = "ENG-1",
+                title = "A gig",
+                url = "https://linear.app/i1",
+                priority = 0,
+                prioritySortOrder = 1,
+            },
+        },
+        open = OPEN,
+    })
+    local items = queue.load(source)
+    equal({
+        { "linear:issue:i1", "todo", "gig", nil },
+        { "github:acme/app#5", "pull_requests", "pr", nil },
+        { "github:acme/app#7", "pull_requests", "pr", nil },
+        { "github:acme/app#10", "pull_requests", "pr", nil },
+    }, summary(items))
+    equal({
+        { "linear", "LINEAR_KEY", "Todo" },
+        { "linear", "LINEAR_KEY", "Backlog" },
+        { "pull_requests", "FORGE_TOKEN", "acme/app" },
+    }, requests)
+end)
+
+test("without a GitHub forge the queue lists no pull requests, board ones included", function()
+    local source = directory("no forge queue")
+    local queue = require("piton.queue")
+    local board = {
+        board_item("Todo", "Issue", 3, "An issue"),
+        board_item("Backlog", "PullRequest", 7, "Board PR"),
+    }
+    for _, forge in ipairs({ vim.NIL, { provider = "none" }, { provider = "gitlab", mcp_server = "github" } }) do
+        fake_roles(source, GITHUB_TRACKER, forge ~= vim.NIL and forge or nil)
+        local requests = fake_providers({ board = board, open = OPEN })
+        equal({ { "github:o/r#3", "todo", "gig", nil } }, summary(queue.load(source)))
+        equal({ { "board", "TRACKER_TOKEN" } }, requests)
+    end
+    fake_roles(source, LINEAR_TRACKER, { provider = "gitlab" })
+    fake_providers({ linear = {}, open = OPEN })
+    equal({}, queue.load(source))
+end)
+
+test("without a tracker a GitHub forge still lists its pull requests", function()
+    local source = directory("forge only queue")
+    local queue = require("piton.queue")
+    for _, tracker in ipairs({ vim.NIL, { provider = "none" } }) do
+        fake_roles(source, tracker ~= vim.NIL and tracker or nil, GITHUB_FORGE)
+        local requests = fake_providers({ open = OPEN })
+        equal({
+            { "github:o/r#5", "pull_requests", "pr", nil },
+            { "github:o/r#7", "pull_requests", "pr", nil },
+            { "github:o/r#10", "pull_requests", "pr", nil },
+        }, summary(queue.load(source)))
+        equal({ { "pull_requests", "FORGE_TOKEN", "o/r" } }, requests)
+    end
 end)
 
 test("queue reads its tracker and credential through piton config get", function()
@@ -336,15 +476,31 @@ test("queue reads its tracker and credential through piton config get", function
     end)
     equal("LINEAR_KEY", queue.credential(source, "linear"))
     fails("Unsupported tracker provider in " .. source .. "/.piton/config.toml", function() queue.load(source) end)
-    equal({ "mcp", "tracker", "mcp" }, calls)
+    equal({ "mcp", "tracker" }, calls)
 
+    -- Neither a tracker nor a GitHub forge: the queue is unavailable.
+    responses.forge = { code = 0, stdout = "null" }
     responses.tracker = { code = 0, stdout = "null" }
-    fails("No tracker configured", function() queue.load(source) end)
+    fails("No tracker or GitHub forge configured: no [tracker] in " .. source, function() queue.load(source) end)
     responses.tracker = {
         code = 0,
         stdout = vim.json.encode({ path = source .. "/.piton/config.toml", value = { provider = "none" } }),
     }
-    fails("The tracker is turned off", function() queue.load(source) end)
+    fails("the tracker is turned off", function() queue.load(source) end)
+    -- A GitHub forge must name its registration and repository.
+    responses.forge = {
+        code = 0,
+        stdout = vim.json.encode({ path = source .. "/.piton/config.toml", value = { provider = "github" } }),
+    }
+    fails("has no repository", function() queue.load(source) end)
+    responses.forge = {
+        code = 0,
+        stdout = vim.json.encode({
+            path = source .. "/.piton/config.toml",
+            value = { provider = "github", repository = { owner = "o", repo = "r" } },
+        }),
+    }
+    fails("The [forge] in " .. source .. "/.piton/config.toml has no mcp_server", function() queue.load(source) end)
     -- A broken file: the resolver's message, unchanged.
     responses.tracker = {
         code = 3,

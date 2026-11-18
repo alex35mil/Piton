@@ -696,7 +696,7 @@ the line. A host or client file has one schema and is read whole.
   reported as pending); the project chain at every launch and `worker create`; the pi package's files at pi start and
   `/reload`. `piton config check` validates the workspace's chain and the host and client files, lists the files
   read, and warns about what doesn't travel (below); `piton config get` serves one resolved part to other tools (the
-  Neovim plugin's tracker queue).
+  Neovim plugin's queue reads `tracker`, `forge`, and `mcp`).
 - **One resolver.** The daemon crate's `config` module is the only implementation (layout below). The pi package and
   the Neovim plugin call `piton config resolve` / `piton config get`, which read files and don't need the daemon
   running. The daemon passes the binary's path in `PITON_BIN` after the mise environment; the pi package caches the

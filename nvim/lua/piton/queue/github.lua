@@ -1,7 +1,8 @@
--- Todo and Backlog items of a GitHub Project: Todo first, each ordered by the
--- configured Priority, then by the Project's manual order. Then incoming pull
--- requests: the open ones of the configured repository not authored by the
--- viewer, on the board or not, listed once.
+-- GitHub as a tracker: Todo and Backlog items of a GitHub Project, Todo first,
+-- each ordered by the configured Priority, then by the Project's manual
+-- order, and the pull requests on the board. GitHub as a forge: the open pull
+-- requests of its repository. `incoming` merges the two into the listed pull
+-- requests: the forge's open ones not authored by the viewer, each once.
 
 local util = require("piton.util")
 local queue = require("piton.queue")
@@ -66,14 +67,15 @@ query($owner: String!, $repo: String!, $cursor: String) {
 ---@field url string
 ---@field author string? Login; nil for a deleted account.
 
---- Open pull requests of the repository, oldest first, and the viewer's login.
----@param tracker QueueTracker
+--- Open pull requests of the forge's repository, oldest first, and the
+--- viewer's login.
+---@param forge QueueConnection
 ---@return GitHubPullRequest[], string
-function M.pull_requests(tracker)
-    local config = tracker.config
+function M.pull_requests(forge)
+    local config = forge.config
     local viewer ---@type string?
     local nodes = queue.paginate(function(cursor)
-        local response = queue.post(tracker, URL, "Bearer {{VAR}}", PULL_REQUESTS, {
+        local response = queue.post(forge, URL, "Bearer {{VAR}}", PULL_REQUESTS, {
             owner = config.repository.owner,
             repo = config.repository.repo,
             cursor = cursor,
@@ -104,49 +106,64 @@ function M.pull_requests(tracker)
     return result, viewer
 end
 
---- Incoming pull requests: every open PR not authored by `viewer`, board PRs
---- in board order first (they carry their Status), then the rest oldest
---- first. Each PR appears once.
----@param repository string `owner/repo`
----@param board QueueItem[] Board pull requests, in board order.
+--- Incoming pull requests: the forge's open PRs not authored by `viewer`.
+--- Those also on the board come first, in board order, carrying their board
+--- Status; then the rest, oldest first. Each PR appears once, matched by id.
+--- A board PR that isn't an open PR of the forge's repository isn't listed.
+---@param repository string The forge's `owner/repo`.
+---@param board QueueItem[] The tracker's board pull requests, in board order; empty without a GitHub Project.
 ---@param open GitHubPullRequest[]
 ---@param viewer string
 ---@return QueueItem[]
 function M.incoming(repository, board, open, viewer)
-    local authors = {} ---@type table<string, string?>
-    local listed = {} ---@type table<string, true>
+    local incoming = {} ---@type QueueItem[]
+    local by_id = {} ---@type table<string, QueueItem>
     for _, pr in ipairs(open) do
-        authors["#" .. pr.number] = pr.author
+        if pr.author ~= viewer then
+            local marker = "#" .. pr.number
+            ---@type QueueItem
+            local item = {
+                id = M.item_id(repository, pr.number),
+                section = "pull_requests",
+                mention = marker,
+                marker = marker,
+                title = pr.title,
+                url = pr.url,
+                kind = { kind = "pr" },
+            }
+            table.insert(incoming, item)
+            by_id[item.id] = item
+        end
     end
     local result = {} ---@type QueueItem[]
-    local function add(item, author)
-        if author ~= viewer and not listed[item.id] then
+    local listed = {} ---@type table<string, true>
+    for _, item in ipairs(board) do
+        if by_id[item.id] and not listed[item.id] then
             listed[item.id] = true
             table.insert(result, item)
         end
     end
-    for _, item in ipairs(board) do
-        add(item, authors[item.marker])
-    end
-    for _, pr in ipairs(open) do
-        local marker = "#" .. pr.number
-        ---@type QueueItem
-        local item = {
-            id = "github:" .. repository .. marker,
-            section = "pull_requests",
-            mention = marker,
-            marker = marker,
-            title = pr.title,
-            url = pr.url,
-            kind = { kind = "pr" },
-        }
-        add(item, pr.author)
+    for _, item in ipairs(incoming) do
+        if not listed[item.id] then
+            listed[item.id] = true
+            table.insert(result, item)
+        end
     end
     return result
 end
 
----@param tracker QueueTracker
----@return QueueItem[]
+--- The stable identity of an issue or pull request; the two share one number
+--- sequence per repository.
+---@param repository string `owner/repo`
+---@param number integer
+---@return string
+function M.item_id(repository, number)
+    return "github:" .. repository .. "#" .. number
+end
+
+--- The tracker's queued issues and its board pull requests.
+---@param tracker QueueConnection
+---@return QueueTrackerWork
 function M.load(tracker)
     local config = tracker.config
     local project = config.project
@@ -175,19 +192,22 @@ function M.load(tracker)
     for position, node in ipairs(nodes) do
         local content = node.content
         local queue_status = queue.status_of(vim.tbl_get(node, "status", "name"), status.values)
+        local owner_repo = type(content) == "table" and vim.tbl_get(content, "repository", "nameWithOwner") or nil
+        local pull_request = type(content) == "table" and content.__typename == "PullRequest"
+        -- Issues come from the tracker's repository; board pull requests from
+        -- any, and the forge decides which of them are listed.
         if
             queue_status
             and type(content) == "table"
             and content.number
             and content.state == "OPEN"
-            and vim.tbl_get(content, "repository", "nameWithOwner") == repository
+            and type(owner_repo) == "string"
+            and (pull_request or owner_repo == repository)
         then
-            -- Issues and pull requests share one number sequence per repository.
             local marker = "#" .. content.number
-            local pull_request = content.__typename == "PullRequest"
             ---@type QueueItem
             local item = {
-                id = "github:" .. repository .. marker,
+                id = M.item_id(owner_repo, content.number),
                 section = pull_request and "pull_requests" or queue_status,
                 mention = marker,
                 marker = marker,
@@ -202,12 +222,11 @@ function M.load(tracker)
     queue.sort_by_priority(result, function(item)
         return orders[item]
     end)
-    local issues, board = {}, {} ---@type QueueItem[], QueueItem[]
+    local work = { issues = {}, board = {} } ---@type QueueTrackerWork
     for _, item in ipairs(result) do
-        table.insert(item.section == "pull_requests" and board or issues, item)
+        table.insert(item.section == "pull_requests" and work.board or work.issues, item)
     end
-    local open, viewer = M.pull_requests(tracker)
-    return queue.group_by_section(vim.list_extend(issues, M.incoming(repository, board, open, viewer)))
+    return work
 end
 
 --- Rank of an item's Priority value in the configured order, whether the

@@ -10,11 +10,13 @@ sandbox settings, pi processes, and deletion. This plugin owns the editor UI, no
 - [snacks.nvim](https://github.com/folke/snacks.nvim), with its picker enabled.
 - [pi.nvim](https://github.com/alex35mil/pi.nvim), configured to attach through Piton (see
   [daemon setup](../docs/daemon.md#pinvim)).
-- For the queue: a GitHub or Linear tracker, the nearest `[tracker]` of Piton's configuration chain (`config.toml` in
-  the source's `.piton/` or its parent folders'; never the global folder), read through `piton config get`; the plugin reads
-  no configuration file itself. Its MCP registration must specify `Authorization: Bearer ${ENV_VAR}`; the credential
-  is resolved through `mise exec -C <source>`, never read into Neovim. Without tracker configuration, named agents
-  still work and the queue shows as unavailable.
+- For the queue: a GitHub or Linear tracker for queued work, and a GitHub forge for incoming pull requests: the
+  nearest `[tracker]` and `[forge]` of Piton's configuration chain (`config.toml` in the source's `.piton/` or its
+  parent folders'; never the global folder), read through `piton config get`; the plugin reads no configuration file
+  itself. Each role reads with its own MCP registration (`mcp_server`), which must specify
+  `Authorization: Bearer ${ENV_VAR}`; the credential is resolved through `mise exec -C <source>`, never read into
+  Neovim. Either role alone is enough. Without a tracker or a GitHub forge, named agents still work and the queue shows
+  as unavailable.
 
 ## Setup
 
@@ -52,10 +54,13 @@ them. All notifications use `vim.notify` with title `Piton`.
 - **`new()`** opens the new-agent picker: Todo, then Backlog, then incoming pull requests, with a named agent always
   available. Queued work already assigned to a worker is excluded. Creation opens its tab and pre-fills the
   appropriate workflow command; it never sends the prompt automatically.
-  - With a GitHub tracker, the pull-request section lists every open PR of the configured repository that the
-    authenticated user didn't author. PRs on the board and off it are listed once, board PRs first with their Status.
-    Selecting one creates a worker with `/pr #NN Title` pre-filled. `/pr` reviews it in that worker.
-  - A Linear tracker lists no pull requests.
+  - With a GitHub forge, the pull-request section lists every open PR of `forge.repository` that the authenticated
+    user didn't author, whatever the tracker is. Selecting one creates a worker with `/pr #NN Title` pre-filled.
+    `/pr` reviews it in that worker.
+  - With a GitHub Project tracker too, PRs on the board come first, in board order with their board Status, then the
+    rest; a PR on the board and on the forge is listed once. Board PRs that aren't open PRs of the forge's repository
+    aren't listed.
+  - Without a forge, or with a forge other than GitHub, there is no pull-request section; tracker work still loads.
 - **`pick()`** lists the current repository's source and workers, with live pi status. Selecting an existing tab focuses
   it; otherwise it opens a tab. With no selection, typed text can create a named worker.
 - **`get(path)`** returns the agent containing a path, or nil. The record has `path`, `source`, `label`, and optional
@@ -109,5 +114,5 @@ mise run nvim:test
 
 This starts clean headless Neovim, loads every module without the user's configuration or installed plugin
 dependencies, and tests the configuration/API, tab and file handling, picker integration, notifications, and deletion
-confirmations. pi.nvim, Snacks, daemon calls, and tracker requests are mocked. Tests never contact the installed
+confirmations. pi.nvim, Snacks, daemon calls, and tracker and forge requests are mocked. Tests never contact the installed
 daemon or real providers. The task is also included in `mise run test`.
