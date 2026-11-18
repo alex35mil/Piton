@@ -9,10 +9,10 @@ export const MAX_DIFF_BYTES = 180 * 1024
 /** Where the branch's own changes start: the merge base with the target, remote-tracking when it exists. */
 type BranchBase = { state: "found"; ref: string; commit: string } | { state: "missing"; target: string }
 
-function branchBase(cwd: string, target: string): BranchBase {
+export function branchBase(cwd: string, target: string, head = "HEAD"): BranchBase {
     for (const ref of [`refs/remotes/origin/${target}`, `refs/heads/${target}`]) {
         if (!Git.succeeds(cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) continue
-        const commit = Git.tryRun(cwd, ["merge-base", ref, "HEAD"])
+        const commit = Git.tryRun(cwd, ["merge-base", ref, head])
         if (commit) return { state: "found", ref, commit }
     }
     return { state: "missing", target }

@@ -39,6 +39,8 @@ allowed-tools:
     - "select_pull_request_resource"
     - "cleanup_delivery_branch"
     - "prepare_merge_resolution_comment"
+    - "begin_user_review"
+    - "end_user_review"
     - "read(.piton/*)"
     - "write(.piton/*)"
     - "edit(.piton/*)"

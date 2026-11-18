@@ -117,4 +117,6 @@ export const expectedWorkflowTools = [
     "cleanup_incoming_pr_checkout",
     "cleanup_delivery_branch",
     "prepare_merge_resolution_comment",
+    "begin_user_review",
+    "end_user_review",
 ] as const
