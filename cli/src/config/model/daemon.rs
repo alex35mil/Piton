@@ -67,7 +67,7 @@ pub struct PiConfig {
 pub struct EnvConfig {
     /// Start from the login shell's environment (captured once at daemon start) instead of the daemon's own.
     pub login_shell: bool,
-    /// Add `mise env -C <workspace> --json` for every launch.
+    /// Add the workspace's mise environment (`mise env`) for every launch; inside the sandbox for sandboxed ones.
     pub mise: bool,
 }
 

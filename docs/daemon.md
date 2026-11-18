@@ -94,7 +94,7 @@ args = []                 # added after `--mode rpc`
 
 [env]
 login_shell = true        # base environment from `$SHELL -l`
-mise = true               # plus `mise env -C <workspace>`
+mise = true               # plus `mise env -C <workspace>`, inside the sandbox for sandboxed launches
 
 [stop]
 grace_ms = 15000          # after closing stdin, before SIGTERM
@@ -103,6 +103,14 @@ term_grace_ms = 3000      # after SIGTERM, before SIGKILL
 
 A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after the workspace's mise
 environment.
+
+For a sandboxed launch, `mise env` runs inside the launch's sandbox, so whatever a workspace's mise configuration runs
+(`exec()` templates, `_.source` scripts) is contained. A configuration that reads a secret manager while `mise env`
+runs (`exec(op read …)`) fails there and the launch is refused with mise's error; keep secrets out of the mise
+environment and use fnox ([#229](https://github.com/alex35mil/Piton/issues/229)).
+
+Everything in pi's environment is visible to the agent and every command it runs. `[permissions]` rules steer the
+agent; in sandboxed sessions they aren't the boundary, the sandbox is.
 
 ### Sandbox
 
@@ -175,6 +183,11 @@ checkout or another grant. When a granted folder (say `~/Library/Developer/Xcode
 link to somewhere else, grant the real path; `piton sandbox show` warns about each grant it doesn't follow, and the
 daemon logs it. Opening a sandboxed session through a symlink inside a checkout that leads out of it is refused: open
 the real folder.
+
+`PI_CODING_AGENT_DIR` set by a file a sandboxed session can write (the workspace's `mise.toml`, anything in the
+checkout or a granted folder) must point inside the checkout; otherwise the launch is refused, naming the file. Set a
+shared agent directory in your shell, your global mise configuration, or a `mise.toml` above the project that no
+sandboxed session can write.
 
 Known limits:
 

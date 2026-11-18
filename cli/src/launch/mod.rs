@@ -1,5 +1,6 @@
 //! Building pi's environment and command line for a launch.
 
+pub mod env;
 mod mode;
 pub mod sandbox;
 
@@ -22,8 +23,12 @@ pub type Env = BTreeMap<String, String>;
 pub enum LaunchError {
     #[error("workspace {path} is not a directory")]
     NotADirectory { path: PathBuf },
-    #[error("mise env failed in {workspace}: {stderr}")]
-    Mise { workspace: PathBuf, stderr: String },
+    #[error("{tool} env failed in {workspace}: {stderr}")]
+    EnvTool {
+        tool: env::EnvTool,
+        workspace: PathBuf,
+        stderr: String,
+    },
     #[error("can't run {program}: {source}")]
     Spawn { program: String, source: std::io::Error },
     #[error("can't find this piton binary to start the sandbox: {0}")]
@@ -105,16 +110,73 @@ fn parse_env0(bytes: &[u8]) -> Env {
         .collect()
 }
 
-/// pi's environment for `workspace` in `mode`: the base environment, `mise env` for that folder, then what piton
-/// decides, set last so a repository's `mise.toml` can't override it: the runtime (which permissions apply), the
-/// global tier, and this binary (the pi package resolves configuration through it).
-pub async fn workspace_env(
+/// A launch whose environment and, for a sandboxed one, policy are resolved.
+pub enum Prepared {
+    Host { env: Env },
+    Sandbox { env: Env, resolution: sandbox::Resolution },
+}
+
+/// Builds a launch in `workspace` in `mode`.
+pub async fn prepare(
     config: &DaemonConfig,
+    resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
     mode: LaunchMode,
-) -> Result<Env, LaunchError> {
-    let mut env = mise_env(config, base, workspace).await?;
+) -> Result<Prepared, LaunchError> {
+    Ok(match mode {
+        LaunchMode::Host => Prepared::Host {
+            env: host_env(config, base, workspace).await?,
+        },
+        LaunchMode::Sandbox => {
+            let (env, resolution) = prepare_sandbox(config, resolved, base, workspace).await?;
+            Prepared::Sandbox { env, resolution }
+        }
+    })
+}
+
+/// pi's environment for a host launch in `workspace`: the base environment and the environment tools' for that folder,
+/// run on the host (a host session trusts the project by choice), then Piton's own variables.
+async fn host_env(config: &DaemonConfig, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
+    let env = env::host(&env::enabled(&config.env), base, workspace).await?;
+    Ok(with_piton_vars(config, env, LaunchMode::Host))
+}
+
+/// A sandboxed launch's environment and policy. The environment tools run inside the sandbox, under the launch's
+/// policy with the host's agent directory (none of their values yet); the launch's policy is then resolved from their
+/// environment, which accepts a widening value only from a file the agent can't write.
+pub async fn prepare_sandbox(
+    config: &DaemonConfig,
+    resolved: &LaunchConfig,
+    base: &Env,
+    workspace: &Path,
+) -> Result<(Env, sandbox::Resolution), LaunchError> {
+    let bootstrap = sandbox_policy(config, resolved, base, &env::SandboxEnv::daemon(base), workspace)?;
+    let tools = env::enabled(&config.env);
+    let launch_env = match tools.is_empty() {
+        true => env::SandboxEnv::daemon(base),
+        false => {
+            env::sandboxed(
+                &tools,
+                base,
+                workspace,
+                &bootstrap.policy,
+                sandbox::containment(),
+                &helper()?,
+            )
+            .await?
+        }
+    };
+    let resolution = sandbox_policy(config, resolved, base, &launch_env, workspace)?;
+    Ok((
+        with_piton_vars(config, launch_env.into_env(), LaunchMode::Sandbox),
+        resolution,
+    ))
+}
+
+/// What Piton decides, set last so a repository's environment can't override it: the runtime (which permissions
+/// apply), the global tier, and this binary (the pi package resolves configuration through it).
+fn with_piton_vars(config: &DaemonConfig, mut env: Env, mode: LaunchMode) -> Env {
     env.remove("PITON_RUNTIME");
     match mode {
         LaunchMode::Sandbox => {
@@ -131,42 +193,13 @@ pub async fn workspace_env(
     if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
         env.insert("PITON_BIN".into(), exe.to_string_lossy().into_owned());
     }
-    Ok(env)
+    env
 }
 
 /// The launch's configuration: `[sandbox]` and `[workers]` of the workspace's chain, refusing them when they're invalid.
 /// The pi package checks its own parts when pi starts.
 pub fn resolve_config(config: &DaemonConfig, workspace: &Workspace) -> Result<LaunchConfig, LaunchError> {
     Ok(crate::config::resolve_launch(workspace, &config.paths)?)
-}
-
-async fn mise_env(config: &DaemonConfig, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
-    let mut env = base.clone();
-    if config.env.mise {
-        let out = Command::new(resolve_program("mise", base))
-            .args(["env", "--json", "-C"])
-            .arg(workspace)
-            .env_clear()
-            .envs(base)
-            .output()
-            .await
-            .map_err(|source| LaunchError::Spawn {
-                program: "mise".into(),
-                source,
-            })?;
-        if !out.status.success() {
-            return Err(LaunchError::Mise {
-                workspace: workspace.to_path_buf(),
-                stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            });
-        }
-        let vars: BTreeMap<String, String> = serde_json::from_slice(&out.stdout).map_err(|e| LaunchError::Mise {
-            workspace: workspace.to_path_buf(),
-            stderr: format!("unexpected mise output: {e}"),
-        })?;
-        env.extend(vars);
-    }
-    Ok(env)
 }
 
 /// The full argument vector for pi in `mode`. A sandboxed pi starts through `helper sandbox-exec` (this binary), which
@@ -206,11 +239,11 @@ pub fn helper() -> Result<PathBuf, LaunchError> {
 
 /// The sandbox policy of a launch in `workspace`, with pi's environment `env`, and the grants it doesn't follow
 /// through a symlink.
-pub fn sandbox_policy(
+fn sandbox_policy(
     config: &DaemonConfig,
     resolved: &LaunchConfig,
     base: &Env,
-    env: &Env,
+    env: &env::SandboxEnv,
     workspace: &Path,
 ) -> Result<sandbox::Resolution, LaunchError> {
     let state = config.state_dir();
@@ -313,8 +346,8 @@ mod tests {
     }
 
     /// piton's own variables are set after mise's, so a repository's `mise.toml` can't change them.
-    #[tokio::test]
-    async fn piton_variables_win_over_the_workspace_environment() {
+    #[test]
+    fn piton_variables_win_over_the_workspace_environment() {
         let mut config = DaemonConfig::for_tests();
         config.env.mise = false;
         config.paths.global = PathBuf::from("/global/piton");
@@ -324,15 +357,11 @@ mod tests {
             ("PITON_BIN".to_string(), "/repo/fake-piton".to_string()),
         ]
         .into();
-        let host = workspace_env(&config, &base, Path::new("/w"), LaunchMode::Host)
-            .await
-            .unwrap();
+        let host = with_piton_vars(&config, base, LaunchMode::Host);
         assert_eq!(host.get("PITON_RUNTIME"), None, "host runtime is unset");
         assert_eq!(host["PITON_CONFIG_HOME"], "/global/piton");
         assert_ne!(host["PITON_BIN"], "/repo/fake-piton");
-        let sandbox = workspace_env(&config, &Env::new(), Path::new("/w"), LaunchMode::Sandbox)
-            .await
-            .unwrap();
+        let sandbox = with_piton_vars(&config, Env::new(), LaunchMode::Sandbox);
         assert_eq!(sandbox["PITON_RUNTIME"], "sandbox");
     }
 
