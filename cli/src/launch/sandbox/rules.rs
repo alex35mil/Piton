@@ -45,7 +45,7 @@ pub enum Target {
 }
 
 impl Target {
-    fn covers(&self, path: &Path) -> bool {
+    pub(super) fn covers(&self, path: &Path) -> bool {
         match self {
             Target::Subpath { path: root } => path.starts_with(root),
             Target::Literal { path: exact } => path == exact,

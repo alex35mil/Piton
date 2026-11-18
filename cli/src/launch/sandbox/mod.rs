@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub use self::{
     apply::{POLICY_ENV, exec},
     policy::{Source, WRITE_ROOTS, nono_version},
-    resolve::{Facts, resolve},
+    resolve::{Facts, Resolution, resolve},
     rules::{Access, Policy},
 };
 

@@ -8,7 +8,7 @@ use crate::{
     config::DaemonConfig,
     launch::{
         self, LaunchMode,
-        sandbox::{Access, Policy, Source},
+        sandbox::{Access, Resolution, Source},
     },
 };
 
@@ -17,7 +17,12 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         SandboxAction::Show { workspace } | SandboxAction::Why { workspace, .. } => workspace.clone(),
     };
     let policy = match policy(config, workspace).await {
-        Ok(policy) => policy,
+        Ok(resolution) => {
+            for link in &resolution.links {
+                eprintln!("piton: warning: {link}");
+            }
+            resolution.policy
+        }
         Err(message) => {
             eprintln!("piton: {message}");
             return ExitCode::from(3);
@@ -63,10 +68,11 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     }
 }
 
-async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Policy, String> {
+async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Resolution, String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+    launch::check_workspace_links(&dir).map_err(|e| e.to_string())?;
     let workspace = launch::resolve_workspace(&dir).map_err(|e| e.to_string())?;
     let resolved = launch::resolve_config(config, &workspace).map_err(|e| e.to_string())?;
     let base: launch::Env = match config.env.login_shell {

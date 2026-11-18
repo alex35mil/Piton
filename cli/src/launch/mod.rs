@@ -5,7 +5,7 @@ pub mod sandbox;
 
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use tokio::process::Command;
@@ -28,6 +28,15 @@ pub enum LaunchError {
     Spawn { program: String, source: std::io::Error },
     #[error("can't find this piton binary to start the sandbox: {0}")]
     Helper(std::io::Error),
+    #[error(
+        "workspace {workspace}: {link} is a symlink inside the checkout {checkout} that leads out of it, which a sandboxed \
+         session could have made; open the real folder instead"
+    )]
+    WorkspaceLink {
+        workspace: PathBuf,
+        link: PathBuf,
+        checkout: PathBuf,
+    },
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -195,14 +204,15 @@ pub fn helper() -> Result<PathBuf, LaunchError> {
         .map_err(LaunchError::Helper)
 }
 
-/// The sandbox policy of a launch in `workspace`, with pi's environment `env`.
+/// The sandbox policy of a launch in `workspace`, with pi's environment `env`, and the grants it doesn't follow
+/// through a symlink.
 pub fn sandbox_policy(
     config: &DaemonConfig,
     resolved: &LaunchConfig,
     base: &Env,
     env: &Env,
     workspace: &Path,
-) -> Result<sandbox::Policy, LaunchError> {
+) -> Result<sandbox::Resolution, LaunchError> {
     let state = config.state_dir();
     let agent_socket = config.agent_socket();
     let logs = crate::logging::root();
@@ -231,6 +241,47 @@ pub fn resolve_workspace(path: &Path) -> Result<Workspace, LaunchError> {
         return Err(LaunchError::NotADirectory { path: canonical });
     }
     Ok(project::resolve(&canonical)?)
+}
+
+/// Refuses a sandboxed launch whose workspace path, as given, goes through a symlink inside a git checkout that leads out
+/// of it: a sandboxed session in that checkout could have made it, to send the next session's workspace grant
+/// anywhere. A link that stays in its checkout, and one outside any checkout (the user's own), are fine.
+pub fn check_workspace_links(path: &Path) -> Result<(), LaunchError> {
+    let not_a_directory = || LaunchError::NotADirectory {
+        path: path.to_path_buf(),
+    };
+    let absolute = std::path::absolute(path).map_err(|_| not_a_directory())?;
+    // Kept real: every link met is replaced by its target, so `..` steps up from where the OS would be.
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::ParentDir => {
+                current.pop();
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => current.push(component),
+        }
+        if !current.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+            continue;
+        }
+        let real = std::fs::canonicalize(&current).map_err(|_| not_a_directory())?;
+        let checkout = current
+            .parent()
+            .and_then(|parent| parent.ancestors().find(|dir| dir.join(".git").exists()))
+            .map(Path::to_path_buf);
+        if let Some(checkout) = checkout
+            && !real.starts_with(&checkout)
+        {
+            return Err(LaunchError::WorkspaceLink {
+                workspace: path.to_path_buf(),
+                link: current,
+                checkout,
+            });
+        }
+        current = real;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -283,6 +334,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sandbox["PITON_RUNTIME"], "sandbox");
+    }
+
+    /// A sandboxed launch through a link inside a checkout that leads out of it is refused; the user's own links work.
+    #[test]
+    fn workspace_links_out_of_their_checkout_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        for d in ["repo/.git", "repo/src/app", "elsewhere/app", "Projects/real"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let link = |target: &str, at: &str| std::os::unix::fs::symlink(root.join(target), root.join(at)).unwrap();
+        link("elsewhere", "repo/out");
+        link("repo/src", "repo/in");
+        link("Projects", "code");
+        link("repo", "Projects/repo-link");
+
+        assert!(matches!(
+            check_workspace_links(&repo.join("out/app")),
+            Err(LaunchError::WorkspaceLink { link, checkout, .. }) if link == repo.join("out") && checkout == repo
+        ));
+        assert!(check_workspace_links(&repo.join("in/app")).is_ok());
+        assert!(check_workspace_links(&repo.join("src/app")).is_ok());
+        // Links outside any checkout are the user's own.
+        assert!(check_workspace_links(&root.join("code/real")).is_ok());
+        assert!(check_workspace_links(&root.join("Projects/repo-link/src")).is_ok());
+        // `..` steps up from where the link leads, as the OS does.
+        assert!(matches!(
+            check_workspace_links(&repo.join("in/../out")),
+            Err(LaunchError::WorkspaceLink { .. })
+        ));
     }
 
     #[test]

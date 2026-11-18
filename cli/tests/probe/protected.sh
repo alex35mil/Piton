@@ -18,8 +18,24 @@ src="$scratch/repo"
 outside="$scratch/outside"
 mkdir -p "$src/.piton/.local" "$src/apps/sub" "$src/apps/.pi" "$src/src" "$src/.agents/skills/s" "$outside"
 git -C "$src" init -q
-marker='# piton protected-file probe'
-echo "$marker" > "$src/.piton/config.toml"
+# A grant through a link the sandbox could have made (here, in the checkout) mustn't reach the link's target: a folder
+# outside every write the sandbox has, created and removed by this script.
+probe="piton-probe-$$"
+linked="$HOME/$probe-linked"
+# Names for the entries the denied attempts would create outside the scratch folder; removed below if they exist.
+agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+cleanup_real() {
+    rm -rf "$linked"
+    rm -f "$HOME/$probe"
+    rmdir "$HOME/Library/Caches/$probe" "$agent_dir/extensions/$probe" 2>/dev/null || true
+}
+trap 'cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
+mkdir "$linked"
+ln -s "$linked" "$src/cache"
+marker="# piton protected-file probe
+[sandbox]
+allow = [\"$src/cache\"]"
+printf '%s\n' "$marker" > "$src/.piton/config.toml"
 echo 'skill' > "$src/.agents/skills/s/SKILL.md"
 echo 'a' > "$src/src/a.rs"
 
@@ -29,16 +45,8 @@ if ! shown=$("$piton" sandbox show --workspace "$src"); then
     exit 1
 fi
 policy=$(printf '%s' "$shown" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
-agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
 state=$HOME/.local/state/piton
 config_home=${PITON_CONFIG_HOME:-$HOME/.config/piton}
-# Names for the entries the denied attempts would create outside the scratch folder; removed below if they exist.
-probe="piton-probe-$$"
-cleanup_real() {
-    rm -f "$HOME/$probe"
-    rmdir "$HOME/Library/Caches/$probe" "$agent_dir/extensions/$probe" 2>/dev/null || true
-}
-trap 'cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
 
 # Every check runs in a shell of its own, so helpers are files, not shell functions.
 connect="$scratch/connect.py"
@@ -96,6 +104,8 @@ attempt ok     "create a folder named like .pi but not" 'mkdir -p apps/.pix && e
 # Moving a parent of a not-yet-existing protected folder is an ordinary write; the daemon guards its own writes
 # against it (it never follows a symlink on an approved path).
 attempt ok     "swap a parent folder for a symlink"     "mv apps apps.bak && ln -s $OUTSIDE apps"
+# A granted path that's a symlink grants the link, not what it points to.
+attempt denied "write through a granted symlink"        'touch cache/x'
 # Reads: everything but credentials.
 attempt ok     "read system files"                      'cat /etc/hosts'
 attempt ok     "read git config"                        "test ! -e $HOME/.gitconfig || cat $HOME/.gitconfig"

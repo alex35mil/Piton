@@ -75,7 +75,8 @@ pub fn browse(roots: &[PathBuf], path: Option<&Path>) -> Result<Vec<Entry>, Work
     Ok(entries)
 }
 
-/// Checks that a native app may start a session in `path`: a checkout under a root. Returns it canonical.
+/// Checks that a native app may start a session in `path`: a checkout under a root. Returns it as given, so the launch
+/// sees any symlink on it (a sandboxed launch refuses one that leads out of its checkout).
 pub fn check_start(roots: &[PathBuf], path: &Path) -> Result<PathBuf, WorkspaceError> {
     if roots.is_empty() {
         return Err(WorkspaceError::NoRoots);
@@ -87,7 +88,7 @@ pub fn check_start(roots: &[PathBuf], path: &Path) -> Result<PathBuf, WorkspaceE
     if !canonical.join(".git").exists() {
         return Err(WorkspaceError::NotACheckout(canonical));
     }
-    Ok(canonical)
+    Ok(path.to_path_buf())
 }
 
 fn entry(path: &Path) -> Entry {
