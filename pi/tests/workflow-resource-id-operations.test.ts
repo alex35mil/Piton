@@ -18,6 +18,9 @@ import {
     recordResourceIds,
 } from "../workflows/extensions/integrations/resource-ids.ts"
 import { ResourceIdsToolValidator } from "../workflows/extensions/integrations/resource-id-tool.ts"
+import { linkPullRequestIssue } from "../workflows/extensions/integrations/forge/github/issue-link.ts"
+import { findPullRequest } from "../workflows/extensions/integrations/forge/github/find-pull-request.ts"
+import { readEntityStatus } from "../workflows/extensions/__lib/entity.ts"
 import {
     evidenceResourceKind,
     shippingReadDecision,
@@ -700,4 +703,184 @@ describe("resource ID operations", () => {
             }
         })
     }
+
+    it("links the recorded PR to its issue and confirms it from GitHub's closing references", async () => {
+        const f = fixture()
+        try {
+            fs.writeFileSync(
+                path.join(f.root, ".piton/mcp.json"),
+                JSON.stringify({
+                    mcpServers: {
+                        github: {
+                            url: "https://api.githubcopilot.com/mcp/",
+                            headers: { Authorization: "Bearer ${LINK_TOKEN}" },
+                        },
+                    },
+                }),
+            )
+            const status = readEntityStatus(f.directory)
+            // A fake GitHub: whether the PR references issue #23, and whether a link request applies or fails.
+            const github = (linked: boolean, link: "applies" | "ignored" | "fails") => {
+                const calls: string[] = []
+                const fetchImpl = (async (_url: string, init: RequestInit) => {
+                    assert.equal((init.headers as Record<string, string>).Authorization, "Bearer secret")
+                    const { query, variables } = JSON.parse(String(init.body))
+                    if (query.includes("addCloseIssueReferences")) {
+                        calls.push("link")
+                        assert.deepEqual(variables, { issue: "I_23", pr: "PR_7" })
+                        if (link === "applies" || link === "fails") linked = true
+                        if (link === "fails") throw new TypeError("fetch failed")
+                        return Response.json({ data: { addCloseIssueReferences: {} } })
+                    }
+                    calls.push("read")
+                    assert.deepEqual(variables, { ...repo, issue: 23, pr: 7 })
+                    const nodes = [{ number: 5, repository: { nameWithOwner: "alex/example" } }]
+                    if (linked) nodes.push({ number: 23, repository: { nameWithOwner: "alex/example" } })
+                    return Response.json({
+                        data: {
+                            repository: {
+                                issue: { id: "I_23" },
+                                pullRequest: { id: "PR_7", closingIssuesReferences: { nodes } },
+                            },
+                        },
+                    })
+                }) as unknown as typeof fetch
+                return { calls, fetchImpl }
+            }
+            const link = (fetchImpl: typeof fetch, env: NodeJS.ProcessEnv = { LINK_TOKEN: "secret" }) =>
+                linkPullRequestIssue(f.root, status, 7, { projectTrusted: true, fetch: fetchImpl, env })
+
+            const existing = github(true, "applies")
+            assert.deepEqual(await link(existing.fetchImpl), { state: "linked", issueNumber: 23 })
+            assert.deepEqual(existing.calls, ["read"])
+            const added = github(false, "applies")
+            assert.deepEqual(await link(added.fetchImpl), { state: "linked", issueNumber: 23 })
+            assert.deepEqual(added.calls, ["read", "link", "read"])
+            // A failed request that still applied is decided by the read-back.
+            assert.deepEqual(await link(github(false, "fails").fetchImpl), { state: "linked", issueNumber: 23 })
+            assert.deepEqual(await link(github(false, "ignored").fetchImpl), { state: "unconfirmed", issueNumber: 23 })
+            assert.deepEqual(await link(github(false, "applies").fetchImpl, {}), {
+                state: "failed",
+                reason: "environment variable LINK_TOKEN is not set",
+            })
+            const local = { ...status, tracker: { provider: "local" as const, createdAt: status.createdAt } }
+            assert.deepEqual(await linkPullRequestIssue(f.root, local, 7, { projectTrusted: true }), {
+                state: "not-applicable",
+            })
+        } finally {
+            f.cleanup()
+        }
+    })
+
+    it("finds the PR among the issue's linked PRs first, then by head and base", async () => {
+        const f = fixture()
+        try {
+            fs.writeFileSync(
+                path.join(f.root, ".piton/mcp.json"),
+                JSON.stringify({
+                    mcpServers: {
+                        github: {
+                            url: "https://api.githubcopilot.com/mcp/",
+                            headers: { Authorization: "Bearer ${LINK_TOKEN}" },
+                        },
+                    },
+                }),
+            )
+            f.git(["add", "."])
+            f.git(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "Fixture"])
+            f.git(["branch", prScope.head])
+            const sha = f.git(["rev-parse", prScope.head])
+            const status = readEntityStatus(f.directory)
+            const node = (number: number, overrides: Record<string, unknown> = {}) => ({
+                number,
+                url: `https://github.com/alex/example/pull/${number}`,
+                state: "OPEN",
+                headRefName: prScope.head,
+                baseRefName: "main",
+                headRefOid: sha,
+                headRepository: { nameWithOwner: "alex/example" },
+                baseRepository: { nameWithOwner: "alex/example" },
+                ...overrides,
+            })
+            // A fake GitHub answering the linked-PR and head/base queries, each split into one-node pages.
+            const github = (linked: object[], listed: object[]) => {
+                const calls: string[] = []
+                const page = (nodes: object[], after: string | null) => {
+                    const index = after === null ? 0 : Number(after)
+                    const more = index + 1 < nodes.length
+                    return {
+                        nodes: nodes.slice(index, index + 1),
+                        pageInfo: { hasNextPage: more, endCursor: more ? String(index + 1) : null },
+                    }
+                }
+                const fetchImpl = (async (_url: string, init: RequestInit) => {
+                    const { query, variables } = JSON.parse(String(init.body))
+                    if (query.includes("closedByPullRequestsReferences")) {
+                        calls.push("linked")
+                        assert.equal(variables.issue, 23)
+                        return Response.json({
+                            data: {
+                                repository: {
+                                    issue: { closedByPullRequestsReferences: page(linked, variables.after) },
+                                },
+                            },
+                        })
+                    }
+                    calls.push("head-base")
+                    assert.deepEqual([variables.head, variables.base], [prScope.head, "main"])
+                    return Response.json({ data: { repository: { pullRequests: page(listed, variables.after) } } })
+                }) as unknown as typeof fetch
+                return { calls, fetchImpl }
+            }
+            const find = (fetchImpl: typeof fetch, entity = status) =>
+                findPullRequest(f.root, entity, {
+                    projectTrusted: true,
+                    fetch: fetchImpl,
+                    env: { LINK_TOKEN: "secret" },
+                })
+
+            const linked = github([node(5, { headRefName: "other" }), node(7, { state: "MERGED" })], [])
+            assert.deepEqual(await find(linked.fetchImpl), {
+                state: "found",
+                source: "linked",
+                pullRequest: { number: 7, url: "https://github.com/alex/example/pull/7", state: "merged" },
+                rejected: [
+                    {
+                        pullRequest: { number: 5, url: "https://github.com/alex/example/pull/5", state: "open" },
+                        mismatches: ["head"],
+                    },
+                ],
+            })
+            assert.deepEqual(linked.calls, ["linked", "linked"])
+
+            // No linked match: the head and base listing decides, and a stale head or fork never matches.
+            const fallback = github(
+                [],
+                [
+                    node(3, { headRefOid: "0".repeat(40), state: "CLOSED" }),
+                    node(8, { headRepository: { nameWithOwner: "someone/example" } }),
+                    node(9),
+                ],
+            )
+            const found = await find(fallback.fetchImpl)
+            assert.equal(found.state === "found" && found.source, "head-base")
+            assert.equal(found.state === "found" && found.pullRequest.number, 9)
+            assert.deepEqual(
+                found.rejected.map((entry) => [entry.pullRequest.number, entry.mismatches]),
+                [
+                    [3, ["head commit"]],
+                    [8, ["head repository"]],
+                ],
+            )
+            assert.equal((await find(github([node(7), node(9)], []).fetchImpl)).state, "ambiguous")
+            assert.equal((await find(github([], []).fetchImpl)).state, "none")
+            // Without a GitHub issue, only the head and base listing is read.
+            const local = { ...status, tracker: { provider: "local" as const, createdAt: status.createdAt } }
+            const listing = github([], [node(9)])
+            assert.equal((await find(listing.fetchImpl, local)).state, "found")
+            assert.deepEqual(listing.calls, ["head-base"])
+        } finally {
+            f.cleanup()
+        }
+    })
 })
