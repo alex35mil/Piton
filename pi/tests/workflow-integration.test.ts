@@ -10,7 +10,14 @@ import * as path from "node:path"
 import { describe, it, type TestContext } from "node:test"
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
-import { githubPhaseReads, kindLabelNames, kindLabels, linearPhases, phaseValues } from "./workflow-phase-fixtures.ts"
+import {
+    githubPhaseReads,
+    kindLabelNames,
+    kindLabels,
+    linearKindGroup,
+    linearPhases,
+    phaseValues,
+} from "./workflow-phase-fixtures.ts"
 import { withToolExecution } from "./extension-context-fixture.ts"
 
 import {
@@ -699,9 +706,14 @@ describe("workflow integration configuration", () => {
             assert.deepEqual(labels(queueSelection), [])
             write({
                 ...linearConfig(),
-                labels: { groups: { kind: { ...kindLabels().groups.kind, scope: "workspace" } } },
+                labels: { groups: { kind: linearKindGroup() } },
             })
             assert.deepEqual(labels(queueSelection), ["Kind: Refactor"], "Linear queue intake applies labels too")
+            assert.deepEqual(
+                labels({ ...queueSelection, entity: "epic", kind: "epic" }),
+                [],
+                "a Linear Epic is a Project and carries no Kind label",
+            )
             write(linearConfig())
             assert.deepEqual(labels(queueSelection), [])
             assert.equal(labels({ operation: "inspect", target: "current" }), undefined)
@@ -1366,10 +1378,13 @@ describe("workflow integration configuration", () => {
             assert.ok(loads(github({ groups: { area } })), "the kind group is optional")
 
             const epicOnly = { appliesTo: ["epic"], cardinality: "exactlyOne", values: { epic: label("Kind: Epic") } }
-            assert.ok(loads(github({ groups: { kind: epicOnly } })))
+            rejects(github({ groups: { kind: epicOnly } }), /GitHub `kind` label group must apply to/)
+            const { scope: _scope, ...deliverablesOnly } = linearKindGroup()
+            rejects(github({ groups: { kind: deliverablesOnly } }), /GitHub `kind` label group must apply to/)
+            const { epic: _epic, ...withoutEpic } = kindLabels().groups.kind.values
             rejects(
-                github({ groups: { kind: { ...epicOnly, values: { ...epicOnly.values, feature: label("F") } } } }),
-                /values must be exactly "epic" for its `appliesTo`/,
+                github({ groups: { kind: { ...kindLabels().groups.kind, values: withoutEpic } } }),
+                /values must be exactly/,
             )
             rejects(
                 github({ groups: { kind: { ...kindLabels().groups.kind, cardinality: "zeroOrOne" } } }),
@@ -1419,6 +1434,11 @@ describe("workflow integration configuration", () => {
             rejects(github({ retired: [{ name: "old" }, { name: "Old" }] }), /listed twice in retired/)
 
             const linear = (labels: unknown) => ({ ...linearConfig(), labels })
+            assert.ok(loads(linear({ groups: { kind: linearKindGroup() } })))
+            rejects(
+                linear({ groups: { kind: { ...kindLabels().groups.kind, scope: "workspace" } } }),
+                /Linear `kind` label group must apply to exactly "deliverable"/,
+            )
             const linearArea = { ...area, scope: "workspace" }
             assert.ok(loads(linear({ groups: { area: { ...linearArea, nativeGroup: label("Area") } } })))
             rejects(

@@ -168,7 +168,9 @@ Example returned configuration for a Project-contained tracker (use the actual o
 ```
 
 - **Groups:** each has `appliesTo` (`epic`, `deliverable`, or both), a `cardinality` (`exactlyOne`, `zeroOrOne`, `oneOrMore`, or `zeroOrMore`), and values keyed by stable lowercase keys. Each value is a label definition: `name`, `color` (`#RRGGBB`), and `description`.
-- **`kind`:** the reserved group for Kind. It must be `exactlyOne`, its values must be exactly `epic` and the six Deliverable kinds its `appliesTo` covers, and its value comes from the item's Kind.
+- **`kind`:** the reserved group for Kind. It must be `exactlyOne`, its values must be exactly the kinds its `appliesTo` covers, and its value comes from the item's Kind. The tracker fixes `appliesTo`:
+  - **GitHub:** `epic` and `deliverable`, with `epic` and the six Deliverable kinds. Epics and Tasks are both issues, so `Kind: Epic` tells them apart.
+  - **Linear:** `deliverable` only, with the six Deliverable kinds. An Epic is a Project, whose object type already tells it apart, so it carries no Kind label.
 - **`gate`:** the reserved group whose values mark a Task or Gig with points where the workflow stops for approval. It applies only to `deliverable` and is `zeroOrMore`. Its values may be only the gates the workflow knows: today `plan`, which makes the plan [wait for approval](./planning.md#plan-approval). The user applies them; runtime only reads them.
 - **Linear groups** add `scope` (`workspace` or `team`) and an optional `nativeGroup` label definition. With it, the values are children of a native group: single-select for at most one value, multi-select otherwise.
 - **`unmanaged.keep`** and **`retired`** record the user's answers about labels outside the configuration. Linear entries also name the `catalog` (`issue` or `project`) and `scope`.

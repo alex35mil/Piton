@@ -13,7 +13,7 @@ import {
 import { parseEpicTasks } from "../workflows/extensions/__lib/epic-tasks.ts"
 import type { TrackerConfig } from "../workflows/extensions/integrations/config.ts"
 import { gateOutcome } from "../workflows/extensions/integrations/gate.ts"
-import { kindLabels, linearPhaseGroup } from "./workflow-phase-fixtures.ts"
+import { kindLabels, linearKindGroup, linearPhaseGroup } from "./workflow-phase-fixtures.ts"
 
 const def = (name: string) => ({ name, color: "#1D76DB", description: "" })
 const group = (cardinality: string, values: Record<string, string>, appliesTo = ["deliverable"]) => ({
@@ -186,7 +186,7 @@ describe("GitHub label update", () => {
 describe("Linear label update", () => {
     const linearLabels = {
         groups: {
-            kind: { ...kindLabels().groups.kind, scope: "workspace" },
+            kind: linearKindGroup(),
             area: { ...group("zeroOrMore", { fe: "Area: FE" }), scope: "team" },
         },
     } as LinearLabels

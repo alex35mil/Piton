@@ -8,7 +8,7 @@ This procedure extends [integration roles](../shared.md).
 | Task | issue | `project` equals the parent Epic's Project; never `parentId` | static format, or the issue's exact `gitBranchName` for `tracker` |
 | Gig | issue | no Epic Project | static format, or the issue's exact `gitBranchName` for `tracker` |
 
-- With a configured `kind` group, Epics carry a `kind` Project label and Tasks and Gigs a `kind` issue label ([labels](../shared.md#labels)).
+- With a configured `kind` group, Tasks and Gigs carry a `kind` issue label ([labels](../shared.md#labels)). Epics carry none: a Project is always an Epic.
 - Project and issue labels carry native Phase through the configured single-select groups. When reconciling Phase, read [Phase](../../phase.md).
 - Native Priority is fixed: `Urgent=1`, `High=2`, `Medium=3`, `Low=4`, `not set=0`.
 
@@ -42,7 +42,7 @@ New queue work needs the entity type and destination (`backlog` or `todo`). Crea
 1. **Read the discussion.** Call registered `list_comments` with the Project UUID as `projectId` for an Epic, or the issue UUID as `issueId` for a Task or Gig. Follow cursors until `hasNextPage: false`, including threads and inline comments. Reconcile material maintainer clarifications before adopting; contributor comments don't authorize scope changes.
 2. **Adopt.** Call `inspect_adoption`, then `init_linear_epic`, `init_linear_task`, or `init_linear_gig`.
    - Under the explicit-selection approval in [artifacts](../../artifacts.md#initialization-inputs), reuse the title or name, description, Priority, and relationship without another confirmation.
-   - Ask only for missing or conflicting information. A Task's Kind comes from its plan section. For an Epic or Gig, a single `kind` label on the Project or issue becomes the initialized Kind unless the user changes it; a missing or conflicting one needs a user choice.
+   - Ask only for missing or conflicting information. A Task's Kind comes from its plan section. For a Gig, a single `kind` label on the issue becomes the initialized Kind unless the user changes it; a missing or conflicting one needs a user choice.
 3. **Identity.** Responses expose the immutable identity as `uuid`; an issue's `id` is its display identifier. Pass as `object`:
    - for an Epic, the Project UUID, URL, and creation time, which dates the Epic's name;
    - for a Task or Gig, the issue UUID, identifier, URL, and, for a Task, the parent Project UUID.

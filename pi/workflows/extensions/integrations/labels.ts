@@ -187,8 +187,38 @@ const LINEAR_RESERVED_LABEL_NAMES = new Set([
 ])
 const GITHUB_DESCRIPTION_LIMIT = 100
 
-function assertKindGroup(group: GitHubLabelGroup | LinearLabelGroup): void {
+/** The tracker whose label configuration is being checked. */
+type LabelTracker = "github" | "linear"
+
+/**
+ * The item types a `kind` group must cover. GitHub Epics and Tasks are both issues, so `Kind: Epic`
+ * tells them apart. A Linear Epic is a Project, which its object type already distinguishes.
+ */
+function kindCoverageFor(tracker: LabelTracker): readonly LabelItemType[] {
+    switch (tracker) {
+        case "github":
+            return ["epic", "deliverable"]
+        case "linear":
+            return ["deliverable"]
+    }
+}
+
+function trackerName(tracker: LabelTracker): string {
+    switch (tracker) {
+        case "github":
+            return "GitHub"
+        case "linear":
+            return "Linear"
+    }
+}
+
+function assertKindGroup(tracker: LabelTracker, group: GitHubLabelGroup | LinearLabelGroup): void {
     if (group.cardinality !== "exactlyOne") throw new Error("the `kind` label group must be `exactlyOne`")
+    const coverage = kindCoverageFor(tracker)
+    if (group.appliesTo.length !== coverage.length || coverage.some((itemType) => !group.appliesTo.includes(itemType)))
+        throw new Error(
+            `the ${trackerName(tracker)} \`kind\` label group must apply to exactly ${coverage.map((itemType) => JSON.stringify(itemType)).join(" and ")}`,
+        )
     const expected = group.appliesTo.flatMap((itemType) => [...kindValuesFor(itemType)]).sort()
     const actual = Object.keys(group.values).sort()
     if (expected.length !== actual.length || expected.some((key, index) => key !== actual[index])) {
@@ -211,9 +241,9 @@ function assertGateGroup(group: GitHubLabelGroup | LinearLabelGroup): void {
 }
 
 /** Checks the shape of the groups whose keys the workflow reserves; other groups are free-form. */
-function assertReservedGroups(groups: [string, GitHubLabelGroup | LinearLabelGroup][]): void {
+function assertReservedGroups(tracker: LabelTracker, groups: [string, GitHubLabelGroup | LinearLabelGroup][]): void {
     for (const [key, group] of groups) {
-        if (key === KIND_GROUP_KEY) assertKindGroup(group)
+        if (key === KIND_GROUP_KEY) assertKindGroup(tracker, group)
         if (key === GATE_GROUP_KEY) assertGateGroup(group)
     }
 }
@@ -254,7 +284,7 @@ function assertEntries<T extends { name: string }>(
 
 export function assertGitHubLabels(labels: GitHubLabels | undefined): void {
     const groups = Object.entries(labels?.groups ?? {})
-    assertReservedGroups(groups)
+    assertReservedGroups("github", groups)
     const definitions = groups.flatMap(([, group]) => Object.values(group.values))
     for (const definition of definitions) {
         if (definition.description.length > GITHUB_DESCRIPTION_LIMIT)
@@ -289,7 +319,7 @@ function linearCatalogItemType(catalog: LinearLabelCatalog): LabelItemType {
  */
 export function assertLinearLabels(labels: LinearLabels | undefined, phase: LinearPhaseGroups | undefined): void {
     const groups = Object.entries(labels?.groups ?? {})
-    assertReservedGroups(groups)
+    assertReservedGroups("linear", groups)
     const managedByCatalog = new Map<LinearLabelCatalog, Set<string>>()
     for (const catalog of LinearLabelCatalogSchema.enum) {
         const itemType = linearCatalogItemType(catalog)
