@@ -81,9 +81,10 @@ async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Res
             .unwrap_or_else(|| std::env::vars().collect()),
         false => std::env::vars().collect(),
     };
-    launch::prepare_sandbox(config, &resolved, &base, &workspace.path)
+    let tools = crate::tools::Tools::resolve(config, &base);
+    launch::prepare_sandbox(config, &tools, &resolved, &base, &workspace.path)
         .await
-        .map(|(_, resolution)| resolution)
+        .map(|sandboxed| sandboxed.resolution)
         .map_err(|e| e.to_string())
 }
 

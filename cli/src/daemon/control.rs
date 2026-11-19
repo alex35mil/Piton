@@ -61,7 +61,10 @@ impl Daemon {
                     Ok(git) => git,
                     Err(refusal) => return ControlResponse::WorkerRefused { refusal },
                 };
-                let mise = self.mise.clone();
+                let mise = match self.worker_mise() {
+                    Ok(mise) => mise,
+                    Err(refusal) => return ControlResponse::WorkerRefused { refusal },
+                };
                 let paths = self.config().paths.clone();
                 let created = tokio::task::spawn_blocking(move || {
                     crate::project::create_worker(&request, mise.as_ref(), &paths, &git)
@@ -113,7 +116,7 @@ impl Daemon {
         &self,
         source: &std::path::Path,
     ) -> Result<crate::launch::git::SourceGit, crate::project::WorkerRefusal> {
-        crate::launch::git::SourceGit::for_source(&self.config(), &self.base_env, source)
+        crate::launch::git::SourceGit::for_source(&self.config(), &self.tools, &self.base_env, source)
             .await
             .map_err(|e| crate::project::WorkerRefusal::InvalidConfiguration {
                 message: format!("can't sandbox Git for {}: {e}", source.display()),
@@ -149,6 +152,11 @@ impl Daemon {
             Ok(Err(refusal)) => return ControlResponse::WorkerRefused { refusal },
             Err(e) => return ControlResponse::Error { message: e.to_string() },
         };
+        // Before any session stops: mise, for the worker's trust, enabled but not installed refuses the deletion.
+        let mise = match self.worker_mise() {
+            Ok(mise) => mise,
+            Err(refusal) => return ControlResponse::WorkerRefused { refusal },
+        };
         let worker = removal.worker.clone();
         let handles: Vec<_> = lock(&self.sessions)
             .values()
@@ -165,7 +173,6 @@ impl Daemon {
         while stops.join_next().await.is_some() {}
         // Leftovers were checked above (or forced); the sessions just stopped can't have added commits worth keeping
         // without the user seeing them, but check again unless forced.
-        let mise = self.mise.clone();
         match tokio::task::spawn_blocking(move || {
             crate::project::remove_worker(&removal, mise.as_ref(), source_git(&git))
         })

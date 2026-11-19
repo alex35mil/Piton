@@ -19,17 +19,19 @@ use crate::{
     },
 };
 
-/// How piton runs mise for workers: the resolved program and the environment it runs with (the daemon's base
-/// environment, so mise sees the user's `MISE_*` settings).
+/// How piton runs mise for workers: the resolved program, its leading arguments, and the environment it runs with (the
+/// daemon's base environment, so mise sees the user's `MISE_*` settings).
 #[derive(Debug, Clone)]
 pub struct Mise {
     pub program: String,
+    pub args: Vec<String>,
     pub env: Env,
 }
 
 impl Mise {
     fn run(&self, args: &[&std::ffi::OsStr]) -> std::result::Result<String, String> {
         let out = Command::new(&self.program)
+            .args(&self.args)
             .args(args)
             .env_clear()
             .envs(&self.env)
@@ -126,6 +128,9 @@ pub enum WorkerRefusal {
     /// Fast-forwarding the source changes protected files: retry with the user's answer. Nothing has changed.
     #[error(transparent)]
     ProtectedUpdate(Blocked),
+    /// A tool workers need (mise, for trust) is enabled but not installed.
+    #[error(transparent)]
+    ToolUnavailable(crate::tools::Unavailable),
     #[error("{message}")]
     Failed { message: String },
 }
@@ -1019,6 +1024,7 @@ mod tests {
         env.insert("MISE_STATE_DIR".into(), state.to_string_lossy().into_owned());
         Mise {
             program: crate::launch::resolve_program("mise", &env),
+            args: Vec::new(),
             env,
         }
     }

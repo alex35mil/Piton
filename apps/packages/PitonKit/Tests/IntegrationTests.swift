@@ -59,13 +59,16 @@ private final class Daemon: @unchecked Sendable {
         args = ["-e", "\(ext)", "--model", "faux/faux-1"]
         [env]
         login_shell = false
-        mise = false
         [stop]
         grace_ms = 3000
         term_grace_ms = 1000
         [tailnet]
         port = 0
-        cli = "\(tailscale)"
+        [tools.mise]
+        enabled = false
+        [tools.tailscale]
+        enabled = true
+        command = ["\(tailscale)"]
         """.write(to: config.appendingPathComponent("config.host.toml"), atomically: true, encoding: .utf8)
         // A fixed host identity in the daemon's database (next to its socket).
         let seed = Process()

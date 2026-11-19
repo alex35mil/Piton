@@ -214,6 +214,9 @@ private let decoder = JSONDecoder()
     // The client file has no local one; the global config.toml is the projects' defaults.
     #expect(state.setting(.client, "text_font")?.localChoice == false)
     #expect(state.setting(.project, "workers.skip")?.value == .array([.string(".build")]))
+    // A tool enabled but not installed carries its warning; other settings have none.
+    #expect(state.setting(.host, "tools.tailscale.enabled")?.warning?.contains("tailscale") == true)
+    #expect(state.setting(.host, "keep_awake")?.warning == nil)
     #expect(SettingScope.host.fileName(.local) == "config.host.local.toml")
     #expect(state.keepAwake && state.awake && state.sessions == 2)
     #expect(

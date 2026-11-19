@@ -543,11 +543,13 @@ public struct Setting: Codable, Sendable, Hashable, Identifiable {
     public let applies: SettingApplies
     /// Whether the apps may change it.
     public let editable: Bool
+    /// Something the user should fix, shown with the setting: a tool enabled but not installed.
+    public let warning: String?
 
     public var id: String { "\(scope.rawValue).\(key)" }
 
     enum CodingKeys: String, CodingKey {
-        case key, scope, value, placement, applies, editable
+        case key, scope, value, placement, applies, editable, warning
         case localChoice = "local_choice"
         case valueType = "value_type"
     }

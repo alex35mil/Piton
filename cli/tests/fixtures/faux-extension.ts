@@ -6,7 +6,8 @@
 //   "ask"        ask a select dialog through the `faux_ask` tool, then answer with the choice
 //   "picture"    call the `faux_picture` tool, which returns a 2 MB image (larger than a phone's WebSocket message)
 //   "status"     call the `faux_status` tool, which sets a status line and a widget, then clears them on "status clear"
-//   "env"        call the `faux_env` tool, which returns the daemon's variables for this pi (token, agent socket)
+//   "env"        call the `faux_env` tool, which returns the daemon's variables for this pi (token, agent socket, and
+//                what the fake fnox set)
 import { fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -89,6 +90,10 @@ export default function (pi: ExtensionAPI) {
             const env = {
                 token: process.env.PITON_SESSION_TOKEN ?? null,
                 socket: process.env.PITON_AGENT_SOCKET ?? null,
+                fnox: process.env.FAKE_FNOX ?? null,
+                githubToken: process.env.GITHUB_TOKEN ?? null,
+                fnoxProfile: process.env.FNOX_PROFILE ?? null,
+                workspaceMarker: process.env.PITON_WORKSPACE_MARKER ?? null,
             };
             return { content: [{ type: "text", text: JSON.stringify(env) }], details: env };
         },

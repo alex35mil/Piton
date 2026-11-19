@@ -36,4 +36,5 @@ wildcard_enum_match_arm = "deny"
 match_wildcard_for_single_variants = "deny"
 
 [dev-dependencies]
+regex-lite = "0.1.8"
 tempfile = "3.27.0"

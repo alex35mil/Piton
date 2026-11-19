@@ -12,6 +12,8 @@ use std::net::{IpAddr, SocketAddr};
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::tools::Program;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfNode {
     pub user: u64,
@@ -60,12 +62,12 @@ pub enum TailnetError {
     NotRunning(String),
 }
 
-pub async fn self_node(cli: &str) -> Result<SelfNode, TailnetError> {
+pub async fn self_node(cli: &Program) -> Result<SelfNode, TailnetError> {
     let out = run(cli, &["status", "--json"], "status").await?;
     parse_status(&out)
 }
 
-pub async fn identify(cli: &str, peer: SocketAddr) -> Result<Peer, Refusal> {
+pub async fn identify(cli: &Program, peer: SocketAddr) -> Result<Peer, Refusal> {
     let out = run(cli, &["whois", "--json", &peer.to_string()], "whois")
         .await
         .map_err(|e| match e {
@@ -107,8 +109,9 @@ pub fn check(me: &SelfNode, peer: &Peer) -> Result<(), Refusal> {
 /// How long a `tailscale` call may take; a hung tailscaled must not hold connections open.
 const CLI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn run(cli: &str, args: &[&str], command: &'static str) -> Result<Vec<u8>, TailnetError> {
-    let child = Command::new(cli)
+async fn run(cli: &Program, args: &[&str], command: &'static str) -> Result<Vec<u8>, TailnetError> {
+    let child = Command::new(&cli.program)
+        .args(&cli.args)
         .args(args)
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)

@@ -291,19 +291,45 @@ pub struct LaunchSpec {
     pub policy: Option<launch::sandbox::Policy>,
     /// What this session's protected files are (canonical source and checkout).
     pub protected: crate::agent::ProtectedRoots,
+    /// The credential proxy pi starts behind, when fnox is used for this workspace.
+    pub proxy: Option<launch::fnox::Proxy>,
 }
 
 pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
     let helper = launch::helper()?;
     let argv = launch::command_line(&config, spec.mode, &spec.session, &helper);
-    let mut env = spec.env.clone();
+    let encoding = |e: serde_json::Error| LaunchError::Spawn {
+        program: "launch environment".into(),
+        source: std::io::Error::other(e),
+    };
+    let mut extra = Env::new();
     if let Some(policy) = &spec.policy {
-        let policy = serde_json::to_string(policy).map_err(|e| LaunchError::Spawn {
-            program: "sandbox policy".into(),
-            source: std::io::Error::other(e),
-        })?;
-        env.insert(launch::sandbox::POLICY_ENV.into(), policy);
+        extra.insert(
+            launch::sandbox::POLICY_ENV.into(),
+            serde_json::to_string(policy).map_err(encoding)?,
+        );
     }
+    // Behind fnox, fnox runs with the daemon's base environment and pi's travels past it in the handoff, which this
+    // binary unpacks: `sandbox-exec` for a sandboxed launch, `launch-exec` for a host one.
+    let (argv, env) = match (&spec.proxy, spec.mode) {
+        (None, LaunchMode::Host | LaunchMode::Sandbox) => {
+            let mut env = spec.env.clone();
+            env.extend(extra);
+            (argv, env)
+        }
+        (Some(proxy), LaunchMode::Sandbox) => (
+            proxy.wrap(argv),
+            proxy.environment(&spec.env, &extra).map_err(encoding)?,
+        ),
+        (Some(proxy), LaunchMode::Host) => {
+            let mut through = vec![helper.to_string_lossy().into_owned(), "launch-exec".into(), "--".into()];
+            through.extend(argv);
+            (
+                proxy.wrap(through),
+                proxy.environment(&spec.env, &extra).map_err(encoding)?,
+            )
+        }
+    };
     // Argument values can contain provider credentials; only structural metadata belongs in persistent logs.
     crate::debug!(
         "session {}: launching {:?} with {} arguments",
@@ -386,6 +412,7 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         pending: HashMap::new(),
         next_internal: 0,
         replay: Replay::default(),
+        fnox: spec.proxy.as_ref().map(|_| FnoxStartup::default()),
         stderr_tail: Vec::new(),
         writer: None,
         stopping: None,
@@ -471,6 +498,8 @@ struct SessionTask {
     pending: HashMap<String, Pending>,
     next_internal: u64,
     replay: Replay,
+    /// fnox's startup warnings, for a session behind the proxy.
+    fnox: Option<FnoxStartup>,
     stderr_tail: Vec<String>,
     writer: Option<ClientId>,
     stopping: Option<(StopPhase, Instant)>,
@@ -495,6 +524,30 @@ struct Watcher {
 
 const STDERR_TAIL: usize = 20;
 
+/// The secrets fnox couldn't read when it started this pi, and whether attached clients were told yet: fnox prints its
+/// warnings before it starts pi, so they're announced once pi's first record arrives.
+#[derive(Default)]
+struct FnoxStartup {
+    log: launch::fnox::StartupLog,
+    announced: bool,
+}
+
+/// The id of the records the daemon sends about fnox in pi's `extension_ui_request` format.
+const FNOX_UI_ID: &str = "piton:fnox";
+
+/// The warning notification for an attached client (pi.nvim), when fnox couldn't read a secret.
+fn fnox_notify(fnox: &FnoxStartup) -> Option<Arc<str>> {
+    let message = fnox.log.notice()?;
+    let record = json!({
+        "type": "extension_ui_request",
+        "id": FNOX_UI_ID,
+        "method": "notify",
+        "notifyType": "warning",
+        "message": message,
+    });
+    Some(record.to_string().into())
+}
+
 impl SessionTask {
     async fn run(
         mut self,
@@ -515,6 +568,9 @@ impl SessionTask {
                 },
                 line = stderr.next_line(), if stderr_open => match line {
                     Ok(Some(line)) => {
+                        if self.fnox.as_mut().is_some_and(|f| f.log.read(&line)) {
+                            self.on_unresolved_secrets();
+                        }
                         self.stderr_tail.push(line);
                         if self.stderr_tail.len() > STDERR_TAIL {
                             self.stderr_tail.remove(0);
@@ -598,6 +654,10 @@ impl SessionTask {
             SessionCmd::Attach { client, tx, done } => {
                 for line in self.replay.frames() {
                     let _ = tx.send(Frame::Record(line));
+                }
+                // A client that attaches after the announcement gets the notification too.
+                if let Some(notify) = self.fnox.as_ref().filter(|f| f.announced).and_then(fnox_notify) {
+                    let _ = tx.send(Frame::Record(notify));
                 }
                 self.clients.insert(client, tx);
                 self.empty_deadline = None;
@@ -987,7 +1047,56 @@ impl SessionTask {
         }
     }
 
+    /// fnox named another secret it couldn't read: the conversation's notice and the status entry show the list.
+    fn on_unresolved_secrets(&mut self) {
+        let Some(fnox) = &self.fnox else { return };
+        let (Some(notice), Some(status)) = (fnox.log.notice(), fnox.log.status()) else {
+            return;
+        };
+        let changes = self.view.set_startup_notice(notice);
+        self.broadcast(changes);
+        let record = json!({
+            "type": "extension_ui_request",
+            "id": FNOX_UI_ID,
+            "method": "setStatus",
+            "statusKey": "piton-fnox",
+            "statusText": status,
+        });
+        self.emit_record(record);
+        // A warning read after pi's first record: tell the clients again, with the whole list.
+        if let Some(notify) = self.fnox.as_ref().filter(|f| f.announced).and_then(fnox_notify) {
+            for tx in self.clients.values() {
+                let _ = tx.send(Frame::Record(notify.clone()));
+            }
+        }
+    }
+
+    /// pi is up, so fnox has printed its startup warnings: tell the attached clients once.
+    fn announce_fnox(&mut self) {
+        let Some(fnox) = self.fnox.as_mut().filter(|f| !f.announced) else {
+            return;
+        };
+        fnox.announced = true;
+        if let Some(notify) = fnox_notify(fnox) {
+            for tx in self.clients.values() {
+                let _ = tx.send(Frame::Record(notify.clone()));
+            }
+        }
+    }
+
+    /// A record the daemon makes in pi's format: tracked for replay like pi's own, and sent to attached clients.
+    fn emit_record(&mut self, record: Value) {
+        let Value::Object(map) = record else { return };
+        let kind = map.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+        let line: Arc<str> = Value::Object(map.clone()).to_string().into();
+        self.replay.track(&kind, &map, &line);
+        for tx in self.clients.values() {
+            let _ = tx.send(Frame::Record(line.clone()));
+        }
+    }
+
     fn on_pi_line(&mut self, line: String) {
+        self.announce_fnox();
         let Ok(Value::Object(record)) = serde_json::from_str::<Value>(&line) else {
             return;
         };

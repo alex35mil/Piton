@@ -1,7 +1,8 @@
 //! Protected files: what an agent may not change without the user's approval, because it decides what the agent may do
-//! or what runs. The source checkout's `.piton/` (except `.local/`, the workflow artifacts), and `.pi/` at any depth in
-//! the workspace's checkout. `.pi/settings.json.lock` itself isn't protected: pi creates that lock folder to read the
-//! project's settings, and it decides nothing.
+//! or what runs. The source checkout's `.piton/` (except `.local/`, the workflow artifacts), and at any depth in the
+//! workspace's checkout: `.pi/`, and fnox's config files (which secrets go where, and the commands fnox runs to get
+//! them). `.pi/settings.json.lock` itself isn't protected: pi creates that lock folder to read the project's settings,
+//! and it decides nothing.
 //!
 //! Two layers use this one definition: the Seatbelt rules every sandboxed launch carries (any write by any process is
 //! denied) and the daemon's check of a write an agent asks for over `agent.sock` (written only after the user approves
@@ -15,6 +16,17 @@ const PI_DIR: &str = ".pi";
 /// The `proper-lockfile` lock pi takes on `.pi/settings.json` to read it (docs/pi-findings.md).
 const PI_SETTINGS_LOCK: &str = "settings.json.lock";
 
+/// A fnox config file's name (lowercase), as fnox finds them in a folder and its `.config/`: `fnox.toml`, `.fnox.toml`,
+/// `fnox.local.toml`, and the profile forms (`fnox.<profile>.toml`, `.fnox.<profile>.local.toml`). Files a config
+/// imports by path are checked at launch instead (`fnox config-files`).
+fn is_fnox_config(name: &str) -> bool {
+    name.strip_prefix('.')
+        .unwrap_or(name)
+        .strip_prefix("fnox")
+        .and_then(|rest| rest.strip_suffix(".toml"))
+        .is_some_and(|middle| middle.is_empty() || middle.strip_prefix('.').is_some_and(|profile| !profile.is_empty()))
+}
+
 /// The roots protection is computed for: one launch's source and workspace checkouts (canonical).
 #[derive(Debug, Clone)]
 pub struct ProtectedRoots {
@@ -25,7 +37,7 @@ pub struct ProtectedRoots {
 impl ProtectedRoots {
     /// The checkout a protected `path` (canonical, absolute) is in, which a write to it stays inside: the source for its
     /// `.piton/` (settings, permissions, sandbox grants), the workspace's checkout for `.pi/` (pi's settings and
-    /// extensions, which run code). `None` when it isn't protected. Every protected write asks the user. Names compare case-insensitively: APFS is case-insensitive by
+    /// extensions, which run code) and fnox's config files. `None` when it isn't protected. Every protected write asks the user. Names compare case-insensitively: APFS is case-insensitive by
     /// default, so `.PI/settings.json` is the file pi reads as `.pi/settings.json`.
     pub fn protected_root(&self, path: &Path) -> Option<&Path> {
         let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
@@ -45,7 +57,8 @@ impl ProtectedRoots {
         if let [.., PI_DIR, PI_SETTINGS_LOCK] = parts.as_slice() {
             return None;
         }
-        parts.contains(&PI_DIR).then_some(self.checkout.as_path())
+        let fnox = parts.last().is_some_and(|name| is_fnox_config(name));
+        (parts.contains(&PI_DIR) || fnox).then_some(self.checkout.as_path())
     }
 
     /// The Seatbelt rules for a sandboxed launch: deny every write to the protected paths. Paths are canonical, as
@@ -70,6 +83,12 @@ impl ProtectedRoots {
                 "(allow file-write* (regex #\"^{checkout}/(.+/)?{}/{}$\"))",
                 any_case(PI_DIR),
                 any_case(PI_SETTINGS_LOCK)
+            ),
+            // fnox's config files by name ([`is_fnox_config`]), after the lock's allow: a `.pi/fnox.toml` stays denied.
+            format!(
+                "(deny file-write* (regex #\"^{checkout}/(.+/)?\\.?{}(\\.[^/]+)?\\.{}$\"))",
+                any_case("fnox"),
+                any_case("toml")
             ),
         ]
     }
@@ -177,6 +196,62 @@ mod tests {
         assert_eq!(c("/u/p/repo--w/apps/.PI/Settings.json.LOCK"), None);
         assert_eq!(c("/u/p/repo--w/.pi/settings.json.lock/x"), checkout);
         assert_eq!(c("/u/p/repo--w/.pi/extensions/settings.json.lock"), checkout);
+        // fnox's config files, by name at any depth, in any case.
+        for name in [
+            "fnox.toml",
+            ".fnox.toml",
+            ".config/fnox.toml",
+            "fnox.local.toml",
+            ".fnox.local.toml",
+            ".config/fnox.local.toml",
+            "fnox.dev.toml",
+            ".fnox.dev.local.toml",
+            "apps/sub/fnox.toml",
+            "FNOX.TOML",
+        ] {
+            assert_eq!(c(&format!("/u/p/repo--w/{name}")), checkout, "{name}");
+        }
+        for name in [
+            "fnox.json",
+            "myfnox.toml",
+            "fnox.toml.bak",
+            "fnox..toml",
+            "fnox.toml/x",
+            "docs/fnox.md",
+        ] {
+            assert_eq!(c(&format!("/u/p/repo--w/{name}")), None, "{name}");
+        }
+    }
+
+    /// The Seatbelt rule covers exactly the names the daemon's check does.
+    #[test]
+    fn fnox_rule_matches_the_names() {
+        let rule = &roots().seatbelt_rules()[3];
+        let pattern = rule
+            .split_once("#\"")
+            .and_then(|(_, rest)| rest.split_once("\"))"))
+            .map(|(pattern, _)| pattern)
+            .unwrap();
+        let regex = regex_lite::Regex::new(pattern).unwrap();
+        for name in [
+            "fnox.toml",
+            ".fnox.toml",
+            ".config/fnox.local.toml",
+            "a/b/fnox.dev.toml",
+            ".FNOX.Toml",
+            "fnox.json",
+            "myfnox.toml",
+            "fnox.toml.bak",
+            "fnox..toml",
+            "fnox.toml/x",
+        ] {
+            let path = format!("/u/p/repo--w/{name}");
+            assert_eq!(
+                regex.is_match(&path),
+                roots().protected_root(Path::new(&path)).is_some(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -192,6 +267,7 @@ mod tests {
                 r#"(deny file-write* (require-all (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN](/|$)") (require-not (regex #"^/u/p/re\.po/\.[pP][iI][tT][oO][nN]/\.[lL][oO][cC][aA][lL](/|$)"))))"#,
                 r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.[pP][iI](/|$)"))"#,
                 r#"(allow file-write* (regex #"^/u/p/re\.po/(.+/)?\.[pP][iI]/[sS][eE][tT][tT][iI][nN][gG][sS]\.[jJ][sS][oO][nN]\.[lL][oO][cC][kK]$"))"#,
+                r#"(deny file-write* (regex #"^/u/p/re\.po/(.+/)?\.?[fF][nN][oO][xX](\.[^/]+)?\.[tT][oO][mM][lL]$"))"#,
             ]
         );
     }

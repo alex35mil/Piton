@@ -199,6 +199,34 @@ A process in a Seatbelt sandbox can't apply another one (`sandbox_init` fails wi
 Piton daemon runs outside any sandbox (launchd), so this only affects running Piton's sandbox mode from a sandboxed
 agent session. Tests of sandbox mode run on the host.
 
+## pi behind fnox's credential proxy
+
+Verified on the host with fnox 1.48.0, op 2.34.1, claude 2.1.309, pi 1.5.2 (#229):
+
+- `fnox --non-interactive proxy run --no-sandbox -- <piton> sandbox-exec -- pi --mode rpc` keeps pi's RPC clean:
+  stdout carries only pi's records, fnox logs on stderr.
+- The GitHub MCP server's `Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}` header gets the real token substituted
+  for the placeholder (HTTP 200).
+- The claude binary with `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) behind the proxy: every Anthropic
+  request, `/v1/messages` included, gets the token injected; `claude -p` and pi's claude-code models (through the
+  extension's relay) answer with only a placeholder in the environment and the keychain closed to the sandbox.
+- 1Password's desktop app approves each new process, including launchd starts while it's unlocked. A service account
+  whose token fnox reads from the keychain needs no prompt from a terminal or launchd; the proxy starts in 4-5 s.
+- fnox prints its warnings on stderr and starts the command anyway when a secret can't be resolved (a missing item, an
+  unknown provider, 1Password unreachable): `Error resolving secret 'X': <reason>` or `Warning: Secret 'X' not found
+  ...`, then `fnox proxy: 'X' is not set; requests that need it are refused until it is`. A broken config, a missing
+  `[proxy]`, or `[proxy]` without rules makes `proxy run` and `proxy rules` exit 1 before anything starts.
+- `proxy run` sets `HTTP(S)_PROXY`/`ALL_PROXY` (with a per-session password), `NO_PROXY=localhost,127.0.0.1,::1`,
+  `NODE_USE_ENV_PROXY=1`, the CA variables (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, ...), and
+  `FNOX_DAEMON=off`; each rule's variable holds a `fnox_proxy_<hex>` placeholder unless the rule sets one.
+- `fnox config-files` lists the files fnox loads from a folder, nearest first, each followed by its imports, then the
+  global config.
+- `gh` 2.96.0 (Go) on macOS 27 refuses fnox's certificate ("x509: certificate is not trusted"), with or without
+  `SSL_CERT_FILE`; `curl` with the same placeholder gets the token injected (HTTP 200).
+- Git over HTTPS to GitHub signs in only with `Authorization: Basic`; `Bearer` and `token` get 401. fnox 1.48 can't
+  substitute a placeholder inside Basic, so Git over HTTPS doesn't work behind it (jdx/fnox#1151 proposed it, closed
+  unmerged).
+
 ## Not yet verified
 
 - Automatic compaction during a run (between turns) and its interaction with replay.

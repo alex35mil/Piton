@@ -96,6 +96,13 @@ enum Cmd {
         #[usage(double_dash = "required")]
         command: Vec<String>,
     },
+    /// Run COMMAND in the launch environment the daemon passes past fnox (how the daemon starts a host-mode pi behind
+    /// fnox's credential proxy).
+    #[usage(name = "launch-exec", hide)]
+    LaunchExec {
+        #[usage(double_dash = "required")]
+        command: Vec<String>,
+    },
     /// Check what this host needs (the Mac app's onboarding runs this), and do the steps piton can do itself.
     Setup {
         #[usage(subcommand)]
@@ -332,6 +339,12 @@ pub fn main() -> ExitCode {
             eprintln!("piton sandbox-exec: {error}");
             return ExitCode::from(126);
         }
+        Cmd::LaunchExec { command } => {
+            let command: Vec<std::ffi::OsString> = command.iter().map(Into::into).collect();
+            let error = crate::launch::handoff::exec(&command);
+            eprintln!("piton launch-exec: {error}");
+            return ExitCode::from(126);
+        }
         Cmd::Tools => {
             println!(
                 "{}",
@@ -374,6 +387,7 @@ pub fn main() -> ExitCode {
         | Cmd::Service { .. }
         | Cmd::Config { .. }
         | Cmd::SandboxExec { .. }
+        | Cmd::LaunchExec { .. }
         | Cmd::Tools
         | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
     };
@@ -407,7 +421,12 @@ pub fn main() -> ExitCode {
 
 async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
     match command {
-        Cmd::Service { .. } | Cmd::Completion { .. } | Cmd::Config { .. } | Cmd::SandboxExec { .. } | Cmd::Tools => {
+        Cmd::Service { .. }
+        | Cmd::Completion { .. }
+        | Cmd::Config { .. }
+        | Cmd::SandboxExec { .. }
+        | Cmd::LaunchExec { .. }
+        | Cmd::Tools => {
             unreachable!("handled before the runtime starts")
         }
         Cmd::Sandbox { action } => sandbox::run(action, &config).await,
@@ -445,14 +464,14 @@ async fn setup(action: SetupAction, json: bool, config: &crate::config::DaemonCo
         Some(env) => env,
         None => std::env::vars().collect(),
     };
-    let tailscale = crate::launch::resolve_program(&config.tailnet.cli, &env);
+    let tailnet = crate::setup::TailnetCheck::run(config, &env).await;
     let host = crate::setup::Host {
         config,
         env: &env,
         binary,
         link,
         daemon_running: tokio::net::UnixStream::connect(&config.socket).await.is_ok(),
-        tailnet: crate::apps::tailnet_self_node(&tailscale).await,
+        tailnet,
     };
     match action {
         SetupAction::Check { .. } => {

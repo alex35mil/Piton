@@ -44,8 +44,8 @@ pub struct Daemon {
     /// The global files as the apps see them: values, where each is set, and keys waiting for a restart.
     app_settings: Mutex<crate::apps::SettingsSnapshot>,
     base_env: Env,
-    /// mise for worker trust; `None` when the config turns mise off.
-    mise: Option<crate::project::Mise>,
+    /// The external tools and whether each is used, decided at start from `[tools]` and the login shell's PATH.
+    tools: crate::tools::Tools,
     sessions: Mutex<BTreeMap<SessionKey, SessionHandle>>,
     next_key: AtomicU64,
     next_client: AtomicU64,
@@ -117,43 +117,31 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     // The launchd marker describes this process, not pi's: a piton run inside a session (tests, the CLI) would
     // otherwise think it's the service and stop writing to stderr.
     base_env.remove("PITON_SERVICE");
-    // What pi will be launched with: if a tool is missing here, sessions fail to start.
-    let found: Vec<String> = [
-        config.pi.command.first().map(String::as_str).unwrap_or("pi"),
-        "mise",
-        config.tailnet.cli.as_str(),
-    ]
-    .iter()
-    .map(|tool| {
-        let resolved = launch::resolve_program(tool, &base_env);
-        match resolved.contains('/') {
-            true => format!("{tool}={resolved}"),
-            false => format!("{tool}=NOT FOUND"),
-        }
-    })
-    .collect();
+    // What pi will be launched with: if it's missing here, sessions fail to start.
+    let pi = config.pi.command.first().map(String::as_str).unwrap_or("pi");
+    let pi_found = match launch::resolve_program(pi, &base_env) {
+        resolved if resolved.contains('/') => format!("{pi}={resolved}"),
+        _ => format!("{pi}=NOT FOUND"),
+    };
+    let tools = crate::tools::Tools::resolve(&config, &base_env);
     // pi's own agent dir: unset means pi's default (~/.pi/agent), not the user's usual setup.
     let agent_dir = base_env
         .get("PI_CODING_AGENT_DIR")
         .map_or("unset (pi's default)", String::as_str);
     crate::log!(
-        "environment: {} variables; {}; PI_CODING_AGENT_DIR={agent_dir}",
+        "environment: {} variables; {pi_found}, {}; PI_CODING_AGENT_DIR={agent_dir}",
         base_env.len(),
-        found.join(", ")
+        tools.describe()
     );
 
     let host_id = crate::state::State::open(&config.state_db())?.host_id()?;
     crate::log!("state: {} (host {host_id})", config.state_db().display());
-    let mise = config.env.mise.then(|| crate::project::Mise {
-        program: launch::resolve_program("mise", &base_env),
-        env: base_env.clone(),
-    });
-    let app_settings = crate::apps::SettingsSnapshot::new(&config.paths);
+    let app_settings = crate::apps::SettingsSnapshot::new(&config.paths, &tools);
     let daemon = Arc::new(Daemon {
         config: std::sync::RwLock::new(Arc::new(config)),
         app_settings: Mutex::new(app_settings),
         base_env,
-        mise,
+        tools,
         sessions: Mutex::new(BTreeMap::new()),
         next_key: AtomicU64::new(first_session_key()),
         next_client: AtomicU64::new(1),
@@ -168,11 +156,14 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     crate::daemon::watch::spawn(daemon.clone());
     tokio::spawn(crate::agent::serve(daemon.clone(), agent_listener));
     let tailnet = daemon.config().tailnet.clone();
-    if tailnet.enabled {
-        // Remote access is optional: without Tailscale the daemon still serves local clients.
-        // Like pi: found through the user's shell PATH, not launchd's (`/usr/local/bin` isn't in it).
-        let cli = launch::resolve_program(&tailnet.cli, &daemon.base_env);
-        tokio::spawn(crate::apps::serve_tailnet(daemon.clone(), cli, tailnet));
+    // Remote access is optional: without Tailscale the daemon still serves local clients.
+    match (tailnet.enabled, daemon.tools.tailscale.optional()) {
+        (false, _) => {}
+        (true, Ok(Some(tailscale))) => {
+            tokio::spawn(crate::apps::serve_tailnet(daemon.clone(), tailscale.clone(), tailnet));
+        }
+        (true, Ok(None)) => crate::log!("tailnet: not listening: tailscale isn't installed"),
+        (true, Err(unavailable)) => crate::log!("tailnet: not listening: {unavailable}"),
     }
     crate::log!("listening on {} (pid {})", socket.display(), std::process::id());
 
@@ -286,6 +277,20 @@ impl Daemon {
         }
     }
 
+    /// mise for worker trust: `None` when it's off; a refusal when it's enabled but not installed.
+    fn worker_mise(&self) -> Result<Option<crate::project::Mise>, crate::project::WorkerRefusal> {
+        let mise = self
+            .tools
+            .mise
+            .optional()
+            .map_err(crate::project::WorkerRefusal::ToolUnavailable)?;
+        Ok(mise.map(|mise| crate::project::Mise {
+            program: mise.program.clone(),
+            args: mise.args.clone(),
+            env: self.base_env.clone(),
+        }))
+    }
+
     pub fn status_changed(&self) -> Arc<Notify> {
         self.status_changed.clone()
     }
@@ -328,6 +333,7 @@ impl Daemon {
                 new.log = current.log.clone();
                 new.env = current.env.clone();
                 new.tailnet = current.tailnet.clone();
+                new.tools = current.tools.clone();
                 let mode = new.logging.mode;
                 let keep_awake = new.keep_awake;
                 *self.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new);
@@ -395,13 +401,13 @@ impl Daemon {
         prepared: launch::Prepared,
         launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
-        let (mode, mut env, policy) = match prepared {
-            launch::Prepared::Host { env } => (LaunchMode::Host, env, None),
-            launch::Prepared::Sandbox { env, resolution } => {
+        let (mode, mut env, policy, proxy) = match prepared {
+            launch::Prepared::Host { env, proxy } => (LaunchMode::Host, env, None, proxy),
+            launch::Prepared::Sandbox(launch::Sandboxed { env, resolution, proxy }) => {
                 for link in &resolution.links {
                     crate::log!("sandbox in {}: {link}", workspace.path.display());
                 }
-                (LaunchMode::Sandbox, env, Some(resolution.policy))
+                (LaunchMode::Sandbox, env, Some(resolution.policy), proxy)
             }
         };
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
@@ -445,6 +451,7 @@ impl Daemon {
             env,
             policy,
             protected,
+            proxy,
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),
@@ -485,9 +492,16 @@ impl Daemon {
         let config = self.config();
         let launch_config =
             launch::resolve_config(&config, &workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
-        let prepared = launch::prepare(&config, &launch_config, &self.base_env, &workspace.path, mode)
-            .await
-            .inspect_err(|e| crate::log!("launch refused: {e}"))?;
+        let prepared = launch::prepare(
+            &config,
+            &self.tools,
+            &launch_config,
+            &self.base_env,
+            &workspace.path,
+            mode,
+        )
+        .await
+        .inspect_err(|e| crate::log!("launch refused: {e}"))?;
         self.launch(workspace, session, prepared, launch_config)
     }
 

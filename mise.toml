@@ -55,6 +55,7 @@ node tests/e2e/view.mjs
 node tests/e2e/websocket.mjs
 node tests/e2e/logging.mjs
 node tests/e2e/setup.mjs
+node tests/e2e/fnox.mjs
 '''
 
 # Formatting uses a pinned nightly rustfmt: the import rules in cli/rustfmt.toml are unstable options. Builds, tests,
