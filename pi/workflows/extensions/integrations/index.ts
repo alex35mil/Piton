@@ -10,12 +10,20 @@ import { observeMcpTools, type McpToolCatalog } from "../../../extensions/__lib/
 import { acceptEpicTasks } from "../__lib/epic-acceptance.js"
 import { readEntityStatus, resolveEntityDirectory } from "../__lib/entity.js"
 import { type EntityTracker, requireTrackerItem } from "./records.js"
-import { loadIntegrationRoles, requireForge, requireTracker, roleContext, type TrackerConfig } from "./config.js"
-import { GateSchema, type WorkflowKind } from "./labels.js"
+import {
+    loadIntegrationRoles,
+    requireForge,
+    requireTracker,
+    type Role,
+    roleContext,
+    type TrackerConfig,
+} from "./config.js"
+import { GateSchema, labelItemType, type WorkflowKind } from "./labels.js"
 import {
     LabelFactsSchema,
     LabelSelectionFailure,
     LabelSelectionSchema,
+    labelGroupSummary,
     type LabelFacts,
     type LabelSelection,
     linearLabelFacts,
@@ -494,7 +502,19 @@ type WorkflowContextInput = Exclude<
     IntegrationContextInput,
     IncomingContextInput | IncomingMergeContextInput | IncomingProjectContextInput
 >
-type WorkflowContext = ReturnType<typeof buildWorkflowIntegrationContext>
+/** The context one workflow operation returns. */
+type WorkflowContext<I extends WorkflowContextInput = WorkflowContextInput> = ContextFor<
+    ReturnType<typeof readProjectIntegrationContext>,
+    I["operation"]
+> & { target?: "current" | "workflow"; projectRoot?: string }
+/** The response members whose operation covers `O`; a shared case such as `initialize | resume` covers both. */
+type ContextFor<C, O> = O extends unknown
+    ? C extends { operation: infer P }
+        ? O extends P
+            ? C
+            : never
+        : never
+    : never
 type IncomingContext = ReturnType<typeof incomingPullRequestContext>
 type IncomingMergeContext = ReturnType<typeof incomingMergeContext>
 type IncomingProjectContext = ReturnType<typeof incomingProjectContext>
@@ -514,11 +534,11 @@ export function buildIntegrationContext(
     input: IncomingProjectContextInput,
     tools: McpToolCatalog,
 ): IncomingProjectContext
-export function buildIntegrationContext(
+export function buildIntegrationContext<I extends WorkflowContextInput>(
     ctx: ExtensionContext,
-    input: WorkflowContextInput,
+    input: I,
     tools: McpToolCatalog,
-): WorkflowContext
+): WorkflowContext<I>
 export function buildIntegrationContext(
     ctx: ExtensionContext,
     input: IntegrationContextInput,
@@ -640,63 +660,126 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
                       reason: "shipping requires locally recorded PR resource IDs; investigate and record the exact PR first",
                   }
     }
-    const tracker =
-        role === "forge"
-            ? undefined
-            : trackedEntity
-              ? roleContext("tracker", roles.tracker, (config) => config.provider)
-              : { state: "disabled" as const, reason: "This Gig is local: it has no tracker item." }
-    const phaseMutation =
-        input.operation === "trackerMutation" && input.change === "phase"
-            ? planPhaseMutation(
-                  configuredTracker!,
-                  entity!.status.entity,
-                  entity!.status.phase,
-                  input.lifecycle,
-                  input.native,
-              )
-            : undefined
-    const forgeRole = role === "tracker" ? undefined : roleContext("forge", roles.forge, (config) => config.provider)
-    // A forge operation already required the forge, so shipping always comes with an enabled forge.
-    const forge: (typeof forgeRole & { shipping?: GitHubMergeDecision }) | undefined =
-        forgeRole && shipping ? { ...forgeRole, shipping } : forgeRole
-    const queueLabels =
-        input.operation === "queueIntake"
-            ? labelsOrFailure(() =>
-                  selectedLabelNames(
-                      configuredTracker!.labels,
-                      input.entity === "epic" ? "epic" : "deliverable",
-                      input.kind === "not set" ? undefined : input.kind,
-                      input.labels ?? {},
-                  ),
-              )
-            : undefined
-    const labelMutation =
-        input.operation === "labelMutation"
-            ? labelsOrFailure(() => planLabelMutation(configuredTracker!, entity!.status, input.labels, input.current))
-            : undefined
-
-    return {
+    // The tracker as the entity sees it: a local Gig has no tracker item, so its tracker reads as off.
+    const tracker = <T extends { provider: TrackerConfig["provider"] }>(shape: (config: TrackerConfig) => T) =>
+        trackedEntity
+            ? roleContext("tracker", mapRole(roles.tracker, shape), (config) => config.provider)
+            : { state: "disabled" as const, reason: "This Gig is local: it has no tracker item." }
+    const forge = () => roleContext("forge", roles.forge, (config) => config.provider)
+    const base = <O extends WorkflowContextInput["operation"]>(operation: O) => ({
         state: "enabled" as const,
         operation,
-        ...(entity && entityTracker && role !== "forge" && operation !== "artifactProjection"
-            ? {
-                  phaseProjection: phaseProjectionContract(entity.status.phase, entityTracker, entity.status.entity),
-              }
-            : {}),
-        ...(phaseMutation ? { phaseMutation } : {}),
-        ...(queueLabels ? { labels: queueLabels } : {}),
-        ...(labelMutation ? { labelMutation } : {}),
-        ...(configuredTracker && trackedEntity && role !== "forge"
-            ? { projection: planProjectionContract(configuredTracker, entity?.status.tracker) }
-            : {}),
-        roles: {
-            ...(tracker ? { tracker } : {}),
-            ...(forge ? { forge } : {}),
-        },
-        entity,
-        permissionBoundary:
-            "Call configured Pi-registered MCP tools directly. A denial or failed call must never be replaced with HTTP, gh, another client, or provider SDK.",
+    })
+
+    // Each operation returns only what it uses. The full configuration, label catalog included, is
+    // `inspect`'s; every other tracker context carries the board without its labels.
+    switch (input.operation) {
+        case "inspect":
+            return { ...base(input.operation), roles: { tracker: tracker((config) => config), forge: forge() } }
+        case "queueIntake":
+            return {
+                ...base(input.operation),
+                labels: labelsOrFailure(() =>
+                    selectedLabelNames(
+                        configuredTracker!.labels,
+                        input.entity === "epic" ? "epic" : "deliverable",
+                        input.kind === "not set" ? undefined : input.kind,
+                        input.labels ?? {},
+                    ),
+                ),
+                roles: { tracker: tracker(trackerBoard) },
+            }
+        case "adopt":
+            return {
+                ...base(input.operation),
+                labelGroups: labelGroupSummary(configuredTracker!.labels, labelItemType(input.entity)),
+                roles: { tracker: tracker(trackerBoard) },
+            }
+        case "initialize":
+        case "resume":
+            return {
+                ...base(input.operation),
+                ...(entityTracker
+                    ? {
+                          phaseProjection: phaseProjectionContract(
+                              entity!.status.phase,
+                              entityTracker,
+                              entity!.status.entity,
+                          ),
+                      }
+                    : {}),
+                roles: { tracker: tracker(trackerBoard), forge: forge() },
+                entity: entity!,
+            }
+        case "artifactProjection":
+            return {
+                ...base(input.operation),
+                projection: planProjectionContract(configuredTracker!, entity!.status.tracker),
+                roles: { tracker: tracker(trackerBoard) },
+            }
+        case "pullRequest":
+        case "shippingRead":
+            return { ...base(input.operation), roles: { forge: forge() }, entity: entity! }
+        case "shippingMerge":
+            // A forge operation already required the forge, so shipping always comes with an enabled forge.
+            return {
+                ...base(input.operation),
+                roles: { forge: { ...forge(), shipping: shipping! } },
+                entity: entity!,
+            }
+        case "trackerMutation":
+            return {
+                ...base(input.operation),
+                ...(input.change === "phase"
+                    ? {
+                          phaseMutation: planPhaseMutation(
+                              configuredTracker!,
+                              entity!.status.entity,
+                              entity!.status.phase,
+                              input.lifecycle,
+                              input.native,
+                          ),
+                      }
+                    : {}),
+                roles: { tracker: tracker(trackerBoard) },
+                entity: entity!,
+            }
+        case "labelMutation":
+            return {
+                ...base(input.operation),
+                labelMutation: labelsOrFailure(() =>
+                    planLabelMutation(configuredTracker!, entity!.status, input.labels, input.current),
+                ),
+                roles: { tracker: tracker(trackerBoard) },
+                entity: entity!,
+            }
+    }
+}
+
+/** A role with its config reshaped, or the same off role. */
+function mapRole<T, U>(role: Role<T>, shape: (config: T) => U): Role<U> {
+    switch (role.state) {
+        case "on":
+            return { state: "on", config: shape(role.config) }
+        case "off":
+            return role
+    }
+}
+
+/**
+ * The tracker configuration without its label catalog: what board, lifecycle, Priority, Phase, and
+ * publication steps use. Label choices read the catalog from `inspect` or adoption's `labelGroups`.
+ */
+function trackerBoard(config: TrackerConfig) {
+    switch (config.provider) {
+        case "github": {
+            const { labels: _labels, ...board } = config
+            return board
+        }
+        case "linear": {
+            const { labels: _labels, ...board } = config
+            return board
+        }
     }
 }
 

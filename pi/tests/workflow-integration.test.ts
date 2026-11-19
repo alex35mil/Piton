@@ -100,6 +100,12 @@ function forgeConfig() {
     }
 }
 
+/** A tracker config as every context but `inspect` returns it: without the label catalog. */
+function withoutLabels<T extends object>(tracker: T): Omit<T, "labels"> {
+    const { labels: _labels, ...board } = tracker as T & { labels?: unknown }
+    return board
+}
+
 const queueSelection = {
     operation: "queueIntake" as const,
     target: "current" as const,
@@ -283,14 +289,13 @@ describe("workflow-source queue context", () => {
                 const before = fileSnapshot(f.root)
                 const inspected = buildIntegrationContext(f.ctx, { operation: "inspect", target: "workflow" }, mcpTools)
                 const intake = buildIntegrationContext(f.ctx, { ...queueSelection, target: "workflow" }, mcpTools)
-                for (const context of [inspected, intake]) {
+                for (const [context, config] of [
+                    [inspected, tracker],
+                    [intake, withoutLabels(tracker)],
+                ] as const) {
                     assert.equal(context.target, "workflow")
                     assert.equal(context.projectRoot, f.source)
-                    assert.deepEqual(context.roles.tracker, {
-                        state: "enabled",
-                        provider,
-                        config: tracker,
-                    })
+                    assert.deepEqual(context.roles.tracker, { state: "enabled", provider, config })
                 }
                 assert.deepEqual(fileSnapshot(f.root), before, "context must not modify either project or settings")
                 if (consumingSetup === "different") {
@@ -299,7 +304,7 @@ describe("workflow-source queue context", () => {
                     assert.deepEqual(current.roles.tracker, {
                         state: "enabled",
                         provider: "github",
-                        config: config(),
+                        config: withoutLabels(config()),
                     })
                 }
                 const updated =
@@ -311,7 +316,7 @@ describe("workflow-source queue context", () => {
                         : { ...tracker, team: "New Workflow Team" }
                 writeProjectConfig(f.source, { tracker: updated })
                 const reread = buildIntegrationContext(f.ctx, { ...queueSelection, target: "workflow" }, mcpTools)
-                assert.deepEqual(reread.roles.tracker?.config, updated)
+                assert.deepEqual(reread.roles.tracker?.config, withoutLabels(updated))
             })
         }
     }
@@ -862,6 +867,99 @@ describe("workflow integration configuration", () => {
         }
     })
 
+    it("returns only what each operation uses", () => {
+        const cwd = temporaryProject()
+        try {
+            const tracker = {
+                ...config(),
+                labels: {
+                    groups: {
+                        ...kindLabels().groups,
+                        area: {
+                            appliesTo: ["epic", "deliverable"],
+                            cardinality: "oneOrMore",
+                            values: { cli: { name: "Area: CLI", color: "#000000", description: "The CLI." } },
+                        },
+                        gate: {
+                            appliesTo: ["deliverable"],
+                            cardinality: "zeroOrMore",
+                            values: { plan: { name: "Gate: Plan", color: "#000000", description: "Waits." } },
+                        },
+                    },
+                },
+            }
+            prepareWorkflowProject(cwd, tracker)
+            prepareArtifactPersistence(cwd)
+            const entityDir = writeGitHubGigEntity(cwd)
+            const ctx = { cwd } as ExtensionContext
+            const inputs: Parameters<typeof buildIntegrationContext>[1][] = [
+                { operation: "inspect", target: "current" },
+                queueSelection,
+                { operation: "adopt", entity: "gig" },
+                { operation: "initialize", entityDir },
+                { operation: "resume", entityDir },
+                { operation: "artifactProjection", entityDir },
+                { operation: "pullRequest", entityDir },
+                { operation: "shippingRead", entityDir },
+                { operation: "trackerMutation", entityDir, change: "lifecycle" },
+                { operation: "labelMutation", entityDir, current: { provider: "github", names: [] } },
+            ]
+            const parts = Object.fromEntries(
+                inputs.map((input) => {
+                    const context = buildIntegrationContext(ctx, input, mcpTools) as Record<string, unknown> & {
+                        roles: { tracker?: { config?: object }; forge?: object }
+                    }
+                    const roles = [
+                        ...(context.roles.tracker
+                            ? [
+                                  context.roles.tracker.config && "labels" in context.roles.tracker.config
+                                      ? "tracker+labels"
+                                      : "tracker",
+                              ]
+                            : []),
+                        ...(context.roles.forge ? ["forge"] : []),
+                    ]
+                    const rest = Object.keys(context).filter(
+                        (key) => !["state", "operation", "roles", "target", "projectRoot"].includes(key),
+                    )
+                    return [input.operation, [...roles, ...rest].sort()]
+                }),
+            )
+            assert.deepEqual(parts, {
+                inspect: ["forge", "tracker+labels"],
+                queueIntake: ["labels", "tracker"],
+                adopt: ["labelGroups", "tracker"],
+                initialize: ["entity", "forge", "phaseProjection", "tracker"],
+                resume: ["entity", "forge", "phaseProjection", "tracker"],
+                artifactProjection: ["projection", "tracker"],
+                pullRequest: ["entity", "forge"],
+                shippingRead: ["entity", "forge"],
+                trackerMutation: ["entity", "tracker"],
+                labelMutation: ["entity", "labelMutation", "tracker"],
+            })
+
+            // Adoption lists each group for the item type by label name, without setup-only fields.
+            const { epic: _epic, ...deliverableKinds } = kindLabelNames
+            assert.deepEqual(
+                buildIntegrationContext(ctx, { operation: "adopt", entity: "gig" }, mcpTools).labelGroups,
+                {
+                    kind: { cardinality: "exactlyOne", values: deliverableKinds },
+                    area: { cardinality: "oneOrMore", values: { cli: "Area: CLI" } },
+                    gate: { cardinality: "zeroOrMore", values: { plan: "Gate: Plan" } },
+                },
+            )
+            assert.deepEqual(
+                buildIntegrationContext(ctx, { operation: "adopt", entity: "epic" }, mcpTools).labelGroups,
+                {
+                    kind: { cardinality: "exactlyOne", values: { epic: kindLabelNames.epic } },
+                    area: { cardinality: "oneOrMore", values: { cli: "Area: CLI" } },
+                },
+            )
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
     it("renders entity provider bodies with only same-repository GitHub closing references", () => {
         const cwd = temporaryProject()
         try {
@@ -953,7 +1051,6 @@ describe("workflow integration configuration", () => {
             assert.equal(forgeSide.roles.forge?.state, "enabled")
             const resumed = buildIntegrationContext(ctx, { operation: "resume", entityDir }, mcpTools)
             assert.equal(resumed.roles.tracker?.state, "disabled")
-            assert.equal(resumed.projection, undefined)
             assert.throws(
                 () => buildIntegrationContext(ctx, { operation: "artifactProjection", entityDir }, mcpTools),
                 /needs the tracker, which is turned off/,
@@ -1002,7 +1099,6 @@ describe("workflow integration configuration", () => {
             const resumed = buildIntegrationContext(ctx, { operation: "resume", entityDir }, mcpTools)
             assert.equal(resumed.roles.tracker?.state, "disabled")
             assert.equal(resumed.phaseProjection, undefined)
-            assert.equal(resumed.projection, undefined)
             assert.equal(
                 buildIntegrationContext(ctx, { operation: "pullRequest", entityDir }, mcpTools).roles.forge?.state,
                 "enabled",
@@ -1107,7 +1203,6 @@ describe("workflow integration configuration", () => {
             })
             assert.equal(projection.roles.tracker?.state, "enabled")
             assert.equal(projection.roles.forge, undefined)
-            assert.equal(projection.phaseProjection, undefined)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -1153,7 +1248,6 @@ describe("workflow integration configuration", () => {
                 value: "Execution",
                 changed: true,
             })
-            assert.partialDeepStrictEqual(context.phaseProjection, { inProgress: "execution" })
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -1327,7 +1421,6 @@ describe("workflow integration configuration", () => {
                 labels: ["customer", "execution"],
                 changed: true,
             })
-            assert.partialDeepStrictEqual(context.phaseProjection, { inProgress: "execution" })
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

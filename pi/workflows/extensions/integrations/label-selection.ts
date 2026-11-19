@@ -138,6 +138,19 @@ export function managedLabelNames(labels: AnyLabels | undefined, itemType: Label
     )
 }
 
+/** Each group that applies to an item type, with its cardinality and value label names: the catalog without its setup-only colors and descriptions. */
+export function labelGroupSummary(
+    labels: AnyLabels | undefined,
+    itemType: LabelItemType,
+): Record<string, { cardinality: Cardinality; values: Record<string, string> }> {
+    return Object.fromEntries(
+        groupsFor(labels, itemType).map(([key, group]) => [
+            key,
+            { cardinality: group.cardinality, values: Object.fromEntries(groupValues(key, group, itemType)) },
+        ]),
+    )
+}
+
 function cardinalityHolds(cardinality: Cardinality, count: number): boolean {
     switch (cardinality) {
         case "exactlyOne":
