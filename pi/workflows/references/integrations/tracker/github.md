@@ -14,7 +14,11 @@ Adoption applies only to an explicitly selected existing issue, before initializ
 
    Reuse facts already returned together.
 3. Read every discussion page. Treat contributor messages as proposals and evidence, and resolve material requirements with the maintainer before changing scope.
-4. Find the issue's item in the configured Project, requesting only the Status and Priority fields. Complete pagination, then verify:
+4. Find the issue's item in the configured Project with one `list_project_items` read, requesting only the Status and Priority fields:
+   - Filter with `repo:<owner>/<repo> is:issue #<N>`. The `#` matches the number only; a bare number also matches text, and `in:number` matches nothing.
+   - When that returns no item, page through the unfiltered list before concluding the issue isn't in the Project.
+
+   Then verify:
    - repository and issue number;
    - the numeric Project-item ID;
    - Status is Backlog or Todo;
