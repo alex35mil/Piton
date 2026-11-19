@@ -20,6 +20,7 @@ import {
     publicationWireArguments,
     REVIEW_GUIDANCE,
     signPublication,
+    stripPublicationSignature,
     type PublicationOperation,
     type PublicationProvider,
 } from "../workflows/extensions/integrations/publication.ts"
@@ -127,6 +128,14 @@ describe("workflow publication policy", () => {
         assert.equal(changed.body, "Body.\n\n<sub>Sent via Pi. Model: anthropic/claude-new.</sub>")
         const examples = `> ${githubFooter}\n\n\`\`\`html\n${githubFooter}\n\`\`\``
         assert.equal(signPublication(examples, "github", identity), `${examples}\n\n${githubFooter}`)
+    })
+
+    it("strips only a terminal signature that publication would replace", () => {
+        for (const footer of [githubFooter, linearFooter, "<sub>Sent via pi [old/model].</sub>"])
+            assert.equal(stripPublicationSignature(`Body.\r\n\r\n${footer}\r\n`), "Body.")
+        const quoted = `> ${githubFooter}\n\nMore.`
+        assert.equal(stripPublicationSignature(quoted), quoted)
+        assert.equal(stripPublicationSignature(`Body.\n${githubFooter}`), `Body.\n${githubFooter}`)
     })
 
     it("uses the requested sentence in GitHub and Linear styling", () => {

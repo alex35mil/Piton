@@ -36,6 +36,7 @@ import {
 import { type EpicTask, readEpicRouting, readEpicTasks } from "../__lib/epic-tasks.js"
 import type { ResourceIds } from "../integrations/resource-ids.js"
 import { initialPhase } from "../integrations/phase.js"
+import { stripPublicationSignature } from "../integrations/publication.js"
 import { resourceIdsFromTrackerObject } from "./resource-ids.js"
 import * as Git from "../__lib/git.js"
 import {
@@ -377,10 +378,13 @@ function createEntityArtifacts(
         input.entity === "epic"
             ? [LOCAL_REVIEWS_DIR, LOCAL_SCRATCH_DIR, "tasks"]
             : [LOCAL_REVIEWS_DIR, LOCAL_SCRATCH_DIR, LOCAL_DESIGNS_DIR]
+    // An adopted item's description can end with the signature publication added; it stays out of artifacts.
+    const request = stripPublicationSignature(input.request).trim()
+    if (!request) throw new Error("request is empty without its publication signature")
     fs.mkdirSync(path.dirname(absoluteDirectory), { recursive: true })
     fs.mkdirSync(absoluteDirectory, { recursive: false })
     for (const directory of directories) fs.mkdirSync(path.join(absoluteDirectory, directory))
-    fs.writeFileSync(path.join(absoluteDirectory, "brief.md"), `# Brief\n\n${input.request.trim()}\n`)
+    fs.writeFileSync(path.join(absoluteDirectory, "brief.md"), `# Brief\n\n${request}\n`)
     fs.writeFileSync(path.join(absoluteDirectory, LOCAL_NOTES_FILE), "# Notes\n")
     if (input.entity !== "epic") fs.writeFileSync(path.join(absoluteDirectory, LOCAL_PENDING_FILE), "# Pending\n")
     writeEntityStatus(absoluteDirectory, status)
