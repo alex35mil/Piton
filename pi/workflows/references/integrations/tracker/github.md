@@ -88,6 +88,7 @@ When a create result is uncertain, read [recovery](../recovery.md#uncertain-trac
 - For `epic.md` or `plan.md`, call `prepare_integration_projection`, then `prepare_tracker_publication` with `entityDir` and the full source ([provider bodies](../shared.md#provider-bodies)).
 - Run the returned comment call, never an issue body or title update.
 - The first publication saves `planComment: pending`, then returns one `add_issue_comment`. Run it immediately, then record it with `record_tracker_publication`.
+- Recording or recovering the first publication also pins the comment through GitHub's API. When its `pin` is `failed`, report the reason in one line and continue. Never retry it; the maintainer can pin the comment by hand.
 - Once published, prepare returns `reads-required`: run the comment reads in its `lookups`, then call `prepare_tracker_publication_update`. The update uses `update_issue_comment` on that same comment. Every update also posts a [plan-update note](../shared.md#plan-update-notes) as a new issue comment.
 - A pending attempt returns `recovery-required`; read [recovery](../recovery.md#github-comment).
 - Don't read just to confirm a successful update. Plan-comment state lives in authoritative metadata, and Resource IDs and Phase are unaffected.

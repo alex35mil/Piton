@@ -2,7 +2,8 @@ import type { EntityStatus } from "../../../__lib/entity.js"
 import * as project from "../../../../../extensions/__lib/project.js"
 import * as Git from "../../../__lib/git.js"
 import { loadIntegrationRoles } from "../../config.js"
-import { closingIssueNumber, forgeGraphql, type IssueLinkOptions } from "./issue-link.js"
+import { githubApi, type GitHubApiOptions } from "../../github-api.js"
+import { closingIssueNumber } from "./issue-link.js"
 
 export interface PullRequestCandidate {
     number: number
@@ -63,13 +64,13 @@ const FIELDS = `
 export async function findPullRequest(
     cwd: string,
     status: EntityStatus,
-    options: IssueLinkOptions,
+    options: GitHubApiOptions,
 ): Promise<PullRequestSearch> {
     const intent = status.forge
     if (!intent) throw new Error("finding the PR requires saved PR intent; prepare the PR with begin_resource_creation")
     const roles = loadIntegrationRoles(cwd)
     if (roles.forge.state !== "on") throw new Error("finding the PR requires the forge")
-    const graphql = forgeGraphql(cwd, roles.forge.config.mcpServer, options)
+    const { graphql } = githubApi(cwd, roles.forge.config.mcpServer, options)
     const repository = `${intent.repository.owner}/${intent.repository.repo}`.toLowerCase()
     const headSha = Git.run(project.resolveRootDir(cwd), [
         "rev-parse",

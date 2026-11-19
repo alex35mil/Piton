@@ -63,7 +63,7 @@ Context tools return configuration, addressing, evidence requirements, or native
   - `recover_tracker_publication` for pending or uncertain identity, or a pending note ([recovery](./integrations/recovery.md)).
 - **Bodies:** `render_provider_body`, `verify_artifact_projection`.
 
-None of these call providers or turn identity, lifecycle, or merge facts into cache.
+None of these turn identity, lifecycle, or merge facts into cache. They call providers only to pin a first GitHub plan comment and, when a PR is recorded, to link it to its issue or find it.
 
 ## Setup, review, and delivery
 

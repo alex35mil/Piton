@@ -72,6 +72,35 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
         forge: { provider: "github", mcpServer: "github", repository },
     })
     prepareArtifactPersistence(root)
+    // The registered GitHub server's token reaches the direct pin call.
+    fs.writeFileSync(
+        path.join(root, ".piton/mcp.json"),
+        JSON.stringify({
+            mcpServers: {
+                github: {
+                    url: "https://api.githubcopilot.com/mcp/",
+                    headers: { Authorization: "Bearer ${PIN_TOKEN}" },
+                },
+            },
+        }),
+    )
+    // A fake GitHub API: records each request and answers with `github.respond`.
+    const github = {
+        requests: [] as Array<{ method: string; url: string; authorization: string }>,
+        respond: (): Response => Response.json({ id: 123, pin: { pinned_at: "2026-01-01T00:00:00Z" } }),
+        env: { PIN_TOKEN: "secret" } as NodeJS.ProcessEnv,
+    }
+    const options = {
+        projectTrusted: true,
+        env: github.env,
+        fetch: (async (url: string, init: RequestInit) => {
+            const authorization = (init.headers as Record<string, string>).Authorization
+            github.requests.push({ method: String(init.method), url, authorization })
+            return github.respond()
+        }) as unknown as typeof fetch,
+    }
+    const publish = (input: TrackerPublicationInput, catalog = tools) =>
+        trackerPublication(root, input, catalog, options)
     // A new and an adopted issue initialize the same way; only the selected object differs.
     const object = (issueNumber: number) => ({
         issueId: 100 + issueNumber,
@@ -109,11 +138,9 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
     const read = () => readEntityStatus(path.join(root, directory))
     const saved = () => JSON.parse(fs.readFileSync(file, "utf8"))
     const prepare = (content = source, catalog = tools) =>
-        trackerPublication(root, { action: "prepare", entityDir: directory, source: content }, catalog)
-    const record = (evidence: ProviderEvidence) =>
-        trackerPublication(root, { action: "record", entityDir: directory, evidence }, tools)
-    const recover = (pages: ProviderEvidence[]) =>
-        trackerPublication(root, { action: "recover", entityDir: directory, source, pages }, tools)
+        publish({ action: "prepare", entityDir: directory, source: content }, catalog)
+    const record = (evidence: ProviderEvidence) => publish({ action: "record", entityDir: directory, evidence })
+    const recover = (pages: ProviderEvidence[]) => publish({ action: "recover", entityDir: directory, source, pages })
     const remote = (body: string, id = 123) => ({
         id,
         url: `https://api.github.com/repos/example/project/issues/comments/${id}`,
@@ -133,6 +160,8 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
         parentDirectory: parent?.directory,
         read,
         saved,
+        github,
+        publish,
         prepare,
         record,
         recover,
@@ -188,17 +217,13 @@ describe("managed GitHub plan comments", () => {
                     f.read()
                     const revised = source.replace("Update the plan.", "Updated scope.")
                     assert.equal((await f.prepare(revised)).state, "reads-required")
-                    const updated = await trackerPublication(
-                        f.root,
-                        {
-                            action: "prepareUpdate",
-                            entityDir: f.directory,
-                            source: revised,
-                            reads: [f.page([full])],
-                            announcement: { summary: "Scope changed." },
-                        },
-                        tools,
-                    )
+                    const updated = await f.publish({
+                        action: "prepareUpdate",
+                        entityDir: f.directory,
+                        source: revised,
+                        reads: [f.page([full])],
+                        announcement: { summary: "Scope changed." },
+                    })
                     assert.ok(updated.state === "mutation-needed")
                     assert.equal(updated.mutation.tool, "mcp__github__update_issue_comment")
                     assert.equal(updated.mutation.arguments.comment_id, 123)
@@ -303,6 +328,111 @@ describe("managed GitHub plan comments", () => {
         }
     })
 
+    it("pins the plan comment on its first publication only, with the registered token", async () => {
+        const f = fixture()
+        try {
+            const prepared = await f.prepare()
+            assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
+            assert.deepEqual(f.github.requests, [])
+            const body = prepared.mutation.arguments.body
+            const recorded = await f.record({ ...prepared.mutation, response: f.remote(body) })
+            assert.deepEqual(recorded, {
+                state: "published",
+                id: 123,
+                url: "https://github.com/example/project/issues/42#issuecomment-123",
+                pin: { state: "pinned" },
+            })
+            assert.deepEqual(f.github.requests, [
+                {
+                    method: "PUT",
+                    url: "https://api.github.com/repos/example/project/issues/comments/123/pin",
+                    authorization: "Bearer secret",
+                },
+            ])
+            // Updates, their notes, and recovery of the published plan keep the pin without calling GitHub.
+            const revised = source.replace("Update the plan.", "Revised.")
+            const updated = await f.publish({
+                action: "prepareUpdate",
+                entityDir: f.directory,
+                source: revised,
+                reads: [f.page([f.remote(body)])],
+                announcement: { summary: "Revised." },
+            })
+            assert.ok(updated.state === "mutation-needed" && typeof updated.mutation.arguments.body === "string")
+            const note = await f.record({ ...updated.mutation, response: f.remote(updated.mutation.arguments.body) })
+            assert.ok(note.state === "mutation-needed" && typeof note.mutation.arguments.body === "string")
+            assert.equal("pin" in note, false)
+            const announced = await f.record({
+                ...note.mutation,
+                response: f.remote(note.mutation.arguments.body, 124),
+            })
+            assert.deepEqual(announced, { state: "announced" })
+            const found = await f.recover([f.page([f.remote(updated.mutation.arguments.body)])])
+            assert.equal(found.state, "identified")
+            assert.equal("pin" in found, false)
+            assert.equal(f.github.requests.length, 1)
+        } finally {
+            f.dispose()
+        }
+    })
+
+    it("pins a pending plan comment that recovery identifies", async () => {
+        const f = fixture()
+        try {
+            const prepared = await f.prepare()
+            assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
+            const found = await f.recover([f.page([f.remote(prepared.mutation.arguments.body, 77)])])
+            assert.ok(found.state === "identified")
+            assert.equal(found.id, 77)
+            assert.deepEqual("pin" in found && found.pin, { state: "pinned" })
+            assert.deepEqual(
+                f.github.requests.map((request) => request.url),
+                ["https://api.github.com/repos/example/project/issues/comments/77/pin"],
+            )
+        } finally {
+            f.dispose()
+        }
+    })
+
+    for (const [name, failure, reason] of [
+        ["a missing token", (f: ReturnType<typeof fixture>) => delete f.github.env.PIN_TOKEN, /PIN_TOKEN is not set/],
+        [
+            "a network error",
+            (f: ReturnType<typeof fixture>) => {
+                f.github.respond = () => {
+                    throw new TypeError("fetch failed")
+                }
+            },
+            /^network request failed \(TypeError\)$/,
+        ],
+        [
+            "a GitHub refusal",
+            (f: ReturnType<typeof fixture>) => {
+                f.github.respond = () => Response.json({ message: "Must have admin rights" }, { status: 403 })
+            },
+            /^HTTP 403: Must have admin rights$/,
+        ],
+    ] as const)
+        it(`keeps the publication and reports a failed pin on ${name}`, async () => {
+            const f = fixture()
+            try {
+                failure(f)
+                const prepared = await f.prepare()
+                assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
+                const recorded = await f.record({
+                    ...prepared.mutation,
+                    response: f.remote(prepared.mutation.arguments.body),
+                })
+                assert.ok(recorded.state === "published" && "pin" in recorded)
+                assert.equal(recorded.pin.state, "failed")
+                assert.match(recorded.pin.state === "failed" ? recorded.pin.reason : "", reason)
+                assert.doesNotMatch(JSON.stringify(recorded), /secret/)
+                assert.equal(f.saved().tracker.planComment.state, "published")
+            } finally {
+                f.dispose()
+            }
+        })
+
     for (const kind of ["epic", "task", "gig"] as const)
         for (const adopted of [false, true])
             it(`uses one comment for ${kind}/${adopted ? "adopted" : "new"}`, async () => {
@@ -334,17 +464,13 @@ describe("managed GitHub plan comments", () => {
                     const revised = source.replace("Update the plan.", "Updated scope.")
                     // Every published plan reads its current version first, to announce the change.
                     assert.equal((await f.prepare(revised)).state, "reads-required")
-                    const updated = await trackerPublication(
-                        f.root,
-                        {
-                            action: "prepareUpdate",
-                            entityDir: f.directory,
-                            source: revised,
-                            reads: [f.page([f.remote(prepared.mutation.arguments.body)])],
-                            announcement: { summary: "Scope changed." },
-                        },
-                        tools,
-                    )
+                    const updated = await f.publish({
+                        action: "prepareUpdate",
+                        entityDir: f.directory,
+                        source: revised,
+                        reads: [f.page([f.remote(prepared.mutation.arguments.body)])],
+                        announcement: { summary: "Scope changed." },
+                    })
                     assert.ok(updated.state === "mutation-needed" && "announcement" in updated)
                     assert.match(updated.announcement as string, /^\*\*Plan updated\*\*\n\nScope changed\./)
                     assert.ok(typeof updated.mutation.arguments.body === "string")
@@ -389,7 +515,7 @@ describe("managed GitHub plan comments", () => {
             assert.equal(parentSaved().tracker.external.issueNumber, 41)
             const childBefore = f.saved()
             const run = (input: Record<string, unknown>) =>
-                trackerPublication(f.root, { entityDir: epicDir, ...input } as TrackerPublicationInput, tools)
+                f.publish({ entityDir: epicDir, ...input } as TrackerPublicationInput)
             const prepared = await run({ action: "prepare", source })
             assert.ok(prepared.state === "mutation-needed")
             assert.ok(typeof prepared.mutation.arguments.body === "string")
@@ -483,17 +609,13 @@ describe("managed GitHub plan comments", () => {
             await f.record({ ...prepared.mutation, response: f.remote(prepared.mutation.arguments.body) })
             const revised = source.replace("Update the plan.", "Revised.")
             const update = (announcement?: Record<string, unknown>) =>
-                trackerPublication(
-                    f.root,
-                    {
-                        action: "prepareUpdate",
-                        entityDir: f.directory,
-                        source: revised,
-                        reads: [f.page([f.remote(prepared.mutation.arguments.body as string)])],
-                        ...(announcement ? { announcement } : {}),
-                    } as TrackerPublicationInput,
-                    tools,
-                )
+                f.publish({
+                    action: "prepareUpdate",
+                    entityDir: f.directory,
+                    source: revised,
+                    reads: [f.page([f.remote(prepared.mutation.arguments.body as string)])],
+                    ...(announcement ? { announcement } : {}),
+                } as TrackerPublicationInput)
             await assert.rejects(update(), /announcement/)
             await assert.rejects(
                 update({ origin: { kind: "task", entityDir: f.directory }, summary: "Revised." }),
@@ -539,7 +661,7 @@ describe("managed GitHub plan comments", () => {
             const f = fixture(kind)
             try {
                 const run = (input: Record<string, unknown>) =>
-                    trackerPublication(f.root, { entityDir: f.directory, ...input } as TrackerPublicationInput, tools)
+                    f.publish({ entityDir: f.directory, ...input } as TrackerPublicationInput)
                 const prepared = await f.prepare()
                 assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
                 await f.record({ ...prepared.mutation, response: f.remote(prepared.mutation.arguments.body) })

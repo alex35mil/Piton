@@ -7,6 +7,7 @@ import {
     mcpResponseValue,
     type McpToolCatalog,
 } from "../../../extensions/__lib/mcp.js"
+import { githubApi, type GitHubApiOptions } from "./github-api.js"
 import { hasAnnouncementToken } from "./plan-announcement.js"
 import {
     assertPlanCommentUrl,
@@ -21,6 +22,31 @@ import type { GitHubTrackerRecord } from "./records.js"
 import type { ProviderEvidence } from "./resource-id-operations.js"
 
 type Tracker = GitHubTrackerRecord
+
+/** Whether the plan comment was pinned after its first publication. A failure leaves the comment published. */
+export type PlanCommentPin = { state: "pinned" } | { state: "failed"; reason: string }
+
+/**
+ * Pins a newly published plan comment so it stays at the top of a busy issue. The official MCP server has no pin
+ * tool, so this calls GitHub's REST API directly. GitHub keeps one pinned comment per issue and keeps it pinned
+ * through edits, so only the first publication pins. Never throws: the publication must not depend on it.
+ */
+export async function pinPlanComment(
+    cwd: string,
+    server: string,
+    repository: { owner: string; repo: string },
+    commentId: number,
+    options: GitHubApiOptions,
+): Promise<PlanCommentPin> {
+    try {
+        const { owner, repo } = repository
+        const pathname = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/comments/${commentId}/pin`
+        await githubApi(cwd, server, options).rest("PUT", pathname)
+        return { state: "pinned" }
+    } catch (error) {
+        return { state: "failed", reason: error instanceof Error ? error.message : String(error) }
+    }
+}
 
 // GitHub hides HTML comments, so a plan comment carries its token in a marker line.
 export function githubPublication(
