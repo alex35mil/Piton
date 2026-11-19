@@ -363,6 +363,61 @@ describe("native rules model delivery", () => {
         }
     })
 
+    it("supplies a rule's full text once per batch of parallel reads", async () => {
+        const h = await nativeSessionFixture({ extensions, setup, tools: ["read", "write", "edit"] })
+        const occurrences = (text: string) => text.split(body).length - 1
+        try {
+            h.respond(
+                call(
+                    { name: "read", arguments: { path: "target.txt" } },
+                    { name: "read", arguments: { path: "other.txt" } },
+                ),
+                (context) => {
+                    assert.equal(occurrences(requestText(context)), 1)
+                    return write()
+                },
+                answer("Done"),
+            )
+            await h.prompt("Read both files, then apply the change")
+            assert.equal(fs.readFileSync(path.join(h.root, "target.txt"), "utf8"), "after")
+            const reads = toolResults(h.events, "read").map((event) => JSON.stringify(event.result))
+            assert.deepEqual(
+                reads.map((result) => result.includes(body)),
+                [true, false],
+            )
+            assert.doesNotMatch(reads[1], /system-reminder/)
+            h.respond(call({ name: "read", arguments: { path: "other.txt" } }), answer("Done"))
+            await h.prompt("Read a file in the already-visible scope")
+            const later = JSON.stringify(toolResults(h.events, "read").at(-1)?.result)
+            assert.ok(!later.includes(body))
+            assert.match(later, /system-reminder/)
+        } finally {
+            await h.cleanup()
+        }
+    })
+
+    it("supplies a discarded batch of nested reads' rule once after the script returns", async () => {
+        const h = await nativeSessionFixture({ extensions, setup })
+        try {
+            h.respond(
+                call({
+                    name: "codemode",
+                    arguments: {
+                        code: 'await Promise.all([tools.read({path:"target.txt"}), tools.read({path:"other.txt"})]); text("discarded reads");',
+                    },
+                }),
+                (context) => {
+                    assert.equal(requestText(context).split(body).length - 1, 1)
+                    return answer("Done")
+                },
+            )
+            await h.prompt("Read both files in a script")
+            assert.equal(h.requests.length, 2)
+        } finally {
+            await h.cleanup()
+        }
+    })
+
     it("requires delivery of changed rule contents before another edit", async () => {
         const h = await nativeSessionFixture({ extensions, setup, tools: ["read", "write", "edit"] })
         try {

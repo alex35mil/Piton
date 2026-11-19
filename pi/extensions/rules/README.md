@@ -53,7 +53,7 @@ Supports `*`, `**`, `?`, and brace expansion (`{a,b}`). Paths are matched relati
 
 ### Queued and Model-Visible Rules
 
-A successful matching read appends the complete rule body and patterns and queues delivery. Reading a rule file itself also supplies its complete reminder, including when the requested file range is only its header.
+A successful matching read appends the complete rule body and patterns and queues delivery. Only the first read of a queued rule carries its full text: later matching reads before the model confirms it, including others in the same tool batch or script, add nothing. Reading a rule file itself also supplies its complete reminder, including when the requested file range is only its header.
 
 A nested read reaches only its script. When the script returns, missing reminders are added to the branch's model context after the tool batch, even when the script discarded its read result. These messages persist so the rules remain available in later requests.
 
