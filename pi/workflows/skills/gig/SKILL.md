@@ -37,6 +37,7 @@ allowed-tools:
     - "record_resource_ids"
     - "invalidate_resource_ids"
     - "select_pull_request_resource"
+    - "find_pull_request"
     - "cleanup_delivery_branch"
     - "prepare_merge_resolution_comment"
     - "begin_user_review"

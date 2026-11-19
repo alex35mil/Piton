@@ -44,6 +44,7 @@ export const expectedWorkflowTools = [
     "resolve_resource_ids",
     "record_resource_ids",
     "invalidate_resource_ids",
+    "find_pull_request",
     "prepare_tracker_publication",
     "prepare_tracker_publication_update",
     "record_tracker_publication",

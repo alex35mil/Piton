@@ -6,6 +6,7 @@ import { workflowTools } from "../__lib/tools.js"
 import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import { isResourceIdsKind, OperationResourceIdsMemo, type ResourceIds } from "./resource-ids.js"
 import { linkPullRequestIssue } from "./forge/github/issue-link.js"
+import { findPullRequest } from "./forge/github/find-pull-request.js"
 import { beginPullRequestCreation, recordPullRequestCreation } from "./creation.js"
 import {
     evidenceResourceKind,
@@ -117,14 +118,35 @@ export function registerResourceIds(pi: ExtensionAPI, memo: OperationResourceIds
                     const context = resolveResourceIdsContext(ctx.cwd, entityDir, resource)
                     if (input.action === "invalidate")
                         return invalidateStaleResourceIds(context, input.evidence, memo, tools)
+                    const resourceIds = await recordResourceIdsEvidence(context, input.evidence, memo, tools)
                     return {
                         state: "resolved" as const,
                         source: "evidence" as const,
-                        resourceIds: await recordResourceIdsEvidence(context, input.evidence, memo, tools),
+                        resourceIds,
+                        // A PR recorded after rediscovery gets the same closing link as a created one.
+                        ...(isResourceIdsKind(resourceIds, "github-pull-request")
+                            ? { issueLink: await linkIssue(ctx, entityDir, resourceIds) }
+                            : {}),
                     }
                 })()
                 return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
             },
         })
     }
+    toolsApi.registerTool({
+        name: "find_pull_request",
+        label: "find_pull_request",
+        description:
+            "Find the entity's PR after an uncertain create or missing IDs: PRs linked to its GitHub issue first, then PRs with the saved head and target. A match needs the saved repository, head, and target and the local branch head commit. Returns found (with source), ambiguous, or none, each with rejected candidates. Read-only; record a found PR with record_resource_ids from a pull_request_read get.",
+        parameters: FindSchema,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const entityDir = parse(FindValidator, params).entityDir.replace(/^@/, "")
+            const status = resolveResourceIdsContext(ctx.cwd, entityDir, "github-pull-request").status
+            const result = await findPullRequest(ctx.cwd, status, { projectTrusted: ctx.isProjectTrusted() })
+            return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
 }
+
+const FindSchema = Type.Object({ entityDir: common.entityDir }, { additionalProperties: false })
+const FindValidator = compile(FindSchema)

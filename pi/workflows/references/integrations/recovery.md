@@ -53,7 +53,7 @@ Initialize from the object when exactly one is confirmed. Retry the create only 
 
 ## Uncertain PR operations
 
-- **Creation:** the first PR create is non-idempotent. After an uncertain result, investigate through the configured forge tools and record the actual PR read. Never prepare a replacement creation.
+- **Creation:** the first PR create is non-idempotent. After an uncertain result, or when intent exists without IDs, call `find_pull_request`. Record a `found` open PR from its `pull_request_read` `get` with `record_resource_ids`. Report anything else to the user. Never prepare a replacement creation.
 - **Merge:** reconcile an uncertain merge through an exact PR get before retrying. Never merge twice to repair a board or cleanup failure.
 
 ## Queue intake

@@ -1,5 +1,5 @@
 import type { EntityStatus } from "../../../__lib/entity.js"
-import { loadIntegrationRoles } from "../../config.js"
+import { loadIntegrationRoles, type IntegrationRoles } from "../../config.js"
 import { registeredCredentialEnvironment } from "../../mcp.js"
 import { sameRepository } from "../../policy.js"
 
@@ -26,6 +26,46 @@ interface LinkRead {
     }
 }
 
+export type GraphQL = <T>(query: string, variables: Record<string, unknown>) => Promise<T>
+
+/** The entity's GitHub issue in the forge's repository: the issue its PR closes, when there is one. */
+export function closingIssueNumber(roles: IntegrationRoles, status: EntityStatus): number | undefined {
+    const tracker = status.tracker
+    return roles.forge.state === "on" &&
+        roles.tracker.state === "on" &&
+        roles.tracker.config.provider === "github" &&
+        tracker.provider === "github" &&
+        sameRepository(tracker.repository, roles.forge.config.repository)
+        ? tracker.external.issueNumber
+        : undefined
+}
+
+/**
+ * GitHub's GraphQL API with the token the MCP registration uses; the official MCP server lacks the operations here.
+ * Errors carry only GitHub's messages or a fetch error name, never the request or its credential.
+ */
+export function forgeGraphql(cwd: string, mcpServer: string, options: IssueLinkOptions): GraphQL {
+    const credential = registeredCredentialEnvironment(cwd, mcpServer, "github", options.projectTrusted)
+    const token = (options.env ?? process.env)[credential]
+    if (!token) throw new Error(`environment variable ${credential} is not set`)
+    return async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
+        let response: Response
+        try {
+            response = await (options.fetch ?? fetch)("https://api.github.com/graphql", {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ query, variables }),
+            })
+        } catch (error) {
+            throw new Error(`network request failed (${error instanceof Error ? error.name : "unknown error"})`)
+        }
+        const body = (await response.json().catch(() => ({}))) as { data?: T; errors?: Array<{ message?: string }> }
+        if (!response.ok || body.errors?.length || !body.data)
+            throw new Error(body.errors?.map((error) => error.message).join("; ") || `HTTP ${response.status}`)
+        return body.data
+    }
+}
+
 /**
  * A safety net under the PR body's `Closes #N`, which GitHub occasionally doesn't turn into a closing link. Links the
  * PR to the entity's same-repository GitHub issue with `addCloseIssueReferences` (the official MCP server has no tool
@@ -40,38 +80,10 @@ export async function linkPullRequestIssue(
 ): Promise<IssueLink> {
     try {
         const roles = loadIntegrationRoles(cwd)
-        const tracker = status.tracker
-        if (
-            roles.forge.state !== "on" ||
-            roles.tracker.state !== "on" ||
-            roles.tracker.config.provider !== "github" ||
-            tracker.provider !== "github" ||
-            !sameRepository(tracker.repository, roles.forge.config.repository)
-        )
-            return { state: "not-applicable" }
+        const issueNumber = closingIssueNumber(roles, status)
+        if (issueNumber === undefined || roles.forge.state !== "on") return { state: "not-applicable" }
         const { repository, mcpServer } = roles.forge.config
-        const issueNumber = tracker.external.issueNumber
-        const credential = registeredCredentialEnvironment(cwd, mcpServer, "github", options.projectTrusted)
-        const token = (options.env ?? process.env)[credential]
-        if (!token) return { state: "failed", reason: `environment variable ${credential} is not set` }
-
-        // Errors carry only GitHub's messages or a fetch error name, never the request or its credential.
-        const graphql = async <T>(query: string, variables: Record<string, unknown>): Promise<T> => {
-            let response: Response
-            try {
-                response = await (options.fetch ?? fetch)("https://api.github.com/graphql", {
-                    method: "POST",
-                    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-                    body: JSON.stringify({ query, variables }),
-                })
-            } catch (error) {
-                throw new Error(`network request failed (${error instanceof Error ? error.name : "unknown error"})`)
-            }
-            const body = (await response.json().catch(() => ({}))) as { data?: T; errors?: Array<{ message?: string }> }
-            if (!response.ok || body.errors?.length || !body.data)
-                throw new Error(body.errors?.map((error) => error.message).join("; ") || `HTTP ${response.status}`)
-            return body.data
-        }
+        const graphql = forgeGraphql(cwd, mcpServer, options)
         // A workflow PR closes one issue; 50 closing references is ample.
         const read = async () => {
             const { repository: found } = await graphql<LinkRead>(

@@ -210,7 +210,8 @@ describe("workflow guidance structure", () => {
         const budgets: Record<string, number> = {
             backlog: 12_200,
             todo: 12_500,
-            gig: 33_400,
+            // Raised in #24 for the find_pull_request grant.
+            gig: 33_500,
             task: 38_000,
             epic: 39_200,
             pr: 29_700,
