@@ -19,7 +19,7 @@ import {
     type EntityStatus,
 } from "../__lib/entity.js"
 import { assertAcceptedTaskList } from "../__lib/epic-acceptance.js"
-import { type EpicTask, readEpicTasks, tagEpicTask } from "../__lib/epic-tasks.js"
+import { type EpicTask, epicTaskMarker, readEpicTasks, tagEpicTask } from "../__lib/epic-tasks.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
 import {
     assertConfiguredPriority,
@@ -96,6 +96,7 @@ export const RecordEpicTaskIssueValidator = compile(RecordEpicTaskIssueSchema)
 export type RecordEpicTaskIssueInput = Static<typeof RecordEpicTaskIssueSchema>
 
 type Mutation = { tool: string; arguments: Record<string, unknown> }
+type PendingTask = Extract<EpicTask, { issue: "pending" }>
 export type EpicTaskIssueStep =
     | { title: string; effect: "create"; mutation: Mutation }
     | { title: string; marker: string; effect: "tag" }
@@ -149,7 +150,7 @@ export function planEpicTaskIssues(
         if (children.has(child.marker)) throw new Error(`children list repeats ${child.marker}`)
         children.set(child.marker, child)
     }
-    const planned = new Set(tasks.flatMap((task) => (task.marker ? [task.marker] : [])))
+    const planned = new Set(tasks.flatMap((task) => epicTaskMarker(task) ?? []))
     const native = nativeCalls(ctx, input.epicPriority)
 
     const steps: EpicTaskIssueStep[] = []
@@ -173,7 +174,7 @@ interface Reconciliation {
 }
 
 function reconcileTask(task: EpicTask, r: Reconciliation): EpicTaskIssueStep[] {
-    if (!task.marker) {
+    if (task.issue === "pending") {
         // A child whose marker the plan already carries belongs to another Task.
         const matches = [...r.children.values()].filter(
             (child) => !r.planned.has(child.marker) && child.title === task.title,
@@ -240,7 +241,8 @@ function lifecycleOf(ctx: Context) {
 }
 
 interface NativeCalls {
-    create(task: EpicTask): Mutation
+    // The new issue's body is the Task's design; from then on the issue holds it.
+    create(task: PendingTask): Mutation
     repairBoard(title: string, child: EpicChildIssue): EpicTaskIssueStep[]
     cancel(title: string, marker: string): EpicTaskIssueStep[]
     closeIfOpen(title: string, child: EpicChildIssue): EpicTaskIssueStep[]
@@ -299,7 +301,7 @@ function nativeCalls(ctx: Context, epicPriority: string): NativeCalls {
                     method: "create",
                     ...repository,
                     title: task.title,
-                    body: task.description,
+                    body: task.design,
                     ...(labels.length > 0 ? { labels } : {}),
                     parent_issue_number: epicNumber,
                 })
@@ -357,7 +359,7 @@ function nativeCalls(ctx: Context, epicPriority: string): NativeCalls {
             return call("save_issue", {
                 team: tracker.team,
                 title: task.title,
-                description: task.description,
+                description: task.design,
                 project: projectId,
                 state: statuses.todo,
                 priority: linearPriorityNumber(epicPriority),

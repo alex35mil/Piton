@@ -823,7 +823,8 @@ describe("workflow reviewer isolation", () => {
             fs.writeFileSync(candidate, "# Candidate\n")
 
             const prompt = await buildEpicReviewPrompt({ cwd: repository } as never, epicDir, candidate, {
-                previousCandidate: "# Reviewed\n\n## Tasks\n\n### [#41] Existing Task\n\nKind: feature\n\nKeep it.\n",
+                previousCandidate:
+                    "# Reviewed\n\n## Tasks\n\n### [#41] Existing Task\n\nKind: feature\nSummary: Keep it.\n",
                 pass: { instructions: [], sections: "F1 rejected by user." },
             })
             assert.ok(prompt.includes(policies))

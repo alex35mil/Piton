@@ -53,6 +53,7 @@ import { registerWorkflowOperations } from "./operations.js"
 import { registerWorkflowPublication } from "./publication-mcp.js"
 import { registerTrackerPublication } from "./tracker-publication.js"
 import { registerWorkflowContext } from "./workflow-context.js"
+import { inspectTaskDesign, recordTaskDesign, TaskDesignSchema, TaskDesignValidator } from "./task-design.js"
 import {
     planEpicTaskIssues,
     PlanEpicTaskIssuesSchema,
@@ -274,11 +275,35 @@ export default function (pi: ExtensionAPI): void {
         name: "record_epic_task_issue",
         label: "record_epic_task_issue",
         description:
-            "Tag one untagged Epic plan Task with its issue's marker, from clear-success create evidence or a matched existing child. Refuses a marker the plan already carries; repeating the same tag is a no-op.",
+            "Tag one untagged Epic plan Task with its issue's marker, from clear-success create evidence or a matched existing child, and drop the section's design, which now lives in the issue body. Refuses a marker the plan already carries; repeating the same tag is a no-op.",
         parameters: RecordEpicTaskIssueSchema,
         async execute(_id, params, _signal, _onUpdate, ctx) {
             const input = parse(RecordEpicTaskIssueValidator, params)
             const result = recordEpicTaskIssue(ctx.cwd, input, tools)
+            return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
+
+    toolsApi.registerTool({
+        name: "inspect_task_design",
+        label: "inspect_task_design",
+        description:
+            "Compare a started Task's issue body (its design), from a fresh issue read, with the design the Task last synced from. Returns `unchanged`, `unrecorded` (nothing synced yet), or `changed` with the new design. Ignores the publication signature and whitespace. Writes nothing.",
+        parameters: TaskDesignSchema,
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+            const result = inspectTaskDesign(ctx.cwd, parse(TaskDesignValidator, params), tools)
+            return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
+
+    toolsApi.registerTool({
+        name: "record_task_design",
+        label: "record_task_design",
+        description:
+            "Record a Task issue's current body, from a fresh issue read, as the design the Task follows: at start, after taking in a changed design, and after the Task rewrites its own issue body. Never calls providers.",
+        parameters: TaskDesignSchema,
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+            const result = recordTaskDesign(ctx.cwd, parse(TaskDesignValidator, params), tools)
             return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
         },
     })

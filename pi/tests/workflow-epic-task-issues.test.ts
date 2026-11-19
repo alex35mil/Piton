@@ -22,6 +22,7 @@ import {
     planEpicTaskIssues,
     recordEpicTaskIssue,
 } from "../workflows/extensions/integrations/epic-task-issues.ts"
+import { inspectTaskDesign, recordTaskDesign } from "../workflows/extensions/integrations/task-design.ts"
 
 const repository = { owner: "example", repo: "app" }
 const statuses = {
@@ -104,8 +105,10 @@ function repo(tracker: "github" | "linear", labels?: unknown) {
     return { root, directory: epic.directory, epicPath, branch: epic.status.branch.name, write }
 }
 
+// `extra` holds the optional `Labels:` and `Status:` lines. Only an untagged Task carries its design.
 const section = (title: string, marker?: string, extra = "") =>
-    `### ${marker ? `[${marker}] ` : ""}${title}\n\nKind: feature\n${extra}\n${title} outcome.\n`
+    `### ${marker ? `[${marker}] ` : ""}${title}\n\nKind: feature\n${extra}Summary: ${title} summary.\n` +
+    (marker ? "" : `\n${title} outcome.\n`)
 const plan = (...sections: string[]) => `# Epic\n\n## Overview\n\nPlan.\n\n## Tasks\n\n${sections.join("\n")}`
 const child = (marker: string, title: string, facts: Partial<EpicChildIssue> = {}): EpicChildIssue => ({
     marker,
@@ -118,7 +121,7 @@ const child = (marker: string, title: string, facts: Partial<EpicChildIssue> = {
 })
 
 describe("Epic Task format", () => {
-    it("parses multi-paragraph sections, lists, and code blocks as one Task each", () => {
+    it("parses a tagged Task's summary and an untagged Task's multi-paragraph design as one Task each", () => {
         const tasks = parseEpicTasks(
             [
                 "# Epic",
@@ -132,6 +135,12 @@ describe("Epic Task format", () => {
                 "### [#12] Build the parser",
                 "",
                 "Kind: bugfix",
+                "Summary: Parse the input.",
+                "",
+                "### Wire the CLI",
+                "",
+                "Kind: chore",
+                "Summary: Expose the parser.",
                 "",
                 "First paragraph.",
                 "",
@@ -143,32 +152,42 @@ describe("Epic Task format", () => {
                 "## Not a section",
                 "```",
                 "",
-                "### Wire the CLI",
-                "",
-                "Kind: chore",
-                "",
-                "Second.",
-                "",
                 "## Delivery",
                 "",
                 "Not part of a Task.",
             ].join("\n"),
         )
-        assert.deepEqual(
-            tasks.map(({ title, marker, kind, canceled }) => ({ title, marker, kind, canceled })),
-            [
-                { title: "Build the parser", marker: "#12", kind: "bugfix", canceled: false },
-                { title: "Wire the CLI", marker: undefined, kind: "chore", canceled: false },
-            ],
+        assert.deepEqual(tasks[0], {
+            issue: "tagged",
+            title: "Build the parser",
+            marker: "#12",
+            kind: "bugfix",
+            labels: {},
+            summary: "Parse the input.",
+            canceled: false,
+        })
+        assert.equal(tasks[1].issue, "pending")
+        assert.equal(tasks[1].summary, "Expose the parser.")
+        assert.match(
+            tasks[1].issue === "pending" ? tasks[1].design : "",
+            /^First paragraph\.[\s\S]*### Not a heading[\s\S]*```$/,
         )
-        assert.match(tasks[0].description, /^First paragraph\.[\s\S]*### Not a heading[\s\S]*```$/)
-        assert.equal(tasks[1].description, "Second.")
     })
 
     it("rejects malformed Tasks", () => {
         assert.throws(() => parseEpicTasks(plan("### A\n\nNo kind.\n")), /first body line must be `Kind/)
-        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: epic\n\nText.\n")), /invalid Kind/)
-        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: chore\n")), /description is empty/)
+        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: epic\nSummary: A.\n\nText.\n")), /invalid Kind/)
+        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: chore\n\nText.\n")), /needs a one-line `Summary:/)
+        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: chore\nSummary:\n\nText.\n")), /`Summary:/)
+        assert.throws(
+            () => parseEpicTasks(plan("### A\n\nKind: chore\nSummary: A.\n")),
+            /design after `Summary:` is empty/,
+        )
+        // A tagged Task's design lives in its issue; the Epic keeps only the summary.
+        assert.throws(
+            () => parseEpicTasks(plan("### [#1] A\n\nKind: chore\nSummary: A.\n\nOld design.\n")),
+            /design belongs in the Task issue/,
+        )
         assert.throws(() => parseEpicTasks(plan(section("A", undefined, "Status: canceled\n"))), /already has an issue/)
         assert.throws(() => parseEpicTasks(plan(section("A", "#1", "Status: done\n"))), /only allowed Status/)
         assert.throws(() => parseEpicTasks(plan(section("A"), section("A"))), /duplicate Task title/)
@@ -177,7 +196,8 @@ describe("Epic Task format", () => {
         assert.throws(() => parseEpicTasks(`# Epic\n\n${section("Stray")}`), /outside `## Tasks`/)
         // A plan without `## Tasks` simply has no Tasks.
         assert.deepEqual(parseEpicTasks("# Epic\n\n## Ordered Tasks\n\n1. **A** — a.\n"), [])
-        assert.equal(parseEpicTasks(plan(section("A", "#1", "Status: canceled\n")))[0].canceled, true)
+        const canceled = parseEpicTasks(plan(section("A", "#1", "Status: canceled\n")))[0]
+        assert.equal(canceled.issue === "tagged" && canceled.canceled, true)
     })
 })
 
@@ -230,7 +250,8 @@ describe("Epic Task issue processing", () => {
                 recordEpicTaskIssue(root, { entityDir: directory, title: "Parser", marker: "#11" }, tools).state,
                 "unchanged",
             )
-            assert.match(fs.readFileSync(epicPath, "utf-8"), /^### \[#11\] Parser$/m)
+            // Tagging drops the design, now in the issue body, and keeps the fields and summary.
+            assert.equal(fs.readFileSync(epicPath, "utf-8"), plan(section("Parser", "#11"), section("CLI")))
 
             // The session stopped after #12 was created but before its tag; the rerun's
             // title lookup tags it instead of creating a duplicate.
@@ -547,8 +568,11 @@ describe("Epic Task issue processing", () => {
             // A Task added after the review isn't accepted.
             fs.writeFileSync(epicPath, plan(section("Parser"), section("CLI"), section("Docs")))
             assert.throws(() => acceptEpicTasks(epicDir), /changed after plan-002[\s\S]*Task 3: added "Docs"/)
-            // Rewording an outcome keeps the reviewed list.
-            fs.writeFileSync(epicPath, reviewed.replace("CLI outcome.", "CLI outcome, reworded."))
+            // Rewording a design or summary keeps the reviewed list.
+            fs.writeFileSync(
+                epicPath,
+                reviewed.replace("CLI outcome.", "CLI outcome, reworded.").replace("CLI summary.", "CLI, reworded."),
+            )
             assert.equal(acceptEpicTasks(epicDir).state, "accepted")
             assert.equal(processIssues().state, "steps-needed")
 
@@ -557,8 +581,8 @@ describe("Epic Task issue processing", () => {
             assert.throws(processIssues, /differs from the accepted one[\s\S]*Task 1: "Parser"/)
             fs.writeFileSync(epicPath, reviewed.replace("### CLI\n\nKind: feature", "### CLI\n\nKind: chore"))
             assert.throws(processIssues, /Task 2: "CLI" · feature · planned → "CLI" · chore · planned/)
-            // Tagging a Task with its issue marker and editing outcome text need no acceptance.
-            fs.writeFileSync(epicPath, plan(section("Parser", "#11"), section("CLI", undefined, "\nMore detail.\n")))
+            // Tagging a Task with its issue marker and editing design text need no acceptance.
+            fs.writeFileSync(epicPath, plan(section("Parser", "#11"), `${section("CLI")}\nMore detail.\n`))
             assert.equal(
                 planEpicTaskIssues(
                     root,
@@ -598,6 +622,12 @@ const accepted = (branch: string) =>
         "### [#11] Parser",
         "",
         "Kind: feature",
+        "Summary: Parse the input.",
+        "",
+        "### CLI",
+        "",
+        "Kind: chore",
+        "Summary: Wire it.",
         "",
         "1. nested",
         "   - list",
@@ -605,12 +635,6 @@ const accepted = (branch: string) =>
         "```md",
         "## not a section",
         "```",
-        "",
-        "### CLI",
-        "",
-        "Kind: chore",
-        "",
-        "Wire it.",
         "",
     ].join("\n")
 
@@ -735,7 +759,9 @@ describe("Epic routing and restore", () => {
                 child("#11", "Parser", { status: "In Progress" }),
                 child("#12", "CLI", { status: "Done" }),
             ]
-            fs.writeFileSync(path.join(root, restored.directory, "epic.md"), source.replace("### CLI", "### [#12] CLI"))
+            // Tagging drops CLI's design, as record_epic_task_issue does.
+            const tagged = `${source.slice(0, source.indexOf("### CLI"))}### [#12] CLI\n\nKind: chore\nSummary: Wire it.\n`
+            fs.writeFileSync(path.join(root, restored.directory, "epic.md"), tagged)
             assert.deepEqual(
                 planEpicTaskIssues(root, { entityDir: restored.directory, epicPriority: "High", children }, tools),
                 { state: "complete" },
@@ -836,6 +862,98 @@ describe("Linear Epic restore", () => {
             assert.equal(fs.readFileSync(path.join(root, restored.directory, "epic.md"), "utf-8"), source)
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+})
+
+describe("Task design", () => {
+    it("detects a changed issue body against the design a started Task last synced from", () => {
+        for (const provider of ["github", "linear"] as const) {
+            const { root, directory, branch, write } = repo(provider)
+            try {
+                const marker = provider === "github" ? "#11" : "ENG-11"
+                write(
+                    `# Epic\n\n## Task delivery strategy\n\nTask target: default\nEpic branch: ${branch}\n\n## Tasks\n\n${section("Parser", marker)}`,
+                )
+                const task = initializeEntity(
+                    {
+                        entity: "task",
+                        title: "Parser",
+                        slug: "parser",
+                        request: "Parse the input.",
+                        parentEpicDir: directory,
+                        object:
+                            provider === "github"
+                                ? {
+                                      issueId: 110,
+                                      issueNumber: 11,
+                                      issueUrl: "https://github.com/example/app/issues/11",
+                                  }
+                                : {
+                                      issueId: "issue-uuid",
+                                      identifier: "ENG-11",
+                                      issueUrl: "https://linear.app/example/issue/ENG-11",
+                                      projectId: "project-uuid",
+                                  },
+                    },
+                    { cwd: root },
+                )
+                const read = (body: string) =>
+                    provider === "github"
+                        ? {
+                              tool: "mcp__github__issue_read",
+                              arguments: { method: "get", ...repository, issue_number: 11 },
+                              response: { number: 11, body },
+                          }
+                        : {
+                              tool: "mcp__linear__get_issue",
+                              arguments: { id: "issue-uuid" },
+                              response: { uuid: "issue-uuid", id: "ENG-11", description: body },
+                          }
+                const check = (body: string) =>
+                    inspectTaskDesign(root, { entityDir: task.directory, evidence: read(body) }, tools)
+                const footer =
+                    provider === "github" ? "<sub>Sent via Pi. Model: a/b.</sub>" : "*Sent via Pi. Model: a/b.*"
+                const original = `Parse the input.\n\n- Keep errors.\n\n${footer}`
+
+                // A Task started before designs were tracked records the current one first.
+                assert.deepEqual(check(original), { state: "unrecorded" })
+                const record = (body: string) =>
+                    recordTaskDesign(root, { entityDir: task.directory, evidence: read(body) }, tools).state
+                assert.equal(record(original), "recorded")
+                assert.equal(record(original), "unchanged")
+
+                // The signature, line endings, and trailing whitespace aren't design changes.
+                assert.deepEqual(
+                    check("Parse the input.  \r\n\r\n- Keep errors.\r\n"),
+                    { state: "unchanged" },
+                    provider,
+                )
+                const redesigned = `Parse the input as a stream.\n\n- Keep errors.\n\n${footer}`
+                assert.deepEqual(
+                    check(redesigned),
+                    { state: "changed", design: "Parse the input as a stream.\n\n- Keep errors." },
+                    provider,
+                )
+                assert.equal(record(redesigned), "recorded")
+                assert.deepEqual(check(redesigned), { state: "unchanged" })
+
+                // Only a read of this Task's own issue counts.
+                const other =
+                    provider === "github"
+                        ? { ...read(original), arguments: { method: "get", ...repository, issue_number: 12 } }
+                        : { ...read(original), arguments: { id: "other-uuid" } }
+                assert.throws(
+                    () => inspectTaskDesign(root, { entityDir: task.directory, evidence: other }, tools),
+                    /argument (issue_number|id) must be/,
+                )
+                assert.throws(
+                    () => inspectTaskDesign(root, { entityDir: directory, evidence: read(original) }, tools),
+                    /needs a Task/,
+                )
+            } finally {
+                fs.rmSync(root, { recursive: true, force: true })
+            }
         }
     })
 })

@@ -90,7 +90,13 @@ const epicProperties = {
     acceptedTasks: Type.Optional(Type.Array(AcceptedTaskSchema)),
 }
 const gigProperties = { entity: Type.Literal("gig"), kind: DeliverableKindSchema }
-const taskProperties = { entity: Type.Literal("task"), kind: DeliverableKindSchema }
+const taskProperties = {
+    entity: Type.Literal("task"),
+    kind: DeliverableKindSchema,
+    // A fingerprint of the Task issue body (its design) the Task last synced from. Absent until
+    // `record_task_design` first runs, for example on a Task started before designs were tracked.
+    design: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$" })),
+}
 
 function entitySchema<P extends TProperties>(properties: P) {
     return Type.Object({ ...baseMetadataProperties, ...properties }, { additionalProperties: false })
@@ -254,14 +260,15 @@ export function readEpicTaskProgress(
     const progress: EpicTaskProgress = {
         epic: entityLabel(epic),
         items: planTasks.map((planTask) => {
-            if (!planTask.marker) return { state: "unpublished" as const, title: planTask.title }
+            if (planTask.issue === "pending") return { state: "unpublished" as const, title: planTask.title }
+            const marker = planTask.marker
             const lifecycle =
-                trackerLifecycle[planTask.marker] ??
+                trackerLifecycle[marker] ??
                 (() => {
-                    throw new Error(`tracker lifecycle is required for ${planTask.marker}`)
+                    throw new Error(`tracker lifecycle is required for ${marker}`)
                 })()
-            const directory = directories.get(planTask.marker)
-            const task = { marker: planTask.marker, ...(directory ? { directory } : {}) }
+            const directory = directories.get(marker)
+            const task = { marker, ...(directory ? { directory } : {}) }
             const title = planTask.title
             switch (lifecycle) {
                 case "backlog":
