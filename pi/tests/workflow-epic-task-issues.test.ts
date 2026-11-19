@@ -669,7 +669,7 @@ describe("Epic routing and restore", () => {
                     id: 100,
                     number: 10,
                     title: "Rollout",
-                    body: "Roll out",
+                    body: "Roll out\n\n<sub>Sent via Pi. Model: x/y.</sub>",
                     html_url: "https://github.com/example/app/issues/10",
                     created_at: "2026-10-01T09:00:00Z",
                 },
@@ -719,6 +719,11 @@ describe("Epic routing and restore", () => {
                 url: "https://github.com/example/app/issues/10#issuecomment-8",
             })
             assert.equal(fs.readFileSync(path.join(root, restored.directory, "epic.md"), "utf-8"), source)
+            // The issue body's publication signature stays out of the brief.
+            assert.equal(
+                fs.readFileSync(path.join(root, restored.directory, "brief.md"), "utf-8"),
+                "# Brief\n\nRoll out\n",
+            )
             // The published plan's Task list was accepted before it was published.
             assert.deepEqual(status.entity === "epic" && status.acceptedTasks, [
                 { title: "Parser", kind: "feature", labels: {}, status: "planned" },

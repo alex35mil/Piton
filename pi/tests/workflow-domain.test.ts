@@ -239,6 +239,33 @@ describe("workflow domain", () => {
         assert.equal(check({ ...gig("Work", issue(1)), priority: "High" }), false)
     })
 
+    it("keeps an adopted item's publication signature out of the brief", () => {
+        const cwd = temporaryRepository()
+        try {
+            const signed = (footer: string) => ({
+                ...gig("Signed", issue(8)),
+                request: `Signed\n\nDo it.\n\n${footer}\n`,
+            })
+            const created = init(cwd, signed("<sub>Sent via Pi. Model: x/y.</sub>"))
+            const brief = path.join(cwd, created.directory, "brief.md")
+            assert.equal(fs.readFileSync(brief, "utf-8"), "# Brief\n\nSigned\n\nDo it.\n")
+            fs.rmSync(path.join(cwd, created.directory), { recursive: true })
+            git(cwd, ["branch", "-D", created.status.branch.name])
+            const linear = init(cwd, signed("*Sent via Pi. Model: x/y.*"))
+            assert.equal(
+                fs.readFileSync(path.join(cwd, linear.directory, "brief.md"), "utf-8"),
+                "# Brief\n\nSigned\n\nDo it.\n",
+            )
+            assert.throws(
+                () => init(cwd, { ...gig("Only", issue(9)), request: "<sub>Sent via Pi. Model: x/y.</sub>" }),
+                /request is empty/,
+            )
+            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/gigs/9-only")), false)
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
     it("uses the current local branch as default without a remote", () => {
         const cwd = temporaryRepository()
         try {

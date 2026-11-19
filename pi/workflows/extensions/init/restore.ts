@@ -21,6 +21,7 @@ import { writeTextAtomically } from "../__lib/files.js"
 import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "../__lib/project-config.js"
 import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "../integrations/config.js"
 import { initialPhase } from "../integrations/phase.js"
+import { stripPublicationSignature } from "../integrations/publication.js"
 import type { RecoveryReads } from "../integrations/plan-publication.js"
 import {
     requireTrackerItem,
@@ -221,7 +222,10 @@ export function restoreEpic(cwd: string, input: RestoreEpicInput, tools: McpTool
     fs.mkdirSync(directory)
     try {
         for (const entry of [LOCAL_REVIEWS_DIR, LOCAL_SCRATCH_DIR, "tasks"]) fs.mkdirSync(path.join(directory, entry))
-        fs.writeFileSync(path.join(directory, "brief.md"), `# Brief\n\n${facts.description.trim() || facts.title}\n`)
+        fs.writeFileSync(
+            path.join(directory, "brief.md"),
+            `# Brief\n\n${stripPublicationSignature(facts.description).trim() || facts.title}\n`,
+        )
         fs.writeFileSync(path.join(directory, LOCAL_NOTES_FILE), "# Notes\n")
         writeTextAtomically(path.join(directory, "epic.md"), plan.source)
         writeEntityStatus(directory, status)

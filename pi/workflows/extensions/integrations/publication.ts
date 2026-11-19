@@ -99,6 +99,16 @@ function htmlLiteral(text: string): string {
     return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
 }
 
+// A terminal code-owned signature paragraph, current or earlier bracket format, GitHub or Linear styling.
+const TERMINAL_SIGNATURE =
+    /(^|(?:\r?\n){2})(?:<sub>Sent via [^\r\n]+(?: \[[^\r\n]+\]\.|\. Model: [^\r\n]+\.)<\/sub>|\*Sent via [^\r\n]+(?: \[[^\r\n]+\]\.|\. Model: [^\r\n]+\.)\*)((?:\r?\n)*)$/
+
+// Removes the terminal signature that publication added, for provider text copied into local artifacts.
+export function stripPublicationSignature(text: string): string {
+    const signature = TERMINAL_SIGNATURE.exec(text)
+    return signature ? text.slice(0, signature.index) : text
+}
+
 export function signPublication(
     text: string,
     service: Exclude<PublicationProvider, "other">,
@@ -107,10 +117,7 @@ export function signPublication(
     const escape = service === "github" ? (value: string) => markdownLiteral(htmlLiteral(value)) : markdownLiteral
     const sentence = `Sent via ${escape(identity.harness)}. Model: ${escape(identity.provider)}/${escape(identity.modelId)}.`
     const footer = service === "github" ? `<sub>${sentence}</sub>` : `*${sentence}*`
-    const previous =
-        /(^|(?:\r?\n){2})(?:<sub>Sent via [^\r\n]+(?: \[[^\r\n]+\]\.|\. Model: [^\r\n]+\.)<\/sub>|\*Sent via [^\r\n]+(?: \[[^\r\n]+\]\.|\. Model: [^\r\n]+\.)\*)((?:\r?\n)*)$/.exec(
-            text,
-        )
+    const previous = TERMINAL_SIGNATURE.exec(text)
     if (previous) return text.slice(0, previous.index) + previous[1] + footer + previous[2]
     const newline = text.includes("\r\n") ? "\r\n" : "\n"
     const separation = text.endsWith(newline.repeat(2)) ? "" : text.endsWith(newline) ? newline : newline.repeat(2)
