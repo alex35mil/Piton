@@ -62,6 +62,8 @@ class FakeGitHub {
     loseNextProjectCreateResponse = false
     nextField = 10
     repositoryOwnerType = "Organization"
+    // undefined omits the field, as GitHub does when the token can't see merge settings.
+    deleteBranchOnMerge: unknown = true
     restRequests: string[] = []
     onBoardCreate?: (project: FakeProject, view: FakeView) => void
     onProjectCreate?: (project: FakeProject) => void
@@ -80,6 +82,7 @@ class FakeGitHub {
                 node_id: "repo-node",
                 name: "example",
                 owner: { login: "acme", type: this.repositoryOwnerType },
+                ...(this.deleteBranchOnMerge === undefined ? {} : { delete_branch_on_merge: this.deleteBranchOnMerge }),
             })
         }
         // Verified against the personal REST API: numeric owner POST 404; login POST 201.
@@ -2035,6 +2038,7 @@ describe("GitHub Project setup", () => {
             assert.deepEqual(inspected, {
                 repository: { owner: "acme", repo: "example", ownerType: ownerType === "User" ? "user" : "org" },
                 suggestedProjectTitle: "example",
+                headBranchDeletion: "on",
             })
             assert.deepEqual(github.restRequests, ["GET https://api.github.com/repos/acme/example"])
             for (const title of [inspected.suggestedProjectTitle, "Explicit title"]) {
@@ -2050,6 +2054,42 @@ describe("GitHub Project setup", () => {
                 )
             }
         }
+    })
+
+    it("reads head-branch deletion without writing it", async () => {
+        const cases: Array<[unknown, string]> = [
+            [true, "on"],
+            [false, "off"],
+            [null, "unknown"],
+            [undefined, "unknown"],
+        ]
+        for (const [value, expected] of cases) {
+            const github = new FakeGitHub()
+            github.deleteBranchOnMerge = value
+            const inspected = await runGitHubProjectSetup(
+                {
+                    operation: "inspectRepository",
+                    credentialEnv: "GITHUB_TOKEN_FOR_TEST",
+                    repository: { owner: "acme", repo: "example" },
+                },
+                setupOptions(github),
+            )
+            assert.equal(inspected.headBranchDeletion, expected)
+            assert.deepEqual(github.restRequests, ["GET https://api.github.com/repos/acme/example"])
+        }
+        const github = new FakeGitHub()
+        github.deleteBranchOnMerge = "yes"
+        await assert.rejects(
+            runGitHubProjectSetup(
+                {
+                    operation: "inspectRepository",
+                    credentialEnv: "GITHUB_TOKEN_FOR_TEST",
+                    repository: { owner: "acme", repo: "example" },
+                },
+                setupOptions(github),
+            ),
+            /delete_branch_on_merge/,
+        )
     })
 
     it("rejects unsupported ownership and personal issue scope without organization discovery", async () => {

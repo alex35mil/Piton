@@ -50,6 +50,7 @@ Run `/project-setup`, invoke `/skill:project-setup`, or ask the agent to help se
 - read-only Linear workspace discovery, plus separately approved creation of missing Linear statuses;
 - separately approved label catalog setup for both trackers, including Linear Phase groups;
 - separately approved GitHub Project/field provisioning and recovery;
+- a read-only check of GitHub's automatic head-branch deletion, with manual steps to turn it on (setup never changes it);
 - optional Project Policies.
 
 See the [configuration reference](references/setup.md) for exact schemas, examples, credential handling, and manual setup. The [artifact reference](references/artifacts.md) owns directory layout, identity, persistence, and authority.

@@ -41,7 +41,7 @@ The cleanup tool:
 - checks out only the stored target;
 - fast-forwards it to freshly fetched origin;
 - requires exact equality with origin, the recorded PR and head, and safe worktree state. It doesn't check lifecycle; setting Done comes first;
-- deletes only the local Deliverable branch.
+- deletes only the local Deliverable branch. The remote head branch is left to GitHub's automatic head-branch deletion setting, which setup offers.
 
 An Epic-target Task stays on the Epic branch and leaves main untouched.
 
