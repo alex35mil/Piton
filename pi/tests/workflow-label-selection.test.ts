@@ -386,12 +386,12 @@ describe("gates", () => {
 })
 
 describe("Task Labels lines", () => {
-    const task = (lines: string) => `## Tasks\n\n### Work\n\nKind: feature\n${lines}\nDo the work.\n`
+    const task = (lines: string) => `## Tasks\n\n### Work\n\nKind: feature\n${lines}Summary: Work.\n\nDo the work.\n`
 
     it("parses a Labels line into a selection", () => {
         const [parsed] = parseEpicTasks(task("Labels: area=fe, area=be, perf=perf\n"))
         assert.deepEqual(parsed.labels, { area: ["fe", "be"], perf: ["perf"] })
-        assert.equal(parsed.description, "Do the work.")
+        assert.equal(parsed.issue === "pending" && parsed.design, "Do the work.")
         assert.deepEqual(parseEpicTasks(task(""))[0].labels, {})
     })
 

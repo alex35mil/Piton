@@ -511,7 +511,7 @@ describe("shared workflow Phase", () => {
                         fs.writeFileSync(path.join(directory, "brief.md"), "# Brief\n")
                         fs.writeFileSync(
                             path.join(directory, "epic.md"),
-                            `## Tasks\n\n### [${provider === "github" ? "#2" : "ENG-2"}] Example\n\nKind: feature\n\nExample.\n`,
+                            `## Tasks\n\n### [${provider === "github" ? "#2" : "ENG-2"}] Example\n\nKind: feature\nSummary: Example.\n`,
                         )
                     } else {
                         fs.writeFileSync(path.join(directory, "plan.md"), "# Plan\n")

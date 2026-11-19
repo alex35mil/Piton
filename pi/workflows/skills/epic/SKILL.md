@@ -136,13 +136,14 @@ Epic branch: <the Epic's branch name>
 
 Kind: <feature | bugfix | refactor | research | audit | chore>
 Labels: <group=value, …, only with label groups configured>
+Summary: <one line on what the Task is for>
 
-<A one-paragraph outcome: what the Task delivers and where it stops. Any Markdown.>
+<The Task's design: what it delivers and where it stops. Any Markdown. Becomes its issue body.>
 ```
 
 - **Goal first:** the Overview states the initiative's outcome and why it matters, so a fresh reader understands it without the conversation.
 - **A map, not a contract:** detail lives in Task plans, Task results, and shipped documentation. No implementation recipes, test plans, status tracking, or empty sections.
-- **Good Tasks:** each has a Kind and an outcome paragraph that stands alone; its body becomes the Task issue's description. Order them so prerequisites come first, without avoidable overlap. Never add Tasks just to lengthen the list.
+- **Good Tasks:** each has a Kind, a summary, and a design that stands alone. The design becomes the Task issue's body, and then the section keeps only the summary. Order them so prerequisites come first, without avoidable overlap. Never add Tasks just to lengthen the list.
 
 ## Review and acceptance
 
@@ -167,7 +168,7 @@ Labels: <group=value, …, only with label groups configured>
 
 Issue processing tags each Task heading once with its issue's marker, `[#12]` on GitHub or `[ENG-12]` on Linear. The marker is the permanent relation. Every later edit keeps existing markers exactly. [Epic Tasks](../../references/epic-tasks.md#progress-and-replanning) defines progress states and how to remove a Task.
 
-Changing the Task list needs another review and acceptance ([accepted Task list](../../references/epic-tasks.md#accepted-task-list)). Other `epic.md` edits, from the Epic or from a Task, are made in place and republished with a plan-update note.
+Changing the Task list needs another review and acceptance ([accepted Task list](../../references/epic-tasks.md#accepted-task-list)). Other `epic.md` edits, from the Epic or from a Task, are made in place and republished with a plan-update note. Redesigning a Task that has an issue rewrites that issue's body instead ([Task designs](../../references/epic-tasks.md#task-designs)).
 
 ### Completing the Epic
 

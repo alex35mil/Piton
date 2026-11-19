@@ -127,9 +127,11 @@ const task = (title: string, parentEpicDir: string, object: unknown) => ({
     parentEpicDir,
     object,
 })
-// One `## Tasks` section; tagged once issue processing has created or linked its issue.
+// One `## Tasks` section; tagged once issue processing has created or linked its issue, which then
+// holds the design. `extra` holds the optional `Labels:` and `Status:` lines.
 const planTask = (title: string, marker?: string, kind = "feature", extra = "") =>
-    `### ${marker ? `[${marker}] ` : ""}${title}\n\nKind: ${kind}\n${extra}\n${title} outcome.\n`
+    `### ${marker ? `[${marker}] ` : ""}${title}\n\nKind: ${kind}\n${extra}Summary: ${title} summary.\n` +
+    (marker ? "" : `\n${title} outcome.\n`)
 const epicPlan = (branch: string, target: "epic" | "default", ...tasks: string[]) =>
     `# Epic\n\n## Overview\n\nPlan.\n\n## Task delivery strategy\n\nTask target: ${target}\nEpic branch: ${branch}\n\nWhy.\n\n## Tasks\n\n${tasks.join("\n")}`
 

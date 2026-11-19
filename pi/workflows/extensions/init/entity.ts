@@ -33,7 +33,7 @@ import {
     resolveEntityDirectory,
     writeEntityStatus,
 } from "../__lib/entity.js"
-import { type EpicTask, readEpicRouting, readEpicTasks } from "../__lib/epic-tasks.js"
+import { type EpicTask, epicTaskMarker, readEpicRouting, readEpicTasks } from "../__lib/epic-tasks.js"
 import type { ResourceIds } from "../integrations/resource-ids.js"
 import { initialPhase } from "../integrations/phase.js"
 import { stripPublicationSignature } from "../integrations/publication.js"
@@ -391,8 +391,8 @@ function createEntityArtifacts(
 }
 
 function plannedTaskFor(parent: ParentEpic, marker: string): EpicTask {
-    const task = parent.tasks.find((candidate) => candidate.marker === marker)
-    if (!task)
+    const task = parent.tasks.find((candidate) => epicTaskMarker(candidate) === marker)
+    if (!task || task.issue !== "tagged")
         throw new Error(
             `parent Epic has no Task tagged ${marker}; finish the Epic's issue processing before starting it`,
         )
@@ -444,7 +444,10 @@ function readParentEpic(root: string, input: TaskInitialization): ParentEpic {
         branch: taskBranch,
         ...(trackerProjectId ? { trackerProjectId } : {}),
         // A Task that already has a directory can't be started again.
-        tasks: tasks.filter((task) => !task.marker || !started.has(task.marker)),
+        tasks: tasks.filter((task) => {
+            const marker = epicTaskMarker(task)
+            return marker === undefined || !started.has(marker)
+        }),
     }
 }
 

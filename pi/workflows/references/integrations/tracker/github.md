@@ -84,7 +84,7 @@ When a create result is uncertain, read [recovery](../recovery.md#uncertain-trac
 
 **Plan publication:**
 
-- The issue keeps its original title and description. New work creates them from the Request; adopted work keeps the existing text.
+- The issue keeps its original title and description. New work creates them from the Request; adopted work keeps the existing text. A Task issue's body is its design instead, and changes as [Task designs](../../epic-tasks.md#task-designs) describes.
 - For `epic.md` or `plan.md`, call `prepare_integration_projection`, then `prepare_tracker_publication` with `entityDir` and the full source ([provider bodies](../shared.md#provider-bodies)).
 - Run the returned comment call, never an issue body or title update.
 - The first publication saves `planComment: pending`, then returns one `add_issue_comment`. Run it immediately, then record it with `record_tracker_publication`.

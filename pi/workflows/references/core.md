@@ -38,6 +38,6 @@ Ask the user only for clarifications and decisions. Do everything else and repor
 
 - An approval covers exactly the operation or set of operations it names. Commit, push, PR creation, merge, branch deletion, and worktree operations each need approval unless an approved set already includes them. "submit" and "ship it" are such sets.
 - Sending or editing a message to people, such as an issue, PR, review, or Linear comment, body, description, document, or status update, needs approval of its text and destination. When sending one, read [sending messages](./communication.md#sending-messages).
-- Workflow publications need no approval: the intake tracker item, the plan and its plan-update notes, and the PR body rendered from the result.
+- Workflow publications need no approval: the intake tracker item, the plan and its plan-update notes, Task designs, and the PR body rendered from the result.
 - Discovering a tool, preparing arguments, or a passing review grants no approval.
 - Precedence: the user's current instructions, `.piton/policies.md`, context files (`AGENTS.md`), these workflow files.

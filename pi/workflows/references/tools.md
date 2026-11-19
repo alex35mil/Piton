@@ -31,6 +31,7 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 - `restore_epic` recreates a missing local Epic from its tracker read and published plan; `restore_epic_plan_source` returns an existing Epic's published plan as source without writing ([Epic restore](./epic.md#restore-an-epic)).
 - `accept_epic_tasks` saves an Epic's reviewed Task list as accepted after the user accepts it ([accepted Task list](./epic-tasks.md#accepted-task-list)).
 - `plan_epic_task_issues` reconciles an Epic's accepted Tasks with fresh child-issue facts into native steps, and `record_epic_task_issue` tags a Task with its issue's marker ([Epic Tasks](./epic-tasks.md#task-issue-processing)).
+- `inspect_task_design` compares a started Task's issue body with the design it last synced from, and `record_task_design` records the current one ([Task designs](./epic-tasks.md#task-designs)).
 
 ## Integration context and state
 

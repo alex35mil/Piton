@@ -10,19 +10,43 @@ import {
 } from "./domain.js"
 import { writeTextAtomically } from "./files.js"
 
-// One planned Task in accepted epic.md: a `### ` section under `## Tasks`.
-export interface EpicTask {
+interface EpicTaskFields {
     title: string
-    // The Task's tracker reference (`#12` or `ENG-12`) once its issue exists.
-    marker?: string
     kind: DeliverableKind
     // `Labels: group=value, …`: the Task's label selection, grouped by label group. Without the
     // line, every group is empty; Task issue processing checks it against the configuration.
     labels: Record<string, string[]>
-    // `Status: canceled`: removed from the plan; its issue is canceled, never started.
-    canceled: boolean
-    // The section body after the `Kind:`, `Labels:`, and `Status:` lines; becomes the issue description.
-    description: string
+    // `Summary: …`: one line on what the Task is for. The Epic keeps only this once the issue exists.
+    summary: string
+}
+
+// One planned Task in accepted epic.md: a `### ` section under `## Tasks`. The Task issue is the
+// home of its design: before the issue exists the section carries the design that becomes the
+// issue body; once tagged, the section is only a reference and the issue body holds the design.
+export type EpicTask = EpicTaskFields &
+    (
+        | {
+              issue: "pending"
+              // The section body after `Summary:`: the Task's full design, sent as the new issue's body.
+              design: string
+          }
+        | {
+              issue: "tagged"
+              // The Task's tracker reference: `#12` or `ENG-12`.
+              marker: string
+              // `Status: canceled`: removed from the plan; its issue is canceled, never started.
+              canceled: boolean
+          }
+    )
+
+/** The marker of a tagged Task, or undefined before its issue exists. */
+export function epicTaskMarker(task: EpicTask): string | undefined {
+    switch (task.issue) {
+        case "pending":
+            return undefined
+        case "tagged":
+            return task.marker
+    }
 }
 
 const TASKS_HEADING = "## Tasks"
@@ -58,8 +82,11 @@ function scanLines(content: string): Line[] {
 const isLevelOneOrTwo = (line: Line) => !line.fenced && /^#{1,2}\s/.test(line.text)
 const isSectionEnd = (line: Line) => !line.fenced && /^#{1,3}\s/.test(line.text)
 
-interface ParsedTask extends EpicTask {
+type ParsedTask = EpicTask & {
     headingIndex: number
+    // The `Summary:` line and the end of the section, so tagging can drop the design.
+    summaryIndex: number
+    endIndex: number
 }
 
 function parse(content: string): ParsedTask[] {
@@ -79,7 +106,8 @@ function parse(content: string): ParsedTask[] {
         for (const heading of headings) {
             const sectionEnd =
                 lines.find((line) => line.index > heading.index && isSectionEnd(line))?.index ?? lines.length
-            tasks.push(parseTask(lines.slice(heading.index, Math.min(sectionEnd, end))))
+            const sectionLines = lines.slice(heading.index, Math.min(sectionEnd, end))
+            tasks.push(parseTask(sectionLines, Math.min(sectionEnd, end)))
         }
     }
     // A Kind-bearing level-three section outside `## Tasks` is a misplaced Task.
@@ -93,13 +121,13 @@ function parse(content: string): ParsedTask[] {
     const titles = tasks.map((task) => task.title)
     const duplicateTitle = titles.find((title, index) => titles.indexOf(title) !== index)
     if (duplicateTitle) throw new Error(`Epic contains duplicate Task title ${JSON.stringify(duplicateTitle)}`)
-    const markers = tasks.flatMap((task) => (task.marker ? [task.marker] : []))
+    const markers = tasks.flatMap((task) => epicTaskMarker(task) ?? [])
     const duplicateMarker = markers.find((marker, index) => markers.indexOf(marker) !== index)
     if (duplicateMarker) throw new Error(`Epic contains duplicate Task marker ${duplicateMarker}`)
     return tasks
 }
 
-function parseTask(section: Line[]): ParsedTask {
+function parseTask(section: Line[], endIndex: number): ParsedTask {
     const [heading, ...body] = section
     const headingText = TASK_HEADING.exec(heading.text)?.[1]
     if (!headingText) throw new Error(`Epic Task heading has no title: ${JSON.stringify(heading.text)}`)
@@ -121,39 +149,53 @@ function parseTask(section: Line[]): ParsedTask {
     } catch {
         return fail(`invalid Kind ${JSON.stringify(kind)}`)
     }
-    let descriptionStart = kindLine.index + 1
-    let nextField = 1
-    const labelsLine = fields[1]
-    let labels: Record<string, string[]> = {}
-    if (labelsLine && !labelsLine.fenced && /^Labels:/.test(labelsLine.text.trim())) {
-        labels = parseLabels(labelsLine.text.trim().slice("Labels:".length), fail)
-        descriptionStart = labelsLine.index + 1
-        nextField = 2
+    const field = (index: number, name: string) => {
+        const line = fields[index]
+        return line && !line.fenced && line.text.trim().startsWith(`${name}:`) ? line : undefined
     }
-    const statusLine = fields[nextField]
+    let nextField = 1
+    const labelsLine = field(nextField, "Labels")
+    let labels: Record<string, string[]> = {}
+    if (labelsLine) {
+        labels = parseLabels(labelsLine.text.trim().slice("Labels:".length), fail)
+        nextField++
+    }
+    const statusLine = field(nextField, "Status")
     let canceled = false
-    if (statusLine && !statusLine.fenced && /^Status:/.test(statusLine.text.trim())) {
+    if (statusLine) {
         if (!/^Status:\s*canceled\s*$/.test(statusLine.text.trim()))
             fail("the only allowed Status is `Status: canceled`")
         if (!tagged) fail("`Status: canceled` is only valid on a Task that already has an issue")
         canceled = true
-        descriptionStart = statusLine.index + 1
+        nextField++
     }
-    const description = body
-        .filter((line) => line.index >= descriptionStart)
+    const summaryLine = field(nextField, "Summary")
+    const summary = summaryLine?.text.trim().slice("Summary:".length).trim()
+    if (!summaryLine || !summary)
+        fail("needs a one-line `Summary: <what the Task is for>` after `Kind:`, `Labels:`, and `Status:`")
+    const design = body
+        .filter((line) => line.index > summaryLine!.index)
         .map((line) => line.text)
         .join("\n")
         .trim()
-    if (!description) fail("the description is empty")
-    return {
+    const common = {
         title,
-        ...(tagged ? { marker: tagged[1] } : {}),
         kind: validatedKind!,
         labels,
-        canceled,
-        description,
+        summary: summary!,
         headingIndex: heading.index,
+        summaryIndex: summaryLine!.index,
+        endIndex,
     }
+    if (tagged) {
+        if (design)
+            fail(
+                "a Task with an issue keeps only its fields and `Summary:` in the Epic; its design belongs in the Task issue's body",
+            )
+        return { ...common, issue: "tagged", marker: tagged[1], canceled }
+    }
+    if (!design) fail("the design after `Summary:` is empty; it becomes the Task issue's body")
+    return { ...common, issue: "pending", design }
 }
 
 /** `area=frontend, area=backend, perf=perf` → `{ area: ["frontend", "backend"], perf: ["perf"] }`. */
@@ -177,7 +219,7 @@ export function hasEpicTasksSection(content: string): boolean {
 }
 
 export function parseEpicTasks(content: string): EpicTask[] {
-    return parse(content).map(({ headingIndex: _, ...task }) => task)
+    return parse(content).map(({ headingIndex: _, summaryIndex: __, endIndex: ___, ...task }) => task)
 }
 
 export function readEpicTasks(epicPath: string): EpicTask[] {
@@ -185,8 +227,8 @@ export function readEpicTasks(epicPath: string): EpicTask[] {
 }
 
 // The Task list the user accepted: each Task's title, Kind, labels, and status, in order. Issue
-// markers and outcome text aren't part of it, so tagging a Task or rewording its outcome keeps
-// the list accepted.
+// markers, summaries, and designs aren't part of it, so tagging a Task or rewording its summary
+// or design keeps the list accepted.
 export const AcceptedTaskSchema = Type.Object(
     {
         title: Type.String({ minLength: 1 }),
@@ -208,7 +250,7 @@ export function epicTaskList(tasks: readonly EpicTask[]): AcceptedTask[] {
                 .sort()
                 .map((group) => [group, [...task.labels[group]].sort()]),
         ),
-        status: task.canceled ? "canceled" : "planned",
+        status: task.issue === "tagged" && task.canceled ? "canceled" : "planned",
     }))
 }
 
@@ -271,7 +313,8 @@ export function readEpicRouting(epicPath: string): EpicRouting {
     return parseEpicRouting(fs.readFileSync(epicPath, "utf-8"))
 }
 
-// Tags an untagged Task's heading with its new issue's marker. Re-tagging the same Task
+// Tags an untagged Task's heading with its new issue's marker and drops its design, which now
+// lives in the issue body, leaving the heading, fields, and summary. Re-tagging the same Task
 // with the same marker is a no-op, so an interrupted record can be repeated safely.
 export function tagEpicTask(epicPath: string, title: string, marker: string): "tagged" | "unchanged" {
     if (!new RegExp(`^(?:${MARKER})$`).test(marker)) throw new Error(`invalid Task marker ${JSON.stringify(marker)}`)
@@ -279,13 +322,20 @@ export function tagEpicTask(epicPath: string, title: string, marker: string): "t
     const tasks = parse(content)
     const task = tasks.find((candidate) => candidate.title === title)
     if (!task) throw new Error(`Epic has no Task titled ${JSON.stringify(title)}`)
-    if (task.marker === marker) return "unchanged"
-    if (task.marker) throw new Error(`Epic Task ${JSON.stringify(title)} is already tagged ${task.marker}`)
-    if (tasks.some((candidate) => candidate.marker === marker))
+    switch (task.issue) {
+        case "tagged":
+            if (task.marker === marker) return "unchanged"
+            throw new Error(`Epic Task ${JSON.stringify(title)} is already tagged ${task.marker}`)
+        case "pending":
+            break
+    }
+    if (tasks.some((candidate) => epicTaskMarker(candidate) === marker))
         throw new Error(`Epic already contains Task marker ${marker}`)
     const newline = content.includes("\r\n") ? "\r\n" : "\n"
     const lines = content.split(/\r?\n/)
     lines[task.headingIndex] = lines[task.headingIndex].replace(/^(###\s+)/, `$1[${marker}] `)
+    // One blank line separates the trimmed section from what follows, or ends the file.
+    lines.splice(task.summaryIndex + 1, task.endIndex - task.summaryIndex - 1, "")
     writeTextAtomically(epicPath, lines.join(newline))
     return "tagged"
 }

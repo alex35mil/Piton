@@ -95,7 +95,7 @@ Queue intake follows [queue](../../queue.md). Require the entity type and the se
 
 ## Artifact projection
 
-1. **Prepare.** After an `epic.md` or `plan.md` change, call `prepare_integration_projection`, then `prepare_tracker_publication` with the full source. The Project or issue keeps its original title or name and description.
+1. **Prepare.** After an `epic.md` or `plan.md` change, call `prepare_integration_projection`, then `prepare_tracker_publication` with the full source. The Project or issue keeps its original title or name and description. A Task issue's description is its design instead, and changes as [Task designs](../../epic-tasks.md#task-designs) describes.
 2. **First publication** creates one document titled Plan, attached by Project UUID for an Epic or issue UUID for a Task or Gig.
    - Run only the returned `save_document`, immediately, and record clear success with `record_tracker_publication`.
    - A pending creation needs recovery, never a create of your own.

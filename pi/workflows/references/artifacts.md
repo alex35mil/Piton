@@ -91,7 +91,7 @@ Use concise lowercase kebab-case, with a soft cap around 48 characters; shorten 
 
 Entity files sit directly in the entity directory.
 
-- **`brief.md`:** only `# Brief`, a blank line, and the Request. Change the Request only with explicit user approval. Never add decisions, findings, questions, paths, provider data, checkpoints, or history.
+- **`brief.md`:** only `# Brief`, a blank line, and the Request. Change the Request only with explicit user approval or a Task's [design change](./epic-tasks.md#task-designs). Never add decisions, findings, questions, paths, provider data, checkpoints, or history.
 - **`notes.md`:** free-form agent notes for transient context that doesn't belong in metadata, the plan, or a review round. Keep resume context here, and refresh it before compaction when possible. No lifecycle or completion gate.
 - **`pending.md`** (Task and Gig): Markdown task-list entries for current-scope work found during execution.
   - An unchecked entry is active; checked entries may stay.
