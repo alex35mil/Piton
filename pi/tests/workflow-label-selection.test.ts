@@ -386,22 +386,25 @@ describe("gates", () => {
 })
 
 describe("Task Labels lines", () => {
-    const task = (lines: string) => `## Tasks\n\n### Work\n\nKind: feature\n${lines}Summary: Work.\n\nDo the work.\n`
+    const task = (lines: string) =>
+        `## Tasks\n\n### Work\n\n**Kind:** \`feature\`\n${lines}**Summary:** Work.\n\nDo the work.\n`
 
     it("parses a Labels line into a selection", () => {
-        const [parsed] = parseEpicTasks(task("Labels: area=fe, area=be, perf=perf\n"))
+        const [parsed] = parseEpicTasks(task("**Labels:** `area=fe`, `area=be`, `perf=perf`\n"))
         assert.deepEqual(parsed.labels, { area: ["fe", "be"], perf: ["perf"] })
         assert.equal(parsed.issue === "pending" && parsed.design, "Do the work.")
         assert.deepEqual(parseEpicTasks(task(""))[0].labels, {})
     })
 
     it("rejects malformed and repeated entries", () => {
-        assert.throws(() => parseEpicTasks(task("Labels: area\n")), /invalid Labels entry/)
-        assert.throws(() => parseEpicTasks(task("Labels: area=fe, area=fe\n")), /repeats/)
+        assert.throws(() => parseEpicTasks(task("**Labels:** `area`\n")), /invalid Labels entry/)
+        assert.throws(() => parseEpicTasks(task("**Labels:** `area=fe, area=be`\n")), /invalid Labels entry/)
+        assert.throws(() => parseEpicTasks(task("**Labels:** area=fe\n")), /invalid Labels entry/)
+        assert.throws(() => parseEpicTasks(task("**Labels:** `area=fe`, `area=fe`\n")), /repeats/)
     })
 
     it("names kind as a selection error when the Task's labels are checked", () => {
-        const [parsed] = parseEpicTasks(task("Labels: kind=bugfix\n"))
+        const [parsed] = parseEpicTasks(task("**Labels:** `kind=bugfix`\n"))
         assert.equal(
             failure(() => selectedLabelNames(labels, "deliverable", parsed.kind, parsed.labels)).kind,
             "kindInSelection",

@@ -128,12 +128,12 @@ const task = (title: string, parentEpicDir: string, object: unknown) => ({
     object,
 })
 // One `## Tasks` section; tagged once issue processing has created or linked its issue, which then
-// holds the design. `extra` holds the optional `Labels:` and `Status:` lines.
+// holds the design. `extra` holds the optional `**Labels:**` and `**Status:**` lines.
 const planTask = (title: string, marker?: string, kind = "feature", extra = "") =>
-    `### ${marker ? `[${marker}] ` : ""}${title}\n\nKind: ${kind}\n${extra}Summary: ${title} summary.\n` +
+    `### ${marker ? `[${marker}] ` : ""}${title}\n\n**Kind:** \`${kind}\`\n${extra}**Summary:** ${title} summary.\n` +
     (marker ? "" : `\n${title} outcome.\n`)
 const epicPlan = (branch: string, target: "epic" | "default", ...tasks: string[]) =>
-    `# Epic\n\n## Overview\n\nPlan.\n\n## Task delivery strategy\n\nTask target: ${target}\nEpic branch: ${branch}\n\nWhy.\n\n## Tasks\n\n${tasks.join("\n")}`
+    `# Epic\n\n## Overview\n\nPlan.\n\n## Task delivery strategy\n\n**Task target:** \`${target}\`\n**Epic branch:** \`${branch}\`\n\nWhy.\n\n## Tasks\n\n${tasks.join("\n")}`
 
 function init(cwd: string, input: unknown) {
     return initializeEntity(parse(EntityInitializationValidator, input), {
@@ -339,7 +339,7 @@ describe("workflow domain", () => {
                 "epic",
                 planTask("Build it", "#13", "bugfix"),
                 planTask("Queued", "#14"),
-                planTask("Dropped", "#15", "chore", "Status: canceled\n"),
+                planTask("Dropped", "#15", "chore", "**Status:** `canceled`\n"),
                 planTask("Later"),
             )
             fs.writeFileSync(epicPath, plan)
@@ -430,15 +430,15 @@ describe("workflow domain", () => {
             const epicPath = path.join(cwd, created.directory, "epic.md")
             const start = () => init(cwd, task("Ship it", created.directory, issue(31)))
             fs.writeFileSync(epicPath, epicPlan("other-branch", "default", planTask("Ship it", "#31")))
-            assert.throws(start, /says `Epic branch: other-branch`/)
+            assert.throws(start, /says ``\*\*Epic branch:\*\* `other-branch` ``/)
             fs.writeFileSync(
                 epicPath,
                 epicPlan("30-planning-only", "default", planTask("Ship it", "#31")).replace(
-                    "Task target: default\n",
+                    "**Task target:** `default`\n",
                     "",
                 ),
             )
-            assert.throws(start, /needs `Task target: default` or `Task target: epic`/)
+            assert.throws(start, /needs ``\*\*Task target:\*\* `default` `` or/)
             fs.writeFileSync(epicPath, epicPlan("30-planning-only", "default", planTask("Ship it", "#31")))
             assert.equal(start().status.branch.start, "main")
         } finally {

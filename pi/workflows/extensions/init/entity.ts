@@ -424,7 +424,7 @@ function readParentEpic(root: string, input: TaskInitialization): ParentEpic {
     const routing = readEpicRouting(epicPath)
     if (routing.epicBranch !== status.branch.name)
         throw new Error(
-            `epic.md says \`Epic branch: ${routing.epicBranch}\`, but the Epic's branch is ${status.branch.name}`,
+            `epic.md says \`\`**Epic branch:** \`${routing.epicBranch}\` \`\`, but the Epic's branch is ${status.branch.name}`,
         )
     // A default-target Task needs nothing from the Epic branch; an Epic-target Task starts from it.
     const taskBranch = routing.taskTarget === "epic" ? status.branch.name : status.branch.target

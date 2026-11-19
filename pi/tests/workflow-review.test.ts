@@ -824,7 +824,7 @@ describe("workflow reviewer isolation", () => {
 
             const prompt = await buildEpicReviewPrompt({ cwd: repository } as never, epicDir, candidate, {
                 previousCandidate:
-                    "# Reviewed\n\n## Tasks\n\n### [#41] Existing Task\n\nKind: feature\nSummary: Keep it.\n",
+                    "# Reviewed\n\n## Tasks\n\n### [#41] Existing Task\n\n**Kind:** `feature`\n**Summary:** Keep it.\n",
                 pass: { instructions: [], sections: "F1 rejected by user." },
             })
             assert.ok(prompt.includes(policies))

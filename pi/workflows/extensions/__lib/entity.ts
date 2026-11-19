@@ -83,7 +83,7 @@ const baseMetadataProperties = {
     tracker: EntityTrackerSchema,
     forge: Type.Optional(ForgeRecordSchema),
 }
-// Routing lives in the published plan (`Task target:` and `Epic branch:` in epic.md). The accepted
+// Routing lives in the published plan (`**Task target:**` and `**Epic branch:**` in epic.md). The accepted
 // Task list is absent until the user first accepts the Epic plan.
 const epicProperties = {
     entity: Type.Literal("epic"),

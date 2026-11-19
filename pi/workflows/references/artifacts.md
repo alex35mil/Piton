@@ -146,7 +146,7 @@ Precedence is in [core approvals](./core.md#approvals).
 
 - `epic.md` and review rounds appear only when their steps create them.
 - Each Task is a `### ` section in `epic.md`. Metadata keeps the Task list the user last accepted ([Epic Tasks](./epic-tasks.md#accepted-task-list)). Task issue processing tags it with its issue's stable marker, `[#N]` or `[ENG-N]`; starting the Task adds its child directory ([Epic Tasks](./epic-tasks.md)).
-- Metadata holds the immutable branch identity. Routing lives in `epic.md` as `Task target:` and `Epic branch:` lines, published with the plan ([Epic routing](./epic.md#routing)).
+- Metadata holds the immutable branch identity. Routing lives in `epic.md` as `**Task target:**` and `**Epic branch:**` lines, published with the plan ([Epic routing](./epic.md#routing)).
 - Every Epic file here is a per-checkout copy, shared only when a worker links `.piton/.local` to its source checkout. A checkout without it [restores](./epic.md#restore-an-epic) the Epic from the tracker.
 
 ### Task and Gig (Deliverables)

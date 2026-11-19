@@ -7,12 +7,12 @@ The Epic skill owns the approved Task delivery strategy. This file owns how that
 `epic.md` records routing in its `## Task delivery strategy` section, before the rationale prose:
 
 ```markdown
-Task target: default
-Epic branch: 21-routing
+**Task target:** `default`
+**Epic branch:** `21-routing`
 ```
 
-- `Task target:` is `default` or `epic`. It decides where Tasks started from now on begin and deliver.
-- `Epic branch:` is the Epic's branch name from its metadata. Every clone reads it from the published plan.
+- `**Task target:**` is `default` or `epic`, as a code span. It decides where Tasks started from now on begin and deliver.
+- `**Epic branch:**` is the Epic's branch name, as a code span, from its metadata. Every clone reads it from the published plan.
 - The reviewed lines are the approval. Changing them needs another Epic plan review and the user's acceptance, and affects only Tasks started afterward. Existing Tasks keep their copied start and target.
 
 **Starting a Task:**
