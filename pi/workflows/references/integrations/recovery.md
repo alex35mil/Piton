@@ -39,8 +39,8 @@ For a published comment, document, or PR body, read the exact saved body and com
 
 A [plan-update note](./shared.md#plan-update-notes) carries an opaque token: a hidden marker on GitHub, the plan link's query on Linear. Its saved state decides recovery:
 
-- **Uncertain plan update:** call `prepare_tracker_publication`, run its reads, and pass them to `prepare_tracker_publication_update` with the same source and note. When the update landed, it returns the saved note to post. Otherwise it prepares the update again.
-- **Uncertain note:** `prepare_tracker_publication` returns `recovery-required` with the comment reads. Read every page, GitHub `issue_read` `get_comments` or Linear `list_comments` with cursors until `hasNextPage: false`, and pass them to `recover_tracker_publication`. One match is recorded; none returns the same comment to post; several stop for the maintainer.
+- **Uncertain plan update:** call `prepare_tracker_publication`, run the calls in its `lookups`, and pass them as `reads` to `prepare_tracker_publication_update` with the same source and `announcement`. When the update landed, it returns the saved note to post. Otherwise it prepares the update again.
+- **Uncertain note:** `prepare_tracker_publication` returns `recovery-required` with the comment reads in `lookups`. Read every page, GitHub `issue_read` `get_comments` or Linear `list_comments` with cursors until `hasNextPage: false`, and pass them to `recover_tracker_publication`. One match is recorded; none returns the same comment to post; several stop for the maintainer.
 
 ## Uncertain tracker creation
 
