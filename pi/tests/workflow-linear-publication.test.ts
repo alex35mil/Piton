@@ -22,6 +22,11 @@ import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
 import { linearPhases } from "./workflow-phase-fixtures.ts"
 
 const tools = workflowMcpCatalog("linear")
+// Linear publication never calls GitHub directly.
+const noGitHub = {
+    projectTrusted: true,
+    fetch: (() => assert.fail("Linear publication called GitHub")) as typeof fetch,
+}
 const source =
     "# Work\n\n## Overview\n\nKeep the original request.\n\n### Plan highlights\n\n- One maintained plan.\n\n## Implementation\n\nAll supporting details.\n"
 const token = "ab345678-1234-4567-8901-123456789abc"
@@ -107,11 +112,11 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).tracker.planDocument, { state: "unpublished" })
     const saved = () => JSON.parse(fs.readFileSync(file, "utf8"))
     const prepare = (content = source, catalog = tools) =>
-        trackerPublication(root, { entityDir: directory, action: "prepare", source: content }, catalog)
+        trackerPublication(root, { entityDir: directory, action: "prepare", source: content }, catalog, noGitHub)
     const record = (evidence: ProviderEvidence) =>
-        trackerPublication(root, { entityDir: directory, action: "record", evidence }, tools)
+        trackerPublication(root, { entityDir: directory, action: "record", evidence }, tools, noGitHub)
     const recover = (pages: ProviderEvidence[], content = source) =>
-        trackerPublication(root, { entityDir: directory, action: "recover", source: content, pages }, tools)
+        trackerPublication(root, { entityDir: directory, action: "recover", source: content, pages }, tools, noGitHub)
     const parent = (): ProviderEvidence => ({
         tool: kind === "epic" ? "mcp__linear__get_project" : "mcp__linear__get_issue",
         arguments: kind === "epic" ? { query: "project-uuid" } : { id: "issue-uuid" },
@@ -168,6 +173,7 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
                 announcement,
             },
             tools,
+            noGitHub,
         )
     return {
         root,
@@ -521,6 +527,7 @@ describe("managed Linear plan documents", () => {
                 f.root,
                 { entityDir: f.parentDirectory, action: "prepare", source },
                 tools,
+                noGitHub,
             )
             assert.ok(prepared.state === "mutation-needed")
             assert.equal(prepared.mutation.arguments.project, "project-uuid")
