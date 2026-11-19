@@ -1,5 +1,14 @@
 # Upgrading
 
+## Kind label coverage follows the tracker
+
+The `kind` label group's `applies_to` is now fixed by the tracker, and `/project-setup` no longer asks about it. A `kind` group with any other `applies_to` fails validation, which stops every workflow command.
+
+- **GitHub:** `applies_to = ["epic", "deliverable"]`, with the `epic` value and the six Deliverable kinds. Epics and Tasks are both issues, so `Kind: Epic` tells them apart.
+- **Linear:** `applies_to = ["deliverable"]`, with only the six Deliverable kinds. An Epic is a Project, so a Kind label on it tells nothing apart. Remove `"epic"` from `applies_to` and delete `[tracker.labels.groups.kind.values.epic]`, then run `/project-setup` and choose to remove the old `Kind: Epic` Project label.
+
+Projects without a `kind` group are unaffected. No `.piton/.local` artifact migration is needed.
+
 ## Configuration moves to one `config.toml` per folder
 
 The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside Piton, `piton` must be on `PATH`). Earlier files (`.project/`, `.agents/*.json`, `.nono.json`, `.piton.toml`, `.piton/`'s separate JSON files, and Piton's files in pi's agent folder) are no longer read; move their settings into these tables by hand.

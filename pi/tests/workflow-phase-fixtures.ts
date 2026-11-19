@@ -55,6 +55,17 @@ export function kindLabels(names?: Record<keyof typeof kindLabelNames, string>) 
     return { groups: { kind: kindGroup(names) } }
 }
 
+/** The Linear `kind` group: Deliverables only, since a Linear Epic is a Project. */
+export function linearKindGroup(scope: "workspace" | "team" = "workspace") {
+    const { epic: _epic, ...values } = kindGroup().values
+    return {
+        appliesTo: ["deliverable"] as ("epic" | "deliverable")[],
+        cardinality: "exactlyOne" as const,
+        values,
+        scope,
+    }
+}
+
 const statuses = {
     backlog: "Backlog",
     todo: "Todo",

@@ -12,7 +12,7 @@ import { describe, it } from "node:test"
 
 import { Type } from "typebox"
 
-import { kindLabels, linearPhases, phaseValues } from "./workflow-phase-fixtures.ts"
+import { kindLabels, linearKindGroup, linearPhases, phaseValues } from "./workflow-phase-fixtures.ts"
 
 import { compile, parse, SchemaValidationError } from "../extensions/__lib/schema.ts"
 import { entityName, formatBranchName, readyBranch, slugify } from "../workflows/extensions/__lib/domain.ts"
@@ -631,6 +631,21 @@ describe("workflow domain", () => {
                 () => preflightEntity({ ...base, entity: "gig", kind: "chore", labels: { area: ["be"] } }, { cwd }),
                 /labels: label group "area" has no value "be"/,
             )
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("creates a Linear Epic without a Kind label, and its Deliverables with one", () => {
+        const cwd = temporaryRepository("linear")
+        try {
+            const tracker = integrationsFromFile(section(resolveSettings(cwd).tracker)!.value) as object
+            writeProjectConfig(cwd, { tracker: { ...tracker, labels: { groups: { kind: linearKindGroup() } } } })
+            const base = { title: "Work", slug: "work", request: "Work" }
+            assert.deepEqual(preflightEntity({ ...base, entity: "epic" }, { cwd }).labels, [])
+            assert.deepEqual(preflightEntity({ ...base, entity: "gig", kind: "chore" }, { cwd }).labels, [
+                "Kind: Chore",
+            ])
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

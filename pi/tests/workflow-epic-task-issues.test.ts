@@ -9,7 +9,7 @@ import * as path from "node:path"
 import { describe, it } from "node:test"
 
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
-import { kindLabels, linearPhases, phaseValues } from "./workflow-phase-fixtures.ts"
+import { kindLabels, linearKindGroup, linearPhases, phaseValues } from "./workflow-phase-fixtures.ts"
 import { acceptEpicTasks } from "../workflows/extensions/__lib/epic-acceptance.ts"
 import { readEntityStatus, writeEntityStatus } from "../workflows/extensions/__lib/entity.ts"
 import { epicTaskList, parseEpicRouting, parseEpicTasks } from "../workflows/extensions/__lib/epic-tasks.ts"
@@ -445,7 +445,7 @@ describe("Epic Task issue processing", () => {
         }
         for (const provider of ["github", "linear"] as const) {
             const groups = {
-                kind: { ...kindLabels().groups.kind, ...(provider === "linear" ? { scope: "workspace" } : {}) },
+                kind: provider === "linear" ? linearKindGroup() : kindLabels().groups.kind,
                 area: { ...area, ...(provider === "linear" ? { scope: "workspace" } : {}) },
             }
             const { root, directory, write } = repo(provider, { groups })
