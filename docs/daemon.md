@@ -82,7 +82,8 @@ way the apps do.
 `config.host.toml`:
 
 ```toml
-socket = "~/.local/state/piton/piton.sock"  # for tests and development only: the Mac app always uses this default
+socket = "~/.local/state/piton/piton.sock"  # debug builds only, for tests: release builds ignore it (the sandbox
+                                            # closes the socket's folder, and the Mac app uses this default)
 log = "~/.local/state/piton/logs/daemon/current.log" # five files, 2 MiB each
 roots = []                # where the apps may browse and start sessions; none until you list some,
                           # e.g. ["~/Projects"]; piton attach and the CLI aren't limited

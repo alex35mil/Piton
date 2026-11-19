@@ -915,8 +915,11 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    sandbox ("Workers"). The `git` preset drops these Git rules, for users who'd rather let agents set up hooks; it's
    accepted only in the user's own files ("Where a key may be set"), so a repository can't turn the protection off for
    whoever clones it.
-7. **The daemon:** its state folder is closed (read, write, connect) except `logs/` for reading and `agent.sock` for
-   connecting; the control socket (`piton.sock`, or the configured `socket`) is denied to connect wherever it is.
+7. **The daemon:** its state folder (the socket's folder: `~/.local/state/piton/`) is closed (read, write, connect)
+   except `logs/` for reading and `agent.sock` for connecting; the control socket (`piton.sock`) is denied to connect
+   wherever it is. Only a debug build moves the socket, and the state folder with it (`socket`, `--socket`,
+   `PITON_SOCKET`, for tests): a moved socket closes its whole folder, so a release build ignores the key (the daemon
+   log and `piton config check` say so) and refuses the flag.
    With the network open, Seatbelt would otherwise let a sandboxed agent connect to it and act as a client:
    approve its own protected writes, start host sessions.
 
@@ -996,8 +999,9 @@ that's what gates it: the daemon decides when a deploy may take effect, and an a
 
 The sandbox keeps every restriction it has. A deploy is a request, and the host does the work:
 
-- **Deploy socket.** The daemon listens on a second Unix socket (`~/.local/state/piton/deploy.sock`, `0600`), the
-  only Piton socket the sandbox allows besides `agent.sock`. It speaks one request, `{deploy: daemon | mac | iphone | ipad,
+- **Deploy socket.** The daemon listens on a second Unix socket (`~/.local/state/piton/deploy.sock`, `0600`). The
+  sandbox closes the state folder, so this feature adds an allow for it, making it the only Piton socket the sandbox
+  allows besides `agent.sock`. It speaks one request, `{deploy: daemon | mac | iphone | ipad,
   checkout}`, and nothing else: no session control, no host-mode launches, no paths or arguments to run. The control
   socket stays out of the sandbox.
 - **Checkout.** The daemon builds from the checkout the request names, accepted only when it's a source or a worker

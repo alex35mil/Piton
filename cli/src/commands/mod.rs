@@ -392,12 +392,21 @@ pub fn main() -> ExitCode {
         | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
     };
     let config = match loaded {
-        Ok(mut config) => {
-            if let Some(socket) = cli.socket {
+        Ok(mut config) => match (cli.socket, crate::config::Build::CURRENT) {
+            (Some(socket), crate::config::Build::Debug) => {
                 config.socket = socket;
+                config
             }
-            config
-        }
+            (Some(socket), crate::config::Build::Release) => {
+                eprintln!(
+                    "piton: --socket / PITON_SOCKET ({}) is for tests and development: this release build always uses {}",
+                    socket.display(),
+                    crate::config::default_socket(&config.paths.home).display()
+                );
+                return ExitCode::from(2);
+            }
+            (None, crate::config::Build::Debug | crate::config::Build::Release) => config,
+        },
         Err(e) => {
             crate::logging::startup_error("configuration_failed");
             eprintln!("piton: {e}");
