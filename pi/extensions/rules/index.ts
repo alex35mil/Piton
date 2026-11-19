@@ -1,6 +1,7 @@
 /**
  * Always-on rules enter the system prompt; path-scoped rules stay lazy.
- * Reads queue full reminders, including nested reads. Only a successful model
+ * Reads queue full reminders, including nested reads. Later reads of a queued rule add
+ * nothing; reads of a visible rule get a compact reminder. Only a successful model
  * response after context delivery establishes visibility for edit/write gates.
  * Visible rule versions follow the session branch; compaction clears them.
  * Glob matching supports *, **, ?, and brace expansion ({a,b}).
@@ -229,8 +230,13 @@ export default function (pi: ExtensionAPI) {
 
         if (matchingRules.length === 0) return
 
-        const newRules = matchingRules.filter((rule) => !runtime.visibleRuleIds.has(rule.id))
+        // A visible rule reached the model in an earlier response: point back to it. A queued rule's full text came
+        // with an earlier read in this batch or an unconfirmed response (or `turn_end` restores it): add nothing.
+        const newRules = matchingRules.filter(
+            (rule) => !runtime.visibleRuleIds.has(rule.id) && !runtime.pendingRuleIds.has(rule.id),
+        )
         const existingRules = matchingRules.filter((rule) => runtime.visibleRuleIds.has(rule.id))
+        if (newRules.length === 0 && existingRules.length === 0) return
         for (const rule of newRules) runtime.pendingRuleIds.add(rule.id)
         if (newRules.length > 0) {
             pi.appendEntry(`${EXTENSION}:load`, {
