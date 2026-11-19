@@ -4,7 +4,7 @@ import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-cod
 import { Type } from "typebox"
 
 import { parse } from "../../../extensions/__lib/schema.js"
-import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
+import { getMcpToolName, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import * as project from "../../../extensions/__lib/project.js"
 import { workflowTools } from "../__lib/tools.js"
 import {
@@ -46,9 +46,10 @@ async function updateEntity<T extends { status: EntityStatus; changed: boolean }
 
 export function registerWorkflowOperations(pi: ExtensionAPI, mcpTools: McpToolCatalog): void {
     const tools = workflowTools(pi, "integrations")
+    const resolveTool = (server: string, operation: string) => getMcpToolName(server, operation, mcpTools)
     const { entityDir, phase, lifecycle } = SetWorkflowPhaseSchema.properties
     const description = (facts: string) =>
-        `Set In Progress workflow Phase and calculate reconciliation from ${facts}. Local metadata only; apply a changed assignment through the configured MCP tool. Does not change lifecycle or grant approval.`
+        `Set In Progress workflow Phase and calculate reconciliation from ${facts}. Local metadata only; a changed assignment carries the registered provider call as \`mutation\`, to run unchanged. Does not change lifecycle or grant approval.`
 
     const name = "set_github_workflow_phase"
     tools.registerTool({
@@ -70,6 +71,7 @@ export function registerWorkflowOperations(pi: ExtensionAPI, mcpTools: McpToolCa
                     status,
                     tracker,
                     parse(SetWorkflowPhaseValidator, { ...params, lifecycle: facts.lifecycle, native: facts.native }),
+                    resolveTool,
                 )
             })
             return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }
@@ -90,7 +92,12 @@ export function registerWorkflowOperations(pi: ExtensionAPI, mcpTools: McpToolCa
         async execute(_id, params, _signal, _update, ctx) {
             const result = await updateEntity(ctx.cwd, params.entityDir, linear, (status, tracker) => {
                 const native = linearPhaseFacts(parse(LinearPhaseInputValidator, params.native))
-                return setWorkflowPhase(status, tracker, parse(SetWorkflowPhaseValidator, { ...params, native }))
+                return setWorkflowPhase(
+                    status,
+                    tracker,
+                    parse(SetWorkflowPhaseValidator, { ...params, native }),
+                    resolveTool,
+                )
             })
             return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }
         },

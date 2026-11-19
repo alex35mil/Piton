@@ -1242,11 +1242,12 @@ describe("workflow integration configuration", () => {
                 },
                 mcpTools,
             )
-            assert.deepEqual(context.phaseMutation, {
+            assert.partialDeepStrictEqual(context.phaseMutation, {
                 provider: "github",
                 field: "Phase",
                 value: "Execution",
                 changed: true,
+                mutation: { tool: "mcp__github__projects_write" },
             })
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
@@ -1290,12 +1291,26 @@ describe("workflow integration configuration", () => {
                         cwd,
                     } as ExtensionContext),
                 )
+            const update = (value: string | null) => ({
+                tool: "mcp__github__projects_write",
+                arguments: {
+                    method: "update_project_item",
+                    owner: "alex",
+                    owner_type: "user",
+                    project_number: 3,
+                    item_owner: "alex",
+                    item_repo: "example",
+                    issue_number: 42,
+                    updated_field: { name: "Phase", value },
+                },
+            })
             const prepared = await prepare(githubPhaseReads(target))
             assert.deepEqual((prepared.details as { phaseMutation: unknown }).phaseMutation, {
                 provider: "github",
                 field: "Phase",
                 value: "Execution",
                 changed: true,
+                mutation: update("Execution"),
             })
             // Lifecycle comes from the item's Status.
             const cleared = await prepare(githubPhaseReads(target, null, "Done"))
@@ -1311,6 +1326,7 @@ describe("workflow integration configuration", () => {
                 field: "Phase",
                 value: null,
                 changed: true,
+                mutation: update(null),
             })
             await assert.rejects(prepare(githubPhaseReads({ ...target, issueNumber: 43 })), /durable issue/)
         } finally {
@@ -1420,6 +1436,10 @@ describe("workflow integration configuration", () => {
                 provider: "linear",
                 labels: ["customer", "execution"],
                 changed: true,
+                mutation: {
+                    tool: "mcp__linear__save_issue",
+                    arguments: { id: "linear-uuid", labels: ["customer", "execution"] },
+                },
             })
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })

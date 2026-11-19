@@ -7,6 +7,7 @@ import type { EntityStatus } from "../__lib/entity.js"
 import type { GitHubPhaseField, LinearTracker, TrackerConfig } from "./config.js"
 import type { LinearPhaseGroup, LinearPhaseGroups } from "./labels.js"
 import { assertEntityTracker } from "./policy.js"
+import { requireTrackerItem, type TrackerRecord } from "./records.js"
 
 const NameSchema = Type.String({ minLength: 1 })
 const NullableNameSchema = Type.Union([NameSchema, Type.Null()])
@@ -135,11 +136,23 @@ export function requirePhase(tracker: TrackerConfig): PhaseRepresentation {
     }
 }
 
-export function setWorkflowPhase(status: EntityStatus, tracker: TrackerConfig, input: SetWorkflowPhaseInput) {
+export function setWorkflowPhase(
+    status: EntityStatus,
+    tracker: TrackerConfig,
+    input: SetWorkflowPhaseInput,
+    resolveTool: McpToolResolver,
+) {
     parse(SetWorkflowPhaseValidator, input)
     assertEntityTracker(status, tracker)
     if (input.lifecycle !== "inProgress") throw new Error("setting workflow Phase requires fresh native In Progress")
-    const phaseMutation = planPhaseMutation(tracker, status.entity, input.phase, input.lifecycle, input.native)
+    const phaseMutation = planPhaseMutation(
+        tracker,
+        phaseItem(status, "set workflow Phase"),
+        input.phase,
+        input.lifecycle,
+        input.native,
+        resolveTool,
+    )
     return { status: { ...status, phase: input.phase }, changed: status.phase !== input.phase, phaseMutation }
 }
 
@@ -221,40 +234,100 @@ export function resolveLinearPhaseGroup(tracker: LinearTracker, entity: EntityTy
     return { groupId: group.id, childIds: children.map((label) => label.id), values }
 }
 
+/** Resolves a configured server's operation to its registered MCP tool name; throws when it isn't registered. */
+export type McpToolResolver = (server: string, operation: string) => string
+
+/** The registered provider call that applies a changed Phase assignment, run unchanged. */
+export interface PhaseProviderCall {
+    tool: string
+    arguments: Record<string, unknown>
+}
+
+/** The tracker item a Phase assignment applies to. */
+export interface PhaseItem {
+    entity: EntityType
+    tracker: TrackerRecord
+}
+
+export function phaseItem(status: EntityStatus, operation: string): PhaseItem {
+    return { entity: status.entity, tracker: requireTrackerItem(status.tracker, operation) }
+}
+
+/** Only a changed assignment carries the call that applies it; an unchanged one has nothing to run. */
+type Assignment<T> = (T & { changed: false }) | (T & { changed: true; mutation: PhaseProviderCall })
+
+export type PhaseMutation =
+    | Assignment<{ provider: "github"; field: string; value: string | null }>
+    | Assignment<{ provider: "linear"; labels: string[] }>
+
+function assignment<T extends object>(base: T, changed: boolean, mutation: () => PhaseProviderCall): Assignment<T> {
+    return changed ? { ...base, changed: true, mutation: mutation() } : { ...base, changed: false }
+}
+
 export function planPhaseMutation(
     tracker: TrackerConfig,
-    entity: EntityType,
+    item: PhaseItem,
     phase: Phase | undefined,
     lifecycle: LifecycleState,
     facts: NativePhaseFacts,
-) {
+    resolveTool: McpToolResolver,
+): PhaseMutation {
     const native = requirePhase(tracker)
+    const call = (operation: string, args: Record<string, unknown>): PhaseProviderCall => ({
+        tool: resolveTool(tracker.mcpServer, operation),
+        arguments: args,
+    })
     // Outside In Progress native Phase is cleared, so a metadata Phase isn't needed to clear it.
     let projected: Phase | null = null
     if (phase !== undefined) projected = projectedPhase(lifecycle, phase)
     else if (lifecycle === "inProgress")
         throw new Error("metadata has no Phase yet; set it with the Phase tool instead of projecting it")
-    if (native.provider === "github" && facts.provider === "github") {
+    if (
+        tracker.provider === "github" &&
+        native.provider === "github" &&
+        facts.provider === "github" &&
+        item.tracker.provider === "github"
+    ) {
         validateGitHubPhaseField(native.field, facts)
         const value = projected === null ? null : native.field.values[projected]
-        return {
-            provider: "github" as const,
-            field: native.field.field,
-            value,
-            changed: facts.current !== value,
-        }
+        const field = native.field.field
+        const { repository, external } = item.tracker
+        return assignment({ provider: "github" as const, field, value }, facts.current !== value, () =>
+            call("projects_write", {
+                method: "update_project_item",
+                owner: tracker.project.owner,
+                owner_type: tracker.project.ownerType,
+                project_number: tracker.project.number,
+                item_owner: repository.owner,
+                item_repo: repository.repo,
+                issue_number: external.issueNumber,
+                updated_field: { name: field, value },
+            }),
+        )
     }
-    if (tracker.provider === "linear" && native.provider === "linear" && facts.provider === "linear") {
-        const group = resolveLinearPhaseGroup(tracker, entity, facts.catalog)
+    if (
+        tracker.provider === "linear" &&
+        native.provider === "linear" &&
+        facts.provider === "linear" &&
+        item.tracker.provider === "linear"
+    ) {
+        const record = item.tracker
+        const group = resolveLinearPhaseGroup(tracker, item.entity, facts.catalog)
         const managed = new Set(group.childIds)
         const labels = facts.applied.filter((id) => !managed.has(id))
         if (projected !== null) labels.push(group.values[projected])
         const current = new Set(facts.applied)
-        return {
-            provider: "linear" as const,
-            labels,
-            changed: labels.length !== current.size || labels.some((id) => !current.has(id)),
-        }
+        const changed = labels.length !== current.size || labels.some((id) => !current.has(id))
+        return assignment({ provider: "linear" as const, labels }, changed, () => {
+            // Only `id` and the full label set: the write changes nothing but labels.
+            switch (record.resource) {
+                case "project":
+                    return call("save_project", { id: record.external.projectId, labels })
+                case "task-issue":
+                case "gig-issue":
+                    return call("save_issue", { id: record.external.issueId, labels })
+            }
+        })
     }
     throw new Error("native Phase facts do not match the configured tracker provider")
 }

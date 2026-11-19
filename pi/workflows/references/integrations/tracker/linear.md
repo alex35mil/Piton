@@ -90,8 +90,8 @@ Queue intake follows [queue](../../queue.md). Require the entity type and the se
 **Phase:**
 
 - Use Project-label metadata for Epics and issue-label metadata for Tasks and Gigs, with the full fresh catalog and applied set ([Phase](../../phase.md#fresh-native-facts)).
-- Apply the returned full label-ID set only when it changed. Remove only managed Phase labels, keep every unrelated label, and clear managed Phase outside In Progress.
-- Never send only the Phase label as a replacement for the full set. No lifecycle or label snapshot becomes durable cache state.
+- Run the returned call, which saves the full label-ID set. When labels change in the same step, save the combined label result instead.
+- No lifecycle or label snapshot becomes durable cache state.
 
 ## Artifact projection
 

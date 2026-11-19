@@ -369,7 +369,11 @@ describe("workflow model-facing contracts", () => {
             if (layout === "directory") delete process.env.PITON_RUNTIME
             else process.env.PITON_RUNTIME = "sandbox"
             const h = await nativeSessionFixture({
-                extensions: [...codingFactories, memoryMcp("github", ["projects_get"]), ...workflowFactories],
+                extensions: [
+                    ...codingFactories,
+                    memoryMcp("github", ["projects_get", "projects_write"]),
+                    ...workflowFactories,
+                ],
                 tools: ["+codemode"],
                 workspace: worker ? "app--w" : "app",
                 setup(fixture) {

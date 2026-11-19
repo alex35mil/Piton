@@ -49,7 +49,8 @@ During In Progress, native Phase equals the metadata Phase. Outside In Progress,
 2. **Setting Phase during In Progress:** call `set_github_workflow_phase` or `set_linear_workflow_phase` with `entityDir`, the target `phase`, and fresh `native` facts (below); Linear also takes fresh `lifecycle`. Reuse reads from this operation, except that a GitHub item read must come after any Status change.
    - The tool validates before changing metadata and returns any native assignment. A matching Phase is a metadata no-op, not a reason to skip native reconciliation.
 3. **Projection only:** when clearing native Phase outside In Progress, keep metadata Phase. Call `prepare_github_phase_mutation` or `prepare_linear_phase_mutation` with `entityDir` and fresh `native` facts; Linear also takes fresh `lifecycle`.
-4. **Apply a changed `phaseMutation`** through the configured MCP tool. On GitHub, write its `value`. On Linear, write its entire `labels` set; never replace the full set with only the Phase label. Skip unchanged assignments.
+4. **Run the returned `mutation`** unchanged. Only a changed assignment has one; otherwise there's nothing to write.
+   - Exception: when Linear labels change in the same step, run only the combined label save ([Linear board setup](./integrations/tracker/linear.md#initialize)), not this `mutation`.
 5. Neither local tool calls providers or grants approval. A provider failure keeps metadata Phase and creates no local lifecycle substitute; report it in one line and continue.
 
 **New work:** the tracker object exists before the local entity. Board setup after initialization moves it to In Progress and applies Planning from fresh native facts. A Linear create may already carry the Planning label; GitHub Phase is assigned after Project membership exists.
