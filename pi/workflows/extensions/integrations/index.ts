@@ -6,7 +6,7 @@ import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { workflowTools } from "../__lib/tools.js"
 
 import * as project from "../../../extensions/__lib/project.js"
-import { observeMcpTools, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
+import { getMcpToolName, observeMcpTools, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import { acceptEpicTasks } from "../__lib/epic-acceptance.js"
 import { readEntityStatus, resolveEntityDirectory } from "../__lib/entity.js"
 import { type EntityTracker, requireTrackerItem } from "./records.js"
@@ -31,6 +31,7 @@ import {
     LinearPhaseInputValidator,
     linearPhaseFacts,
     linearPhaseGroup,
+    phaseItem,
     phaseProjectionContract,
     planPhaseMutation,
 } from "./phase.js"
@@ -426,7 +427,7 @@ export default function (pi: ExtensionAPI): void {
         name: githubPhase,
         label: githubPhase,
         description:
-            "Calculate the native Phase assignment from the actual Project item read, which gives both lifecycle (its Status) and the current Phase. Never execute a provider mutation or change lifecycle.",
+            "Calculate the native Phase assignment from the actual Project item read, which gives both lifecycle (its Status) and the current Phase. A changed assignment carries the registered provider call as `mutation`, to run unchanged. Never execute a provider mutation or change lifecycle.",
         parameters: Type.Object(
             { entityDir: phase.properties.entityDir, native: GitHubPhaseInputSchema },
             { additionalProperties: false },
@@ -446,7 +447,7 @@ export default function (pi: ExtensionAPI): void {
         name: linearPhase,
         label: linearPhase,
         description:
-            "Calculate the native Phase assignment from fresh lifecycle and provider-specific label catalog and selection facts; omit only observed empty native leaves. Never execute a provider mutation or change lifecycle.",
+            "Calculate the native Phase assignment from fresh lifecycle and provider-specific label catalog and selection facts; omit only observed empty native leaves. A changed assignment carries the registered provider call as `mutation`, to run unchanged. Never execute a provider mutation or change lifecycle.",
         parameters: Type.Object(
             {
                 entityDir: phase.properties.entityDir,
@@ -650,10 +651,11 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
         input.operation === "trackerMutation" && input.change === "phase"
             ? planPhaseMutation(
                   configuredTracker!,
-                  entity!.status.entity,
+                  phaseItem(entity!.status, name),
                   entity!.status.phase,
                   input.lifecycle,
                   input.native,
+                  (server, operation) => getMcpToolName(server, operation, tools),
               )
             : undefined
     const forgeRole = role === "tracker" ? undefined : roleContext("forge", roles.forge, (config) => config.provider)

@@ -54,6 +54,8 @@ const linear = parse(LinearTrackerValidator, {
     phase: linearPhases(),
     statuses: { projects: statuses, issues: statuses },
 })
+const resolveTool = (server: string, operation: string) => `mcp__${server}__${operation}`
+
 function environment(provider: "github" | "linear"): TrackerConfig {
     return structuredClone(provider === "github" ? github : linear)
 }
@@ -146,15 +148,21 @@ describe("workflow operations", () => {
                 const original = entity(provider, kind)
                 const saved = structuredClone(original)
                 for (const phase of ["planning", "execution", "selfReview"] as const) {
-                    const result = setWorkflowPhase(original, environment(provider), {
-                        entityDir: "example",
-                        phase,
-                        lifecycle: "inProgress",
-                        native: native(provider),
-                    })
+                    const result = setWorkflowPhase(
+                        original,
+                        environment(provider),
+                        {
+                            entityDir: "example",
+                            phase,
+                            lifecycle: "inProgress",
+                            native: native(provider),
+                        },
+                        resolveTool,
+                    )
                     assert.deepEqual(result.status, { ...saved, phase })
                     assert.equal(result.changed, phase !== "planning")
                     assert.equal(result.phaseMutation.changed, phase !== "planning")
+                    assert.equal("mutation" in result.phaseMutation, phase !== "planning")
                     if (result.phaseMutation.provider === "linear")
                         assert.deepEqual(result.phaseMutation.labels, ["unrelated", phase])
                 }
@@ -166,12 +174,17 @@ describe("workflow operations", () => {
         for (const lifecycle of ["backlog", "todo", "inReview", "done", "canceled"] as const)
             assert.throws(
                 () =>
-                    setWorkflowPhase(entity("github"), environment("github"), {
-                        entityDir: "example",
-                        phase: "execution",
-                        lifecycle,
-                        native: native("github"),
-                    }),
+                    setWorkflowPhase(
+                        entity("github"),
+                        environment("github"),
+                        {
+                            entityDir: "example",
+                            phase: "execution",
+                            lifecycle,
+                            native: native("github"),
+                        },
+                        resolveTool,
+                    ),
                 /In Progress/,
             )
         const invalid = native("github")
@@ -179,22 +192,32 @@ describe("workflow operations", () => {
         invalid.field.dataType = "TEXT"
         assert.throws(
             () =>
-                setWorkflowPhase(entity("github"), environment("github"), {
-                    entityDir: "example",
-                    phase: "execution",
-                    lifecycle: "inProgress",
-                    native: invalid,
-                }),
+                setWorkflowPhase(
+                    entity("github"),
+                    environment("github"),
+                    {
+                        entityDir: "example",
+                        phase: "execution",
+                        lifecycle: "inProgress",
+                        native: invalid,
+                    },
+                    resolveTool,
+                ),
             /single-select/,
         )
         assert.throws(
             () =>
-                setWorkflowPhase(entity("linear"), environment("github"), {
-                    entityDir: "example",
-                    phase: "execution",
-                    lifecycle: "inProgress",
-                    native: native("github"),
-                }),
+                setWorkflowPhase(
+                    entity("linear"),
+                    environment("github"),
+                    {
+                        entityDir: "example",
+                        phase: "execution",
+                        lifecycle: "inProgress",
+                        native: native("github"),
+                    },
+                    resolveTool,
+                ),
             /not the configured tracker/,
         )
         assert.equal(
@@ -310,6 +333,19 @@ describe("workflow operations", () => {
                     field: "Phase",
                     value: "Execution",
                     changed: true,
+                    mutation: {
+                        tool: "mcp__github__projects_write",
+                        arguments: {
+                            method: "update_project_item",
+                            owner: "example",
+                            owner_type: "user",
+                            project_number: 2,
+                            item_owner: "example",
+                            item_repo: "repo",
+                            issue_number: 11,
+                            updated_field: { name: "Phase", value: "Execution" },
+                        },
+                    },
                 },
             })
             const modified = fs.statSync(file, { bigint: true }).mtimeNs

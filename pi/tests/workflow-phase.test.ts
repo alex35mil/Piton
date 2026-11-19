@@ -15,10 +15,11 @@ import {
     NativePhaseFactsValidator,
     phaseProjectionContract,
     initialPhase,
-    planPhaseMutation,
+    planPhaseMutation as planForItem,
     resolveLinearPhaseGroup,
     trackerPhase,
     type NativePhaseFacts,
+    type PhaseItem,
 } from "../workflows/extensions/integrations/phase.ts"
 import { itemFieldEntry, itemFieldValue } from "../workflows/extensions/integrations/github-project-reads.ts"
 import { requireProviderCall } from "../workflows/extensions/integrations/provider-evidence.ts"
@@ -112,6 +113,65 @@ function linearFacts(): Extract<NativePhaseFacts, { provider: "linear" }> {
 }
 const lifecycles: LifecycleState[] = ["backlog", "todo", "inProgress", "inReview", "done", "canceled"]
 
+function phaseItem(provider: "github" | "linear", entity: "epic" | "task" | "gig"): PhaseItem {
+    if (provider === "github")
+        return {
+            entity,
+            tracker: {
+                provider,
+                repository: { owner: "example", repo: "example" },
+                external: { issueNumber: 7 },
+                planComment: { state: "unpublished" },
+            },
+        }
+    const planDocument = { state: "unpublished" } as const
+    switch (entity) {
+        case "epic":
+            return {
+                entity,
+                tracker: {
+                    provider,
+                    resource: "project",
+                    external: { projectId: "project-uuid", createdAt: "2026-01-01T00:00:00.000Z" },
+                    planDocument,
+                },
+            }
+        case "task":
+            return {
+                entity,
+                tracker: {
+                    provider,
+                    resource: "task-issue",
+                    external: { issueId: "issue-uuid", identifier: "ENG-7", projectId: "project-uuid" },
+                    planDocument,
+                },
+            }
+        case "gig":
+            return {
+                entity,
+                tracker: {
+                    provider,
+                    resource: "gig-issue",
+                    external: { issueId: "issue-uuid", identifier: "ENG-7" },
+                    planDocument,
+                },
+            }
+    }
+}
+
+const resolveTool = (server: string, operation: string) => `mcp__${server}__${operation}`
+
+/** Plans for the entity's item on the tracker's provider, resolving tools by the fixture naming. */
+function planPhaseMutation(
+    tracker: typeof github | typeof linear,
+    entity: "epic" | "task" | "gig",
+    phase: Parameters<typeof planForItem>[2],
+    lifecycle: LifecycleState,
+    facts: NativePhaseFacts,
+) {
+    return planForItem(tracker, phaseItem(tracker.provider, entity), phase, lifecycle, facts, resolveTool)
+}
+
 describe("shared workflow Phase", () => {
     it("projects exactly the active Phase only while In Progress for every entity and provider", () => {
         for (const entity of ["epic", "task", "gig"] as const) {
@@ -136,6 +196,73 @@ describe("shared workflow Phase", () => {
             }
         }
         assert.equal(PhaseValidator.check("paused"), false)
+    })
+
+    it("returns the registered provider call for a changed assignment, and none otherwise", () => {
+        const project = github.project
+        const githubCall = (value: string | null) => ({
+            tool: "mcp__github__projects_write",
+            arguments: {
+                method: "update_project_item",
+                owner: project.owner,
+                owner_type: project.ownerType,
+                project_number: project.number,
+                item_owner: "example",
+                item_repo: "example",
+                issue_number: 7,
+                updated_field: { name: "Phase", value },
+            },
+        })
+        const set = planPhaseMutation(github, "gig", "execution", "inProgress", githubFacts)
+        assert.deepEqual(set, {
+            provider: "github",
+            field: "Phase",
+            value: "Execution",
+            changed: true,
+            mutation: githubCall("Execution"),
+        })
+        const selected = { ...githubFacts, current: "Execution" }
+        assert.deepEqual(planPhaseMutation(github, "gig", "execution", "inReview", selected), {
+            provider: "github",
+            field: "Phase",
+            value: null,
+            changed: true,
+            mutation: githubCall(null),
+        })
+        assert.equal("mutation" in planPhaseMutation(github, "gig", "execution", "inProgress", selected), false)
+
+        for (const [entity, tool, id] of [
+            ["epic", "mcp__linear__save_project", "project-uuid"],
+            ["task", "mcp__linear__save_issue", "issue-uuid"],
+            ["gig", "mcp__linear__save_issue", "issue-uuid"],
+        ] as const) {
+            const labels = ["customer-label", "other-execution", "execution"]
+            assert.deepEqual(planPhaseMutation(linear, entity, "execution", "inProgress", linearFacts()), {
+                provider: "linear",
+                labels,
+                changed: true,
+                mutation: { tool, arguments: { id, labels } },
+            })
+            const unchanged = planPhaseMutation(linear, entity, "planning", "inProgress", linearFacts())
+            assert.deepEqual(unchanged, {
+                provider: "linear",
+                labels: ["customer-label", "other-execution", "planning"],
+                changed: false,
+            })
+        }
+
+        // An unregistered tool fails while preparing, not when the agent runs the call.
+        const missing = () => {
+            throw new Error("no registered tool")
+        }
+        assert.throws(
+            () => planForItem(github, phaseItem("github", "gig"), "execution", "inProgress", githubFacts, missing),
+            /no registered tool/,
+        )
+        assert.throws(
+            () => planForItem(github, phaseItem("linear", "gig"), "execution", "inProgress", githubFacts, resolveTool),
+            /provider/,
+        )
     })
 
     it("returns a local lifecycle-dependent contract, not an inferred tracker status", () => {
@@ -168,7 +295,7 @@ describe("shared workflow Phase", () => {
 
     it("clears native Phase for an entity whose metadata has no Phase yet, but won't project one", () => {
         const selected = { ...githubFacts, current: phaseValues.execution }
-        assert.deepEqual(planPhaseMutation(github, "gig", undefined, "inReview", selected), {
+        assert.partialDeepStrictEqual(planPhaseMutation(github, "gig", undefined, "inReview", selected), {
             provider: "github",
             field: "Phase",
             value: null,
@@ -257,7 +384,7 @@ describe("shared workflow Phase", () => {
                 planPhaseMutation(github, "gig", "execution", selected.lifecycle, selected.native).changed,
                 false,
             )
-            assert.deepEqual(plan(githubPhaseReads(target, null)), {
+            assert.partialDeepStrictEqual(plan(githubPhaseReads(target, null)), {
                 provider: "github",
                 field: "Phase",
                 value: "Planning",
@@ -277,7 +404,12 @@ describe("shared workflow Phase", () => {
         it("clears Phase when the item read, taken after a Status change, shows another lifecycle", () => {
             const reads = githubPhaseReads(target, "Self-Review", "In Review")
             assert.equal(facts(reads).lifecycle, "inReview")
-            assert.deepEqual(plan(reads), { provider: "github", field: "Phase", value: null, changed: true })
+            assert.partialDeepStrictEqual(plan(reads), {
+                provider: "github",
+                field: "Phase",
+                value: null,
+                changed: true,
+            })
             assert.throws(() => facts(githubPhaseReads(target, "Planning", "Blocked")), /configured: Backlog, Todo/)
             assert.throws(
                 () => facts(edit((r) => delete (r.item.response.fields[0] as { value?: unknown }).value)),
