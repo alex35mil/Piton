@@ -1,10 +1,11 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 import { compile, parse } from "../../../extensions/__lib/schema.js"
 import { workflowTools } from "../__lib/tools.js"
 
 import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
-import { OperationResourceIdsMemo } from "./resource-ids.js"
+import { isResourceIdsKind, OperationResourceIdsMemo, type ResourceIds } from "./resource-ids.js"
+import { linkPullRequestIssue } from "./forge/github/issue-link.js"
 import { beginPullRequestCreation, recordPullRequestCreation } from "./creation.js"
 import {
     evidenceResourceKind,
@@ -59,6 +60,13 @@ export const ResourceIdsToolSchema = Type.Union([
 ])
 export const ResourceIdsToolValidator = compile(ResourceIdsToolSchema)
 
+// The PR is recorded either way; the link only reports how it went.
+async function linkIssue(ctx: ExtensionContext, entityDir: string, ids: ResourceIds) {
+    if (!isResourceIdsKind(ids, "github-pull-request")) throw new Error("issue linking requires PR resource IDs")
+    const status = resolveResourceIdsContext(ctx.cwd, entityDir, "github-pull-request").status
+    return linkPullRequestIssue(ctx.cwd, status, ids.value.number, { projectTrusted: ctx.isProjectTrusted() })
+}
+
 export function registerResourceIds(pi: ExtensionAPI, memo: OperationResourceIdsMemo, tools: McpToolCatalog): void {
     const toolsApi = workflowTools(pi, "integrations")
     const [begin, creation, select, resolve, record, invalidate] = ResourceIdsToolSchema.anyOf
@@ -90,16 +98,19 @@ export function registerResourceIds(pi: ExtensionAPI, memo: OperationResourceIds
                     if (input.action === "recordCreation") {
                         const recorded = await recordPullRequestCreation(ctx.cwd, entityDir, input.evidence, tools)
                         for (const ids of recorded.resourceIds) memo.record(ids)
-                        return recorded
+                        const [pullRequest] = recorded.resourceIds
+                        return { ...recorded, issueLink: await linkIssue(ctx, entityDir, pullRequest) }
                     }
                     if (input.action === "resolve")
                         return resolveResourceIds(resolveResourceIdsContext(ctx.cwd, entityDir, input.resource), memo)
                     if (input.action === "select") {
                         const context = resolveResourceIdsContext(ctx.cwd, entityDir, input.resource)
+                        const resourceIds = await selectPullRequestResourceIds(context, input.evidence, memo, tools)
                         return {
                             state: "resolved" as const,
                             source: "user-selection" as const,
-                            resourceIds: await selectPullRequestResourceIds(context, input.evidence, memo, tools),
+                            resourceIds,
+                            issueLink: await linkIssue(ctx, entityDir, resourceIds),
                         }
                     }
                     const resource = evidenceResourceKind(ctx.cwd, entityDir, input.evidence, input.action, tools)
