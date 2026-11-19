@@ -106,7 +106,7 @@ An Epic's `epic.md` is the initiative's current state: its goal and its Task lis
 
 Epic planning recommends a Task delivery strategy and asks for approval before the first Task starts. Independently shippable Tasks can deliver directly to the repository default branch; intermediate work can integrate on the Epic branch. The accepted Epic records the choice and rationale.
 
-- The plan records routing as public `Task target:` and `Epic branch:` lines, so every clone reads the same choice.
+- The plan records routing as public `**Task target:**` and `**Epic branch:**` lines, so every clone reads the same choice.
 - Default-target Tasks don't depend on the Epic branch at all. Epic-target Tasks start from it, so it must exist locally.
 - Changing the strategy affects future Tasks only.
 - A clone without the Epic's local files restores them from the tracker.

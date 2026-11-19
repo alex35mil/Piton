@@ -106,7 +106,7 @@ Each Task is a `### ` section under `## Tasks`, in the [Epic Task format](../../
    - intermediate work that needs integration can target the Epic branch.
 
    Recommend one from the decomposition and get explicit approval.
-2. **Record.** Put the approved strategy in `epic.md`: the `Task target:` and `Epic branch:` lines and the rationale in the Task delivery strategy section, and the choice in Plan highlights. [Epic routing](../../references/epic.md#routing) owns the format and how Tasks apply it.
+2. **Record.** Put the approved strategy in `epic.md`: the `**Task target:**` and `**Epic branch:**` lines and the rationale in the Task delivery strategy section, and the choice in Plan highlights. [Epic routing](../../references/epic.md#routing) owns the format and how Tasks apply it.
 
 A strategy change needs another plan review and the user's acceptance. Never retarget existing Tasks.
 
@@ -125,8 +125,8 @@ Minimum shape:
 
 ## Task delivery strategy
 
-Task target: <default | epic>
-Epic branch: <the Epic's branch name>
+**Task target:** `<default | epic>`
+**Epic branch:** `<the Epic's branch name>`
 
 <Rationale from the decomposition and delivery prerequisites.>
 
@@ -134,9 +134,9 @@ Epic branch: <the Epic's branch name>
 
 ### <Task-sized unit>
 
-Kind: <feature | bugfix | refactor | research | audit | chore>
-Labels: <group=value, …, only with label groups configured>
-Summary: <one line on what the Task is for>
+**Kind:** `<feature | bugfix | refactor | research | audit | chore>`
+**Labels:** `<group=value>`, … <only with label groups configured>
+**Summary:** <one line on what the Task is for>
 
 <The Task's design: what it delivers and where it stops. Any Markdown. Becomes its issue body.>
 ```
@@ -160,7 +160,7 @@ Summary: <one line on what the Task is for>
 
 ### Epic branch
 
-- The Epic's branch identity never changes, and the plan's `Epic branch:` line records it for every clone.
+- The Epic's branch identity never changes, and the plan's `**Epic branch:**` line records it for every clone.
 - It's the merge target for Epic-target Tasks. With explicit user approval, it merges into its default target through its own PR.
 - Default-target Tasks never depend on it. Never delete it while a Task targets it.
 

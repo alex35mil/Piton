@@ -90,7 +90,7 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
     if (parent)
         fs.writeFileSync(
             path.join(root, parent.directory, "epic.md"),
-            `# Parent\n\n## Overview\n\nParent.\n\n## Task delivery strategy\n\nTask target: epic\nEpic branch: ${parent.status.branch.name}\n\n## Tasks\n\n### [#42] Work\n\nKind: feature\nSummary: Work.\n`,
+            `# Parent\n\n## Overview\n\nParent.\n\n## Task delivery strategy\n\n**Task target:** \`epic\`\n**Epic branch:** \`${parent.status.branch.name}\`\n\n## Tasks\n\n### [#42] Work\n\n**Kind:** \`feature\`\n**Summary:** Work.\n`,
         )
     const input =
         kind === "epic"
@@ -508,7 +508,7 @@ describe("managed GitHub plan comments", () => {
     it("refuses to publish an Epic plan whose Task list isn't the accepted one", async () => {
         const f = fixture("epic")
         try {
-            const withTask = `${source}\n## Tasks\n\n### Parser\n\nKind: feature\nSummary: Parse.\n\nParse it.\n`
+            const withTask = `${source}\n## Tasks\n\n### Parser\n\n**Kind:** \`feature\`\n**Summary:** Parse.\n\nParse it.\n`
             await assert.rejects(f.prepare(withTask), /differs from the accepted one[\s\S]*Task 1: added "Parser"/)
             assert.deepEqual(f.saved().tracker.planComment, { state: "unpublished" })
             acceptTaskList(path.join(f.root, f.directory), withTask)

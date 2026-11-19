@@ -105,9 +105,9 @@ function repo(tracker: "github" | "linear", labels?: unknown) {
     return { root, directory: epic.directory, epicPath, branch: epic.status.branch.name, write }
 }
 
-// `extra` holds the optional `Labels:` and `Status:` lines. Only an untagged Task carries its design.
+// `extra` holds the optional `**Labels:**` and `**Status:**` lines. Only an untagged Task carries its design.
 const section = (title: string, marker?: string, extra = "") =>
-    `### ${marker ? `[${marker}] ` : ""}${title}\n\nKind: feature\n${extra}Summary: ${title} summary.\n` +
+    `### ${marker ? `[${marker}] ` : ""}${title}\n\n**Kind:** \`feature\`\n${extra}**Summary:** ${title} summary.\n` +
     (marker ? "" : `\n${title} outcome.\n`)
 const plan = (...sections: string[]) => `# Epic\n\n## Overview\n\nPlan.\n\n## Tasks\n\n${sections.join("\n")}`
 const child = (marker: string, title: string, facts: Partial<EpicChildIssue> = {}): EpicChildIssue => ({
@@ -134,13 +134,15 @@ describe("Epic Task format", () => {
                 "",
                 "### [#12] Build the parser",
                 "",
-                "Kind: bugfix",
-                "Summary: Parse the input.",
+                "**Kind:** `bugfix`",
+                "**Summary:** Parse the input.",
                 "",
                 "### Wire the CLI",
                 "",
-                "Kind: chore",
-                "Summary: Expose the parser.",
+                "**Kind:** `chore`",
+                "**Summary:** Expose the parser.",
+                "",
+                "Status: a design paragraph that reads like a field.",
                 "",
                 "First paragraph.",
                 "",
@@ -170,33 +172,58 @@ describe("Epic Task format", () => {
         assert.equal(tasks[1].summary, "Expose the parser.")
         assert.match(
             tasks[1].issue === "pending" ? tasks[1].design : "",
-            /^First paragraph\.[\s\S]*### Not a heading[\s\S]*```$/,
+            /^Status: a design[\s\S]*First paragraph\.[\s\S]*### Not a heading[\s\S]*```$/,
         )
     })
 
     it("rejects malformed Tasks", () => {
-        assert.throws(() => parseEpicTasks(plan("### A\n\nNo kind.\n")), /first body line must be `Kind/)
-        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: epic\nSummary: A.\n\nText.\n")), /invalid Kind/)
-        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: chore\n\nText.\n")), /needs a one-line `Summary:/)
-        assert.throws(() => parseEpicTasks(plan("### A\n\nKind: chore\nSummary:\n\nText.\n")), /`Summary:/)
+        assert.throws(() => parseEpicTasks(plan("### A\n\nNo kind.\n")), /first body line must be ``\*\*Kind/)
         assert.throws(
-            () => parseEpicTasks(plan("### A\n\nKind: chore\nSummary: A.\n")),
-            /design after `Summary:` is empty/,
+            () => parseEpicTasks(plan("### A\n\n**Kind:** `epic`\n**Summary:** A.\n\nText.\n")),
+            /invalid Kind/,
+        )
+        assert.throws(
+            () => parseEpicTasks(plan("### A\n\n**Kind:** chore\n**Summary:** A.\n\nText.\n")),
+            /one code span/,
+        )
+        assert.throws(() => parseEpicTasks(plan("### A\n\n**Kind:** `chore`\n\nText.\n")), /needs a one-line/)
+        assert.throws(
+            () => parseEpicTasks(plan("### A\n\n**Kind:** `chore`\n**Summary:**\n\nText.\n")),
+            /needs a one-line/,
+        )
+        assert.throws(
+            () => parseEpicTasks(plan("### A\n\n**Kind:** `chore`\n**Summary:** A.\n")),
+            /design after `\*\*Summary:\*\*` is empty/,
         )
         // A tagged Task's design lives in its issue; the Epic keeps only the summary.
         assert.throws(
-            () => parseEpicTasks(plan("### [#1] A\n\nKind: chore\nSummary: A.\n\nOld design.\n")),
+            () => parseEpicTasks(plan("### [#1] A\n\n**Kind:** `chore`\n**Summary:** A.\n\nOld design.\n")),
             /design belongs in the Task issue/,
         )
-        assert.throws(() => parseEpicTasks(plan(section("A", undefined, "Status: canceled\n"))), /already has an issue/)
-        assert.throws(() => parseEpicTasks(plan(section("A", "#1", "Status: done\n"))), /only allowed Status/)
+        assert.throws(
+            () => parseEpicTasks(plan(section("A", undefined, "**Status:** `canceled`\n"))),
+            /already has an issue/,
+        )
+        assert.throws(() => parseEpicTasks(plan(section("A", "#1", "**Status:** `done`\n"))), /only allowed Status/)
+        assert.throws(() => parseEpicTasks(plan(section("A", "#1", "**Status:** canceled\n"))), /only allowed Status/)
+        // The plain `Name: value` form is rejected with the bold form as the hint.
+        for (const old of [
+            "### A\n\nKind: chore\nSummary: A.\n\nText.\n",
+            "### A\n\n**Kind:** `chore`\nLabels: area=fe\n**Summary:** A.\n\nText.\n",
+            "### [#1] A\n\n**Kind:** `chore`\nStatus: canceled\n**Summary:** A.\n",
+            "### A\n\n**Kind:** `chore`\nSummary: A.\n\nText.\n",
+        ])
+            assert.throws(
+                () => parseEpicTasks(plan(old)),
+                /are written `\*\*(Kind|Labels|Status|Summary):\*\* <value>`/,
+            )
         assert.throws(() => parseEpicTasks(plan(section("A"), section("A"))), /duplicate Task title/)
         assert.throws(() => parseEpicTasks(plan(section("A", "#1"), section("B", "#1"))), /duplicate Task marker #1/)
         assert.throws(() => parseEpicTasks(plan(section("[x] A"))), /invalid Task marker/)
         assert.throws(() => parseEpicTasks(`# Epic\n\n${section("Stray")}`), /outside `## Tasks`/)
         // A plan without `## Tasks` simply has no Tasks.
         assert.deepEqual(parseEpicTasks("# Epic\n\n## Ordered Tasks\n\n1. **A** — a.\n"), [])
-        const canceled = parseEpicTasks(plan(section("A", "#1", "Status: canceled\n")))[0]
+        const canceled = parseEpicTasks(plan(section("A", "#1", "**Status:** `canceled`\n")))[0]
         assert.equal(canceled.issue === "tagged" && canceled.canceled, true)
     })
 })
@@ -395,7 +422,7 @@ describe("Epic Task issue processing", () => {
     it("cancels queued and started Tasks, never a Done one, and finishes an interrupted cancel", () => {
         const { root, directory, write } = repo("github")
         try {
-            write(plan(section("Dropped", "#14", "Status: canceled\n")))
+            write(plan(section("Dropped", "#14", "**Status:** `canceled`\n")))
             const run = (facts: Partial<EpicChildIssue>) =>
                 planEpicTaskIssues(
                     root,
@@ -471,7 +498,7 @@ describe("Epic Task issue processing", () => {
             }
             const { root, directory, write } = repo(provider, { groups })
             try {
-                write(plan(section("Parser", undefined, "Labels: area=fe\n")))
+                write(plan(section("Parser", undefined, "**Labels:** `area=fe`\n")))
                 const result = planEpicTaskIssues(
                     root,
                     { entityDir: directory, epicPriority: "High", children: [] },
@@ -498,7 +525,7 @@ describe("Epic Task issue processing", () => {
     it("creates Linear issues in the Epic's Project with Todo and Priority", () => {
         const { root, directory, epicPath, write } = repo("linear")
         try {
-            write(plan(section("Parser"), section("Dropped", "ENG-3", "Status: canceled\n")))
+            write(plan(section("Parser"), section("Dropped", "ENG-3", "**Status:** `canceled`\n")))
             const result = planEpicTaskIssues(
                 root,
                 { entityDir: directory, epicPriority: "High", children: [child("ENG-3", "Dropped")] },
@@ -579,7 +606,10 @@ describe("Epic Task issue processing", () => {
             // After acceptance, a reorder or a Kind change refuses until it is reviewed and accepted.
             fs.writeFileSync(epicPath, plan(section("CLI"), section("Parser")))
             assert.throws(processIssues, /differs from the accepted one[\s\S]*Task 1: "Parser"/)
-            fs.writeFileSync(epicPath, reviewed.replace("### CLI\n\nKind: feature", "### CLI\n\nKind: chore"))
+            fs.writeFileSync(
+                epicPath,
+                reviewed.replace("### CLI\n\n**Kind:** `feature`", "### CLI\n\n**Kind:** `chore`"),
+            )
             assert.throws(processIssues, /Task 2: "CLI" · feature · planned → "CLI" · chore · planned/)
             // Tagging a Task with its issue marker and editing design text need no acceptance.
             fs.writeFileSync(epicPath, plan(section("Parser", "#11"), `${section("CLI")}\nMore detail.\n`))
@@ -612,8 +642,8 @@ const accepted = (branch: string) =>
         "",
         "## Task delivery strategy",
         "",
-        "Task target: default",
-        `Epic branch: ${branch}`,
+        "**Task target:** `default`",
+        `**Epic branch:** \`${branch}\``,
         "",
         "Independent Tasks.",
         "",
@@ -621,13 +651,13 @@ const accepted = (branch: string) =>
         "",
         "### [#11] Parser",
         "",
-        "Kind: feature",
-        "Summary: Parse the input.",
+        "**Kind:** `feature`",
+        "**Summary:** Parse the input.",
         "",
         "### CLI",
         "",
-        "Kind: chore",
-        "Summary: Wire it.",
+        "**Kind:** `chore`",
+        "**Summary:** Wire it.",
         "",
         "1. nested",
         "   - list",
@@ -643,10 +673,21 @@ describe("Epic routing and restore", () => {
         assert.deepEqual(parseEpicRouting(accepted("10-rollout")), { taskTarget: "default", epicBranch: "10-rollout" })
         assert.throws(() => parseEpicRouting("# E\n\n## Tasks\n"), /no `## Task delivery strategy`/)
         assert.throws(
-            () => parseEpicRouting(accepted("x").replace("Task target: default", "Task target: main")),
-            /needs `Task target: default` or `Task target: epic`/,
+            () => parseEpicRouting(accepted("x").replace("`default`", "`main`")),
+            /needs ``\*\*Task target:\*\* `default` `` or/,
         )
-        assert.throws(() => parseEpicRouting(accepted("x").replace("Epic branch: x\n", "")), /needs `Epic branch:/)
+        assert.throws(
+            () => parseEpicRouting(accepted("x").replace("`default`", "default")),
+            /needs ``\*\*Task target:\*\* `default` `` or/,
+        )
+        assert.throws(
+            () => parseEpicRouting(accepted("x").replace("**Epic branch:** `x`\n", "")),
+            /needs ``\*\*Epic branch:\*\*/,
+        )
+        assert.throws(
+            () => parseEpicRouting(accepted("x").replace("**Task target:** `default`", "Task target: default")),
+            /are written `\*\*Task target:\*\* <value>`/,
+        )
     })
 
     it("round-trips accepted epic.md through GitHub and Linear plan rendering", () => {
@@ -760,7 +801,7 @@ describe("Epic routing and restore", () => {
                 child("#12", "CLI", { status: "Done" }),
             ]
             // Tagging drops CLI's design, as record_epic_task_issue does.
-            const tagged = `${source.slice(0, source.indexOf("### CLI"))}### [#12] CLI\n\nKind: chore\nSummary: Wire it.\n`
+            const tagged = `${source.slice(0, source.indexOf("### CLI"))}### [#12] CLI\n\n**Kind:** \`chore\`\n**Summary:** Wire it.\n`
             fs.writeFileSync(path.join(root, restored.directory, "epic.md"), tagged)
             assert.deepEqual(
                 planEpicTaskIssues(root, { entityDir: restored.directory, epicPriority: "High", children }, tools),
@@ -873,7 +914,7 @@ describe("Task design", () => {
             try {
                 const marker = provider === "github" ? "#11" : "ENG-11"
                 write(
-                    `# Epic\n\n## Task delivery strategy\n\nTask target: default\nEpic branch: ${branch}\n\n## Tasks\n\n${section("Parser", marker)}`,
+                    `# Epic\n\n## Task delivery strategy\n\n**Task target:** \`default\`\n**Epic branch:** \`${branch}\`\n\n## Tasks\n\n${section("Parser", marker)}`,
                 )
                 const task = initializeEntity(
                     {

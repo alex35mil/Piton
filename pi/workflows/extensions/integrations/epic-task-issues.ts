@@ -390,7 +390,7 @@ function nativeCalls(ctx: Context, epicPriority: string): NativeCalls {
     }
 }
 
-/** A Task issue's labels: its `kind` label and its `Labels:` selection, checked against the configuration. */
+/** A Task issue's labels: its `kind` label and its `**Labels:**` selection, checked against the configuration. */
 function taskLabels(tracker: TrackerConfig, task: EpicTask): string[] {
     try {
         return selectedLabelNames(tracker.labels, "deliverable", task.kind, task.labels)

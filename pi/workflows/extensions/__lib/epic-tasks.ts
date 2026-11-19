@@ -13,10 +13,10 @@ import { writeTextAtomically } from "./files.js"
 interface EpicTaskFields {
     title: string
     kind: DeliverableKind
-    // `Labels: group=value, …`: the Task's label selection, grouped by label group. Without the
-    // line, every group is empty; Task issue processing checks it against the configuration.
+    // ``**Labels:** `group=value`, …``: the Task's label selection, grouped by label group. Without
+    // the line, every group is empty; Task issue processing checks it against the configuration.
     labels: Record<string, string[]>
-    // `Summary: …`: one line on what the Task is for. The Epic keeps only this once the issue exists.
+    // `**Summary:** …`: one line on what the Task is for. The Epic keeps only this once the issue exists.
     summary: string
 }
 
@@ -27,14 +27,14 @@ export type EpicTask = EpicTaskFields &
     (
         | {
               issue: "pending"
-              // The section body after `Summary:`: the Task's full design, sent as the new issue's body.
+              // The section body after `**Summary:**`: the Task's full design, sent as the new issue's body.
               design: string
           }
         | {
               issue: "tagged"
               // The Task's tracker reference: `#12` or `ENG-12`.
               marker: string
-              // `Status: canceled`: removed from the plan; its issue is canceled, never started.
+              // ``**Status:** `canceled` ``: removed from the plan; its issue is canceled, never started.
               canceled: boolean
           }
     )
@@ -82,9 +82,36 @@ function scanLines(content: string): Line[] {
 const isLevelOneOrTwo = (line: Line) => !line.fenced && /^#{1,2}\s/.test(line.text)
 const isSectionEnd = (line: Line) => !line.fenced && /^#{1,3}\s/.test(line.text)
 
+// Epic field lines read `**Name:** value`: a bold name, then the value. Values other than the
+// summary are code spans: ``**Kind:** `feature` ``, ``**Labels:** `area=fe`, `perf=perf` ``.
+type FieldName = "Kind" | "Labels" | "Status" | "Summary" | "Task target" | "Epic branch"
+const TASK_FIELDS = ["Kind", "Labels", "Status", "Summary"] as const satisfies readonly FieldName[]
+
+/** The trimmed value of a `**<name>:** value` line, or undefined when the line is another line. */
+function fieldValue(line: Line | undefined, name: FieldName): string | undefined {
+    if (!line || line.fenced) return undefined
+    const prefix = `**${name}:**`
+    const text = line.text.trim()
+    return text.startsWith(prefix) ? text.slice(prefix.length).trim() : undefined
+}
+
+/** The field a line writes in the plain `Name: value` form, which Epics no longer accept. */
+function plainField(line: Line | undefined, names: readonly FieldName[]): FieldName | undefined {
+    if (!line || line.fenced) return undefined
+    return names.find((name) => line.text.trim().startsWith(`${name}:`))
+}
+
+const plainFieldMessage = (name: FieldName) =>
+    `\`${name}:\` lines are written \`**${name}:** <value>\`, with code-formatted values except the summary`
+
+/** The text inside a value that is exactly one code span, or undefined. */
+function codeSpan(value: string): string | undefined {
+    return /^`([^`\s]+)`$/.exec(value)?.[1]
+}
+
 type ParsedTask = EpicTask & {
     headingIndex: number
-    // The `Summary:` line and the end of the section, so tagging can drop the design.
+    // The `**Summary:**` line and the end of the section, so tagging can drop the design.
     summaryIndex: number
     endIndex: number
 }
@@ -114,7 +141,7 @@ function parse(content: string): ParsedTask[] {
     for (const line of lines) {
         if (line.fenced || inTasks.has(line.index) || !/^###\s/.test(line.text)) continue
         const next = lines.slice(line.index + 1).find((candidate) => candidate.text.trim())
-        if (next && !next.fenced && /^Kind:/.test(next.text.trim()))
+        if (fieldValue(next, "Kind") !== undefined)
             throw new Error(`Epic Task section is outside \`## Tasks\`: ${JSON.stringify(line.text.trim())}`)
     }
 
@@ -140,39 +167,46 @@ function parseTask(section: Line[], endIndex: number): ParsedTask {
     }
 
     const fields = body.filter((line) => line.text.trim())
-    const kindLine = fields[0]
-    const kind = kindLine && !kindLine.fenced ? /^Kind:\s*(\S+)\s*$/.exec(kindLine.text.trim())?.[1] : undefined
-    if (!kind) fail("the first body line must be `Kind: <kind>`")
+    // A plain-form line among the leading field lines gets the new form as its error. The design
+    // after them is free text, so a paragraph starting with `Status:` there is fine.
+    for (const line of fields) {
+        if (fieldValue(line, "Summary") !== undefined) break
+        if (TASK_FIELDS.some((name) => fieldValue(line, name) !== undefined)) continue
+        const plain = plainField(line, TASK_FIELDS)
+        if (plain) fail(plainFieldMessage(plain))
+        break
+    }
+    const kindValue = fieldValue(fields[0], "Kind")
+    if (kindValue === undefined) fail("the first body line must be ``**Kind:** `<kind>` ``")
+    const kind = codeSpan(kindValue!)
+    if (!kind) fail(`Kind ${JSON.stringify(kindValue)} must be one code span, such as \`\`**Kind:** \`feature\` \`\``)
     let validatedKind: DeliverableKind
     try {
         validatedKind = validateDeliverableKind(kind!)
     } catch {
         return fail(`invalid Kind ${JSON.stringify(kind)}`)
     }
-    const field = (index: number, name: string) => {
-        const line = fields[index]
-        return line && !line.fenced && line.text.trim().startsWith(`${name}:`) ? line : undefined
-    }
     let nextField = 1
-    const labelsLine = field(nextField, "Labels")
+    const labelsValue = fieldValue(fields[nextField], "Labels")
     let labels: Record<string, string[]> = {}
-    if (labelsLine) {
-        labels = parseLabels(labelsLine.text.trim().slice("Labels:".length), fail)
+    if (labelsValue !== undefined) {
+        labels = parseLabels(labelsValue, fail)
         nextField++
     }
-    const statusLine = field(nextField, "Status")
+    const statusValue = fieldValue(fields[nextField], "Status")
     let canceled = false
-    if (statusLine) {
-        if (!/^Status:\s*canceled\s*$/.test(statusLine.text.trim()))
-            fail("the only allowed Status is `Status: canceled`")
-        if (!tagged) fail("`Status: canceled` is only valid on a Task that already has an issue")
+    if (statusValue !== undefined) {
+        if (codeSpan(statusValue) !== "canceled") fail("the only allowed Status is ``**Status:** `canceled` ``")
+        if (!tagged) fail("``**Status:** `canceled` `` is only valid on a Task that already has an issue")
         canceled = true
         nextField++
     }
-    const summaryLine = field(nextField, "Summary")
-    const summary = summaryLine?.text.trim().slice("Summary:".length).trim()
-    if (!summaryLine || !summary)
-        fail("needs a one-line `Summary: <what the Task is for>` after `Kind:`, `Labels:`, and `Status:`")
+    const summaryLine = fields[nextField]
+    const summary = fieldValue(summaryLine, "Summary")
+    if (!summary)
+        fail(
+            "needs a one-line `**Summary:** <what the Task is for>` after `**Kind:**`, `**Labels:**`, and `**Status:**`",
+        )
     const design = body
         .filter((line) => line.index > summaryLine!.index)
         .map((line) => line.text)
@@ -190,22 +224,23 @@ function parseTask(section: Line[], endIndex: number): ParsedTask {
     if (tagged) {
         if (design)
             fail(
-                "a Task with an issue keeps only its fields and `Summary:` in the Epic; its design belongs in the Task issue's body",
+                "a Task with an issue keeps only its fields and `**Summary:**` in the Epic; its design belongs in the Task issue's body",
             )
         return { ...common, issue: "tagged", marker: tagged[1], canceled }
     }
-    if (!design) fail("the design after `Summary:` is empty; it becomes the Task issue's body")
+    if (!design) fail("the design after `**Summary:**` is empty; it becomes the Task issue's body")
     return { ...common, issue: "pending", design }
 }
 
-/** `area=frontend, area=backend, perf=perf` → `{ area: ["frontend", "backend"], perf: ["perf"] }`. */
+/** `` `area=frontend`, `area=backend`, `perf=perf` `` → `{ area: ["frontend", "backend"], perf: ["perf"] }`. */
 function parseLabels(text: string, fail: (message: string) => never): Record<string, string[]> {
     const labels: Record<string, string[]> = {}
-    const pairs = text.split(",").map((pair) => pair.trim())
-    if (pairs.length === 1 && pairs[0] === "") return labels
-    for (const pair of pairs) {
+    const entries = text.split(",").map((entry) => entry.trim())
+    if (entries.length === 1 && entries[0] === "") return labels
+    for (const entry of entries) {
+        const pair = codeSpan(entry) ?? ""
         const match = /^([a-z][a-z0-9-]*)=([a-z][a-z0-9-]*)$/.exec(pair)
-        if (!match) fail(`invalid Labels entry ${JSON.stringify(pair)}; use \`group=value\``)
+        if (!match) fail(`invalid Labels entry ${JSON.stringify(entry)}; write each entry as \`\` \`group=value\` \`\``)
         const [, group, value] = match!
         const values = (labels[group] ??= [])
         if (values.includes(value)) fail(`Labels repeats ${JSON.stringify(pair)}`)
@@ -286,26 +321,36 @@ export interface EpicRouting {
 
 const ROUTING_HEADING = "## Task delivery strategy"
 
-// Reads `Task target:` and `Epic branch:` from the `## Task delivery strategy` section.
+// Reads ``**Task target:** `…` `` and ``**Epic branch:** `…` `` from the `## Task delivery strategy` section.
 export function parseEpicRouting(content: string): EpicRouting {
     const lines = scanLines(content)
     const start = lines.find((line) => !line.fenced && line.text.trim() === ROUTING_HEADING)
     if (!start)
-        throw new Error("Epic has no `## Task delivery strategy` section with `Task target:` and `Epic branch:`")
+        throw new Error(
+            "Epic has no `## Task delivery strategy` section with `**Task target:**` and `**Epic branch:**`",
+        )
     const end = lines.find((line) => line.index > start.index && isLevelOneOrTwo(line))?.index ?? lines.length
-    const fields = new Map<string, string>()
+    const names = ["Task target", "Epic branch"] as const
+    const fields = new Map<FieldName, string>()
     for (const line of lines.slice(start.index + 1, end)) {
-        if (line.fenced) continue
-        const field = /^(Task target|Epic branch):\s*(\S+)\s*$/.exec(line.text.trim())
-        if (!field) continue
-        if (fields.has(field[1])) throw new Error(`Epic repeats \`${field[1]}:\``)
-        fields.set(field[1], field[2])
+        const plain = plainField(line, names)
+        if (plain) throw new Error(`Epic ${plainFieldMessage(plain)}`)
+        for (const name of names) {
+            const value = fieldValue(line, name)
+            if (value === undefined) continue
+            if (fields.has(name)) throw new Error(`Epic repeats \`**${name}:**\``)
+            fields.set(name, value)
+        }
     }
-    const target = fields.get("Task target")
+    const targetValue = fields.get("Task target")
+    const target = targetValue === undefined ? undefined : codeSpan(targetValue)
     if (target !== "default" && target !== "epic")
-        throw new Error("Epic `## Task delivery strategy` needs `Task target: default` or `Task target: epic`")
-    const branch = fields.get("Epic branch")
-    if (!branch) throw new Error("Epic `## Task delivery strategy` needs `Epic branch: <name>`")
+        throw new Error(
+            "Epic `## Task delivery strategy` needs ``**Task target:** `default` `` or ``**Task target:** `epic` ``",
+        )
+    const branchValue = fields.get("Epic branch")
+    const branch = branchValue === undefined ? undefined : codeSpan(branchValue)
+    if (!branch) throw new Error("Epic `## Task delivery strategy` needs ``**Epic branch:** `<name>` ``")
     return { taskTarget: target, epicBranch: branch }
 }
 

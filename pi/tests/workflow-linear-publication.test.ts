@@ -79,7 +79,7 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
         parentDirectory = parent.directory
         fs.writeFileSync(
             path.join(root, parent.directory, "epic.md"),
-            `# Parent\n\n## Overview\n\nParent.\n\n## Task delivery strategy\n\nTask target: epic\nEpic branch: ${parent.status.branch.name}\n\n## Tasks\n\n### [${issue.identifier}] Work\n\nKind: feature\nSummary: Work.\n`,
+            `# Parent\n\n## Overview\n\nParent.\n\n## Task delivery strategy\n\n**Task target:** \`epic\`\n**Epic branch:** \`${parent.status.branch.name}\`\n\n## Tasks\n\n### [${issue.identifier}] Work\n\n**Kind:** \`feature\`\n**Summary:** Work.\n`,
         )
     }
     const initialization =

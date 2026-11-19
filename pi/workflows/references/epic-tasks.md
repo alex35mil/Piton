@@ -11,23 +11,24 @@ An accepted Epic owns one tracker issue for every planned Task, so the tracker's
 
 ### [#12] Build the parser
 
-Kind: feature
-Labels: area=backend, perf=perf
-Summary: Parse config files into typed settings.
+**Kind:** `feature`
+**Labels:** `area=backend`, `perf=perf`
+**Summary:** Parse config files into typed settings.
 
 ### Wire the CLI
 
-Kind: chore
-Summary: Expose the parser through the CLI.
+**Kind:** `chore`
+**Summary:** Expose the parser through the CLI.
 
 The Task's full design: its outcome and where it stops. Any Markdown: paragraphs, lists, code blocks.
 ```
 
 - **Heading:** `<title>` before the Task's issue exists, then `[<marker>] <title>`. Titles are unique within the Epic.
+- **Fields:** each is a bold name, then the value. Values other than the summary are code spans. Code rejects the plain `Kind: feature` form.
 - **Kind:** the first body line, one of `feature`, `bugfix`, `refactor`, `research`, `audit`, or `chore`. A Task starts with this Kind.
-- **Labels:** an optional `Labels: group=value, …` line right after `Kind:`, with values for the label groups that apply to Deliverables, never `kind`. A group that needs a value and has none blocks the Task's issue processing.
-- **Status:** an optional `Status: canceled` line after `Kind:` and `Labels:`, only on a tagged Task. It removes the Task from the plan.
-- **Summary:** a required `Summary:` line after the other fields: one line on what the Task is for.
+- **Labels:** an optional ``**Labels:** `group=value`, …`` line right after Kind, one code span per entry, with values for the label groups that apply to Deliverables, never `kind`. A group that needs a value and has none blocks the Task's issue processing.
+- **Status:** an optional ``**Status:** `canceled` `` line after Kind and Labels, only on a tagged Task. It removes the Task from the plan.
+- **Summary:** a required `**Summary:**` line after the other fields: one line of plain text on what the Task is for.
 - **Design:** the rest of the section, only before the Task's issue exists. It must not be empty, and becomes the issue's body. Once tagged, a section has no design: the issue holds it ([Task designs](#task-designs)).
 
 Code rejects anything else, including a Task section outside `## Tasks`.
@@ -57,11 +58,11 @@ Run it after `accept_epic_tasks` and on every Epic resume, before any publicatio
 **Rules:**
 
 - Accepting the Task list approves these creates, cancellations, and board updates, with no second confirmation. Rerunning after an interruption needs no new approval.
-- Created issues are sub-issues on GitHub, or Project issues on Linear, with the Task's `kind` label and its `Labels:` values.
+- Created issues are sub-issues on GitHub, or Project issues on Linear, with the Task's `kind` label and its Labels values.
 - A tagged Task whose issue is In Progress, In Review, or Done has started, with or without a local Task directory; it may have started in another clone.
 - A tagged Task that hasn't started must be a child of this Epic in Backlog, Todo, or Canceled. A local Task directory on a queued issue is an error.
-- Processing ensures every queued Task's board state itself, whatever Project automations did first: on the Project, Status Todo (Backlog or empty becomes Todo), and the Epic's Priority when the Task has none. A Priority already set on the Task is kept, and a Canceled issue is left alone. To defer a Task, mark it `Status: canceled` or replan; a manual Backlog move is reverted.
-- A started Task (In Progress or In Review) marked `Status: canceled` is set to Canceled and closed. Its branch, PR, and local directory stay as they are. A Done Task can't be canceled.
+- Processing ensures every queued Task's board state itself, whatever Project automations did first: on the Project, Status Todo (Backlog or empty becomes Todo), and the Epic's Priority when the Task has none. A Priority already set on the Task is kept, and a Canceled issue is left alone. To defer a Task, mark it canceled or replan; a manual Backlog move is reverted.
+- A started Task (In Progress or In Review) marked canceled is set to Canceled and closed. Its branch, PR, and local directory stay as they are. A Done Task can't be canceled.
 - An uncertain create needs no separate recovery: the next run's title lookup finds the issue or confirms it's absent.
 - Creating issues never initializes a Task. Task issues stay unassigned until the Task starts.
 
@@ -73,7 +74,7 @@ A Task issue's body is the Task's current design until the Task is Done or Cance
 
 1. Read the issue body fresh, then write the complete new body: `issue_write` `update` on GitHub, `save_issue` on Linear.
 2. Post a one-line comment on that issue saying what changed and why.
-3. When the change alters what the Task is for, update its `Summary:` line and republish the Epic plan.
+3. When the change alters what the Task is for, update its `**Summary:**` line and republish the Epic plan.
 
 The design change is the user's decision, so neither write needs approval of its text. A Task that rewrites its own body then calls `record_task_design` with a fresh issue read.
 
@@ -102,7 +103,7 @@ Progress comes from the plan and each tagged Task's lifecycle, read fresh from t
 **Replanning:**
 
 - New Tasks get issues through issue processing.
-- To remove a queued or started Task, keep its section and marker and add `Status: canceled`. Never delete a tagged section.
+- To remove a queued or started Task, keep its section and marker and add ``**Status:** `canceled` ``. Never delete a tagged section.
 - A complete or canceled Task can't be removed.
 - To link an existing queued child issue of this Epic, add its section already tagged with that issue's marker, its fields, and a summary.
 - A Task's design changes in its issue ([Task designs](#task-designs)). Editing its title, Kind, or summary in `epic.md` doesn't rewrite the issue.
