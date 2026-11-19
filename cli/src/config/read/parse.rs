@@ -14,7 +14,7 @@ use crate::config::{
         client::ClientFile,
         host::HostFile,
         level::LevelKind,
-        paths::{Scope, Sharing, global_tier},
+        paths::{Scope, Sharing},
         tables::{
             BranchesTable, Files, Integration, Levels, PermissionsTable, Rule, SandboxTable, Table, TableValue,
             WebSearchTable, WorkersTable,
@@ -106,32 +106,26 @@ impl ConfigDoc {
         use LevelKind::{Global, Parent, Repository};
         let path = self.origin.path.clone();
         match (rule.levels, self.origin.level) {
-            (Levels::Global, Parent | Repository) => {
-                return Err(ConfigError::GlobalOnly {
-                    path,
-                    key: key.to_string(),
-                    global: global_tier(),
-                });
-            }
             (Levels::Project, Global) => {
                 return Err(ConfigError::ProjectOnly {
                     path,
                     key: key.to_string(),
                 });
             }
-            (Levels::Any, Global | Parent | Repository)
-            | (Levels::Global, Global)
-            | (Levels::Project, Parent | Repository) => {}
+            (Levels::Any, Global | Parent | Repository) | (Levels::Project, Parent | Repository) => {}
         }
         match (rule.files, self.origin.level, self.sharing) {
-            (Files::Local, Global | Parent | Repository, Sharing::Shared)
-            | (Files::LocalInProjects, Parent | Repository, Sharing::Shared) => Err(ConfigError::LocalOnly {
+            (Files::Local, Global | Parent | Repository, Sharing::Shared) => Err(ConfigError::LocalOnly {
+                path,
+                key: key.to_string(),
+            }),
+            (Files::UsersOwn, Parent | Repository, Sharing::Shared) => Err(ConfigError::NotInProjectConfig {
                 path,
                 key: key.to_string(),
             }),
             (Files::Either, Global | Parent | Repository, Sharing::Shared | Sharing::Local)
-            | (Files::Local | Files::LocalInProjects, Global | Parent | Repository, Sharing::Local)
-            | (Files::LocalInProjects, Global, Sharing::Shared) => Ok(()),
+            | (Files::Local | Files::UsersOwn, Global | Parent | Repository, Sharing::Local)
+            | (Files::UsersOwn, Global, Sharing::Shared) => Ok(()),
         }
     }
 
@@ -313,13 +307,25 @@ mod tests {
         };
         use LevelKind::{Global, Parent, Repository};
         use Sharing::{Local, Shared};
-        // Lifting a built-in deny: global only, so a repository can't open the user's credentials to itself.
-        let expose = "[sandbox]\nexpose = [\"~/.ssh/config\"]\n";
-        assert!(matches!(
-            part(expose, Parent, Shared, Table::Sandbox),
-            Err(ConfigError::GlobalOnly { ref key, .. }) if key == "sandbox.expose"
-        ));
-        assert!(part(expose, Global, Local, Table::Sandbox).is_ok());
+        // Loosening the sandbox: the user's own files only, so a repository can't open it to itself.
+        for loosening in [
+            "[sandbox]\nexpose = [\"~/.ssh/config\"]\n",
+            "[sandbox]\npresets = [\"git\"]\n",
+            "[sandbox]\npresets = [{ name = \"mise\", install = \"allow\" }]\n",
+        ] {
+            for level in [Parent, Repository] {
+                assert!(
+                    matches!(
+                        part(loosening, level, Shared, Table::Sandbox),
+                        Err(ConfigError::NotInProjectConfig { .. })
+                    ),
+                    "{loosening}"
+                );
+                assert!(part(loosening, level, Local, Table::Sandbox).is_ok(), "{loosening}");
+            }
+            assert!(part(loosening, Global, Shared, Table::Sandbox).is_ok(), "{loosening}");
+            assert!(part(loosening, Global, Local, Table::Sandbox).is_ok(), "{loosening}");
+        }
         assert!(part("[sandbox]\nallow = [\"/r\"]\n", Repository, Shared, Table::Sandbox).is_ok());
         // Integrations: project only.
         for table in [Table::Tracker, Table::Forge] {
@@ -341,7 +347,7 @@ mod tests {
         let name = "[branches]\nusername = \"me\"\n";
         assert!(matches!(
             part(name, Repository, Shared, Table::Branches),
-            Err(ConfigError::LocalOnly { .. })
+            Err(ConfigError::NotInProjectConfig { .. })
         ));
         assert!(part(name, Repository, Local, Table::Branches).is_ok());
         assert!(part(name, Global, Shared, Table::Branches).is_ok());

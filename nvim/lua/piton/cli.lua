@@ -27,7 +27,15 @@
 ---| { kind: "not_a_worker", path: string }
 ---| { kind: "leftovers", path: string, lines: string[] }
 ---| { kind: "invalid_configuration", message: string }
+---| { kind: "source_fetch", checkout: string, message: string }
+---| { kind: "protected_update", checkout: string, upstream: string, target: string, files: string[] }
 ---| { kind: "failed", message: string }
+
+--- The answer to a `protected_update` refusal.
+---@alias PitonSourceUpdate
+---| { kind: "ask" }
+---| { kind: "approve", target: string } Apply this commit's changes to protected files.
+---| { kind: "skip" } Deletion only: leave the source as it is.
 
 ---@alias PitonCreateResult
 ---| { kind: "created", worker: PitonWorker }
@@ -52,6 +60,8 @@ local REFUSAL_KINDS = {
     not_a_worker = true,
     leftovers = true,
     invalid_configuration = true,
+    source_fetch = true,
+    protected_update = true,
     failed = true,
 }
 
@@ -132,13 +142,32 @@ local function unexpected(response, command)
     util.refuse("Unexpected response to `piton worker " .. command .. "`: " .. vim.inspect(response))
 end
 
----@param request { from: string, name: string, label: string, issue: string? }
+--- The CLI arguments for an answer to `protected_update`.
+---@param update PitonSourceUpdate
+---@return string[]
+local function update_args(update)
+    if update.kind == "ask" then
+        return {}
+    elseif update.kind == "approve" then
+        return { "--approve-source-update", update.target }
+    elseif update.kind == "skip" then
+        return { "--skip-source-update" }
+    end
+    error("unknown source update: " .. vim.inspect(update))
+end
+
+---@param request { from: string, name: string, label: string, issue: string?, update: PitonSourceUpdate? }
 ---@return PitonCreateResult
 function M.create(request)
     local args = { "create", request.name, "--from", request.from, "--label", request.label }
     if request.issue then
         vim.list_extend(args, { "--issue", request.issue })
     end
+    local update = request.update or { kind = "ask" }
+    if update.kind == "skip" then
+        error("creating an agent always updates its source")
+    end
+    vim.list_extend(args, update_args(update))
     local response = run(args)
     if response.type == "worker" then
         return { kind = "created", worker = worker(response.worker) }
@@ -168,16 +197,19 @@ function M.list(from)
     error("unreachable")
 end
 
---- Stop the worker's sessions and delete it. Without `force`, refuses with
---- `leftovers` when it has uncommitted changes or unpushed commits.
+--- Stop the worker's sessions and delete it. Every refusal comes before
+--- anything changes: `leftovers` (uncommitted changes or unpushed commits)
+--- unless `force`, and `protected_update` unless `update` answers it.
 ---@param path string
 ---@param force boolean
+---@param update? PitonSourceUpdate
 ---@return PitonDeleteResult
-function M.delete(path, force)
+function M.delete(path, force, update)
     local args = { "delete", path }
     if force then
         table.insert(args, "--force")
     end
+    vim.list_extend(args, update_args(update or { kind = "ask" }))
     local response = run(args)
     if response.type == "worker_deleted" then
         return {
@@ -264,8 +296,14 @@ function M.describe(refusal_value)
         return r.path .. " is not an agent"
     elseif r.kind == "leftovers" then
         return r.path .. " isn't clean:\n" .. table.concat(r.lines, "\n")
-    elseif r.kind == "invalid_configuration" or r.kind == "failed" then
+    elseif r.kind == "invalid_configuration" or r.kind == "source_fetch" or r.kind == "failed" then
         return r.message
+    elseif r.kind == "protected_update" then
+        return ("Updating %s to %s changes protected files, which the sandbox can't write:\n%s"):format(
+            r.checkout,
+            r.upstream,
+            table.concat(util.head(r.files, 15), "\n")
+        )
     end
     error("unknown piton refusal: " .. vim.inspect(r))
 end

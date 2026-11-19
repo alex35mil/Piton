@@ -276,6 +276,9 @@ enum WorkerAction {
         label: Option<String>,
         #[usage(long)]
         issue: Option<String>,
+        /// Approve this commit's changes to protected files: Piton writes them, the rest of the update runs in the sandbox.
+        #[usage(long, value_name = "SHA")]
+        approve_source_update: Option<String>,
     },
     /// List the workers of FROM's source, with their live sessions.
     Ls {
@@ -288,7 +291,22 @@ enum WorkerAction {
         /// Delete despite uncommitted changes or unpushed commits.
         #[usage(long)]
         force: bool,
+        /// What happens to the source when its update changes protected files (default: refuse, so you can decide).
+        #[usage(arg_group)]
+        source_update: Option<SourceUpdateFlag>,
     },
+}
+
+/// The answer to a source update that changes protected files: one of the two, or neither.
+#[derive(usage_rs::ArgGroup)]
+#[usage(name = "source-update")]
+enum SourceUpdateFlag {
+    /// Approve this commit's changes to protected files: Piton writes them, the rest of the update runs in the sandbox.
+    #[usage(long = "approve-source-update", value_name = "SHA")]
+    ApproveSourceUpdate(String),
+    /// Leave the source as it is.
+    #[usage(long = "skip-source-update")]
+    SkipSourceUpdate,
 }
 
 #[derive(Subcommands)]

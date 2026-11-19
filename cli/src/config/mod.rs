@@ -44,16 +44,18 @@ pub enum ConfigError {
     Read { path: PathBuf, source: std::io::Error },
     #[error("invalid {path}: {reason}")]
     Invalid { path: PathBuf, reason: String },
-    #[error("{path}: `{key}` belongs in the global tier ({global})")]
-    GlobalOnly {
-        path: PathBuf,
-        key: String,
-        global: PathBuf,
-    },
     #[error("{path}: `{key}` belongs in a project's .piton/, not the global tier")]
     ProjectOnly { path: PathBuf, key: String },
+    /// A secret, in a file that isn't `config.local.toml`.
     #[error("{path}: `{key}` belongs in config.local.toml, which isn't committed")]
     LocalOnly { path: PathBuf, key: String },
+    /// A key the user sets for themselves (one that loosens the sandbox, a personal value), in a project's
+    /// `config.toml`, which travels with the repository.
+    #[error(
+        "{path}: `{key}` can't be set in a project's config.toml, which travels with the repository; set it in that \
+         folder's config.local.toml or the global config.toml"
+    )]
+    NotInProjectConfig { path: PathBuf, key: String },
     #[error("{path}: `{key}` {reason}")]
     Conflict { path: PathBuf, key: String, reason: String },
 }

@@ -35,13 +35,31 @@ function M.close_tab(agent)
     })
 end
 
+--- The answer to an update of the source that changes protected files: nil keeps the agent.
+---@param agent Agent
+---@param refusal { kind: "protected_update", target: string, checkout: string }
+---@return PitonSourceUpdate?
+local function source_update(agent, refusal)
+    local question = cli.describe(refusal)
+        .. "\n\n"
+        .. require("piton.create").PROTECTED_UPDATE_NOTE
+        .. "\n\nDelete agent "
+        .. agent.label
+        .. " and apply these changes to "
+        .. refusal.checkout
+        .. "?"
+    if config.confirm(question) then
+        return { kind = "approve", target = refusal.target }
+    end
+    if config.confirm("Delete agent " .. agent.label .. " without updating " .. refusal.checkout .. "?") then
+        return { kind = "skip" }
+    end
+    return nil
+end
+
+--- Deletes the agent after every question is answered; its tab stays open until then.
 ---@param agent Agent
 function M.delete(agent)
-    local tab = tabs.find(agent.path)
-    if tab then
-        vim.cmd("tabclose " .. vim.api.nvim_tabpage_get_number(tab))
-    end
-
     util.async(function()
         local unsaved = vim.tbl_filter(function(buffer)
             return buffer.modified
@@ -60,19 +78,34 @@ function M.delete(agent)
             end
         end
 
-        local result = cli.delete(agent.path, false)
+        -- The daemon checks leftovers, then the source's update, before it changes anything: each answer retries.
+        local force, update = false, nil
+        local result = cli.delete(agent.path, force, update)
         if result.kind == "refused" and result.refusal.kind == "leftovers" then
             local message = "Agent " .. agent.label .. " isn't clean:\n" .. table.concat(result.refusal.lines, "\n")
             if not config.confirm(message .. "\n\nDelete anyway?") then
                 log.info("Kept agent: " .. agent.path)
                 return
             end
-            result = cli.delete(agent.path, true)
+            force = true
+            result = cli.delete(agent.path, force, update)
+        end
+        if result.kind == "refused" and result.refusal.kind == "protected_update" then
+            update = source_update(agent, result.refusal --[[@as { kind: "protected_update", target: string, checkout: string }]])
+            if not update then
+                log.info("Kept agent: " .. agent.path)
+                return
+            end
+            result = cli.delete(agent.path, force, update)
         end
 
         if result.kind == "refused" then
             util.refuse("Can't delete agent " .. agent.label .. ": " .. cli.describe(result.refusal))
         elseif result.kind == "deleted" then
+            local tab = tabs.find(agent.path)
+            if tab then
+                vim.cmd("tabclose " .. vim.api.nvim_tabpage_get_number(tab))
+            end
             -- Its files are gone; buffers left open would point at nothing.
             for _, buffer in ipairs(M.agent_buffers(agent.path)) do
                 pcall(vim.api.nvim_buf_delete, buffer.buf, { force = true })

@@ -18,6 +18,9 @@ src="$scratch/repo"
 outside="$scratch/outside"
 mkdir -p "$src/.piton/.local" "$src/apps/sub" "$src/apps/.pi" "$src/src" "$src/.agents/skills/s" "$outside"
 git -C "$src" init -q
+# A commit, so the sandboxed Git checks below have a branch and a HEAD; a nested repository for the any-depth rules.
+git -C "$src" -c user.email=p@p -c user.name=p commit -q --allow-empty -m probe
+git -C "$src/apps/sub" init -q
 # A grant through a link the sandbox could have made (here, in the checkout) mustn't reach the link's target: a folder
 # outside every write the sandbox has, created and removed by this script.
 probe="piton-probe-$$"
@@ -97,6 +100,17 @@ attempt denied "write inside the settings lock"         'mkdir apps/.pi/settings
 attempt ok     "write workflow artifacts"               'echo z > .piton/.local/x'
 attempt ok     "write .piton/.LOCAL (another case)"     'echo z > .piton/.LOCAL/y'
 attempt ok     "write a source file"                    'echo w > src/a.rs'
+# Git's hooks and configuration: Git on the host runs what they name. The rest of .git stays writable.
+attempt denied "add a Git hook"                         'printf "#!/bin/sh\n" > .git/hooks/post-merge'
+attempt denied "write .git/config"                      'echo "[core]" >> .git/config'
+attempt denied "set core.fsmonitor"                     'git config core.fsmonitor /tmp/x'
+attempt denied "write .git/commondir"                   'echo /tmp > .git/commondir'
+attempt denied "replace .git"                           'mv .git git.bak'
+attempt denied "write .GIT/HOOKS (another case)"        'echo x > .GIT/HOOKS/pre-commit'
+attempt denied "add a nested repository's hook"         'echo x > apps/sub/.git/hooks/post-checkout'
+attempt ok     "commit"                                 'echo c > src/c.rs && git add src/c.rs && git -c user.email=p@p -c user.name=p commit -q -m c'
+attempt ok     "create and switch branches"             'git switch -q -c probe-branch && git switch -q -'
+attempt ok     "add and remove a worktree in .piton/.local" 'git worktree add -q --detach .piton/.local/pull-requests/1/rebase && git worktree remove --force .piton/.local/pull-requests/1/rebase'
 attempt ok     "write rules (not protected)"            'mkdir -p .agents/rules && echo r > .agents/rules/r.md'
 attempt ok     "edit a skill (not protected)"           'echo more >> .agents/skills/s/SKILL.md'
 attempt ok     "create a skill in a subfolder"          'mkdir -p apps/.agents/skills/x && echo s > apps/.agents/skills/x/SKILL.md'

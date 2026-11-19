@@ -4,12 +4,13 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use super::{
-    WorkerAction,
+    SourceUpdateFlag, WorkerAction,
     control::{control, report},
 };
 use crate::{
     config::DaemonConfig,
     daemon::{ControlRequest, ControlResponse},
+    project::source::{CreateUpdate, DeleteUpdate, Sha},
 };
 
 /// Exit code for a refused worker operation, so callers can tell it from a failure.
@@ -17,22 +18,50 @@ const EXIT_REFUSED: u8 = 4;
 
 pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> ExitCode {
     let here = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let sha = |value: String| Sha::try_from(value).map_err(|e| format!("--approve-source-update: {e}"));
+    let is_delete = match &action {
+        WorkerAction::Delete { .. } => true,
+        WorkerAction::Create { .. } | WorkerAction::Ls { .. } => false,
+    };
     let request = match action {
         WorkerAction::Create {
             name,
             from,
             label,
             issue,
-        } => ControlRequest::WorkerCreate(crate::project::CreateRequest {
-            from: from.unwrap_or_else(here),
-            name,
-            label,
-            issue,
-        }),
+            approve_source_update,
+        } => {
+            let update = match approve_source_update.map(sha).transpose() {
+                Ok(None) => CreateUpdate::Ask,
+                Ok(Some(target)) => CreateUpdate::Approve { target },
+                Err(message) => return report(Err(message)),
+            };
+            ControlRequest::WorkerCreate(crate::project::CreateRequest {
+                from: from.unwrap_or_else(here),
+                name,
+                label,
+                issue,
+                update,
+            })
+        }
         WorkerAction::Ls { from } => ControlRequest::WorkerList {
             from: from.unwrap_or_else(here),
         },
-        WorkerAction::Delete { path, force } => ControlRequest::WorkerDelete { path, force },
+        WorkerAction::Delete {
+            path,
+            force,
+            source_update,
+        } => {
+            let update = match source_update {
+                None => DeleteUpdate::Ask,
+                Some(SourceUpdateFlag::SkipSourceUpdate) => DeleteUpdate::Skip,
+                Some(SourceUpdateFlag::ApproveSourceUpdate(value)) => match sha(value) {
+                    Ok(target) => DeleteUpdate::Approve { target },
+                    Err(message) => return report(Err(message)),
+                },
+            };
+            ControlRequest::WorkerDelete { path, force, update }
+        }
     };
     let response = match control(&config.socket, request).await {
         Ok(response) => response,
@@ -81,6 +110,19 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
                 for line in lines {
                     eprintln!("  {line}");
                 }
+            }
+            if let crate::project::WorkerRefusal::ProtectedUpdate(blocked) = &refusal {
+                eprintln!(
+                    "  Approving lets Piton write exactly these files from {}; the rest of the update, hooks \
+                     included, runs in the sandbox. To approve, run the command again with --approve-source-update \
+                     {}{}",
+                    blocked.target,
+                    blocked.target,
+                    match is_delete {
+                        true => ", or with --skip-source-update to leave the source as it is",
+                        false => "",
+                    }
+                );
             }
         }
         other @ (ControlResponse::Sessions { .. }

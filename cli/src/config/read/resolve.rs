@@ -263,7 +263,7 @@ impl Docs {
                         let error = match error {
                             ConfigError::Read { source, .. } => FailedRead::Io(source.kind(), source.to_string()),
                             ConfigError::Invalid { reason, .. } => FailedRead::Invalid(reason),
-                            other @ (ConfigError::GlobalOnly { .. }
+                            other @ (ConfigError::NotInProjectConfig { .. }
                             | ConfigError::ProjectOnly { .. }
                             | ConfigError::LocalOnly { .. }
                             | ConfigError::Conflict { .. }) => FailedRead::Invalid(other.to_string()),
@@ -746,7 +746,7 @@ mcp_server = "linear"
         let repo = t.home.join("repo");
         write(&repo.join(".piton/config.toml"), "[sandbox]\nexpose = [\"~/.ssh\"]\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.sandbox, Err(ConfigError::GlobalOnly { .. })));
+        assert!(matches!(r.sandbox, Err(ConfigError::NotInProjectConfig { .. })));
         assert!(r.permissions.is_ok());
         // Integrations are project only: a global [tracker] fails its part.
         write(&t.global.join("config.toml"), "[tracker]\nprovider = \"github\"\n");
@@ -760,7 +760,7 @@ mcp_server = "linear"
         // A username in a shared file.
         write(&repo.join(".piton/config.toml"), "[branches]\nusername = \"me\"\n");
         let r = run(&t, &source(repo), Runtime::Host).unwrap();
-        assert!(matches!(r.branches, Err(ConfigError::LocalOnly { .. })));
+        assert!(matches!(r.branches, Err(ConfigError::NotInProjectConfig { .. })));
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! `[sandbox]`: what a sandboxed pi may do beyond Piton's built-in policy (`launch/sandbox/`). Lists only add across
-//! levels. `expose` lifts a built-in deny, so it belongs to the global tier: a repository can't open the user's
-//! credentials to itself.
+//! levels.
+//!
+//! A knob that loosens a protection (`expose`, the `git` preset, the `mise` preset's `install = "allow"`) is accepted
+//! in the global `config.toml` or a `config.local.toml`, never a project's committed `config.toml`: a repository can't
+//! open the sandbox for whoever clones it. Knobs are on or off; asking when the sandbox blocks something is #241's.
 //!
 //! Keys of the nono-CLI backend and the network keys are refused with a message that says what replaces them.
 
@@ -20,7 +23,7 @@ pub struct SandboxTable {
     /// Paths denied like the built-in credential list: no read, write, or connect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    /// Toolchain grants Piton ships.
+    /// Named permissions beyond the default: toolchain caches, and `git`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
     /// Paths whose built-in deny is lifted. Readable then; writable only through `allow` or `allow_file`.
@@ -44,15 +47,24 @@ pub struct SandboxTable {
     network: Option<toml::Value>,
 }
 
-/// A toolchain's grants: its caches and state, which host tools reuse (see `launch/sandbox/policy.rs`). Written as
-/// its name, or as a table with the name and the preset's own options: `{ name = "mise", install = "allow" }`.
+/// A named permission beyond the default. Written as its name, or as a table with the name and the preset's own
+/// options: `{ name = "mise", install = "allow" }`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "toml::Value", into = "toml::Value")]
 pub enum Preset {
+    /// mise's cache and install bookkeeping; with `install = "allow"`, its installed tools too. Each toolchain preset
+    /// grants that toolchain's caches and state, which host builds reuse; the folders are in `launch/sandbox/policy.rs`.
     Mise(MiseOptions),
+    /// Cargo's registry and git checkouts and rustup's downloads, never `~/.cargo/bin` or installed toolchains.
     Rust,
+    /// npm, pnpm, bun, and Yarn caches.
     Node,
+    /// SwiftPM's caches, clang's module cache, and Xcode's DerivedData.
     Swift,
+    /// Git's hooks and configuration (`.git/hooks/`, `.git/config`, `.git/commondir`, replacing `.git`) become
+    /// writable, so `husky install` and `git remote add` work in the sandbox, and the next Git command on the host may
+    /// run an agent's code (`agent/git.rs`). Hooks run in the sandbox either way.
+    Git,
 }
 
 /// The `mise` preset's options. Unset options are the nearest level's that sets them, else their default.
@@ -87,11 +99,12 @@ impl InstallMode {
 
 impl Preset {
     #[cfg(test)]
-    pub const ALL: [Preset; 4] = [
+    pub const ALL: [Preset; 5] = [
         Preset::Mise(MiseOptions { install: None }),
         Preset::Rust,
         Preset::Node,
         Preset::Swift,
+        Preset::Git,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -100,6 +113,7 @@ impl Preset {
             Preset::Rust => "rust",
             Preset::Node => "node",
             Preset::Swift => "swift",
+            Preset::Git => "git",
         }
     }
 
@@ -111,15 +125,20 @@ impl Preset {
                     options.install = n.install;
                 }
             }
-            (Preset::Mise(_) | Preset::Rust | Preset::Node | Preset::Swift, _) => {}
+            (Preset::Mise(_) | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git, _) => {}
         }
     }
 
-    /// Options only the global tier may set: they let the sandbox write what the host runs.
-    fn global_only(&self) -> bool {
+    /// The key of a preset that loosens a protection (it lets the sandbox write what the host runs), or `None` for one
+    /// any configuration file may list.
+    fn loosening(&self) -> Option<&'static str> {
         match self {
-            Preset::Mise(options) => matches!(options.install, Some(InstallMode::Allow)),
-            Preset::Rust | Preset::Node | Preset::Swift => false,
+            Preset::Mise(options) => match options.install {
+                Some(InstallMode::Allow) => Some("sandbox.presets mise install = \"allow\""),
+                Some(InstallMode::Ask | InstallMode::Deny) | None => None,
+            },
+            Preset::Git => Some("sandbox.presets git"),
+            Preset::Rust | Preset::Node | Preset::Swift => None,
         }
     }
 }
@@ -128,7 +147,7 @@ impl TryFrom<toml::Value> for Preset {
     type Error = String;
 
     fn try_from(value: toml::Value) -> Result<Self, String> {
-        let names = "mise, rust, node, or swift";
+        let names = "mise, rust, node, swift, or git";
         let (name, mut options) = match value {
             toml::Value::String(name) => (name, toml::Table::new()),
             toml::Value::Table(mut table) => match table.remove("name") {
@@ -163,6 +182,7 @@ impl TryFrom<toml::Value> for Preset {
             "rust" => Preset::Rust,
             "node" => Preset::Node,
             "swift" => Preset::Swift,
+            "git" => Preset::Git,
             other => return Err(format!("unknown preset {other:?}: {names}")),
         };
         match options.keys().next() {
@@ -180,7 +200,8 @@ impl From<Preset> for toml::Value {
             Preset::Mise(MiseOptions { install: Some(mode) }) => {
                 table.insert("install".into(), toml::Value::String(mode.name().into()));
             }
-            Preset::Mise(MiseOptions { install: None }) | Preset::Rust | Preset::Node | Preset::Swift => {}
+            Preset::Mise(MiseOptions { install: None }) | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git => {
+            }
         }
         match table.is_empty() {
             true => toml::Value::String(preset.name().into()),
@@ -200,7 +221,7 @@ impl SandboxTable {
     fn removed_key(&self) -> Option<String> {
         let presets = "Piton has a built-in default; add toolchain grants with `presets` (mise, rust, node, swift)";
         let readable = "everything is readable by default except the built-in denies; use `expose` in the global \
-                        config.toml for a denied path";
+                        config.toml or a config.local.toml for a denied path";
         let removed = |key: &str, why: &str| format!("sandbox.{key} was removed: {why}");
         if self.base.is_some() {
             return Some(removed("base", presets));
@@ -211,7 +232,7 @@ impl SandboxTable {
         if self.bypass.is_some() {
             return Some(removed(
                 "bypass",
-                "use `expose` in the global config.toml to lift a built-in deny for a path",
+                "use `expose` in the global config.toml or a config.local.toml to lift a built-in deny for a path",
             ));
         }
         if self.read.is_some() {
@@ -246,17 +267,16 @@ impl SandboxTable {
 }
 
 impl TableValue for SandboxTable {
+    /// Every knob that loosens a protection: the global file or a `config.local.toml`, never a project's
+    /// `config.toml`.
     fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
-        present(
-            Rule::GLOBAL,
-            &[
-                ("sandbox.expose", !self.expose.is_empty()),
-                (
-                    "sandbox.presets mise install = \"allow\"",
-                    self.presets.iter().any(Preset::global_only),
-                ),
-            ],
-        )
+        let mut keys = present(Rule::USERS_OWN, &[("sandbox.expose", !self.expose.is_empty())]);
+        for key in self.presets.iter().filter_map(Preset::loosening) {
+            if !keys.iter().any(|(k, _)| *k == key) {
+                keys.push((key, Rule::USERS_OWN));
+            }
+        }
+        keys
     }
 
     fn check(&self) -> Result<(), String> {
@@ -348,19 +368,34 @@ mod tests {
         }
     }
 
-    /// Only the global tier lets the sandbox write the tools the host runs; any level may ask or deny.
+    /// Every knob that loosens a protection is the user's own: the global file or a `config.local.toml`. Toolchains,
+    /// and installs that ask or are denied, may be listed anywhere.
     #[test]
-    fn installing_tools_is_global_only() {
+    fn loosening_knobs_are_the_users_own() {
         assert_eq!(
             table("presets = [{ name = \"mise\", install = \"allow\" }]").ruled_keys(),
-            [("sandbox.presets mise install = \"allow\"", Rule::GLOBAL)]
+            [("sandbox.presets mise install = \"allow\"", Rule::USERS_OWN)]
+        );
+        assert_eq!(
+            table("presets = [\"git\", \"rust\"]").ruled_keys(),
+            [("sandbox.presets git", Rule::USERS_OWN)]
+        );
+        assert_eq!(
+            table("expose = [\"~/.ssh/config\"]").ruled_keys(),
+            [("sandbox.expose", Rule::USERS_OWN)]
         );
         for text in [
             "presets = [\"mise\"]",
             "presets = [{ name = \"mise\", install = \"deny\" }]",
+            "presets = [\"rust\", \"swift\"]",
+            "allow = [\"/a\"]",
         ] {
             assert!(table(text).ruled_keys().is_empty(), "{text}");
         }
+        assert!(
+            toml::from_str::<SandboxTable>("git = \"unprotected\"").is_err(),
+            "the key is a preset"
+        );
     }
 
     #[test]
@@ -369,15 +404,6 @@ mod tests {
         assert!(table("expose = [\"x\"]").check().is_err());
         assert!(table("allow = [\"~/x\", \"/abs\", \"$TMPDIR/x\"]").check().is_ok());
         assert!(toml::from_str::<SandboxTable>("presets = [\"python\"]").is_err());
-    }
-
-    #[test]
-    fn expose_is_global_only() {
-        assert_eq!(
-            table("expose = [\"~/.ssh/config\"]").ruled_keys(),
-            [("sandbox.expose", Rule::GLOBAL)]
-        );
-        assert!(table("allow = [\"/a\"]").ruled_keys().is_empty());
     }
 
     /// Each removed key fails the table with what replaces it; network keys point at the filtering issue.

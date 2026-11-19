@@ -169,18 +169,39 @@ with `.piton/.local` linked to the source's.
   settings come from the checkout's source, and deleting a worker stops the sessions in its subfolders too.
 - **`[workers] skip`** in `.piton/config.toml` lists paths not copied into new workers, such as editor indexes that
   break tooling in a clone (`apps/.build/index-build` here). It only removes things from the copy.
-- **`piton worker create <name> [--from <checkout>] [--label] [--issue]`:** the source must be clean on its default
-  branch; Piton fast-forwards it, clones everything except the skip list and `.piton/.local` (one `clonefile(2)` per
-  entry), links `.piton/.local`, and sets `agent.source`, `agent.label`, `agent.issue`. When mise trusts the
+- **`piton worker create <name> [--from <checkout>] [--label] [--issue] [--approve-source-update <sha>]`:** the
+  source must be clean on its default branch; Piton fast-forwards it (see "Updating the source" below), clones
+  everything except the skip list and `.piton/.local` (one `clonefile(2)` per entry), links `.piton/.local`, and sets `agent.source`, `agent.label`, `agent.issue`. When mise trusts the
   source's own config, Piton trusts the worker's too (`mise trust <worker>`): its config files are the source's,
   cloned, so this grants nothing the user hasn't. An untrusted source gives an untrusted worker, and a launch there
   reports it (see "Launching pi"). It writes no pi.nvim
   descriptor: pi.nvim's global spec attaches through Piton, and a workspace descriptor would override that and bypass
   Piton (no phone access, no keep-awake). The worker's sandbox comes from Piton at launch (see "Launch mode").
 - **`piton worker ls`:** the source's workers with their live sessions.
-- **`piton worker delete <path> [--force]`:** refuses with the uncommitted changes and unpushed commits unless forced;
-  stops the worker's sessions, drops mise's trust in the folder, unlinks `.piton/.local`, deletes the folder, and
-  fast-forwards the source.
+- **`piton worker delete <path> [--force] [--approve-source-update <sha> | --skip-source-update]`:** refuses with
+  the uncommitted changes and unpushed commits unless forced, and plans the source's update, both before changing
+  anything; then stops the worker's sessions, drops mise's trust in the folder, unlinks `.piton/.local`, deletes the
+  folder, and fast-forwards the source. A source that isn't clean on its default branch, or can't be fetched, is left
+  as it is, with a warning.
+- **Updating the source.** A sandboxed agent may have worked in the source checkout, so what Git runs there (hooks,
+  `core.fsmonitor`, and the files they read, including ones Git ignores, like husky's `.husky/_/`) may be the agent's.
+  The daemon fetches the default branch and fast-forwards inside the sandbox a launch in the source gets, with every
+  hook on: the user's hooks keep running, contained, and no Git that could run them runs on the host. The fetch
+  authenticates the way the agent's Git does (SSH with `~/.ssh/config` and `known_hosts` exposed; HTTPS with the
+  keychain exposed); when it can't, creation is refused naming that. The target is the commit `git ls-remote`
+  reports, never a remote-tracking ref an agent could have rewritten. Read-only Git commands run on the host with
+  hooks and fsmonitor off.
+  - An update that changes protected files (`.piton/`, `.pi/`) needs the user, since the sandbox can't write them. The
+    daemon refuses with `protected_update` (the checkout, `upstream`, the `target` commit, and the `files`) before
+    changing anything. The client asks and retries with `--approve-source-update <target>`; deletion can instead
+    `--skip-source-update`. An approval of a commit the remote has since moved past asks again.
+  - Approved, the daemon writes exactly the approved files itself: each path's blob from the target commit (by hash,
+    with its mode), or its removal, through the no-follow writer protected writes use, staged with `git update-index`.
+    Then the merge runs in the sandbox with every rule in place, finding those paths done. Nothing is lifted, so a
+    hook can't write any other protected file (`.piton/config.local.toml`, which no diff shows). A symlink or
+    submodule among them refuses (change it by hand); a merge that fails puts the paths back from `HEAD`.
+  - Not asking comes with the universal question when the sandbox blocks something
+    ([#241](https://github.com/alex35mil/Piton/issues/241)), as a `piton(git-pull)` rule in `[sandbox.on_block]`.
   - An incoming-PR review that the pi package's `/pr` tools left untouched isn't an uncommitted change. Piton reads
     `.piton/.local/pull-requests/<number>/checkout.json`, which pi writes, and checks four fields: `phase`,
     `location.root`, and `workspace.{headSha, indexTree, diskCommit}`.
@@ -198,7 +219,8 @@ with `.piton/.local` linked to the source's.
   trusted revision on disk.
 - **`--json`:** every `piton worker` command prints the daemon's response; refusals are typed (`kind`: `exists`,
   `source_dirty`, `source_off_default`, `unknown_default`, `invalid_name`, `not_a_repository`, `not_a_worker`,
-  `leftovers`, `failed`) with what a caller needs to explain or force them, and exit 4.
+  `leftovers`, `invalid_configuration`, `source_fetch`, `protected_update`, `failed`) with what a caller needs to
+  explain or answer them, and exit 4.
 
 The editor keeps its UI (tabs, picker, tracker queue, dialogs) and calls `piton worker` for the rest.
 
@@ -685,13 +707,15 @@ the line. A host or client file has one schema and is read whole.
   mise environment; a pi started outside Piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
-  - `sandbox.expose` (lifting a built-in credential deny) and the `mise` preset's `install = "allow"` (writing the
-    tools the host runs): the global `config.toml` only, so a repository can't open them to itself.
+  - Every knob that loosens the sandbox, `sandbox.expose` (lifting a built-in credential deny), the `mise` preset's
+    `install = "allow"` (writing the tools the host runs), and the `git` preset (letting agents write Git's hooks and
+    configuration): the global `config.toml` or a `config.local.toml`, never a project's `config.toml`, which travels
+    with the repository, so a repository can't open the sandbox for whoever clones it. Knobs are on or off; asking when
+    the sandbox blocks something is #241's.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
     repository's.
   - `web_search.api_key`: a `config.local.toml` only (a secret).
-  - `branches.username`: a project's `config.local.toml`, where `config.toml` is committed; either file in the global
-    tier, which is yours alone.
+  - `branches.username`: the same files, as a personal value.
   - Everything else, keep-awake included: either file, any level.
 - **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
   - `[sandbox]`: lists (`presets`, `allow`, `allow_file`, `deny`, `expose`) only add; a preset named at several
@@ -813,11 +837,13 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    With its default options no preset writes what the host executes or trusts (a unit test lists those paths):
    `mise` writes its cache and install bookkeeping, never its installed tools or trusted configs. Its `install`
    option is `"ask"` by default (installs approved per command and run on the host, through #241's confirmation gate;
-   until then they fail in the sandbox), `"deny"`, or `"allow"` (global only: the sandbox writes the installed tools).
+   until then they fail in the sandbox), `"deny"`, or `"allow"` (the sandbox writes the installed tools; the user's own
+   files only, like every loosening knob).
+   The `git` preset grants no path: it leaves out the Git rule (6).
 3. **Credentials:** nono's deny groups (`deny_credentials`, keychains, browser data, macOS private data, shell
    history and rc files), vendored verbatim in `nono-deny-groups.json` at the `nono` version; `mise run
    cli:nono-policy-check` reports upstream changes, and a test fails when the crate is bumped without re-vendoring.
-   Read, write, exec, and Unix connect are denied; metadata stays visible. `expose` (global only) lifts one, readable
+   Read, write, exec, and Unix connect are denied; metadata stays visible. `expose` (the user's own files) lifts one, readable
    then, writable with `allow`; exposing `~/Library/Keychains` also reopens the keychain Mach services the library
    always closes.
 4. **pi's agent directory:** read-only, except its runtime state (`sessions/`, `auth.json`, `models-store.json`,
@@ -838,7 +864,23 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    `mise.toml` for later launches in projects below it, as with links planted from another workspace.
 5. **The user's `deny`.**
 6. **Configuration:** every level of both chains, and what their entries link to (a dotfiles repository), is
-   write-denied; protected files (below) too. The workspace's own `.agents/` stays writable.
+   write-denied; protected files (below) too. The workspace's own `.agents/` stays writable. So are Git's hooks and
+   configuration (`agent/git.rs`), which Git on the host runs: in any `.git` folder of the checkout and its source,
+   `hooks/`, `config`, `config.worktree`, and `commondir` (which points Git at another git directory); the
+   checkout's own `.git`, which can't be removed or replaced; and, for a checkout whose `.git` is a file (a linked
+   worktree, a submodule), that file and the shared git directory's same entries. The rest of `.git` stays writable:
+   commits, branches, fetches, pushes, rebases, `git worktree add`, and `git submodule update` of initialized
+   submodules work. What writes a `config` or `hooks/` in a `.git` folder fails, and the user runs it on the host or
+   outside the checkout: `git config --local`, `git remote add`, `husky install`, `git submodule init` (so
+   `git submodule update --init` too), and `git clone` or `git init` into the checkout; `push -u` pushes but can't
+   record tracking. Not covered, as in Claude Code: a `.git` entry created below the checkout's top level (a `gitdir:`
+   file or a symlink to a git directory the agent built elsewhere), which makes Git run in that folder use it; denying
+   it would also break `git worktree add` and checking out initialized submodules, which create such `.git` files. Nor
+   the git directories Git keeps inside `.git` for linked worktrees (`worktrees/`) and submodules (`modules/`).
+   Hook logic in tracked files (husky, lefthook) runs wherever Git runs; the daemon's Git that runs hooks runs in the
+   sandbox ("Workers"). The `git` preset drops these Git rules, for users who'd rather let agents set up hooks; it's
+   accepted only in the user's own files ("Where a key may be set"), so a repository can't turn the protection off for
+   whoever clones it.
 7. **The daemon:** its state folder is closed (read, write, connect) except `logs/` for reading and `agent.sock` for
    connecting; the control socket (`piton.sock`, or the configured `socket`) is denied to connect wherever it is.
    With the network open, Seatbelt would otherwise let a sandboxed agent connect to it and act as a client:

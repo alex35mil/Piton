@@ -140,7 +140,7 @@ pub static CATALOG: &[Entry] = &[
     project(
         "sandbox.presets",
         ValueType::ChoiceList {
-            options: &["mise", "rust", "node", "swift"],
+            options: &["mise", "rust", "node", "swift", "git"],
         },
         empty,
     ),

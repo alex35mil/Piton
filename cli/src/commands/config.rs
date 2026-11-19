@@ -214,7 +214,7 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
     crate::config::resolve(&workspace, &Paths::current(), runtime).map_err(|e| match e {
         ConfigError::Read { .. }
         | ConfigError::Invalid { .. }
-        | ConfigError::GlobalOnly { .. }
+        | ConfigError::NotInProjectConfig { .. }
         | ConfigError::ProjectOnly { .. }
         | ConfigError::LocalOnly { .. }
         | ConfigError::Conflict { .. } => ErrorBody::Invalid { message: e.to_string() },

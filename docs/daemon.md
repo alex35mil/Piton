@@ -32,6 +32,19 @@ Per-project settings live in `.piton/config.toml` in the source checkout (read o
 `[workers] skip` lists paths not copied into new workers, `[sandbox]` adds grants for sandboxed pis (see "Sandbox"
 below).
 
+Creating or deleting a worker fast-forwards its source checkout. The fetch and the fast-forward run in the sandbox a
+session in the source gets, with your hooks on; nothing of it runs outside the sandbox. The fetch authenticates the way
+an agent's Git does: over SSH with `~/.ssh/config` and `~/.ssh/known_hosts` in `expose`, over HTTPS with the keychain
+exposed. When it can't, creating a worker fails naming that; deleting one leaves the source as it is, with a warning.
+
+An update that changes protected files (`.piton/`, `.pi/`) needs your approval, since the sandbox can't write them.
+Piton asks before changing anything, naming the files. Approved, Piton writes exactly those files from the upstream
+commit itself, and the rest of the update, with your hooks, still runs in the sandbox, so a hook can't change any
+other protected file. Declined, nothing changes (when deleting, you can delete without updating the source). The
+Neovim plugin asks; `piton worker` refuses and prints the flag that answers it (`--approve-source-update <sha>`, or
+`--skip-source-update` when deleting). Not asking at all comes with
+[#241](https://github.com/alex35mil/Piton/issues/241).
+
 ## pi.nvim
 
 ```lua
@@ -130,19 +143,37 @@ Gemini CLI's:
 - **Always closed:** protected files (`.piton/`, `.pi/`, except the lock pi takes to read `.pi/settings.json`) and
   every configuration level, the daemon's state folder (except `logs/` for reading and `agent.sock`), and the
   daemon's control socket.
+- **Git:** hooks and configuration (`.git/hooks/`, `.git/config`, `.git/config.worktree`, `.git/commondir`, in any
+  repository of the checkout), and replacing the checkout's `.git`, since Git on the host runs what they name. Commits,
+  branches, fetches, pushes, worktrees, and updating initialized submodules work. What writes a repository's
+  configuration or hooks fails in the sandbox: run `husky install`, `git config --local`, `git remote add`,
+  `git submodule update --init`, and `git clone` or `git init` into the checkout on the host (or clone outside the
+  checkout); `git push -u` pushes but can't record tracking. Known limit, as in Claude Code: an agent can create a
+  `.git` file or symlink in a subfolder pointing at a repository it built elsewhere, whose settings Git uses when run
+  in that folder; check a folder an agent created before running Git there. Hooks still run in the sandbox; only
+  writing these files is closed. The `git` preset (below) lifts it.
 - **Network:** open: pi has to reach its model provider, and fetch, web search, MCP, and installs need it too.
 
 `[sandbox]` adds to that, in any `config.toml` of the chain; lists only add across levels:
 
 ```toml
 [sandbox]
-presets = []     # toolchains whose caches and state may be written: "mise", "rust", "node", "swift".
-                 # Host builds reuse what the sandbox writes there; turn on the ones you build with.
+presets = []     # toolchains whose caches and state may be written: "mise", "rust", "node", "swift";
+                 # host builds reuse what the sandbox writes there, turn on the ones you build with.
+                 # "git": agents may write Git's hooks and configuration (see below)
 allow = []       # more writable folders
 allow_file = []  # more writable files
 deny = []        # paths closed like the credentials: no read, write, or connect
-expose = []      # global config.toml only: lift a built-in deny for a path (readable then; writable with allow)
+expose = []      # lift a built-in deny for a path (readable then; writable with allow)
 ```
+
+The knobs that loosen a protection are yours alone: `expose`, the `git` preset, and the `mise` preset's
+`install = "allow"` are accepted in the global `config.toml` or any `config.local.toml`, never in a project's
+`config.toml`, which travels with the repository: a repository can't open the sandbox for whoever clones it.
+
+The `git` preset lets agents write Git's hooks and configuration, so `husky install`, `git remote add`, and
+`git submodule update --init` work in the sandbox, and the next Git command on the host may run an agent's code.
+Hooks run in the sandbox either way.
 
 Paths are absolute, `~/...`, or `$VAR/...` from the daemon's login-shell environment (never the workspace's).
 
@@ -160,7 +191,7 @@ presets = ["rust", { name = "mise", install = "ask" }]
   run them on the host.
 - `"deny"`: installs fail in the sandbox.
 - `"allow"`: the sandbox may write mise's installed tools, so installs just work, and an agent can replace binaries
-  your host shell runs. Global `config.toml` only.
+  your host shell runs. The global `config.toml` or a `config.local.toml` only.
 
 Across levels, a preset's options are the nearest level's that sets them, so a project can turn `install` to `"deny"`.
 The apps edit `presets` as a list of names; a value with options is shown read-only and edited in the file.

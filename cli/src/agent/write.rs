@@ -109,25 +109,119 @@ pub fn write_dialog(id: &str, path: &Path, current: Option<&str>, content: &str)
     })
 }
 
+/// The permissions an approved write gives its file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileMode {
+    /// An existing file keeps its own; a new one is `0644`.
+    Keep,
+    /// Exactly these (a Git blob's `0644` or `0755`).
+    Set(u32),
+}
+
 /// Writes `content` to `path` (canonical, as approved) atomically, keeping an existing file's permissions, without
 /// following any symlink at or below `root`.
+pub fn write_approved(root: &Path, path: &Path, content: &str) -> std::io::Result<()> {
+    write_file(root, path, content.as_bytes(), FileMode::Keep)
+}
+
+/// Writes `content` to `path` (canonical, as approved) atomically with `mode`, without following any symlink at or
+/// below `root`.
 ///
 /// The agent can change its checkout while the user decides (move a folder away, put a symlink in its place). So the
 /// path is walked from `root` one folder at a time, each opened with `O_NOFOLLOW` (missing ones created, never
 /// followed), and the temporary file and the rename happen relative to the last folder's descriptor. A path that no
 /// longer leads where the user saw it fails here instead of writing elsewhere.
-pub fn write_approved(root: &Path, path: &Path, content: &str) -> std::io::Result<()> {
-    use std::{
-        io::Write,
-        os::fd::{AsFd, OwnedFd},
-    };
+pub fn write_file(root: &Path, path: &Path, content: &[u8], mode: FileMode) -> std::io::Result<()> {
+    use std::io::Write;
 
     use nix::{
-        fcntl::{AtFlags, OFlag, open, openat, renameat},
-        sys::stat::{Mode, fstatat, mkdirat},
+        fcntl::{OFlag, openat, renameat},
+        sys::stat::Mode,
     };
 
-    let refused = |why: String| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why);
+    let (name, dirs) = walk(root, path, Walk::Create)?.ok_or_else(|| refused("a folder vanished".into()))?;
+    let dir = dirs.last().expect("the walk starts at the root");
+    // The file itself must be a regular file (or missing): a symlink there could have been put in place while the user
+    // decided, and would send the write elsewhere.
+    let mode = match (regular_file(dir, &name, path)?, mode) {
+        (_, FileMode::Set(bits)) => Mode::from_bits_truncate(bits as nix::sys::stat::mode_t),
+        (Some(existing), FileMode::Keep) => existing,
+        (None, FileMode::Keep) => Mode::from_bits_truncate(0o644),
+    };
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = format!(".{}.piton-{}-{n}", Path::new(&name).display(), std::process::id());
+    let file = openat(
+        dir.as_fd(),
+        temporary.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        mode,
+    )?;
+    let mut file = std::fs::File::from(file);
+    // `openat` applies the umask; set the exact bits the change names.
+    let written = file
+        .write_all(content)
+        .and_then(|()| {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(u32::from(mode.bits())))
+        })
+        .and_then(|()| file.sync_all())
+        .and_then(|()| renameat(dir.as_fd(), temporary.as_str(), dir.as_fd(), name.as_os_str()).map_err(Into::into));
+    if written.is_err() {
+        let _ = nix::unistd::unlinkat(dir.as_fd(), temporary.as_str(), nix::unistd::UnlinkatFlags::NoRemoveDir);
+    }
+    written
+}
+
+/// Removes the regular file at `path` (canonical, as approved), then each folder it leaves empty, up to `root`,
+/// without following any symlink. A file already missing is fine.
+pub fn remove_file(root: &Path, path: &Path) -> std::io::Result<()> {
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
+    let Some((name, dirs)) = walk(root, path, Walk::Existing)? else {
+        return Ok(());
+    };
+    let dir = dirs.last().expect("the walk starts at the root");
+    if regular_file(dir, &name, path)?.is_none() {
+        return Ok(());
+    }
+    unlinkat(dir.as_fd(), name.as_os_str(), UnlinkatFlags::NoRemoveDir)?;
+    // Folders left empty, innermost first; the first one that isn't empty stops it.
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| refused("outside the root".into()))?;
+    let folders: Vec<&std::ffi::OsStr> = relative.parent().into_iter().flat_map(Path::iter).collect();
+    for (folder, parent) in folders.iter().zip(&dirs).rev() {
+        match unlinkat(parent.as_fd(), *folder, UnlinkatFlags::RemoveDir) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::ENOTEMPTY | nix::errno::Errno::EEXIST) => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+use std::os::fd::{AsFd, OwnedFd};
+
+fn refused(why: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, why)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Walk {
+    /// Missing folders are created.
+    Create,
+    /// A missing folder ends the walk with `None`.
+    Existing,
+}
+
+/// The file's name and the folders from `root` to it, each opened with `O_NOFOLLOW`: `dirs[0]` is `root`.
+fn walk(root: &Path, path: &Path, mode: Walk) -> std::io::Result<Option<(std::ffi::OsString, Vec<OwnedFd>)>> {
+    use nix::{
+        fcntl::{OFlag, open, openat},
+        sys::stat::{Mode, mkdirat},
+    };
+
     let relative = path
         .strip_prefix(root)
         .map_err(|_| refused(format!("{} is outside {}", path.display(), root.display())))?;
@@ -147,51 +241,49 @@ pub fn write_approved(root: &Path, path: &Path, content: &str) -> std::io::Resul
         return Err(refused(format!("{} names no file", path.display())));
     };
     let directory = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
-    let mut dir: OwnedFd = open(root, directory, Mode::empty())?;
+    let mut dirs: Vec<OwnedFd> = vec![open(root, directory, Mode::empty())?];
     for folder in folders {
-        match mkdirat(dir.as_fd(), *folder, Mode::from_bits_truncate(0o755)) {
-            Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
-            Err(e) => return Err(e.into()),
+        let dir = dirs.last().expect("the walk starts at the root");
+        match mode {
+            Walk::Create => match mkdirat(dir.as_fd(), *folder, Mode::from_bits_truncate(0o755)) {
+                Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
+                Err(e) => return Err(e.into()),
+            },
+            Walk::Existing => {}
         }
         // ELOOP or ENOTDIR here means a symlink or a file took the folder's place.
-        dir = openat(dir.as_fd(), *folder, directory, Mode::empty()).map_err(|e| {
-            refused(format!(
-                "{} no longer leads to the approved file ({e})",
-                Path::new(folder).display()
-            ))
-        })?;
+        let next = match (openat(dir.as_fd(), *folder, directory, Mode::empty()), mode) {
+            (Ok(next), _) => next,
+            (Err(nix::errno::Errno::ENOENT), Walk::Existing) => return Ok(None),
+            (Err(e), Walk::Create | Walk::Existing) => {
+                return Err(refused(format!(
+                    "{} no longer leads to the approved file ({e})",
+                    Path::new(folder).display()
+                )));
+            }
+        };
+        dirs.push(next);
     }
-    // The file itself must be a regular file (or missing): a symlink there could have been put in place while the user
-    // decided, and would send the write elsewhere. Its mode carries over.
-    let mode = match fstatat(dir.as_fd(), *name, AtFlags::AT_SYMLINK_NOFOLLOW) {
-        Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFREG => Mode::from_bits_truncate(stat.st_mode & 0o7777),
-        Ok(_) => {
-            return Err(refused(format!(
-                "{} isn't a regular file (a symlink or folder); change it by hand",
-                path.display()
-            )));
-        }
-        Err(nix::errno::Errno::ENOENT) => Mode::from_bits_truncate(0o644),
-        Err(e) => return Err(e.into()),
+    Ok(Some((name.to_os_string(), dirs)))
+}
+
+/// An existing regular file's permissions, or `None` when it's missing; anything else (a symlink, a folder) refuses.
+fn regular_file(dir: &OwnedFd, name: &std::ffi::OsStr, path: &Path) -> std::io::Result<Option<nix::sys::stat::Mode>> {
+    use nix::{
+        fcntl::AtFlags,
+        sys::stat::{Mode, fstatat},
     };
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = format!(".{}.piton-{}-{n}", Path::new(name).display(), std::process::id());
-    let file = openat(
-        dir.as_fd(),
-        temporary.as_str(),
-        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        mode,
-    )?;
-    let mut file = std::fs::File::from(file);
-    let written = file
-        .write_all(content.as_bytes())
-        .and_then(|()| file.sync_all())
-        .and_then(|()| renameat(dir.as_fd(), temporary.as_str(), dir.as_fd(), *name).map_err(Into::into));
-    if written.is_err() {
-        let _ = nix::unistd::unlinkat(dir.as_fd(), temporary.as_str(), nix::unistd::UnlinkatFlags::NoRemoveDir);
+    match fstatat(dir.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) if stat.st_mode & libc::S_IFMT == libc::S_IFREG => {
+            Ok(Some(Mode::from_bits_truncate(stat.st_mode & 0o7777)))
+        }
+        Ok(_) => Err(refused(format!(
+            "{} isn't a regular file (a symlink or folder); change it by hand",
+            path.display()
+        ))),
+        Err(nix::errno::Errno::ENOENT) => Ok(None),
+        Err(e) => Err(e.into()),
     }
-    written
 }
 
 #[cfg(test)]
@@ -250,6 +342,36 @@ mod tests {
         let new = write_dialog("piton:w:2", Path::new("/r/.pi/x"), None, "y");
         let title: Value = serde_json::from_str(new["title"].as_str().unwrap()).unwrap();
         assert_eq!(title["current"], Value::Null);
+    }
+
+    /// What the daemon writes for an approved source update: a Git blob's mode, and removal that clears emptied folders
+    /// without following a symlink.
+    #[test]
+    fn writes_with_a_mode_and_removes_emptied_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let hook = root.join(".pi/bin/run");
+        write_file(&root, &hook, b"#!/bin/sh\n", FileMode::Set(0o755)).unwrap();
+        assert_eq!(std::fs::metadata(&hook).unwrap().permissions().mode() & 0o777, 0o755);
+        write_file(&root, &hook, b"x", FileMode::Set(0o644)).unwrap();
+        assert_eq!(std::fs::metadata(&hook).unwrap().permissions().mode() & 0o777, 0o644);
+        std::fs::write(root.join(".pi/keep"), "k").unwrap();
+
+        remove_file(&root, &hook).unwrap();
+        assert!(!root.join(".pi/bin").exists(), "the emptied folder goes");
+        assert!(root.join(".pi/keep").exists(), "a folder with other files stays");
+        remove_file(&root, &hook).unwrap();
+        remove_file(&root, &root.join("missing/x")).unwrap();
+
+        // Through a symlinked folder: refused, nothing removed there.
+        let elsewhere = root.join("../elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let elsewhere = std::fs::canonicalize(elsewhere).unwrap();
+        std::fs::write(elsewhere.join("x"), "theirs").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("link")).unwrap();
+        assert!(remove_file(&root, &root.join("link/x")).is_err());
+        assert!(elsewhere.join("x").exists());
     }
 
     #[test]

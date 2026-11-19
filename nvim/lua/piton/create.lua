@@ -11,8 +11,13 @@ local lookup = require("piton.lookup")
 local cli = require("piton.cli")
 local tabs = require("piton.tabs")
 local queue = require("piton.queue")
+local config = require("piton.config")
 
 local M = {}
+
+--- What approving a protected update does.
+M.PROTECTED_UPDATE_NOTE =
+    "Piton writes these files from the upstream commit; the rest of the update and your Git hooks run in the sandbox."
 
 ---@class AgentPlan
 ---@field name string Directory suffix; piton normalizes it.
@@ -50,7 +55,21 @@ function M.create(request)
         ---@cast source string
 
         log.info("Updating " .. source .. " and creating agent…")
-        local result = cli.create({ from = source, name = plan.name, label = plan.label, issue = plan.issue })
+        local request = { from = source, name = plan.name, label = plan.label, issue = plan.issue }
+        local result = cli.create(request)
+        if result.kind == "refused" and result.refusal.kind == "protected_update" then
+            local refusal = result.refusal --[[@as { kind: "protected_update", target: string }]]
+            local question = cli.describe(refusal)
+                .. "\n\n"
+                .. M.PROTECTED_UPDATE_NOTE
+                .. "\n\nApply these changes and create the agent?"
+            if not config.confirm(question) then
+                log.info("No agent created; " .. source .. " is unchanged")
+                return
+            end
+            request.update = { kind = "approve", target = refusal.target }
+            result = cli.create(request)
+        end
         local path
         if result.kind == "created" then
             path = result.worker.path
@@ -74,7 +93,13 @@ end
 ---@return string
 function M.refusal_message(refusal)
     local kind = refusal.kind
-    if kind == "source_dirty" or kind == "source_off_default" or kind == "unknown_default" then
+    if
+        kind == "source_dirty"
+        or kind == "source_off_default"
+        or kind == "unknown_default"
+        or kind == "source_fetch"
+        or kind == "protected_update"
+    then
         return "Can't create an agent: " .. cli.describe(refusal)
     elseif
         kind == "invalid_name"

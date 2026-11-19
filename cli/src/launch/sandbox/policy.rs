@@ -126,12 +126,13 @@ pub const AGENT_DIR_WRITES: &[AgentDirWrite] = &[
 /// The folders mise installs tools into: what the host runs. Written only with `install = "allow"`.
 pub const MISE_INSTALL_DIRS: &[&str] = &["~/.local/share/mise/installs", "~/.local/share/mise/downloads"];
 
-/// What a preset grants: folders, then files, as written (`~/...`). Each is a toolchain's caches and state; host
+/// What a preset grants: folders, then files, as written (`~/...`). Each toolchain's are its caches and state; host
 /// builds reuse what the sandbox writes there, which is why none is on by default. None of them, without options,
 /// writes what the host executes or trusts (checked below): mise's installed tools and trusted configs, cargo's
-/// installed binaries, rustup's toolchains.
+/// installed binaries, rustup's toolchains. `git` grants no path: it leaves out the Git rule instead (`resolve.rs`).
 pub fn preset_grants(preset: &Preset) -> (Vec<&'static str>, &'static [&'static str]) {
     match preset {
+        Preset::Git => (Vec::new(), &[]),
         Preset::Mise(options) => {
             let mut dirs = vec![
                 "~/Library/Caches/mise",
@@ -219,7 +220,12 @@ mod tests {
     fn presets_grant_paths_under_home() {
         for preset in Preset::ALL {
             let (dirs, files) = preset_grants(&preset);
-            assert!(!dirs.is_empty(), "{}", preset.name());
+            match preset {
+                Preset::Git => assert!(dirs.is_empty() && files.is_empty(), "git grants no path"),
+                Preset::Mise(_) | Preset::Rust | Preset::Node | Preset::Swift => {
+                    assert!(!dirs.is_empty(), "{}", preset.name());
+                }
+            }
             assert!(dirs.iter().chain(files).all(|p| p.starts_with("~/")));
         }
     }

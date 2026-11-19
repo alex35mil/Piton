@@ -16,7 +16,7 @@ use tokio::process::Command;
 
 use super::{
     Env, LaunchError, resolve_program,
-    sandbox::{Containment, POLICY_ENV, Policy},
+    sandbox::{Contained, Containment, Policy, contained},
 };
 use crate::config::EnvConfig;
 
@@ -183,45 +183,23 @@ enum Runner<'a> {
     },
 }
 
-struct Invocation {
-    program: String,
-    args: Vec<OsString>,
-    env: Env,
-}
+type Invocation = Contained;
 
 fn invocation(tool: EnvTool, base: &Env, workspace: &Path, runner: &Runner) -> Result<Invocation, String> {
     let program = resolve_program(tool.program(), base);
     let args = tool.args(workspace);
-    Ok(match runner {
-        Runner::Host => Invocation {
+    match runner {
+        Runner::Host => Ok(Invocation {
             program,
             args,
             env: base.clone(),
-        },
+        }),
         Runner::Sandbox {
             helper,
             policy,
             containment,
-        } => match containment {
-            Containment::Apply => {
-                let mut env = base.clone();
-                let policy = serde_json::to_string(policy).map_err(|e| format!("can't encode the sandbox: {e}"))?;
-                env.insert(POLICY_ENV.into(), policy);
-                let mut sandboxed: Vec<OsString> = vec!["sandbox-exec".into(), "--".into(), program.into()];
-                sandboxed.extend(args);
-                Invocation {
-                    program: helper.to_string_lossy().into_owned(),
-                    args: sandboxed,
-                    env,
-                }
-            }
-            Containment::Inherited => Invocation {
-                program,
-                args,
-                env: base.clone(),
-            },
-        },
-    })
+        } => contained(helper, policy, *containment, program, args, base),
+    }
 }
 
 async fn run(
@@ -292,6 +270,7 @@ pub async fn sandboxed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch::sandbox::POLICY_ENV;
 
     /// A sample of each tool's output, with what it must parse to.
     fn fixture(tool: EnvTool) -> (&'static str, Vec<(&'static str, &'static str, ToolSource)>) {
