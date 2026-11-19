@@ -251,6 +251,8 @@ A rerun can change only labels. Reuse the saved groups and lists as the desired 
 
 Reuse the known repository and selected server. Use the same candidate rules and ask only for missing or ambiguous identity. When tracker and forge share a repository and server, say so rather than asking twice.
 
+Then check automatic head-branch deletion: read [head-branch deletion](../../references/setup/head-branch-deletion.md). It's optional and never stops setup.
+
 #### Fork-only incoming PR intake
 
 When GitHub forge and Project configuration are both known, read [incoming PR intake](../../references/setup/incoming-pr-intake.md) and offer it as a numbered enable or decline choice.
@@ -280,6 +282,7 @@ GitHub provisioning has its own preview and hash approval and must finish first.
 - **Configuration** for `configure_project`: the branch format, the tracker and forge exactly as the tools returned them, and a local username when one is needed (otherwise the existing username source, or none). The project file never holds a username.
 - **`.piton/policies.md`**, exactly, or that it will be absent.
 - **Fork-only intake**, when opted in: the rendered `.github/workflows/incoming-pr-project.yml` diff, the Project and repository, the secret name, and the prerequisites. Otherwise the path stays unchanged.
+- **Head-branch deletion**, with a GitHub forge: an explicit no-op when it's on, otherwise the optional manual step.
 - **`.gitignore`:** follow the setup context's `projectLocalIgnore`: an explicit no-op for `present`, or this exact append for `append`:
 
     ```gitignore
@@ -309,6 +312,7 @@ After approval:
 7. Report:
    - branch formats and the username source;
    - roles, policy status, and permission scope;
+   - with a GitHub forge, head-branch deletion: on, confirmed, declined, or unknown;
    - changed files and validation results.
 
    Don't label anything `Next` or imply another action is required. End with `Available workflow commands when you want to start work:` and briefly define `/epic <initiative>`, `/task <request and parent Epic>`, `/gig <standalone request>`, `/backlog <potential work>`, and `/todo <queued work>`.

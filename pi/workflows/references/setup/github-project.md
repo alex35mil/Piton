@@ -4,7 +4,7 @@ Read this when provisioning, adopting, or resuming a GitHub Project for a GitHub
 
 ## Discovery
 
-1. **Repository.** `inspect_github_repository_setup` takes `credentialEnv` and `repository`. It returns the canonical owner and name, the verified owner type, and `suggestedProjectTitle`, which is the repository name. Use it before asking about the Project owner. An unknown owner type or failed read stops discovery.
+1. **Repository.** `inspect_github_repository_setup` takes `credentialEnv` and `repository`. It returns the canonical owner and name, the verified owner type, and `suggestedProjectTitle`, which is the repository name. It also returns `headBranchDeletion`, which the forge step uses ([head-branch deletion](./head-branch-deletion.md)). Use it before asking about the Project owner. An unknown owner type or failed read stops discovery.
 2. **Project owner.** Explain that the Project owner contains the Project and controls access. Offer the verified repository owner before asking for another explicit owner.
 3. **Owner-level discovery.** `inspect_github_project_setup` returns existing Projects, the title suggestion, and editable defaults.
    - A new Project uses the suggested title unless the user overrides it, and the resolved title appears in the preview before creation.

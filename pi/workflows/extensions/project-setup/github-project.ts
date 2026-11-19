@@ -321,7 +321,14 @@ interface RepositoryDetails {
     owner: string
     repo: string
     ownerType: "user" | "org"
+    headBranchDeletion: HeadBranchDeletion
 }
+/**
+ * The repository's "Automatically delete head branches" setting (`delete_branch_on_merge`). `unknown` when the
+ * token can't see merge settings: GitHub then omits the field. Setup only reads it; changing it needs repository
+ * Administration access, which setup never asks for.
+ */
+export type HeadBranchDeletion = "on" | "off" | "unknown"
 /** A repository label as the REST label list returns it; `color` is normalized to `#RRGGBB`. */
 export interface RepositoryLabel {
     id: string
@@ -412,6 +419,7 @@ export async function runGitHubProjectSetup(
             return {
                 repository: { owner: repository.owner, repo: repository.repo, ownerType: repository.ownerType },
                 suggestedProjectTitle: repository.repo,
+                headBranchDeletion: repository.headBranchDeletion,
             }
         }
         if (input.operation === "inspect") {
@@ -492,6 +500,7 @@ class GitHubClient {
             owner: text(owner.login, "repository owner login"),
             repo: text(result.name, "repository name"),
             ownerType: owner.type === "Organization" ? "org" : "user",
+            headBranchDeletion: headBranchDeletion(result.delete_branch_on_merge),
         }
     }
 
@@ -2251,6 +2260,13 @@ async function responseJson(response: Response): Promise<unknown> {
     } catch {
         throw new Error(`GitHub returned invalid JSON with status ${response.status}`)
     }
+}
+
+function headBranchDeletion(value: unknown): HeadBranchDeletion {
+    if (value === true) return "on"
+    if (value === false) return "off"
+    if (value === undefined || value === null) return "unknown"
+    throw new Error("invalid repository delete_branch_on_merge")
 }
 
 function githubError(status: number, result: unknown): Error {
