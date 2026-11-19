@@ -13,6 +13,7 @@ These rules apply to chat and to every prose artifact the workflow writes: brief
 - Say what happens and why it matters before implementation or architecture.
 - Use clear, everyday language. Remove fluff and unnecessary jargon, and briefly define specialized terms and acronyms on first use.
 - Use concrete examples when they clarify behavior, configuration, state, failure handling, or outcomes.
+- Name issues, Epics, Tasks, Gigs, and PRs by what they are, with the reference in parentheses: "ship the fnox credential proxy (#229)", not "ship #229". Readers shouldn't have to remember what each number means.
 
 ## Findings, concerns, and recommendations
 
