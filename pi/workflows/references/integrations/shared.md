@@ -126,7 +126,7 @@ Workflow publications need no approval of their text ([approvals](../core.md#app
 3. **Tracker plans:** call `prepare_tracker_publication` with `entityDir` and the full source.
    - Run its returned mutation immediately, in the same step. The first call for an unpublished plan already saves pending state before it returns. Never call it again just to look at the output; a second call returns `recovery-required` and needs recovery reads.
    - Record a first creation with `record_tracker_publication`, passing the actual call as `evidence`.
-   - `reads-required`: run the returned reads, then call `prepare_tracker_publication_update` with the source, those reads, and a [plan-update note](#plan-update-notes). Linear documents always need them; the parent read maps the display identifier to the bound UUID. Run a Linear update by document ID only, never with parent or title arguments.
+   - `reads-required`: run the calls in its `lookups`, then call `prepare_tracker_publication_update` with the source, those reads as `reads`, and a [plan-update note](#plan-update-notes). Linear documents always need them; the parent read maps the display identifier to the bound UUID. Run a Linear update by document ID only, never with parent or title arguments.
    - A missing, moved, archived, or conflicting document stops for maintainer direction, never reattachment or replacement.
 4. **PR bodies:** call `render_provider_body` with `destination: pullRequest` and publish its returned Markdown unchanged.
 5. **Rendering:** `projection.ts` owns presentation and closing references.
@@ -146,7 +146,7 @@ The same contract applies when an open PR's synchronized `result.md` or `report.
 
 Editing a published plan notifies nobody, so every update to a published Epic, Task, or Gig plan also posts one discussion comment on that entity's own tracker item: a GitHub issue comment, or a Linear Project or issue comment. The first publication has no note. Post it without asking.
 
-1. **Write** a one-line summary of what changed and why; say when the change is only editorial. Pass it as `announcement` to `prepare_tracker_publication_update`, with an `origin` only for an Epic update made from one of its Tasks.
+1. **Write** a one-line summary of what changed and why; say when the change is only editorial. Pass it as `announcement.summary` to `prepare_tracker_publication_update`. Set `announcement.origin` only for an Epic update made from one of its Tasks.
 2. **Rendering** is code-owned: `**Plan updated**`, `from Task <marker>` when an Epic update came from a Task, the summary, a link to the plan, and a folded diff of the published plan against the new one. An oversized diff is left out.
 3. **Run** the returned plan update, then record its clear success with `record_tracker_publication`. That returns the note; run it and record it the same way.
 4. **Until it's recorded**, every publication of that entity returns the pending note. When the outcome is uncertain, read [recovery](./recovery.md#pending-plan-update-note).
