@@ -47,14 +47,16 @@ pub enum Target {
 }
 
 impl Target {
+    /// Whether the rule applies to `path`, compared without case as Seatbelt compares on APFS (case-insensitive by
+    /// default): a lowercase rule covers `~/.SSH/x` and `TRUST.JSON.LOCK` too, existing or not.
     pub(super) fn covers(&self, path: &Path) -> bool {
         match self {
-            Target::Subpath { path: root } => path.starts_with(root),
-            Target::Literal { path: exact } => path == exact,
-            Target::Prefix { path: prefix } => path
+            Target::Subpath { path: root } => folded(path).starts_with(folded(root)),
+            Target::Literal { path: exact } => folded(path) == folded(exact),
+            Target::Prefix { path: prefix } => folded(path)
                 .as_os_str()
                 .as_encoded_bytes()
-                .starts_with(prefix.as_os_str().as_encoded_bytes()),
+                .starts_with(folded(prefix).as_os_str().as_encoded_bytes()),
             Target::Protected { source, checkout } => ProtectedRoots {
                 source: source.clone(),
                 checkout: checkout.clone(),
@@ -64,6 +66,12 @@ impl Target {
             Target::GitControl { control } => control.covers(path),
         }
     }
+}
+
+/// A path in one case, for comparing as the file system does (the protected files and Git's control files compare
+/// the same way).
+fn folded(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().to_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +281,44 @@ mod tests {
         assert_eq!(d("/w/src/main.rs", Access::Write).source, Source::Workspace);
         assert!(!d("/elsewhere", Access::Write).allowed);
         assert!(d("/any.sock", Access::Connect).allowed);
+    }
+
+    /// Seatbelt compares without case on APFS, so the explanation does too: a deny holds and an allow inside it applies
+    /// for other-case paths, including ones that don't exist yet (no on-disk case to restore).
+    #[test]
+    fn paths_compare_without_case() {
+        let policy = Policy {
+            rules: vec![
+                rule(Effect::Deny, &[Access::Read, Access::Write], "/h/.ssh", "deny"),
+                rule(Effect::Allow, &[Access::Read], "/h/.ssh/config", "expose"),
+                Rule {
+                    effect: Effect::Allow,
+                    access: vec![Access::Write],
+                    target: Target::Literal {
+                        path: "/a/crashes.json".into(),
+                    },
+                    source: Source::AgentDir,
+                },
+                Rule {
+                    effect: Effect::Allow,
+                    access: vec![Access::Write],
+                    target: Target::Prefix {
+                        path: "/a/lock-".into(),
+                    },
+                    source: Source::AgentDir,
+                },
+            ],
+            keychain: false,
+        };
+        let d = |p: &str, a| policy.decide(Path::new(p), a).allowed;
+        assert!(!d("/H/.SSH/id_ed25519", Access::Read));
+        assert!(!d("/h/.Ssh", Access::Read));
+        assert!(d("/h/.SSH/CONFIG", Access::Read));
+        assert!(d("/a/CRASHES.JSON", Access::Write));
+        assert!(d("/A/LOCK-1/x", Access::Write));
+        assert!(!d("/a/crashes.json.bak", Access::Write));
+        // A shared prefix of text isn't a parent folder.
+        assert!(d("/h/.sshx", Access::Read));
     }
 
     #[test]

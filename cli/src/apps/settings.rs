@@ -201,7 +201,8 @@ pub struct Snapshot {
     placements: BTreeMap<Id, Option<Sharing>>,
     /// Restart-only values the daemon started with.
     started: BTreeMap<Id, Value>,
-    /// Warnings by setting: each enabled tool that isn't installed, on its `enabled` key.
+    /// Warnings by setting: each enabled tool that isn't installed, on its `enabled` key; a `socket` a release build
+    /// ignores.
     warnings: BTreeMap<Id, String>,
     /// Why some file's latest version can't be used (its values are the last good ones).
     pub error: Option<String>,
@@ -238,6 +239,15 @@ impl Snapshot {
     pub fn reload(&mut self, paths: &Paths) {
         let GlobalConfig { host, client, project } = crate::config::global(paths);
         let defaults = DaemonConfig::defaults(paths.clone());
+        // A release build ignores the host file's `socket`: the row keeps the file's value and says so.
+        let socket_note = host
+            .as_ref()
+            .ok()
+            .and_then(|host| DaemonConfig::new(host, paths.clone()).ignored_socket_note());
+        match socket_note {
+            Some(note) => self.warnings.insert((Scope::Host, "socket"), note),
+            None => self.warnings.remove(&(Scope::Host, "socket")),
+        };
         let mut errors = Vec::new();
         let scopes: [(Scope, Result<Value, String>); 3] = [
             (

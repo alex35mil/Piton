@@ -31,6 +31,7 @@ cleanup_real() {
     rm -rf "$linked"
     rm -f "$HOME/$probe"
     rmdir "$HOME/Library/Caches/$probe" "$agent_dir/extensions/$probe" 2>/dev/null || true
+    rmdir "$agent_dir/TRUST.JSON.LOCK" 2>/dev/null || true
 }
 trap 'cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
 mkdir "$linked"
@@ -49,6 +50,7 @@ if ! shown=$("$piton" sandbox show --workspace "$src"); then
 fi
 policy=$(printf '%s' "$shown" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
 state=$HOME/.local/state/piton
+state_other_case=$HOME/.LOCAL/STATE/PITON
 config_home=${PITON_CONFIG_HOME:-$HOME/.config/piton}
 
 # Every check runs in a shell of its own, so helpers are files, not shell functions.
@@ -133,6 +135,9 @@ attempt "$EXPECT_SSH_KEY" "read an SSH key"              "cat '$SSH_KEY'"
 # Denied by default; allowed when the configuration exposes the keychains.
 attempt "$EXPECT_KEYCHAIN" "read the login keychain"     "cat $KEYCHAIN"
 attempt "$EXPECT_HISTORY" "read shell history"           "cat $HOME/.zsh_history"
+# Other case: APFS is case-insensitive, and so is Seatbelt's matching there; denies and the allows inside them hold.
+attempt "$EXPECT_SSH_KEY" "read an SSH key in another case" 'cat "$HOME/.SSH/$(basename "$SSH_KEY")"'
+attempt "$EXPECT_HISTORY" "read shell history in another case" "cat $HOME/.ZSH_HISTORY"
 # Writes outside the workspace.
 attempt ok     "write temp"                             'mktemp'
 # `: >> file` opens a file for writing and writes nothing: denied or not, the file stays as it is.
@@ -147,11 +152,17 @@ attempt denied "write pi's MCP servers"                 ": >> $AGENT_DIR/mcp.jso
 attempt ok     "take and drop pi's settings lock"       "mkdir $AGENT_DIR/settings.json.lock && touch $AGENT_DIR/settings.json.lock && rmdir $AGENT_DIR/settings.json.lock"
 attempt ok     "take and drop pi's trust lock"          "mkdir $AGENT_DIR/trust.json.lock && rmdir $AGENT_DIR/trust.json.lock"
 attempt ok     "take and drop an MCP refresh lock"      "mkdir $AGENT_DIR/mcp-auth-refresh-$PROBE.lock && rmdir $AGENT_DIR/mcp-auth-refresh-$PROBE.lock"
+attempt ok     "take and drop pi's trust lock in another case" "mkdir $AGENT_DIR/TRUST.JSON.LOCK && rmdir $AGENT_DIR/TRUST.JSON.LOCK"
+attempt denied "write pi's extensions in another case"  "mkdir $AGENT_DIR/EXTENSIONS/$PROBE"
 attempt denied "write the global configuration"         ": >> $CONFIG_HOME/config.toml"
 # The daemon. The socket checks need python3 to run; if it can't, they all read "denied" and prove nothing.
 attempt ok     "run python3 (for the socket checks)"   'python3 -I -c pass'
 attempt "$EXPECT_DATABASE" "read the daemon's database"  "cat $STATE/piton.db"
 attempt ok     "read Piton's logs"                      "ls $STATE/logs"
+attempt "$EXPECT_DATABASE" "read the daemon's database in another case" "cat $STATE_OTHER_CASE/PITON.DB"
+attempt ok     "read Piton's logs in another case"      "ls $STATE_OTHER_CASE/LOGS"
+attempt "$EXPECT_CONTROL" "connect to the control socket in another case" "python3 -I $CONNECT $STATE_OTHER_CASE/PITON.SOCK"
+attempt "$EXPECT_AGENT" "connect to the agent socket in another case" "python3 -I $CONNECT $STATE_OTHER_CASE/AGENT.SOCK"
 attempt "$EXPECT_CONTROL" "connect to the control socket" "python3 -I $CONNECT $STATE/piton.sock"
 attempt "$EXPECT_CONTROL" "connect to it through a symlink" "ln -s $STATE/piton.sock ctl.sock && python3 -I $CONNECT ctl.sock"
 attempt "$EXPECT_AGENT" "connect to the agent socket"    "python3 -I $CONNECT $STATE/agent.sock"
@@ -162,7 +173,7 @@ status=0
 EXPECT_SSH_KEY="$expect_ssh_key" SSH_KEY="$ssh_key" EXPECT_KEYCHAIN="$expect_keychain" KEYCHAIN="$keychain" \
 EXPECT_HISTORY="$expect_history" EXPECT_DATABASE="$expect_database" EXPECT_CONTROL="$expect_control" \
 EXPECT_AGENT="$expect_agent" CONNECT="$connect" \
-OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" CONFIG_HOME="$config_home" PROBE="$probe" ERR="$scratch/err" \
+OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" STATE_OTHER_CASE="$state_other_case" CONFIG_HOME="$config_home" PROBE="$probe" ERR="$scratch/err" \
     PITON_SANDBOX_POLICY="$policy" "$piton" sandbox-exec -- sh "$scratch/attempts.sh" </dev/null \
     >"$scratch/out" 2>&1 || status=$?
 cat "$scratch/out"

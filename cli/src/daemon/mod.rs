@@ -83,6 +83,9 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     }
     // First line of every start, so the log shows which build was running when.
     crate::log!("piton {} starting (pid {})", crate::VERSION, std::process::id());
+    if let Some(note) = config.ignored_socket_note() {
+        crate::log!("warning: {note}");
+    }
     if UnixStream::connect(&socket).await.is_ok() {
         return Err(DaemonError::AlreadyRunning(socket));
     }

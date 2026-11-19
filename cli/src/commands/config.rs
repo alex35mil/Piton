@@ -132,8 +132,10 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                     .into_iter()
                     .map(|(part, e)| (part.to_string(), e.to_string()))
                     .collect();
-                if let Err(e) = crate::config::host(&paths) {
-                    errors.push(("host".into(), e.to_string()));
+                let mut ignored = None;
+                match crate::config::host(&paths) {
+                    Ok(host) => ignored = crate::config::DaemonConfig::new(&host, paths.clone()).ignored_socket_note(),
+                    Err(e) => errors.push(("host".into(), e.to_string())),
                 }
                 if let Err(e) = crate::config::client(&paths) {
                     errors.push(("client".into(), e.to_string()));
@@ -155,6 +157,9 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 // Portability: warnings only, the files still work here.
                 for warning in crate::config::portability_warnings(&files, &resolved.home) {
                     eprintln!("piton: warning: {warning}");
+                }
+                if let Some(note) = ignored {
+                    eprintln!("piton: warning: {note}");
                 }
                 if errors.is_empty() {
                     ExitCode::SUCCESS
