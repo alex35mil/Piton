@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::policy::Source;
-use crate::agent::ProtectedRoots;
+use crate::agent::{GitControl, ProtectedRoots};
 
 /// What a process does to a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +42,8 @@ pub enum Target {
     Prefix { path: PathBuf },
     /// The protected files of a launch (`agent/protected.rs`): write rules only.
     Protected { source: PathBuf, checkout: PathBuf },
+    /// Git's hooks and configuration in a launch's checkouts (`agent/git.rs`): write rules only.
+    GitControl { control: GitControl },
 }
 
 impl Target {
@@ -59,6 +61,7 @@ impl Target {
             }
             .protected_root(path)
             .is_some(),
+            Target::GitControl { control } => control.covers(path),
         }
     }
 }
@@ -142,7 +145,9 @@ impl Policy {
                             path.display()
                         ));
                     }
-                    (Target::Protected { .. }, _) => unreachable!("protected rules are emitted whole"),
+                    (Target::Protected { .. } | Target::GitControl { .. }, _) => {
+                        unreachable!("protected and Git control rules are emitted whole")
+                    }
                 })
             };
             let path = match &rule.target {
@@ -154,6 +159,11 @@ impl Policy {
                         checkout: checkout.clone(),
                     };
                     out.extend(roots.seatbelt_rules());
+                    continue;
+                }
+                Target::GitControl { control } => {
+                    // Write denies only, like the protected files.
+                    out.extend(control.seatbelt_rules());
                     continue;
                 }
             };

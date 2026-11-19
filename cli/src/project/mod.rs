@@ -5,6 +5,7 @@
 //! the worker's local git config (`agent.source`), which lives in `.git/` and is checked against the folder layout
 //! (`<parent>/<repo>--<name>` next to `<parent>/<repo>`).
 
+pub mod source;
 pub mod tools;
 mod worker;
 
@@ -14,8 +15,8 @@ use std::{
 };
 
 pub use self::worker::{
-    CreateRequest, Mise, WorkerInfo, WorkerRefusal, create as create_worker, info as worker_info,
-    leftovers as worker_leftovers, list as list_workers, remove as remove_worker,
+    CreateRequest, Mise, WorkerInfo, WorkerRefusal, create as create_worker, info as worker_info, list as list_workers,
+    plan_removal, remove as remove_worker, source_of,
 };
 
 /// The only path a worker shares with its source, as a symlink (the pi package's workflow artifacts).

@@ -1,6 +1,7 @@
 //! Building pi's environment and command line for a launch.
 
 pub mod env;
+pub mod git;
 mod mode;
 pub mod sandbox;
 

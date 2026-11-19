@@ -171,6 +171,70 @@ const tests = {
         const notWorker = await cli(ctx, ["worker", "delete", ctx.source, "--json"]);
         assert.equal(notWorker.json.refusal.kind, "not_a_worker");
     },
+
+    // The fast-forward of the source runs in its sandbox, which can't write protected files: an update that changes
+    // them waits for the user's approval of that exact commit, before anything changes.
+    async "an update that changes protected files asks first"(ctx) {
+        const upstream = join(ctx.dir, "upstream");
+        execFileSync("git", ["clone", "-q", join(ctx.dir, "origin.git"), upstream]);
+        git(upstream, "config", "user.email", "t@t");
+        git(upstream, "config", "user.name", "t");
+        const push = (file, content) => {
+            git(upstream, "pull", "-q", "origin", "main");
+            writeFileSync(join(upstream, file), content);
+            git(upstream, "add", ".");
+            git(upstream, "commit", "-q", "-m", file);
+            git(upstream, "push", "-q", "origin", "HEAD:main");
+            return git(upstream, "rev-parse", "HEAD");
+        };
+        const head = () => git(ctx.source, "rev-parse", "HEAD");
+
+        // An ordinary update: fast-forwarded without asking.
+        const ordinary = push("README", "hello");
+        const one = await cli(ctx, ["worker", "create", "one", "--json"]);
+        assert.equal(one.code, 0, one.err);
+        assert.equal(head(), ordinary);
+
+        const before = head();
+        const target = push(".piton/config.toml", '[workers]\nskip = ["apps/.build/index-build"]\n');
+        const refused = await cli(ctx, ["worker", "create", "two", "--json"]);
+        assert.equal(refused.code, 4, refused.err);
+        assert.equal(refused.json.refusal.kind, "protected_update");
+        assert.equal(refused.json.refusal.target, target);
+        assert.deepEqual(refused.json.refusal.files, [".piton/config.toml"]);
+        assert.equal(head(), before, "the source is unchanged");
+        assert.ok(!existsSync(join(ctx.dir, "repo--two")));
+        const human = await cli(ctx, ["worker", "create", "two"]);
+        assert.match(human.err, new RegExp(`--approve-source-update ${target}`));
+        assert.match(human.err, /runs in the sandbox/);
+        assert.doesNotMatch(human.err, /outside the sandbox/);
+
+        // Deleting asks too, before deleting.
+        const worker = one.json.worker.path;
+        const asked = await cli(ctx, ["worker", "delete", worker, "--json"]);
+        assert.equal(asked.json.refusal.kind, "protected_update");
+        assert.ok(existsSync(worker), "nothing deleted before the answer");
+
+        // The user's post-merge hook tries to write a protected file the user never saw: the daemon wrote the approved
+        // file itself, and the merge (with the hook) runs in the sandbox, which denies the hook's write. Only on the
+        // host: in a sandboxed session the merge runs in this session's sandbox, whose protected files are elsewhere.
+        const local = join(ctx.source, ".piton/config.local.toml");
+        writeFileSync(
+            join(ctx.source, ".git/hooks/post-merge"),
+            `#!/bin/sh\nprintf '[sandbox]\\npresets = ["git"]\\n' > '${local}' 2>/dev/null\nexit 0\n`,
+            { mode: 0o755 },
+        );
+        const approved = await cli(ctx, ["worker", "create", "two", "--approve-source-update", target, "--json"]);
+        assert.equal(approved.code, 0, approved.err);
+        assert.equal(head(), target);
+        assert.equal(readFileSync(join(ctx.source, ".piton/config.toml"), "utf8"), '[workers]\nskip = ["apps/.build/index-build"]\n');
+        if (process.env.PITON_RUNTIME !== "sandbox") {
+            assert.ok(!existsSync(local), "the hook couldn't write a protected file");
+        }
+        const skipped = await cli(ctx, ["worker", "delete", worker, "--skip-source-update", "--json"]);
+        assert.equal(skipped.code, 0, skipped.err);
+        assert.ok(!existsSync(worker));
+    },
 };
 
 let failed = 0;

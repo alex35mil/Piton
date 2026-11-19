@@ -39,6 +39,45 @@ pub enum Containment {
     Inherited,
 }
 
+/// How to start a command the daemon runs contained by a launch's policy: through `helper sandbox-exec` with the policy
+/// in [`POLICY_ENV`], or directly when this process is already sandboxed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contained {
+    pub program: String,
+    pub args: Vec<std::ffi::OsString>,
+    pub env: crate::launch::Env,
+}
+
+/// `program args` with `env`, contained by `policy`.
+pub fn contained(
+    helper: &Path,
+    policy: &Policy,
+    containment: Containment,
+    program: String,
+    args: Vec<std::ffi::OsString>,
+    env: &crate::launch::Env,
+) -> Result<Contained, String> {
+    Ok(match containment {
+        Containment::Apply => {
+            let mut env = env.clone();
+            let policy = serde_json::to_string(policy).map_err(|e| format!("can't encode the sandbox: {e}"))?;
+            env.insert(POLICY_ENV.into(), policy);
+            let mut sandboxed: Vec<std::ffi::OsString> = vec!["sandbox-exec".into(), "--".into(), program.into()];
+            sandboxed.extend(args);
+            Contained {
+                program: helper.to_string_lossy().into_owned(),
+                args: sandboxed,
+                env,
+            }
+        }
+        Containment::Inherited => Contained {
+            program,
+            args,
+            env: env.clone(),
+        },
+    })
+}
+
 /// This process's [`Containment`].
 pub fn containment() -> Containment {
     match current_process_sandboxed() {

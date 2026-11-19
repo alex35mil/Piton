@@ -28,10 +28,7 @@ pub enum BranchFormat {
 impl TableValue for BranchesTable {
     /// A name: never in a project's committed `config.toml`.
     fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
-        present(
-            Rule::LOCAL_IN_PROJECTS,
-            &[("branches.username", self.username.is_some())],
-        )
+        present(Rule::USERS_OWN, &[("branches.username", self.username.is_some())])
     }
 }
 

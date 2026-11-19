@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     launch::Env,
-    project::{self, ProjectError, Relation, SHARED_PATH, WORKER_SEPARATOR},
+    project::{
+        self, ProjectError, Relation, SHARED_PATH, WORKER_SEPARATOR,
+        source::{self, Blocked, CreateUpdate, DeleteUpdate, GitRunner, Plan, UpdateError},
+    },
 };
 
 /// How piton runs mise for workers: the resolved program and the environment it runs with (the daemon's base
@@ -85,6 +88,9 @@ pub struct CreateRequest {
     /// Tracker item the worker is for.
     #[serde(default)]
     pub issue: Option<String>,
+    /// How the source is fast-forwarded when the update changes protected files.
+    #[serde(default)]
+    pub update: CreateUpdate,
 }
 
 /// Why a worker can't be created or deleted. Variants carry what a caller needs to explain it or decide to force.
@@ -114,6 +120,12 @@ pub enum WorkerRefusal {
     /// The source's configuration is invalid: fix it, then retry.
     #[error("{message}")]
     InvalidConfiguration { message: String },
+    /// The source can't be fetched inside the sandbox: its message names the setting.
+    #[error("{message}")]
+    SourceFetch { checkout: PathBuf, message: String },
+    /// Fast-forwarding the source changes protected files: retry with the user's answer. Nothing has changed.
+    #[error(transparent)]
+    ProtectedUpdate(Blocked),
     #[error("{message}")]
     Failed { message: String },
 }
@@ -121,6 +133,19 @@ pub enum WorkerRefusal {
 impl From<ProjectError> for WorkerRefusal {
     fn from(e: ProjectError) -> Self {
         Self::Failed { message: e.to_string() }
+    }
+}
+
+impl From<UpdateError> for WorkerRefusal {
+    fn from(e: UpdateError) -> Self {
+        match e {
+            UpdateError::Blocked(blocked) => Self::ProtectedUpdate(*blocked),
+            UpdateError::Fetch { ref checkout, .. } | UpdateError::NoBranch { ref checkout, .. } => Self::SourceFetch {
+                checkout: checkout.clone(),
+                message: e.to_string(),
+            },
+            UpdateError::Apply { .. } | UpdateError::Merge { .. } => Self::Failed { message: e.to_string() },
+        }
     }
 }
 
@@ -133,7 +158,7 @@ fn failed(message: impl Into<String>) -> WorkerRefusal {
 }
 
 /// The source checkout for `from`: itself, or the source of the worker it is.
-fn source_of(from: &Path) -> Result<PathBuf> {
+pub fn source_of(from: &Path) -> Result<PathBuf> {
     let path = std::fs::canonicalize(from).map_err(|_| WorkerRefusal::NotARepository { path: from.into() })?;
     let root = git_ok(&path, &["rev-parse", "--show-toplevel"])
         .map_err(|_| WorkerRefusal::NotARepository { path: path.clone() })?;
@@ -159,10 +184,15 @@ pub fn normalize_name(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-/// Creates the worker. With `mise`, a worker of a mise-trusted source is trusted too: its config files are the
-/// source's, cloned, so cloning never grants trust the user hasn't given. `paths` locates the configuration chain the
-/// skip list comes from.
-pub fn create(request: &CreateRequest, mise: Option<&Mise>, paths: &crate::config::Paths) -> Result<WorkerInfo> {
+/// Creates the worker, after fast-forwarding the source through `git` (see [`source`]). With `mise`, a worker of a
+/// mise-trusted source is trusted too: its config files are the source's, cloned, so cloning never grants trust the
+/// user hasn't given. `paths` locates the configuration chain the skip list and the update setting come from.
+pub fn create(
+    request: &CreateRequest,
+    mise: Option<&Mise>,
+    paths: &crate::config::Paths,
+    git: &dyn GitRunner,
+) -> Result<WorkerInfo> {
     let source = source_of(&request.from)?;
     let normalized = normalize_name(&request.name);
     if normalized.is_empty() {
@@ -186,15 +216,14 @@ pub fn create(request: &CreateRequest, mise: Option<&Mise>, paths: &crate::confi
         checkout: source.clone(),
         relation: Relation::Source,
     };
-    let skip_list = crate::config::resolve_launch(&workspace, paths)
+    let workers = crate::config::resolve_launch(&workspace, paths)
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?
-        .workers
-        .skip;
+        .workers;
+    let skip_list = workers.skip;
 
     let branch = ready_branch(&source)?;
-    git_ok(&source, &["fetch"]).map_err(|e| failed(format!("git fetch failed in {}: {e}", source.display())))?;
-    git_ok(&source, &["merge", "--ff-only", &format!("origin/{branch}")])
-        .map_err(|e| failed(format!("can't fast-forward {}: {e}", source.display())))?;
+    let plan = source::plan(git, &source, &branch, (&request.update).into())?;
+    source::apply(git, &source, &plan)?;
 
     // Created outside the cleanup below, so a failure never removes a directory this call didn't create.
     mkdir_like(&source, &path)?;
@@ -428,23 +457,82 @@ pub fn leftovers(path: &Path) -> Vec<String> {
     lines
 }
 
-/// Deletes the worker's files (its sessions must already be stopped): unlinks the shared folder as a link, removes
-/// the folder without following symlinks, then fast-forwards the source when it's clean on its default branch.
-/// Returns a warning when the source couldn't be updated. With `mise`, also drops mise's trust in the folder.
-pub fn remove(worker: &WorkerInfo, force: bool, mise: Option<&Mise>) -> Result<Option<String>> {
+/// A worker deletion checked and decided before anything changes: [`remove`] carries it out.
+#[derive(Debug, Clone)]
+pub struct Removal {
+    pub worker: WorkerInfo,
+    force: bool,
+    source: AfterRemoval,
+}
+
+/// What happens to the source once the worker is gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AfterRemoval {
+    Update(Plan),
+    /// It can't be updated (not clean, off its default branch, the fetch failed): it may stay behind.
+    Stale {
+        warning: String,
+    },
+}
+
+/// Checks a deletion and plans the source's update, changing nothing but the fetched objects: refuses with
+/// leftovers (unless `force`) or with an update that waits for the user (unless `update` answers it). When sandboxed
+/// Git isn't available, the worker is still deleted and the source left as it is.
+pub fn plan_removal(
+    worker: WorkerInfo,
+    force: bool,
+    update: &DeleteUpdate,
+    git: source::SourceGit<'_>,
+) -> Result<Removal> {
     if !project::is_worker_layout(&worker.path, &worker.source) || !worker.path.join(".git").is_dir() {
         return Err(WorkerRefusal::NotAWorker {
             path: worker.path.clone(),
         });
     }
     if !force {
-        let lines = leftovers(&worker.path);
-        if !lines.is_empty() {
-            return Err(WorkerRefusal::Leftovers {
-                path: worker.path.clone(),
-                lines,
-            });
+        refuse_leftovers(&worker.path)?;
+    }
+    let stale = |why: String| AfterRemoval::Stale {
+        warning: format!("source not updated, it may be behind: {why}"),
+    };
+    let source = match (ready_branch(&worker.source), git) {
+        (Err(e), _) => stale(e.to_string()),
+        (Ok(_), source::SourceGit::Unavailable(why)) => stale(why),
+        (Ok(branch), source::SourceGit::Ready(git)) => {
+            match source::plan(git, &worker.source, &branch, update.into()) {
+                Ok(plan) => AfterRemoval::Update(plan),
+                Err(UpdateError::Blocked(blocked)) => return Err(WorkerRefusal::ProtectedUpdate(*blocked)),
+                Err(
+                    e @ (UpdateError::Fetch { .. }
+                    | UpdateError::NoBranch { .. }
+                    | UpdateError::Apply { .. }
+                    | UpdateError::Merge { .. }),
+                ) => stale(e.to_string()),
+            }
         }
+    };
+    Ok(Removal { worker, force, source })
+}
+
+fn refuse_leftovers(path: &Path) -> Result<()> {
+    let lines = leftovers(path);
+    match lines.is_empty() {
+        true => Ok(()),
+        false => Err(WorkerRefusal::Leftovers {
+            path: path.to_path_buf(),
+            lines,
+        }),
+    }
+}
+
+/// Deletes the worker's files (its sessions must already be stopped): unlinks the shared folder as a link, removes
+/// the folder without following symlinks, then updates the source as planned. Returns a warning when the source
+/// wasn't updated. With `mise`, also drops mise's trust in the folder.
+pub fn remove(removal: &Removal, mise: Option<&Mise>, git: source::SourceGit<'_>) -> Result<Option<String>> {
+    let worker = &removal.worker;
+    // The sessions just stopped may have left work behind.
+    if !removal.force {
+        refuse_leftovers(&worker.path)?;
     }
     let link = worker.path.join(SHARED_PATH);
     if link
@@ -472,7 +560,20 @@ pub fn remove(worker: &WorkerInfo, force: bool, mise: Option<&Mise>) -> Result<O
         );
     }
     crate::log!("worker deleted: {}", worker.path.display());
-    Ok(update_source(&worker.source))
+    Ok(match (&removal.source, git) {
+        (AfterRemoval::Stale { warning }, _) => Some(warning.clone()),
+        // A plan exists only when Git was there to make it.
+        (AfterRemoval::Update(_), source::SourceGit::Unavailable(why)) => {
+            Some(format!("source not updated, it may be behind: {why}"))
+        }
+        (AfterRemoval::Update(plan), source::SourceGit::Ready(git)) => {
+            match (plan, source::apply(git, &worker.source, plan)) {
+                (_, Err(e)) => Some(format!("source not updated, it may be behind: {e}")),
+                (Plan::Skipped, Ok(())) => Some(format!("{} wasn't updated, as asked", worker.source.display())),
+                (Plan::Current | Plan::Sandboxed { .. }, Ok(())) => None,
+            }
+        }
+    })
 }
 
 /// An incoming-PR review the pi package's `/pr` tools recorded for this checkout. The record is
@@ -598,23 +699,14 @@ fn matches_review(checkout: &Path, state: &ReviewWorkspace) -> bool {
     clean
 }
 
-fn update_source(source: &Path) -> Option<String> {
-    let branch = match ready_branch(source) {
-        Ok(branch) => branch,
-        Err(e) => return Some(format!("source not updated, it may be behind: {e}")),
-    };
-    let upstream = format!("origin/{branch}");
-    if let Err(e) = git_ok(source, &["fetch"]).and_then(|_| git_ok(source, &["merge", "--ff-only", &upstream])) {
-        return Some(format!("{} is behind {upstream}: {e}", source.display()));
-    }
-    None
-}
-
+/// A Git command that runs nothing the checkout configures: the daemon reads checkouts agents work in.
 fn git_ok(dir: &Path, args: &[&str]) -> std::result::Result<String, String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
         .args(args)
+        .env("GIT_PAGER", "cat")
         .output()
         .map_err(|e| format!("can't run git: {e}"))?;
     if !out.status.success() {
@@ -631,6 +723,32 @@ fn git_ok(dir: &Path, args: &[&str]) -> std::result::Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::source::tests::Recorder;
+
+    /// `create`, with Git run on the host (sandboxes don't nest in a sandboxed test run).
+    fn create_with_host(
+        request: &CreateRequest,
+        mise: Option<&Mise>,
+        paths: &crate::config::Paths,
+    ) -> Result<WorkerInfo> {
+        create(request, mise, paths, &Recorder::default())
+    }
+
+    /// Plans and carries out a deletion with Git on the host, the way the daemon does.
+    fn remove_now(worker: &WorkerInfo, force: bool, mise: Option<&Mise>) -> Result<Option<String>> {
+        remove_with(worker, force, &DeleteUpdate::Ask, mise)
+    }
+
+    fn remove_with(
+        worker: &WorkerInfo,
+        force: bool,
+        update: &DeleteUpdate,
+        mise: Option<&Mise>,
+    ) -> Result<Option<String>> {
+        let git = Recorder::default();
+        let removal = plan_removal(worker.clone(), force, update, source::SourceGit::Ready(&git))?;
+        remove(&removal, mise, source::SourceGit::Ready(&git))
+    }
 
     #[test]
     fn names() {
@@ -689,12 +807,13 @@ mod tests {
     #[test]
     fn create_list_delete() {
         let (_dir, source) = fixture();
-        let info = create(
+        let info = create_with_host(
             &CreateRequest {
                 from: source.clone(),
                 name: "Fix X".into(),
                 label: None,
                 issue: Some("KID-5".into()),
+                update: CreateUpdate::Ask,
             },
             None,
             &paths(source.parent().unwrap()),
@@ -723,12 +842,13 @@ mod tests {
             }
         );
         // Creating from a worker clones its source.
-        let second = create(
+        let second = create_with_host(
             &CreateRequest {
                 from: worker.clone(),
                 name: "two".into(),
                 label: Some("Second".into()),
                 issue: None,
+                update: CreateUpdate::Ask,
             },
             None,
             &paths(source.parent().unwrap()),
@@ -747,13 +867,129 @@ mod tests {
 
         // Leftovers refuse a delete unless forced; the source's shared folder survives.
         std::fs::write(worker.join("new-file"), "x").unwrap();
-        match remove(&info, false, None) {
+        match remove_now(&info, false, None) {
             Err(WorkerRefusal::Leftovers { lines, .. }) => assert!(lines.iter().any(|l| l.contains("new-file"))),
             other => panic!("expected leftovers, got {other:?}"),
         }
-        remove(&info, true, None).unwrap();
+        remove_now(&info, true, None).unwrap();
         assert!(!worker.exists());
         assert!(source.join(SHARED_PATH).join("gigs").is_dir());
+    }
+
+    /// An upstream commit to the source's origin, made from a clone of it.
+    fn push_upstream(source: &Path, file: &str) -> source::Sha {
+        let root = source.parent().unwrap();
+        let upstream = root.join("upstream");
+        if !upstream.exists() {
+            git(
+                root,
+                &["clone", "-q", root.join("origin.git").to_str().unwrap(), "upstream"],
+            );
+            git(&upstream, &["config", "user.email", "t@t"]);
+            git(&upstream, &["config", "user.name", "t"]);
+        }
+        git(&upstream, &["pull", "-q", "origin", "main"]);
+        let path = upstream.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Valid in any of the files tests change (`config.toml`, `settings.json`).
+        std::fs::write(&path, "").unwrap();
+        std::fs::write(upstream.join("CHANGES"), file).unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-q", "-m", file]);
+        git(&upstream, &["push", "-q", "origin", "HEAD:main"]);
+        source::Sha::try_from(git_ok(&upstream, &["rev-parse", "HEAD"]).unwrap()).unwrap()
+    }
+
+    fn request(source: &Path, name: &str, update: CreateUpdate) -> CreateRequest {
+        CreateRequest {
+            from: source.to_path_buf(),
+            name: name.into(),
+            label: None,
+            issue: None,
+            update,
+        }
+    }
+
+    /// An update that changes protected files refuses creation before anything changes; with the approval of that
+    /// commit, the daemon writes the approved files and the merge still runs in the sandbox.
+    #[test]
+    fn creation_asks_before_a_protected_update() {
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
+        let target = push_upstream(&source, ".piton/config.toml");
+        let git = Recorder::default();
+        let blocked = match create(&request(&source, "one", CreateUpdate::Ask), None, &p, &git) {
+            Err(WorkerRefusal::ProtectedUpdate(blocked)) => blocked,
+            other => panic!("expected ProtectedUpdate, got {other:?}"),
+        };
+        assert_eq!(blocked.files, [".piton/config.toml"]);
+        assert_eq!(blocked.target, target);
+        assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert!(!source.parent().unwrap().join("repo--one").exists());
+        assert_eq!(git.ran("merge"), 0);
+
+        // Typed for clients: the refusal's fields at the top level.
+        let json = serde_json::to_value(WorkerRefusal::ProtectedUpdate(blocked)).unwrap();
+        assert_eq!(json["kind"], "protected_update");
+        assert_eq!(json["files"][0], ".piton/config.toml");
+        assert_eq!(json["target"], target.as_str());
+
+        let approved = CreateUpdate::Approve { target: target.clone() };
+        create(&request(&source, "one", approved), None, &p, &git).unwrap();
+        assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), target.as_str());
+        assert_eq!(git.ran("merge"), 1, "the merge runs through the sandboxed runner");
+        assert!(git_ok(&source, &["status", "--porcelain"]).unwrap().is_empty());
+
+        let ordinary = push_upstream(&source, "src/lib.rs");
+        let git = Recorder::default();
+        create(&request(&source, "two", CreateUpdate::Ask), None, &p, &git).unwrap();
+        assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), ordinary.as_str());
+        assert_eq!((git.ran("fetch"), git.ran("merge")), (1, 1));
+    }
+
+    /// Deletion asks before it deletes anything; the answer updates on the host or leaves the source behind.
+    #[test]
+    fn deletion_asks_before_deleting() {
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        let one = create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p).unwrap();
+        let two = create_with_host(&request(&source, "two", CreateUpdate::Ask), None, &p).unwrap();
+        let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
+        let target = push_upstream(&source, ".piton/config.toml");
+
+        match remove_now(&one, false, None) {
+            Err(WorkerRefusal::ProtectedUpdate(blocked)) => assert_eq!(blocked.target, target),
+            other => panic!("expected ProtectedUpdate, got {other:?}"),
+        }
+        assert!(one.path.exists(), "nothing deleted before the answer");
+
+        let warning = remove_with(&one, false, &DeleteUpdate::Skip, None).unwrap();
+        assert!(warning.is_some_and(|w| w.contains("wasn't updated")));
+        assert!(!one.path.exists());
+        assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), before);
+
+        let approved = DeleteUpdate::Approve { target: target.clone() };
+        assert_eq!(remove_with(&two, false, &approved, None).unwrap(), None);
+        assert!(!two.path.exists());
+        assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), target.as_str());
+    }
+
+    /// Without the source's sandbox (its configuration or environment tools failed), a worker is still deleted, and
+    /// the source left as it is with the reason.
+    #[test]
+    fn deletion_goes_on_without_sandboxed_git() {
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        let one = create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p).unwrap();
+        let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
+        push_upstream(&source, "src/lib.rs");
+        let unavailable = || source::SourceGit::Unavailable("mise env failed".into());
+        let removal = plan_removal(one.clone(), false, &DeleteUpdate::Ask, unavailable()).unwrap();
+        let warning = remove(&removal, None, unavailable()).unwrap();
+        assert!(warning.is_some_and(|w| w.contains("mise env failed")));
+        assert!(!one.path.exists());
+        assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), before);
     }
 
     #[test]
@@ -761,12 +997,13 @@ mod tests {
         let (_dir, source) = fixture();
         std::fs::write(source.join("README"), "changed").unwrap();
         let p = paths(source.parent().unwrap());
-        match create(
+        match create_with_host(
             &CreateRequest {
                 from: source,
                 name: "x".into(),
                 label: None,
                 issue: None,
+                update: CreateUpdate::Ask,
             },
             None,
             &p,
@@ -799,20 +1036,21 @@ mod tests {
             name: name.into(),
             label: None,
             issue: None,
+            update: CreateUpdate::Ask,
         };
 
         // Untrusted source: the worker isn't trusted either.
         let p = paths(source.parent().unwrap());
-        let untrusted = create(&request("one"), Some(&mise), &p).unwrap();
+        let untrusted = create_with_host(&request("one"), Some(&mise), &p).unwrap();
         assert!(!mise.trusts(&untrusted.path).unwrap());
 
         mise.trust(&source).unwrap();
-        let trusted = create(&request("two"), Some(&mise), &p).unwrap();
+        let trusted = create_with_host(&request("two"), Some(&mise), &p).unwrap();
         assert!(mise.trusts(&trusted.path).unwrap());
         assert!(!mise.trusts(&untrusted.path).unwrap(), "only new workers are trusted");
 
         // Deleting drops the trust: a later folder at the same path starts untrusted.
-        remove(&trusted, true, Some(&mise)).unwrap();
+        remove_now(&trusted, true, Some(&mise)).unwrap();
         std::fs::create_dir_all(&trusted.path).unwrap();
         std::fs::write(trusted.path.join("mise.toml"), "[env]\nX = \"1\"\n").unwrap();
         assert!(!mise.trusts(&trusted.path).unwrap());
@@ -840,12 +1078,13 @@ mod tests {
     #[test]
     fn folders_inside_a_worker_belong_to_it() {
         let (_dir, source) = fixture();
-        let worker = create(
+        let worker = create_with_host(
             &CreateRequest {
                 from: source.clone(),
                 name: "sub".into(),
                 label: None,
                 issue: None,
+                update: CreateUpdate::Ask,
             },
             None,
             &paths(source.parent().unwrap()),
@@ -873,12 +1112,13 @@ mod tests {
     #[test]
     fn pristine_pr_review_is_not_a_leftover() {
         let (_dir, source) = fixture();
-        let info = create(
+        let info = create_with_host(
             &CreateRequest {
                 from: source.clone(),
                 name: "pr-12".into(),
                 label: None,
                 issue: None,
+                update: CreateUpdate::Ask,
             },
             None,
             &paths(source.parent().unwrap()),

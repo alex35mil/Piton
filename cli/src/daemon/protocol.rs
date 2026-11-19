@@ -85,6 +85,9 @@ pub enum ControlRequest {
         /// Delete despite uncommitted changes or unpushed commits.
         #[serde(default)]
         force: bool,
+        /// How the source is fast-forwarded afterwards when the update changes protected files.
+        #[serde(default)]
+        update: crate::project::source::DeleteUpdate,
     },
     /// The host logging policy in effect (`piton logging status`, the collector).
     Logging,

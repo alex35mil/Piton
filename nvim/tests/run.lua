@@ -51,6 +51,7 @@ local piton = require("piton")
 local config = require("piton.config")
 local tabs = require("piton.tabs")
 local close = require("piton.close")
+local create = require("piton.create")
 local lookup = require("piton.lookup")
 local cli = require("piton.cli")
 local util = require("piton.util")
@@ -557,6 +558,109 @@ test("approved worker deletion retries with force through the daemon", function(
     piton.setup({ confirm = function() return true end })
     close.delete(agent)
     equal({ false, true }, forced)
+end)
+
+local PROTECTED = {
+    kind = "protected_update",
+    checkout = "/p/repo",
+    upstream = "origin/main",
+    target = string.rep("a", 40),
+    files = { ".piton/config.toml" },
+}
+
+-- Answers each confirmation in turn, recording the questions.
+local function answers(list)
+    local asked = {}
+    piton.setup({ confirm = function(message)
+        asked[#asked + 1] = message
+        return table.remove(list, 1)
+    end })
+    return asked
+end
+
+test("a protected source update asks before deleting, and the tab closes only after", function()
+    local agent = { path = directory("protected worker"), label = "Protected" }
+    vim.cmd("tabnew")
+    vim.cmd("tcd " .. vim.fn.fnameescape(agent.path))
+    local tabs_before = #vim.api.nvim_list_tabpages()
+    local calls = {}
+    replace(cli, "delete", function(path, force, update)
+        calls[#calls + 1] = { force, update and update.kind or "ask", update and update.target }
+        if not update then return { kind = "refused", refusal = PROTECTED } end
+        return { kind = "deleted", stopped = 0 }
+    end)
+
+    -- No to both: kept, the tab with it.
+    local asked = answers({ false, false })
+    close.delete(agent)
+    equal({ { false, "ask" } }, calls)
+    assert(asked[1]:find(".piton/config.toml", 1, true) and asked[1]:find("apply these changes", 1, true))
+    assert(not asked[1]:find("outside the sandbox", 1, true))
+    assert(asked[2]:find("without updating", 1, true))
+    equal(tabs_before, #vim.api.nvim_list_tabpages())
+
+    -- Skip the update.
+    calls = {}
+    answers({ false, true })
+    close.delete(agent)
+    equal({ { false, "ask" }, { false, "skip" } }, calls)
+    equal(tabs_before - 1, #vim.api.nvim_list_tabpages())
+
+    -- Apply the changes, after leftovers were forced.
+    calls = {}
+    replace(cli, "delete", function(path, force, update)
+        calls[#calls + 1] = { force, update and update.kind or "ask", update and update.target }
+        if not force then
+            return { kind = "refused", refusal = { kind = "leftovers", path = path, lines = { "dirty" } } }
+        end
+        if not update then return { kind = "refused", refusal = PROTECTED } end
+        return { kind = "deleted", stopped = 0 }
+    end)
+    answers({ true, true })
+    close.delete(agent)
+    equal({ { false, "ask" }, { true, "ask" }, { true, "approve", PROTECTED.target } }, calls)
+end)
+
+test("a protected source update asks before creating, and retries with the approval", function()
+    local source = directory("protected source")
+    replace(lookup, "current_source", function() return source, source end)
+    replace(tabs, "relative_file", function() return nil end)
+    local opened = {}
+    replace(tabs, "open", function(agent) opened[#opened + 1] = agent.path end)
+    local updates = {}
+    replace(cli, "create", function(request)
+        updates[#updates + 1] = request.update and request.update.target or "ask"
+        if not request.update then return { kind = "refused", refusal = PROTECTED } end
+        return { kind = "created", worker = { path = source .. "--x", source = source, label = "x" } }
+    end)
+
+    local asked = answers({ false })
+    create.create({ kind = "named", name = "x" })
+    equal({ "ask" }, updates)
+    equal({}, opened)
+    assert(asked[1]:find("run in the sandbox", 1, true))
+
+    updates = {}
+    answers({ true })
+    create.create({ kind = "named", name = "x" })
+    equal({ "ask", PROTECTED.target }, updates)
+    equal({ source .. "--x" }, opened)
+end)
+
+test("cli passes the answers and describes the new refusals", function()
+    local commands = {}
+    replace(util, "exec", function(cmd)
+        commands[#commands + 1] = table.concat(cmd, " ")
+        return { code = 0, stdout = vim.json.encode({ type = "worker_deleted", stopped = 0 }) }
+    end)
+    cli.delete("/w", true, { kind = "approve", target = PROTECTED.target })
+    cli.delete("/w", false, { kind = "skip" })
+    equal({
+        "piton worker delete /w --force --approve-source-update " .. PROTECTED.target .. " --json",
+        "piton worker delete /w --skip-source-update --json",
+    }, commands)
+    assert(cli.describe(PROTECTED):find("origin/main", 1, true))
+    equal("no socket", cli.describe({ kind = "source_fetch", checkout = "/p", message = "no socket" }))
 end)
 
 test("unsaved buffers require confirmation before any daemon deletion", function()

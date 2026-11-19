@@ -2,15 +2,20 @@
 //! has to ask anyway, and how that request is answered.
 //!
 //! - [`protected`]: which files are protected, and the Seatbelt rules every sandboxed launch carries for them.
+//! - [`git`]: Git's hooks and configuration, which a sandboxed agent may not write.
 //! - [`socket`]: `agent.sock`, the socket sandboxed pis reach the daemon on, and their session tokens.
 //! - [`write`]: a protected write an agent asks for: the user's dialog, and the daemon's write once approved.
 
+mod git;
 mod protected;
 mod socket;
 mod write;
 
 pub use self::{
+    git::GitControl,
     protected::{ProtectedRoots, canonical_target, lexical},
     socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, serve},
-    write::{WriteDecision, WriteOutcome, WriteRequest, write_approved, write_dialog},
+    write::{
+        FileMode, WriteDecision, WriteOutcome, WriteRequest, remove_file, write_approved, write_dialog, write_file,
+    },
 };

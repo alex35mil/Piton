@@ -12,7 +12,7 @@ mod rules;
 use std::path::PathBuf;
 
 pub use self::{
-    apply::{Containment, POLICY_ENV, containment, exec},
+    apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
     policy::{Source, WRITE_ROOTS, nono_version},
     resolve::{Facts, Resolution, resolve},
     rules::{Access, Policy},

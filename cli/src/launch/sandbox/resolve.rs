@@ -6,7 +6,8 @@
 //! 2. nono's credential denies; then `expose`, which lifts them (and reopens writes granted inside an exposed path);
 //! 3. the host agent directory is read-only; the launch's agent directory's runtime state is writable;
 //! 4. the user's `deny`;
-//! 5. every configuration level, and what its entries link to, is read-only; protected files are read-only;
+//! 5. every configuration level, and what its entries link to, is read-only; protected files are read-only; so are
+//!    Git's hooks and configuration in the launch's checkouts;
 //! 6. the daemon's state folder is closed (reads, writes, connects) except its logs and the agent socket, and its
 //!    control socket can't be connected to, wherever it is.
 //!
@@ -25,8 +26,8 @@ use super::{
     rules::{Access, Effect, Policy, Rule, Target},
 };
 use crate::{
-    agent::{canonical_target, lexical},
-    config::{LOCAL_DIR, LaunchConfig, expand_home},
+    agent::{GitControl, canonical_target, lexical},
+    config::{LOCAL_DIR, LaunchConfig, Preset, expand_home},
     launch::{
         Env,
         env::{Origin, SandboxEnv, ToolSource, Widening},
@@ -262,6 +263,19 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
             what: "a protected file (.piton/ or .pi/): changed only with the user's approval".into(),
         },
     );
+    // The `git` preset (the user's own choice) leaves this rule out.
+    if !table.presets.contains(&Preset::Git) {
+        rules.push(
+            Effect::Deny,
+            &[Access::Write],
+            Target::GitControl {
+                control: GitControl::of(&[&canonical(&config.checkout), &canonical(&config.source)]),
+            },
+            Source::Piton {
+                what: "Git's hooks and configuration: Git on the host runs what they name".into(),
+            },
+        );
+    }
 
     // 6. The daemon.
     rules.push(
@@ -438,7 +452,7 @@ fn grants_write(rule: &Rule) -> bool {
 fn rule_path(target: &Target) -> Option<&Path> {
     match target {
         Target::Subpath { path } | Target::Literal { path } | Target::Prefix { path } => Some(path),
-        Target::Protected { .. } => None,
+        Target::Protected { .. } | Target::GitControl { .. } => None,
     }
 }
 
@@ -484,7 +498,7 @@ fn real_form(rule: &Rule, replaceable: &[Target]) -> RealForm {
             }
             (None, _) | (_, None) => (rule.target.clone(), None),
         },
-        Target::Protected { .. } => {
+        Target::Protected { .. } | Target::GitControl { .. } => {
             return RealForm {
                 target: None,
                 unfollowed: None,
@@ -1137,6 +1151,45 @@ mod tests {
         link(&secret, &f.repo.join("secret"));
         let p = policy(&f);
         assert!(!allowed(&p, &secret.join("k"), Access::Read));
+    }
+
+    /// Git's hooks and configuration are closed in the checkout, the rest of `.git` and a new worktree's `.git` file
+    /// aren't, and `piton sandbox why` names the rule.
+    #[test]
+    fn gits_control_files_are_closed() {
+        let f = fixture("", "");
+        let p = policy(&f);
+        for denied in [
+            ".git",
+            ".git/hooks/post-merge",
+            ".git/config",
+            ".GIT/Config",
+            "vendor/lib/.git/hooks/x",
+        ] {
+            assert!(!allowed(&p, &f.repo.join(denied), Access::Write), "{denied}");
+        }
+        assert_eq!(
+            p.decide(&f.repo.join(".git/config"), Access::Write).source,
+            Source::Piton {
+                what: "Git's hooks and configuration: Git on the host runs what they name".into()
+            }
+        );
+        for open in [
+            ".git/index",
+            ".git/refs/heads/x",
+            ".git/worktrees/w/commondir",
+            ".piton/.local/pull-requests/1/rebase/.git",
+        ] {
+            assert!(allowed(&p, &f.repo.join(open), Access::Write), "{open}");
+        }
+        assert!(allowed(&p, &f.repo.join(".git/config"), Access::Read));
+
+        // The `git` preset in the global configuration lifts them.
+        let g = fixture("[sandbox]\npresets = [\"git\"]\n", "");
+        let p = policy(&g);
+        for open in [".git/config", ".git/hooks/post-merge", ".git/commondir"] {
+            assert!(allowed(&p, &g.repo.join(open), Access::Write), "{open}");
+        }
     }
 
     /// Every rule is valid Seatbelt the library accepts.

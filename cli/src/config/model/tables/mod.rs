@@ -64,21 +64,24 @@ impl Table {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Levels {
     Any,
-    /// The global tier's `config.toml`: the base every project inherits.
-    Global,
     /// A project or parent folder's `.piton/`, never the global tier.
     Project,
 }
 
-/// Which file of a level's pair may hold a key.
+/// Which file of a level's pair (`config.toml`, `config.local.toml`) may hold a key. A project's `config.toml` is
+/// committed, so it's written by whoever commits to the repository; its `config.local.toml`, and both files of the
+/// global tier, are the user's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Files {
+    /// Either file, at every level.
     Either,
-    /// Only `config.local.toml`: a secret.
+    /// `config.local.toml` only, at every level, the global tier included: a secret, kept out of any file that might
+    /// be shared or synced (`web_search.api_key`).
     Local,
-    /// Only `config.local.toml` in a project or parent folder, where `config.toml` is committed; either file in the
-    /// global tier, which is the user's own.
-    LocalInProjects,
+    /// Any file but a project's committed `config.toml`: a value only the user may choose for themselves, which
+    /// needn't be secret (`branches.username`, and every knob that loosens the sandbox: a repository can't open it for
+    /// whoever clones it).
+    UsersOwn,
 }
 
 /// Where a key may be set. Fixed by piton, not configurable.
@@ -89,10 +92,6 @@ pub struct Rule {
 }
 
 impl Rule {
-    pub const GLOBAL: Rule = Rule {
-        levels: Levels::Global,
-        files: Files::Either,
-    };
     pub const PROJECT: Rule = Rule {
         levels: Levels::Project,
         files: Files::Either,
@@ -101,9 +100,9 @@ impl Rule {
         levels: Levels::Any,
         files: Files::Local,
     };
-    pub const LOCAL_IN_PROJECTS: Rule = Rule {
+    pub const USERS_OWN: Rule = Rule {
         levels: Levels::Any,
-        files: Files::LocalInProjects,
+        files: Files::UsersOwn,
     };
 }
 

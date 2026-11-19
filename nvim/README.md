@@ -53,7 +53,10 @@ them. All notifications use `vim.notify` with title `Piton`.
   configuration, rather than retaining old hooks. Unknown options and wrong types are rejected before changing it.
 - **`new()`** opens the new-agent picker: Todo, then Backlog, then incoming pull requests, with a named agent always
   available. Queued work already assigned to a worker is excluded. Creation opens its tab and pre-fills the
-  appropriate workflow command; it never sends the prompt automatically.
+  appropriate workflow command; it never sends the prompt automatically. When fast-forwarding the source changes
+  protected files (`.piton/`, `.pi/`), which the daemon's sandboxed Git can't write, it asks first whether to apply
+  them (Piton writes those files; the rest still runs in the sandbox); no creates nothing and leaves the source as it
+  was.
   - With a GitHub forge, the pull-request section lists every open PR of `forge.repository` that the authenticated
     user didn't author, whatever the tracker is. Selecting one creates a worker with `/pr #NN Title` pre-filled.
     `/pr` reviews it in that worker.
@@ -66,8 +69,10 @@ them. All notifications use `vim.notify` with title `Piton`.
 - **`get(path)`** returns the agent containing a path, or nil. The record has `path`, `source`, `label`, and optional
   `issue`. Use this from your own tab-close action to distinguish workers from ordinary tabs.
 - **`close_tab(agent)`** offers “Close tab” or “Delete agent”. Closing only closes the editor tab: the daemon's pi keeps
-  running. Deleting uses the daemon and confirms discarding modified buffers or a dirty/unpushed checkout before
-  forcing deletion. Deleted workers' buffers are removed.
+  running. Deleting uses the daemon, which checks everything before changing anything, and confirms each question in
+  turn: discarding modified buffers, a dirty/unpushed checkout, and, when the source's update changes protected files,
+  applying them or else deleting without updating the source. Answering no to all keeps the
+  agent. Its tab stays open until the deletion succeeds; then it closes and the worker's buffers are removed.
 
 ## Editor integration
 
