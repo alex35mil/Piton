@@ -27,7 +27,7 @@ A role is off when its table is missing, or set to `provider = "none"` ([setup](
 
 ### Context tools
 
-These tools read local configuration, authority, and entity state. They never call providers.
+These tools read local configuration, authority, and entity state. They never call providers. Each returns only what its operation uses; only `inspect_integrations` returns the full configuration, label definitions included.
 
 | Situation | Tool |
 | --- | --- |
@@ -178,7 +178,7 @@ Adding work to Backlog or Todo creates no workflow artifact or saved recovery st
 
 ## Labels
 
-- Label groups live in `labels.groups`. Each value maps to one tracker label, and the group's cardinality limits how many an item carries. Read the configuration with `inspect_integrations`.
+- Label groups live in `labels.groups`. Each value maps to one tracker label, and the group's cardinality limits how many an item carries. When adopting, use the `labelGroups` that `inspect_adoption` returns; otherwise read them with `inspect_integrations`.
 - The `kind` value always comes from the item's Kind. `gate` values are the user's: keep them as the item has them, and set one at intake only when the user asks. Values for other groups come from Project Policies and the work; ask the user only when one can't be derived.
 - For new work, report the chosen labels with the other intake values.
 - New work gets its labels from preflight or queue intake. Existing work changes them only through `prepare_label_mutation`, which returns the complete label set; apply it only when `changed`.

@@ -18,6 +18,7 @@ import { assertAcceptedTaskList } from "../__lib/epic-acceptance.js"
 import { resolveAnnouncementOrigin, withPlanAnnouncement } from "./announcement-state.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
 import { loadIntegrationRoles, requireTracker } from "./config.js"
+import type { GitHubApiOptions } from "./github-api.js"
 import { assertEntityTracker } from "./policy.js"
 import {
     type AnnouncementInput,
@@ -30,7 +31,7 @@ import {
 import type { PublicationAdapter, PublicationIdentity } from "./plan-publication.js"
 import { requireTrackerItem, type TrackerRecord } from "./records.js"
 import { EvidenceSchema } from "./resource-id-tool.js"
-import { githubPublication } from "./tracker-publication-github.js"
+import { githubPublication, pinPlanComment } from "./tracker-publication-github.js"
 import { linearPublication } from "./tracker-publication-linear.js"
 
 const common = { entityDir: Type.String({ minLength: 1 }) }
@@ -211,44 +212,78 @@ function runPublication<I, P, Q extends PublicationIdentity<I>>(
     }
 }
 
-export async function trackerPublication(cwd: string, raw: TrackerPublicationInput, tools: McpToolCatalog) {
+/**
+ * Runs one publication step. When it confirms a GitHub plan comment's first publication (recorded, or identified by
+ * recovery), it then pins that comment, after the metadata write and outside its queue, and reports the outcome as
+ * `pin`. A failed pin leaves the publication as it is.
+ */
+export async function trackerPublication(
+    cwd: string,
+    raw: TrackerPublicationInput,
+    tools: McpToolCatalog,
+    github: GitHubApiOptions,
+) {
     const input = parse(TrackerPublicationValidator, raw)
     const root = project.resolveRootDir(cwd)
     const directory = resolveEntityDirectory(root, cwd, input.entityDir)
-    return withFileMutationQueue(path.join(directory, ENTITY_METADATA_FILE), async () => {
-        assertArtifactPersistencePrepared(root)
-        const configured = requireTracker(loadIntegrationRoles(root), "plan publication")
-        const status = readEntityStatus(directory)
-        assertEntityTracker(status, configured)
-        const tracker = requireTrackerItem(status.tracker, "plan publication")
-        const server = configured.mcpServer
-        // Publication and announcement saves can follow each other in one call; each builds on the latest record.
-        let current = tracker
-        const save = (record: TrackerRecord) => {
-            current = record
-            writeEntityStatus(directory, { ...status, tracker: record })
-        }
-        const context = {
-            status,
-            resolveOrigin: (origin: AnnouncementInput["origin"]) =>
-                resolveAnnouncementOrigin(root, cwd, directory, status, origin),
-            announcement: tracker.planAnnouncement,
-            saveAnnouncement: (state: PlanAnnouncement | undefined) => save(withPlanAnnouncement(current, state)),
-        }
-        if (tracker.provider === "github")
-            return runPublication(input, {
-                ...context,
-                adapter: githubPublication(tracker, server, tools, (planComment) =>
-                    save({ ...(current as typeof tracker), planComment }),
-                ),
-            })
-        return runPublication(input, {
+    const { result, firstPublication } = await withFileMutationQueue(path.join(directory, ENTITY_METADATA_FILE), () =>
+        publish(root, cwd, directory, input, tools),
+    )
+    if (!firstPublication) return result
+    const { server, repository, commentId } = firstPublication
+    return { ...result, pin: await pinPlanComment(root, server, repository, commentId, github) }
+}
+
+async function publish(
+    root: string,
+    cwd: string,
+    directory: string,
+    input: TrackerPublicationInput,
+    tools: McpToolCatalog,
+) {
+    assertArtifactPersistencePrepared(root)
+    const configured = requireTracker(loadIntegrationRoles(root), "plan publication")
+    const status = readEntityStatus(directory)
+    assertEntityTracker(status, configured)
+    const tracker = requireTrackerItem(status.tracker, "plan publication")
+    const server = configured.mcpServer
+    // Publication and announcement saves can follow each other in one call; each builds on the latest record.
+    let current = tracker
+    const save = (record: TrackerRecord) => {
+        current = record
+        writeEntityStatus(directory, { ...status, tracker: record })
+    }
+    const context = {
+        status,
+        resolveOrigin: (origin: AnnouncementInput["origin"]) =>
+            resolveAnnouncementOrigin(root, cwd, directory, status, origin),
+        announcement: tracker.planAnnouncement,
+        saveAnnouncement: (state: PlanAnnouncement | undefined) => save(withPlanAnnouncement(current, state)),
+    }
+    if (tracker.provider === "github") {
+        let published: number | undefined
+        const result = runPublication(input, {
             ...context,
-            adapter: linearPublication(tracker, server, tools, (planDocument) =>
-                save({ ...(current as typeof tracker), planDocument }),
-            ),
+            adapter: githubPublication(tracker, server, tools, (planComment) => {
+                // Only the pending-to-published step pins: later edits keep the comment pinned.
+                if (tracker.planComment.state === "pending" && planComment.state === "published")
+                    published = planComment.id
+                save({ ...(current as typeof tracker), planComment })
+            }),
         })
+        return {
+            result,
+            firstPublication:
+                published === undefined ? undefined : { server, repository: tracker.repository, commentId: published },
+        }
+    }
+    const result = runPublication(input, {
+        ...context,
+        adapter: linearPublication(tracker, server, tools, (planDocument) =>
+            save({ ...(current as typeof tracker), planDocument }),
+        ),
     })
+    return { result, firstPublication: undefined }
 }
 
 export function registerTrackerPublication(pi: ExtensionAPI, tools: McpToolCatalog): void {
@@ -266,13 +301,14 @@ export function registerTrackerPublication(pi: ExtensionAPI, tools: McpToolCatal
         toolsApi.registerTool({
             name,
             label: name,
-            description: `${name.replaceAll("_", " ")} using the complete current plan content and exact provider evidence. Workflow plan publications need no user approval of their text. The first prepare for an unpublished plan saves pending state before returning its create; run that create immediately. When prepare returns reads-required, run the calls in its lookups and call prepare_tracker_publication_update with them as reads and a one-line summary of what changed as announcement.summary; it is posted as the plan-update note without asking. Record the plan update's clear success with record_tracker_publication, run the returned announcement comment, and record it too. Recovery takes the approved source and complete comment pages, or the Linear parent read, complete document listing pages, and full document reads; for a pending announcement, complete comment pages. One match identifies it; no match returns the same create; several matches stop. Saves local authoritative state only; never calls providers or authorizes publication.`,
+            description: `${name.replaceAll("_", " ")} using the complete current plan content and exact provider evidence. Workflow plan publications need no user approval of their text. The first prepare for an unpublished plan saves pending state before returning its create; run that create immediately. When prepare returns reads-required, run the calls in its lookups and call prepare_tracker_publication_update with them as reads and a one-line summary of what changed as announcement.summary; it is posted as the plan-update note without asking. Record the plan update's clear success with record_tracker_publication, run the returned announcement comment, and record it too. Recovery takes the approved source and complete comment pages, or the Linear parent read, complete document listing pages, and full document reads; for a pending announcement, complete comment pages. One match identifies it; no match returns the same create; several matches stop. Saves local authoritative state and never authorizes publication. On GitHub, a recorded or recovered first publication also pins the plan comment with a direct GitHub API call and reports it as pin: pinned, or pin: failed with the reason; a failed pin leaves the publication in place and isn't retried. No other step calls providers.`,
             parameters,
             async execute(_id, input, _signal, _onUpdate, ctx) {
                 const result = await trackerPublication(
                     ctx.cwd,
                     parse(TrackerPublicationValidator, { ...parse(validator, input), action }),
                     tools,
+                    { projectTrusted: ctx.isProjectTrusted() },
                 )
                 return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }
             },
