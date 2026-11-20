@@ -32,7 +32,16 @@ export const EvidenceSchema = Type.Object(
 )
 export const ResourceIdsToolSchema = Type.Union([
     Type.Object(
-        { entityDir: common.entityDir, action: Type.Literal("beginCreation") },
+        {
+            entityDir: common.entityDir,
+            action: Type.Literal("beginCreation"),
+            evidence: Type.Optional(
+                Type.Union([EvidenceSchema], {
+                    description:
+                        "A fresh read of the entity's tracker issue, for the PR title: GitHub issue_read get, or Linear get_issue by the stored issue UUID. Required when the entity has a tracker issue and the tracker is on; omit it for a local Gig or with the tracker off.",
+                }),
+            ),
+        },
         { additionalProperties: false },
     ),
     Type.Object(
@@ -95,7 +104,8 @@ export function registerResourceIds(pi: ExtensionAPI, memo: OperationResourceIds
                 })
                 const entityDir = input.entityDir.replace(/^@/, "")
                 const result = await (async () => {
-                    if (input.action === "beginCreation") return beginPullRequestCreation(ctx.cwd, entityDir, tools)
+                    if (input.action === "beginCreation")
+                        return beginPullRequestCreation(ctx.cwd, entityDir, input.evidence, tools)
                     if (input.action === "recordCreation") {
                         const recorded = await recordPullRequestCreation(ctx.cwd, entityDir, input.evidence, tools)
                         for (const ids of recorded.resourceIds) memo.record(ids)

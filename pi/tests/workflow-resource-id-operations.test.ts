@@ -18,6 +18,11 @@ import {
     recordResourceIds,
 } from "../workflows/extensions/integrations/resource-ids.ts"
 import { ResourceIdsToolValidator } from "../workflows/extensions/integrations/resource-id-tool.ts"
+import {
+    readTrackerIssue,
+    trackerIssueBody,
+    trackerIssueTitle,
+} from "../workflows/extensions/integrations/issue-read.ts"
 import { linkPullRequestIssue } from "../workflows/extensions/integrations/forge/github/issue-link.ts"
 import { findPullRequest } from "../workflows/extensions/integrations/forge/github/find-pull-request.ts"
 import { readEntityStatus } from "../workflows/extensions/__lib/entity.ts"
@@ -65,6 +70,12 @@ const evidence = {
     arguments: { method: "get", ...repo, pullNumber: 7 },
     response: pr,
 }
+// A fresh read of the fixture Gig's issue #23, which PR creation takes its title from.
+const issueRead = (title = "Example", issueNumber = 23) => ({
+    tool: "mcp__github__issue_read",
+    arguments: { method: "get", ...repo, issue_number: issueNumber },
+    response: { number: issueNumber, title, body: "Request." },
+})
 
 function fixture() {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "workflow-resource-ids-")))
@@ -558,7 +569,10 @@ describe("resource ID operations", () => {
     it("refuses a second PR intent and never creates one for an Epic", async () => {
         const f = fixture()
         try {
-            await assert.rejects(beginPullRequestCreation(f.root, f.directory, mcpTools), /PR intent already exists/)
+            await assert.rejects(
+                beginPullRequestCreation(f.root, f.directory, issueRead(), mcpTools),
+                /PR intent already exists/,
+            )
             const epicDir = path.join(f.root, ".piton/.local/epics/9-rollout")
             fs.mkdirSync(epicDir, { recursive: true })
             fs.writeFileSync(
@@ -579,7 +593,7 @@ describe("resource ID operations", () => {
                 }),
             )
             await assert.rejects(
-                beginPullRequestCreation(f.root, epicDir, mcpTools),
+                beginPullRequestCreation(f.root, epicDir, undefined, mcpTools),
                 /Epics never create pull requests/,
             )
         } finally {
@@ -592,7 +606,7 @@ describe("resource ID operations", () => {
         try {
             delete f.metadata.forge
             const reset = () => fs.writeFileSync(f.file, JSON.stringify(f.metadata))
-            const begin = () => beginPullRequestCreation(f.root, f.directory, mcpTools)
+            const begin = () => beginPullRequestCreation(f.root, f.directory, issueRead(), mcpTools)
             reset()
             await assert.rejects(begin(), /no final review has run/)
             f.finalRound(1, "blocked")
@@ -622,8 +636,112 @@ describe("resource ID operations", () => {
             fs.writeFileSync(f.file, JSON.stringify(f.metadata))
             f.finalRound(1, "approved")
             const before = fs.readFileSync(f.file, "utf8")
-            await assert.rejects(beginPullRequestCreation(f.root, f.directory, new Map()), /create_pull_request/)
+            await assert.rejects(
+                beginPullRequestCreation(f.root, f.directory, issueRead(), new Map()),
+                /create_pull_request/,
+            )
             assert.equal(fs.readFileSync(f.file, "utf8"), before)
+        } finally {
+            f.cleanup()
+        }
+    })
+
+    it("opens the PR with the tracker issue's current title and saves it with the intent", async () => {
+        const f = fixture()
+        try {
+            delete f.metadata.forge
+            const reset = () => fs.writeFileSync(f.file, JSON.stringify(f.metadata))
+            reset()
+            f.finalRound(1, "approved")
+            const before = fs.readFileSync(f.file, "utf8")
+            // Without a read, or with a read of another issue, nothing is written.
+            await assert.rejects(beginPullRequestCreation(f.root, f.directory, undefined, mcpTools), /fresh read/)
+            await assert.rejects(
+                beginPullRequestCreation(f.root, f.directory, issueRead("Retitled", 24), mcpTools),
+                /issue_number must be 23/,
+            )
+            const untitled = { ...issueRead(), response: { number: 23, title: "" } }
+            await assert.rejects(beginPullRequestCreation(f.root, f.directory, untitled, mcpTools), /one-line title/)
+            assert.equal(fs.readFileSync(f.file, "utf8"), before)
+
+            // The issue was retitled after initialization: the PR and metadata follow it.
+            const begun = await beginPullRequestCreation(f.root, f.directory, issueRead("Retitled"), mcpTools)
+            assert.equal(begun.mutation.arguments.title, "Retitled")
+            assert.deepEqual(begun.title, { state: "updated", from: "Example", to: "Retitled" })
+            const saved = JSON.parse(fs.readFileSync(f.file, "utf8"))
+            assert.equal(saved.title, "Retitled")
+            assert.equal(saved.forge.head, prScope.head)
+            // Recording checks the create against the synced title.
+            const created = {
+                tool: begun.mutation.tool,
+                arguments: { ...begun.mutation.arguments, body: "Approved" },
+                response: { url: pr.html_url },
+            }
+            assert.equal(
+                (await recordPullRequestCreation(f.root, f.directory, created, mcpTools)).resourceIds.length,
+                1,
+            )
+
+            // An unchanged title reports unchanged.
+            reset()
+            const same = await beginPullRequestCreation(f.root, f.directory, issueRead(), mcpTools)
+            assert.deepEqual(same.title, { state: "unchanged" })
+        } finally {
+            f.cleanup()
+        }
+    })
+
+    it("reads a Linear Gig issue's title by its stored UUID", () => {
+        const record = {
+            provider: "linear" as const,
+            resource: "gig-issue" as const,
+            external: { issueId: "issue-uuid", identifier: "ENG-5" },
+            planDocument: { state: "unpublished" as const },
+        }
+        const tracker = { provider: "linear", mcpServer: "linear" } as never
+        const read = (id: string) => ({
+            tool: "mcp__linear__get_issue",
+            arguments: { id },
+            response: { uuid: "issue-uuid", id: "ENG-5", title: "Retitled", description: "Request." },
+        })
+        const issue = readTrackerIssue(record, tracker, read("issue-uuid"), mcpTools, "tracker issue")
+        assert.equal(trackerIssueTitle(issue), "Retitled")
+        assert.equal(trackerIssueBody(issue), "Request.")
+        assert.throws(
+            () => readTrackerIssue(record, tracker, read("ENG-5"), mcpTools, "tracker issue"),
+            /argument id must be/,
+        )
+    })
+
+    it("keeps the stored title when there is no tracker issue to read", async () => {
+        const f = fixture()
+        try {
+            f.finalRound(1, "approved")
+            const { forge: _forge, ...withoutForge } = f.metadata
+            const begin = async (
+                metadata: Record<string, unknown>,
+                read?: ReturnType<typeof issueRead>,
+                directory = f.directory,
+            ) => {
+                fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata))
+                return beginPullRequestCreation(f.root, directory, read, mcpTools)
+            }
+            // A local Gig has no issue: a read is refused, and the stored title stands.
+            const localDir = path.join(f.root, ".piton/.local/gigs/20261001-example")
+            fs.cpSync(path.join(f.directory, "reviews"), path.join(localDir, "reviews"), { recursive: true })
+            const local = { ...withoutForge, tracker: { provider: "local", createdAt: "2026-10-01T00:00:00Z" } }
+            await assert.rejects(begin(local, issueRead("Retitled"), localDir), /no issue to read/)
+            const localBegun = await begin(local, undefined, localDir)
+            assert.equal(localBegun.mutation.arguments.title, "Example")
+            assert.deepEqual(localBegun.title, { state: "unchanged" })
+
+            // With the tracker role off, a tracked Gig still submits with its stored title.
+            writeProjectConfig(f.root, {
+                tracker: { provider: "none" },
+                forge: { provider: "github", mcpServer: "github", repository: repo },
+            })
+            await assert.rejects(begin(withoutForge, issueRead("Retitled")), /no issue to read/)
+            assert.equal((await begin(withoutForge)).mutation.arguments.title, "Example")
         } finally {
             f.cleanup()
         }
@@ -638,7 +756,7 @@ describe("resource ID operations", () => {
                 f.finalRound(1, "approved")
                 f.git(["add", "."])
                 f.git(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "Submission"])
-                const begun = await beginPullRequestCreation(f.root, f.directory, mcpTools)
+                const begun = await beginPullRequestCreation(f.root, f.directory, issueRead(), mcpTools)
                 assert.deepEqual(begun.mutation, {
                     tool: "mcp__github__create_pull_request",
                     arguments: { ...repo, head: prScope.head, base: prScope.target, title: "Example" },

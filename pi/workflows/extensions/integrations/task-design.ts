@@ -4,13 +4,13 @@ import * as path from "node:path"
 import { type Static, Type } from "typebox"
 
 import { compile } from "../../../extensions/__lib/schema.js"
-import { mcpResponsePayload, type McpToolCatalog } from "../../../extensions/__lib/mcp.js"
+import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import * as project from "../../../extensions/__lib/project.js"
 import { type EntityStatus, readEntityStatus, resolveEntityDirectory, writeEntityStatus } from "../__lib/entity.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
 import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "./config.js"
+import { readTrackerIssue, trackerIssueBody } from "./issue-read.js"
 import { assertEntityTracker } from "./policy.js"
-import { requireProviderCall } from "./provider-evidence.js"
 import { stripPublicationSignature } from "./publication.js"
 import { requireTrackerItem } from "./records.js"
 import type { ProviderEvidence } from "./resource-id-operations.js"
@@ -56,26 +56,7 @@ export function taskIssueDesign(
     tools: McpToolCatalog,
 ): string {
     const record = requireTrackerItem(status.tracker, "a Task design read")
-    const response = mcpResponsePayload(evidence.response)
-    const server = tracker.mcpServer
-    const label = "Task issue"
-    switch (record.provider) {
-        case "github": {
-            const expected = { method: "get", ...record.repository, issue_number: record.external.issueNumber }
-            requireProviderCall(evidence, { server, operation: "issue_read", expected }, tools, label)
-            if (response.number !== record.external.issueNumber) throw new Error("Task issue read is for another issue")
-            return stripPublicationSignature(typeof response.body === "string" ? response.body : "").trim()
-        }
-        case "linear": {
-            if (record.resource !== "task-issue") throw new Error("a Task design read needs a Linear Task issue")
-            const expected = { id: record.external.issueId }
-            requireProviderCall(evidence, { server, operation: "get_issue", expected }, tools, label)
-            if (response.uuid !== record.external.issueId) throw new Error("Task issue read is for another issue")
-            return stripPublicationSignature(
-                typeof response.description === "string" ? response.description : "",
-            ).trim()
-        }
-    }
+    return trackerIssueBody(readTrackerIssue(record, tracker, evidence, tools, "Task issue"))
 }
 
 function context(cwd: string, entityDir: string) {
