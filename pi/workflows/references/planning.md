@@ -40,14 +40,24 @@ A Task or Gig takes one of two paths. Say which in one line before continuing. "
 - Plan the smallest change that meets the Request. A new tool, module, mode, or setup decision the Request doesn't need is a scope question: ask before planning it.
 - Use the [reviewed document shape](./artifacts.md#reviewed-document-shape): `## Overview` explains the brief and why it matters, then a few scope and behavior bullets under `### Plan highlights`, then the supporting sections. Keep the highlights in sync with plan changes.
 
+## Credible cases
+
+Apply this bar when planning, implementing, and handling review findings. Reviewers get the same bar.
+
+- Handle an edge case, race, or failure mode only when one line can state its real trigger in supported use, the harm, its likelihood, and why handling costs less than that harm.
+- Base each part on the code path or documented behavior. Async code isn't proof of a race; overlapping operations aren't proof of harmful ordering.
+- Security, data loss, and corrupted persisted data need only a reachable trigger. When that trigger is uncertain, ask the user.
+- Handling that shapes the core design, such as new state, a queue, or a protocol change, goes in the plan highlights.
+- When unsure, leave the case out and list it under `## Unhandled cases` in `plan.md`, or in `result.md` when found during implementation: one line with the case and why it was left out. List only cases you or a reviewer seriously considered; omit the section when empty.
+
 ## Task and Gig plans
 
 The plan informs the user. It waits for approval only when the item is marked (below). Without a tracker, or for a local Gig, skip the Phase, publication, and gate steps ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
 
 1. Set Planning with the Phase tool for the configured tracker when Phase is configured, then call `review_task` or `review_gig` with `phase: "plan"`. Handle the cycle as described in [review](./review.md).
 2. Publish the plan, as described in [provider bodies](./integrations/shared.md#provider-bodies).
-3. Check [plan approval](#plan-approval). When the plan waits, keep Planning and stop with about five highlights, any open concerns from the review, any questions, and a request to approve.
-4. Otherwise set Execution (when Phase is configured) and send one message: about five highlights, any open concerns, and any questions. With no question, continue into implementation in the same turn. The user can interrupt at any time.
+3. Check [plan approval](#plan-approval). When the plan waits, keep Planning and stop with about five highlights, any [unhandled cases](#credible-cases), any open concerns from the review, any questions, and a request to approve.
+4. Otherwise set Execution (when Phase is configured) and send one message: about five highlights, any unhandled cases, any open concerns, and any questions. With no question, continue into implementation in the same turn. The user can interrupt at any time.
 
 ### Plan approval
 

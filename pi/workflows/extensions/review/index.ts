@@ -51,6 +51,7 @@ import {
     MAX_EMBEDDED_FILE_BYTES,
     readOptional,
     REVIEW_AUTHORITY_INSTRUCTIONS,
+    REVIEW_CREDIBLE_CASE_INSTRUCTIONS,
     REVIEW_DOCUMENT_INSTRUCTIONS,
     REVIEW_GIT_INSTRUCTIONS,
     truncate,
@@ -840,7 +841,7 @@ export async function buildDeliverableReviewPrompt(
             ? "The parent Epic is context: the initiative's goal and this Task's outcome. Tasks update epic.md in place, so a difference between the Task and the Epic text is not a finding by itself. Report one only when the Task breaks the Epic's goal or a user decision."
             : "",
         "It is valid to report no findings. Do not invent a finding to justify the review.",
-        "For edge-case, race/concurrency, and failure-mode findings, apply every active evidence and credible-complexity rule. A finding that omits evidence required by those rules is invalid, must be omitted, and must not affect signoff.",
+        REVIEW_CREDIBLE_CASE_INSTRUCTIONS,
         ...pass.instructions,
         "",
         "Authority model:",

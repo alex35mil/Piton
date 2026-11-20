@@ -14,6 +14,7 @@ import {
     fence,
     MAX_EMBEDDED_FILE_BYTES,
     REVIEW_AUTHORITY_INSTRUCTIONS,
+    REVIEW_CREDIBLE_CASE_INSTRUCTIONS,
     REVIEW_GIT_INSTRUCTIONS,
     truncate,
 } from "./context.js"
@@ -183,7 +184,7 @@ export async function buildStandaloneReviewPrompt(root: string, input: Standalon
             : "No requirement was stated: review for correctness, regressions, security, and maintainability.",
         "A finding is blocking when the change, as it is, would contain a defect, would break a stated requirement or active rule, or needs a decision only the user can make. Everything else is a note.",
         "It is valid to report no findings. Do not invent a finding to justify the review.",
-        "For edge-case, race/concurrency, and failure-mode findings, apply every active evidence and credible-complexity rule. A finding that omits evidence required by those rules is invalid, must be omitted, and must not affect signoff.",
+        REVIEW_CREDIBLE_CASE_INSTRUCTIONS,
         input.instructions ? `\nExtra instructions:\n${input.instructions}` : "",
         "",
         reviewAgentOutputInstructions(),

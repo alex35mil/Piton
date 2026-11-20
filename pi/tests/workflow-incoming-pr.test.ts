@@ -30,6 +30,7 @@ import {
     ReviewPullRequestValidator,
 } from "../workflows/extensions/review/pull-request.ts"
 import { executeReviewRound, recordRoundResponse } from "../workflows/extensions/review/round.ts"
+import { REVIEW_CREDIBLE_CASE_INSTRUCTIONS } from "../workflows/extensions/review/context.ts"
 import { buildReviewerArgs } from "../workflows/extensions/review/agent.ts"
 import registerPr from "../workflows/extensions/pr/index.ts"
 import { INCOMING_CHECKOUT_TOOLS } from "../workflows/extensions/pr/operations.ts"
@@ -466,6 +467,7 @@ describe("incoming PR private review", () => {
             assert.match(first.prompt, /Verification|verification/)
             assert.match(first.prompt, /not an Epic, Task or Gig/)
             assert.match(first.prompt, /read-only subprocess is not an execution sandbox/)
+            assert.ok(first.prompt.includes(REVIEW_CREDIBLE_CASE_INSTRUCTIONS))
             assert.equal(fs.readFileSync(first.dossierPath, "utf-8"), dossier())
             const second = await preparePullRequestReview(f.root, input, mcpTools)
             assert.equal(second.round, 2)
