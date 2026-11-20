@@ -79,8 +79,8 @@ function remergeDiff(root: string, merge: string): string {
 }
 
 /**
- * Validates the pushed merge against local state and returns the PR comment call. Reads only local
- * Git and workflow state; makes no provider call.
+ * Validates the pushed merge against local state and returns the PR comment call as `mutation`.
+ * Reads only local Git and workflow state; makes no provider call.
  */
 export function prepareMergeResolutionComment(
     cwd: string,
@@ -116,7 +116,7 @@ export function prepareMergeResolutionComment(
     return {
         merge,
         marker: mergeResolutionMarker(merge),
-        call: {
+        mutation: {
             tool: getMcpToolName(context.scope.mcpServer, "add_issue_comment", catalog),
             arguments: { ...context.scope.repository, issue_number: saved.value.number, body },
         },
