@@ -25,12 +25,13 @@ These rules apply to every Deliverable commit, including a local commit step bef
 Every Deliverable ships through a merged PR. Without a forge, submission stops after the local commits ([when a role is off](../integrations/shared.md#when-a-role-is-off)).
 
 1. **Save PR intent.** After the last Deliverable commit, call `prepare_integration_pull_request`, then `begin_resource_creation`, and let both finish.
-   - `begin_resource_creation` saves the immutable PR repository, head, and target in the local `metadata.json`, and returns the PR create call. It's a local checkpoint and authorizes no push or PR.
+   - With a tracker item and the tracker on, read the issue fresh and pass it to `begin_resource_creation`. The PR title comes from the issue, so a retitle since initialization is kept. Report an `updated` title in one line.
+   - `begin_resource_creation` saves the immutable PR repository, head, and target, and the current title, in the local `metadata.json`, and returns the PR create call. It's a local checkpoint and authorizes no push or PR.
    - It refuses until the newest final review cycle finished. A blocked verification pass counts; an unverified blocked review doesn't.
    - When intent already exists or IDs are missing, investigate through the configured tools. Never prepare a replacement creation.
 2. **Render the body.** Call `render_provider_body` with the complete synchronized `result.md` or `report.md` and destination `pullRequest`. Publish its Markdown unchanged.
 3. **Push** only the stored entity branch.
-4. **Create the PR** by running the returned call once, adding only the rendered body as `body`. It already carries the registered tool, the entity title, the stored branch as head, and the stored target as base. Approval never changes that contract. Don't discover PRs first.
+4. **Create the PR** by running the returned call once, adding only the rendered body as `body`. It already carries the registered tool, the issue's current title, the stored branch as head, and the stored target as base. Approval never changes that contract. Don't discover PRs first.
 5. **Record.** On clear success, call `record_resource_creation` with that call's tool, arguments, and response as evidence. A rejected record changes nothing; correct the evidence and record again, never create again. It records the PR number and URL only in the local Resource IDs file; it never changes `metadata.json` or causes a follow-up commit. Use the number from the PR URL, not the database ID.
 6. **In Review.** After the PR is created or recovered, when the Deliverable has a tracker item, set native Status to In Review and, when Phase is configured, clear native Phase, reading the item after the Status write ([Phase](../phase.md#fresh-native-facts)). A local commit or push without a reviewable PR is not submission.
 
