@@ -29,7 +29,7 @@ When changing board state, read [Project handling](../../references/pr/project.m
 
 1. **Selection.** The command argument is one exact GitHub PR URL or `#NN`. Ask for a missing or ambiguous selection; never infer a PR from a tracker issue or the checked-out branch.
 2. **Context.** Call `inspect_incoming_pr_context` with `reference` set to that selection, and use its configured forge server and normalized addressing.
-3. **Board.** Read actual Project membership.
+3. **Board.** When the context's `project` is disabled, say in one line that there's no GitHub Project to queue the PR on, and move on. Never ask about a Project. Otherwise, read actual Project membership.
    - Fork-only automation may already have added the card to Backlog. Keep existing membership and Status without asking for another intake choice.
    - For explicit missing intake, ask Backlog or Todo and use `plan_incoming_pr_intake` with actual scoped evidence.
    - Never change the board just because a reference was supplied.

@@ -571,7 +571,8 @@ describe("maintainer-controlled incoming PR Project", () => {
                 },
                 mcpTools,
             )
-            assert.equal(context.project.state, "disabled")
+            if (context.project.state !== "disabled") assert.fail("Expected no Project with a Linear tracker")
+            assert.match(context.project.reason, /Skip Project intake/)
             assert.equal(context.roles.forge.config.mcpServer, "forge")
         } finally {
             f.close()

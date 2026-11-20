@@ -31,7 +31,7 @@ export default function (pi: ExtensionAPI): void {
                     parsed.reference,
                     ...(parsed.context ? ["", `Maintainer context: ${parsed.context}`] : []),
                     "",
-                    "Use the pr skill. Select the PR and inspect Project membership; ask for a missing intake choice. A reference alone is not review-start or shipping approval; this does not authorize publication, fixes, pushing, closing, or merging.",
+                    "Use the pr skill. Select the PR. When its context has a Project, inspect membership and ask for a missing intake choice; when the Project is disabled, skip intake without asking about a Project. A reference alone is not review-start or shipping approval; this does not authorize publication, fixes, pushing, closing, or merging.",
                 ].join("\n"),
                 { deliverAs: "followUp" },
             )

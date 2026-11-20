@@ -99,13 +99,13 @@ export function incomingPullRequestContext(cwd: string, reference: string, tools
     }
 }
 
-/** The incoming PR's Project board: a GitHub tracker's Project, or disabled with the reason. */
+/** The incoming PR's Project board: a GitHub tracker's Project, or disabled with the reason and what to do instead. */
 function incomingBoard(tracker: Role<TrackerConfig>, selected: IncomingPullRequest, tools: McpToolCatalog) {
     switch (tracker.state) {
         case "off":
             return {
                 state: "disabled" as const,
-                reason: `The tracker ${roleOffReason("tracker", tracker)}; forge-only inspection remains available.`,
+                reason: `The tracker ${roleOffReason("tracker", tracker)}, so there's no GitHub Project. ${NO_PROJECT_INTAKE}`,
             }
         case "on":
             break
@@ -115,7 +115,7 @@ function incomingBoard(tracker: Role<TrackerConfig>, selected: IncomingPullReque
         case "linear":
             return {
                 state: "disabled" as const,
-                reason: "The tracker isn't a GitHub Project; forge-only inspection remains available.",
+                reason: `The tracker is Linear, so there's no GitHub Project. ${NO_PROJECT_INTAKE}`,
             }
         case "github":
             return {
@@ -137,6 +137,9 @@ function incomingBoard(tracker: Role<TrackerConfig>, selected: IncomingPullReque
             }
     }
 }
+
+const NO_PROJECT_INTAKE =
+    "Skip Project intake and don't ask for a Project; forge-only inspection and review remain available."
 
 function incomingSafety() {
     return {
