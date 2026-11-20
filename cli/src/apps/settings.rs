@@ -150,7 +150,7 @@ pub static CATALOG: &[Entry] = &[
     project(
         "sandbox.presets",
         ValueType::ChoiceList {
-            options: &["mise", "rust", "node", "swift", "git"],
+            options: &crate::config::Preset::NAMES,
         },
         empty,
     ),
@@ -290,6 +290,15 @@ impl Snapshot {
         self.error = (!errors.is_empty()).then(|| errors.join("; "));
     }
 
+    /// Refuses a change to a value the apps show read-only because the file gives it options.
+    pub fn check_editable(&self, change: &Change) -> Result<(), SetError> {
+        let current = self.values.get(&(change.scope, change.change.key.as_str()));
+        match (entry(change.scope, &change.change.key), current) {
+            (Some(entry), Some(value)) if has_options(value) => Err(SetError::NotEditable { key: entry.key }),
+            (Some(_) | None, _) => Ok(()),
+        }
+    }
+
     pub fn info(&self) -> Vec<SettingInfo> {
         CATALOG
             .iter()
@@ -309,7 +318,7 @@ impl Snapshot {
                     local_choice: entry.scope.local_name().is_some(),
                     value_type: entry.value_type,
                     applies,
-                    editable: entry.editable,
+                    editable: entry.editable && !has_options(&value),
                     warning: self.warnings.get(&id).cloned(),
                     value,
                 }
@@ -407,6 +416,12 @@ pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> 
         },
         placement,
     })
+}
+
+/// A list with an entry that isn't a name, such as `presets = [{ name = "pi-claude-code", login = "keychain" }]`: the
+/// apps' list control can't show the options, so the value is edited in the file.
+fn has_options(value: &Value) -> bool {
+    value.as_array().is_some_and(|items| items.iter().any(Value::is_object))
 }
 
 /// The value has the entry's type, so the apps' controls and the file agree.
@@ -640,5 +655,37 @@ mod tests {
         let list = snapshot.info();
         assert_eq!(info(&list, Scope::Host, "roots").value, json!(["~/b"]));
         assert_eq!(info(&list, Scope::Client, "text_font").value, json!("Inter"));
+    }
+
+    /// Presets with options are edited in the file: the apps' list control would drop the options.
+    #[test]
+    fn presets_with_options_are_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::create_dir_all(&paths.global).unwrap();
+        let config = paths.global.join("config.toml");
+        std::fs::write(&config, "[sandbox]\npresets = [\"rust\", \"pi-claude-code\"]\n").unwrap();
+        let mut snapshot = Snapshot::new(&paths, &no_tools());
+        let presets = |s: &Snapshot| info(&s.info(), Scope::Project, "sandbox.presets").clone();
+        assert!(presets(&snapshot).editable);
+        let change = validate(Scope::Project, "sandbox.presets", &json!(["rust", "swift"]), None).unwrap();
+        assert!(snapshot.check_editable(&change).is_ok());
+
+        std::fs::write(
+            &config,
+            "[sandbox]\npresets = [\"rust\", { name = \"pi-claude-code\", login = \"keychain\" }]\n",
+        )
+        .unwrap();
+        snapshot.reload(&paths);
+        let shown = presets(&snapshot);
+        assert!(!shown.editable);
+        assert_eq!(
+            shown.value,
+            json!(["rust", {"login": "keychain", "name": "pi-claude-code"}])
+        );
+        assert!(matches!(
+            snapshot.check_editable(&change),
+            Err(SetError::NotEditable { .. })
+        ));
     }
 }

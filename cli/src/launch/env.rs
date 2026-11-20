@@ -137,12 +137,15 @@ pub enum Origin {
 pub enum Widening {
     /// pi's agent directory, whose runtime state the sandbox may write.
     AgentDir,
+    /// The pi-claude-code extension's Claude Code config folder, which the `pi-claude-code` preset makes writable.
+    ClaudeCodeConfigDir,
 }
 
 impl Widening {
     pub fn var(self) -> &'static str {
         match self {
             Self::AgentDir => "PI_CODING_AGENT_DIR",
+            Self::ClaudeCodeConfigDir => "PI_CLAUDE_CODE_CONFIG_DIR",
         }
     }
 }
@@ -171,6 +174,11 @@ impl SandboxEnv {
             .get(widening.var())
             .filter(|(value, _)| !value.is_empty())
             .map(|(value, origin)| (value.as_str(), origin))
+    }
+
+    /// A value that decides no grant, as pi gets it: a variable the policy only checks a widening value against.
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.vars.get(name).map(|(value, _)| value.as_str())
     }
 
     /// The plain environment pi is started with.

@@ -202,7 +202,7 @@ placeholder = "sk-ant-oat01-placeholder"   # claude checks the token's shape
   accounts and the desktop app, set `account` on the provider, or `op` asks which one.
 - **Claude subscription.** `claude setup-token` makes a long-lived token for scripts; with it in
   `CLAUDE_CODE_OAUTH_TOKEN` behind the proxy, the claude binary (and pi's claude-code models) work without reading the
-  keychain.
+  keychain. In a sandboxed session, the `pi-claude-code` preset (Sandbox, below) gives pi's `claude` what it writes.
 - **Move secrets out of `mise.local.toml`** and other files pi's environment comes from: a secret still set there
   reaches pi as a real value.
 - **Restart sessions after changing a secret.** fnox reads secrets when it starts a session; a running session keeps
@@ -229,8 +229,9 @@ placeholder = "sk-ant-oat01-placeholder"   # claude checks the token's shape
 > the keychain. So does the source update of a worker's creation, which runs your hooks in that sandbox (a deletion
 > leaves the source as it is, with a warning): remove
 > `~/Library/Keychains` (and any folder containing it, like `~/Library`) from `[sandbox] read` and `write` in your
-> configuration (the global `config.toml` or a `config.local.toml`; `piton config check` lists the files). With the
-> Claude token behind the proxy, the sandbox doesn't need it. Git over HTTPS authenticates through the keychain, so
+> configuration (the global `config.toml` or a `config.local.toml`; `piton config check` lists the files), and the
+> `pi-claude-code` preset's `login = "keychain"`; the refusal names what opened it. With the Claude token behind the
+> proxy, the sandbox doesn't need it. Git over HTTPS authenticates through the keychain, so
 > with it closed, the sandbox's Git (an agent's, and worker updates) fetches over SSH.
 
 Limits:
@@ -318,7 +319,8 @@ write_file = []       # writable files: exactly each path
 read = []             # lift a built-in credential deny for a path (readable then; writable with write)
 connect = []          # sockets, ports, and hosts (below)
 presets = []          # "mise", "rust", "node", "swift": toolchain caches and state;
-                      # "git": agents may write Git's hooks and configuration (see below)
+                      # "git": agents may write Git's hooks and configuration (see below);
+                      # "pi-claude-code": what pi's Claude Code needs (see below)
 deny = []             # paths closed like the credentials: no read, write, or connect
 ```
 
@@ -328,6 +330,7 @@ deny = []             # paths closed like the credentials: no read, write, or co
 | --- | --- |
 | `/path`, `~/path`, `$VAR/path` | Unix sockets at and below the path; `/` is every socket |
 | `localhost:PORT` | a port on this Mac |
+| `localhost:*` | every port on this Mac: every local service (databases, dev servers) too |
 | `*:PORT` | a port on any host |
 | `*` | any host, any port |
 | `github.com`, `github.com:22`, `*.npmjs.org`, `10.0.0.5` | a named host or address, any port or one |
@@ -338,7 +341,7 @@ they're open whatever `connect` says. A `connect` entry never reopens a credenti
 credential deny.
 
 The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `commands` (below), and the `git`
-preset are accepted in the global `config.toml` or any `config.local.toml`, never in a project's `config.toml`, which
+and `pi-claude-code` presets are accepted in the global `config.toml` or any `config.local.toml`, never in a project's `config.toml`, which
 travels with the repository: a repository can't open the sandbox for whoever clones it. `write`, `write_file`,
 toolchain presets, and `deny` may be set anywhere.
 
@@ -348,7 +351,9 @@ Hooks run in the sandbox either way.
 
 Paths are absolute, `~/...`, or `$VAR/...` from the daemon's login-shell environment (never the workspace's).
 
-A preset is its name. No preset lets the sandbox write what the host runs or trusts (installed tools,
+A preset is its name, or a table with its name and options (`{ name = "pi-claude-code", login = "keychain" }`); a
+nearer file's options win one by one. The apps show a preset list with options read-only: edit it in the file. No
+preset lets the sandbox write what the host runs or trusts (installed tools,
 `~/.cargo/bin`, rustup's toolchains, mise's trusted configs). The `mise` preset writes mise's cache and its install
 bookkeeping; `mise install` itself is asked about when the sandbox blocks it (below), or granted per command.
 
@@ -360,6 +365,44 @@ presets = ["mise", "rust", "node"]
 ```
 
 And per project, in its `.piton/config.toml`, what its builds need, e.g. `presets = ["swift"]`.
+
+#### pi's Claude Code
+
+The pi-claude-code extension runs the `claude` CLI for every Claude turn. `claude` writes its state in its config
+folder and its logs in `~/Library/Caches/claude-cli-nodejs`, and signs in. Don't grant it the folder the interactive
+Claude Code uses (`~/.claude`, or `$CLAUDE_CONFIG_DIR`): that one loads hooks, plugins, and MCP servers, so an agent
+that writes there runs code on the host the next time you start Claude Code. Give pi's `claude` a folder of its own,
+signed in with a token:
+
+1. Set `PI_CLAUDE_CODE_CONFIG_DIR` to a new folder (e.g. `~/.config/pi/claude`) in your shell or global mise
+   configuration. The extension passes it to `claude` as `CLAUDE_CONFIG_DIR`.
+2. Run `claude setup-token` and put the token in `CLAUDE_CODE_OAUTH_TOKEN` behind fnox (above), or in pi's
+   environment. A token wins over a saved login.
+3. In the global `config.toml` or a `config.local.toml`:
+
+   ```toml
+   [sandbox]
+   presets = ["pi-claude-code"]
+   ```
+
+4. Keep the keychain and the interactive folder out of `[sandbox] read` and `write`.
+
+The preset makes writable that folder and its lock beside it (`<folder>.lock`), the log cache, and connecting to any
+port on this Mac (`localhost:*`; the extension's relay listens on a random one, and it reaches Anthropic from pi's
+process). The folder is read like pi's agent directory: from your shell's environment, a file the agent can't write,
+or, when the workspace's own `mise.toml` sets it, only inside the checkout.
+
+`login = "keychain"` (`presets = [{ name = "pi-claude-code", login = "keychain" }]`) signs in with a
+`claude auth login` saved in the keychain instead: the sandbox can then read the keychain. Run `claude auth login`
+with `CLAUDE_CONFIG_DIR` set to the same folder; each folder has its own keychain entry. Refused while fnox applies,
+since the sandbox could then run `fnox get`.
+
+The session still starts, with a warning after the conversation (and a pi.nvim notification), when the folder isn't
+set, is the interactive Claude Code's, would open what the sandbox closes (your home, a configuration level, a
+credential, pi's agent directory), or was set by a file a sandboxed session can write and leads out of the checkout;
+and when the token login finds no `CLAUDE_CODE_OAUTH_TOKEN` in pi's environment or fnox's proxy rules. `claude`'s
+writes to a folder the preset didn't open are blocked and asked about like any other. `piton sandbox show` prints the
+same warnings.
 
 `piton sandbox why PATH [--write | --connect] [--workspace DIR]` says whether a sandboxed pi there may read, write, or
 connect to PATH, and which rule decides: built in, or an entry from a profile or the file that lists it.

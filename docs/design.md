@@ -871,7 +871,7 @@ what it lists. Every list entry keeps where it came from (a profile, or the file
 rule's source (`Source::Config` and `Source::Preset` with a `Provenance`), so `piton sandbox why` names it. Each Task
 that closes more of the base (sockets #248, apps #249, the network #228) adds the entries that reopen it to the
 profiles. `connect` is typed at parse time (`Connect`: a socket path, or a `NetworkTarget`: `localhost:PORT`,
-`*:PORT`, `*`, a named host): socket entries become connect rules; network entries are carried in the policy
+`localhost:*`, `*:PORT`, `*`, a named host): socket entries become connect rules; network entries are carried in the policy
 (`Policy::network`) for the proxy.
 
 **Permissions and the sandbox are separate layers.** `[permissions]` decides whether the agent may make a call,
@@ -890,10 +890,22 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    `/` included) reopens a credential, a user deny, or the daemon's sockets. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
    (the Go build cache is linked straight into host builds), so a writable cache would run sandbox-written code on
    the host. Each preset (`mise`, `rust`, `node`, `swift`) grants one toolchain's caches and state as an informed
-   opt-in, documented as such. A preset is its name. No preset writes what the host executes or trusts (a unit test
-   lists those paths): `mise` writes its cache and install bookkeeping, never its installed tools or trusted configs;
-   an install that needs them is asked about ("Asking when the sandbox blocks").
-   The `git` preset grants no path: it leaves out the Git rule (6).
+   opt-in, documented as such. A preset is its name, or a table with its name and its options (`Preset` parses
+   both; options merge per option across levels, nearest wins, and the preset's provenance is the file that set an
+   option, else the first that lists it). No preset writes what the host executes or trusts (a unit test lists those
+   paths): `mise` writes its cache and install bookkeeping, never its installed tools or trusted configs; an install
+   that needs them is asked about ("Asking when the sandbox blocks"). A preset's fixed entries
+   (`policy::preset_grants`: `write`, `write_file`, `read`, `connect`) join the lists of the same names, named after
+   the preset. The `git` preset grants no path: it leaves out the Git rule (6). The `pi-claude-code` preset (the
+   user's own files only) grants the pi-claude-code extension's `claude`: the folder `PI_CLAUDE_CODE_CONFIG_DIR`
+   names and its `<folder>.lock`, decided like pi's agent directory (accepted from the daemon's environment or a
+   file the agent can't write, else only inside the checkout; never overlapping a configuration level, the daemon's
+   state, a denied path, pi's agent directory, or the interactive Claude Code's folder), its log cache
+   `~/Library/Caches/claude-cli-nodejs` (which doesn't follow `CLAUDE_CONFIG_DIR`), `connect` `localhost:*` for the
+   extension's relay, and with `login = "keychain"` a `read` of `~/Library/Keychains`. A folder it won't open, or a
+   token login with no `CLAUDE_CODE_OAUTH_TOKEN` in pi's environment or fnox's rules, starts the session with a
+   warning (`LaunchWarning`) instead of refusing it; resolution builds the policy without the folder first and judges
+   the setting file against that.
 3. **Credentials:** nono's deny groups (`deny_credentials`, keychains, browser data, macOS private data, shell
    history and rc files), vendored verbatim in `nono-deny-groups.json` at the `nono` version; `mise run
    cli:nono-policy-check` reports upstream changes, and a test fails when the crate is bumped without re-vendoring.
