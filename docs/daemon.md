@@ -91,6 +91,7 @@ roots = []                # where the apps may browse and start sessions; none u
 favorites = []
 default_attach_mode = "sandbox"   # mode for `piton attach` when none is given
 empty_grace_ms = 10000    # stop a pi with no messages this long after its last client leaves
+confirmation_timeout_ms = 600000  # a question about a blocked command waits this long; then it isn't run
 logging = "info"          # host logging level ("info" or "debug"); `piton logging` and the Mac app switch it
                           # until it expires or the daemon restarts
 keep_awake = true         # hold the Mac awake while sessions are live; toggled from the apps
@@ -388,7 +389,7 @@ and you're asked in the apps or pi.nvim:
 - **Deny:** it stays failed.
 - **Allow this command, or a pattern, in this project or everywhere:** saves a per-command grant, and runs it.
 
-No answer in 10 minutes: it doesn't run. The agent can ask, never approve. `osascript` is never offered, and neither is
+No answer within `confirmation_timeout_ms` (10 minutes by default): it doesn't run. The agent can ask, never approve. `osascript` is never offered, and neither is
 `open` of a file or app the sandbox could have written; `open` of a link says where it goes.
 
 Per-command grants, in the global `config.toml` or a `config.local.toml`:
@@ -409,7 +410,8 @@ rules still decide first whether it runs at all.
 
 When something other than a command is blocked (an MCP server, an extension, pi), you're asked once per process and
 path whether to add the entry that lifts it (`write_file`, `read`, or `connect`) in this project or everywhere, which
-restarts the session. What the floor or your `deny` blocks is only shown, never offered.
+restarts the session. Every blocked process is brought to you, one question at a time. What the floor or your `deny`
+blocks, and what no entry can lift, is shown as a notice instead.
 
 Known limits:
 

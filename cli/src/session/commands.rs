@@ -25,9 +25,6 @@ use crate::{
     launch::{Env, sandbox::grant::CommandPolicies},
 };
 
-/// How long the block question waits for an answer.
-pub const ANSWER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
 /// A bash call pi is running.
 #[derive(Debug, Clone)]
 pub struct BashCall {
@@ -85,9 +82,6 @@ pub struct ProcessQuestion {
     pub lift: crate::launch::sandbox::grant::Lift,
 }
 
-/// How many process questions wait behind the one showing.
-const PROCESS_WAITING: usize = 8;
-
 impl ProcessBlocks {
     pub fn asking(&self, id: &str) -> bool {
         self.asking.as_ref().is_some_and(|q| q.id == id)
@@ -99,10 +93,9 @@ impl ProcessBlocks {
             .insert((process.to_string(), operation.to_string(), target.to_string()))
     }
 
+    /// Every blocked process is asked about, in order: none is dropped.
     pub fn queue(&mut self, question: ProcessQuestion) {
-        if self.waiting.len() < PROCESS_WAITING {
-            self.waiting.push_back(question);
-        }
+        self.waiting.push_back(question);
     }
 
     /// The next question to show, when none is showing.
@@ -283,33 +276,54 @@ impl Calls {
         Ok((call, tag))
     }
 
-    /// A command the user typed: a number of its own, kept like a call's so its refusals are noted (and not offered).
-    fn number_typed(&mut self, id: &str) -> String {
-        self.next += 1;
-        let number = self.next;
-        self.end(
-            id.to_string(),
-            BashCall {
-                command: String::new(),
-                outside_sandbox: false,
-                used: true,
-                refusals: Vec::new(),
-                number,
-            },
-        );
-        format!("{}-{number}", self.tag_prefix)
+    /// The tag of a command the user typed (`<session tag>-u`): a call's sandbox, so its refusals aren't taken for a
+    /// blocked process; the user saw the command fail, and it's never offered to run again.
+    fn typed_tag(&self) -> String {
+        format!("{}-u", self.tag_prefix)
     }
 
-    /// The call a sandbox tag names (`<session tag>-<number>`), running or recently ended. `None` for the session's
-    /// own tag (pi's sandbox) or another session's.
-    pub fn by_tag(&self, tag: &str) -> Option<String> {
-        let number: u64 = tag.strip_prefix(&self.tag_prefix)?.strip_prefix('-')?.parse().ok()?;
-        self.calls
-            .iter()
-            .chain(self.ended.iter().map(|(id, call)| (id, call)))
-            .find(|(_, call)| call.number == number)
-            .map(|(id, _)| id.clone())
+    /// Whose sandbox a tag names: a call's (running or recently ended), a typed command's, or pi's own.
+    pub fn owner(&self, tag: &str) -> TagOwner {
+        if tag == self.tag_prefix {
+            return TagOwner::Session;
+        }
+        if tag == self.typed_tag() {
+            return TagOwner::Typed;
+        }
+        let Some(number) = tag
+            .strip_prefix(&self.tag_prefix)
+            .and_then(|t| t.strip_prefix('-'))
+            .and_then(|n| n.parse::<u64>().ok())
+        else {
+            return TagOwner::Other;
+        };
+        let call = Some(number).and_then(|number| {
+            self.calls
+                .iter()
+                .chain(self.ended.iter().map(|(id, call)| (id, call)))
+                .find(|(_, call)| call.number == number)
+                .map(|(id, _)| id.clone())
+        });
+        match call {
+            Some(id) => TagOwner::Call(id),
+            None => TagOwner::GoneCall,
+        }
     }
+}
+
+/// Whose sandbox a refusal came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagOwner {
+    /// pi's own sandbox: an MCP server, an extension, pi.
+    Session,
+    /// A bash call the session still knows.
+    Call(String),
+    /// A bash call ended long enough ago to be forgotten, still running something (a background job).
+    GoneCall,
+    /// A command the user typed.
+    Typed,
+    /// Not this session's.
+    Other,
 }
 
 /// What the daemon does with a request, before any question: run it (at the session's policy or a grant), ask, or
@@ -345,8 +359,7 @@ impl Commands {
             if request.rerun {
                 return not_run("a command you type runs in the sandbox".into());
             }
-            let tag = calls.number_typed(&request.call_id);
-            return self.run(request, &self.policies.launch, &tag, RunEnv::Request);
+            return self.run(request, &self.policies.launch, &calls.typed_tag(), RunEnv::Request);
         }
         let (call, tag) = match calls.take(request) {
             Ok(taken) => taken,
@@ -361,7 +374,7 @@ impl Commands {
                         Ok(analysis) => analysis.commands,
                         Err(e) => return not_run(e.to_string()),
                     };
-                    match open::check(&nodes, &request.cwd, &self.policies.launch, open::default_app) {
+                    match open::check(&nodes, &request.cwd, &self.policies.launch) {
                         OpenCheck::Refused { reason } => not_run(reason),
                         OpenCheck::Ask { note } => First::Ask {
                             refusals,
@@ -608,16 +621,17 @@ mod tests {
         assert_eq!(plain.policy.tag, "7-ab-2");
         assert_eq!(plain.policy.rules, c.policies.launch.rules, "the session's own policy");
         assert_eq!(plain.env["FROM"], "request", "pi's shell environment");
-        assert_eq!(calls.by_tag("7-ab-2").as_deref(), Some("2"));
-        assert_eq!(calls.by_tag("7-ab"), None, "pi's own sandbox");
-        assert_eq!(calls.by_tag("7-abc-2"), None);
+        assert_eq!(calls.owner("7-ab-2"), TagOwner::Call("2".into()));
+        assert_eq!(calls.owner("7-ab"), TagOwner::Session, "pi's own sandbox");
+        assert_eq!(calls.owner("7-ab-99"), TagOwner::GoneCall, "a call long forgotten");
+        assert_eq!(calls.owner("7-abc-2"), TagOwner::Other);
 
         let typed = run(c.decide(&mut calls, &request(&dir, "user:1", "ls ~", false)));
         assert_eq!(
             typed.policy.rules, c.policies.launch.rules,
             "a typed command is never widened"
         );
-        assert_eq!(calls.by_tag(&typed.policy.tag).as_deref(), Some("user:1"));
+        assert_eq!(calls.owner(&typed.policy.tag), TagOwner::Typed);
         assert_eq!(
             kind(&c.decide(&mut calls, &request(&dir, "user:2", "ls", true))),
             "refused"

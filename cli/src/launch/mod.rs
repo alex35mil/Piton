@@ -223,19 +223,7 @@ pub async fn prepare_sandbox(
         Some(_) => sandbox::grant::Credentials::Floor,
         None => sandbox::grant::Credentials::Liftable,
     };
-    let commands =
-        sandbox::grant::command_policies(
-            resolved,
-            &resolution.policy,
-            credentials,
-            widened,
-            |policy| match &proxy {
-                Some(proxy) => proxy
-                    .check_sandbox(policy, &config.paths.home)
-                    .map_err(|e| format!("refused while fnox is on: {e}")),
-                None => Ok(()),
-            },
-        );
+    let commands = sandbox::grant::command_policies(resolved, &resolution.policy, credentials, widened);
     Ok(Sandboxed {
         env,
         resolution,

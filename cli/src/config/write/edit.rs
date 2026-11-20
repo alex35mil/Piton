@@ -155,46 +155,36 @@ pub fn append_table(
     validate: &dyn Fn(&str, &Path) -> Result<(), ConfigError>,
 ) -> Result<(), EditError> {
     let target = link_target(path)?;
-    for _ in 0..5 {
-        let before = read(&target)?;
-        let mut doc = document(before.as_deref().unwrap_or(""), path)?;
-        let Some((last, tables)) = key.split_last() else {
-            return Ok(());
-        };
-        let mut table: &mut Table = doc.as_table_mut();
-        for part in tables {
-            let entry = table.entry(part).or_insert_with(|| {
-                let mut new = Table::new();
-                new.set_implicit(true);
-                Item::Table(new)
-            });
-            table = entry.as_table_mut().ok_or_else(|| EditError::NotATable {
-                path: path.to_path_buf(),
-                key: key.join("."),
-            })?;
-        }
-        let array = table
-            .entry(last)
-            .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
-            .as_array_of_tables_mut()
-            .ok_or_else(|| EditError::NotATable {
-                path: path.to_path_buf(),
-                key: key.join("."),
-            })?;
-        let mut entry = entry.clone();
-        entry.set_position(None);
-        entry.decor_mut().set_prefix("\n");
-        array.push(entry);
-        let new = doc.to_string().trim_start_matches('\n').to_string();
-        validate(&new, path)?;
-        if read(&target)? != before {
-            continue;
-        }
-        return replace(&target, &new);
-    }
-    Err(EditError::Busy {
+    let before = read(&target)?;
+    let mut doc = document(before.as_deref().unwrap_or(""), path)?;
+    let Some((last, tables)) = key.split_last() else {
+        return Ok(());
+    };
+    let not_a_table = || EditError::NotATable {
         path: path.to_path_buf(),
-    })
+        key: key.join("."),
+    };
+    let mut table: &mut Table = doc.as_table_mut();
+    for part in tables {
+        let entry = table.entry(part).or_insert_with(|| {
+            let mut new = Table::new();
+            new.set_implicit(true);
+            Item::Table(new)
+        });
+        table = entry.as_table_mut().ok_or_else(not_a_table)?;
+    }
+    let array = table
+        .entry(last)
+        .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .ok_or_else(not_a_table)?;
+    let mut entry = entry.clone();
+    entry.set_position(None);
+    entry.decor_mut().set_prefix("\n");
+    array.push(entry);
+    let new = doc.to_string().trim_start_matches('\n').to_string();
+    validate(&new, path)?;
+    replace(&target, &new)
 }
 
 /// Several changes to one file, written together: one read-modify-write, checked as a whole.

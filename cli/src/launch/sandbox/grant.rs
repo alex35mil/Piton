@@ -25,8 +25,8 @@ pub struct CommandPolicies {
     pub all: Policy,
     /// Whether credentials are floor (fnox is on).
     pub credentials: Credentials,
-    /// Each entry in matching order, with its policy, or why it can't be granted (a narrowed grant that would read the
-    /// keychain while fnox is on).
+    /// Each entry in matching order, with its policy, or why it couldn't be resolved (a narrowed grant naming a `$VAR`
+    /// that isn't set).
     pub entries: Vec<(Listed<CommandGrant>, Result<Policy, String>)>,
 }
 
@@ -70,13 +70,12 @@ pub fn widened_config(config: &LaunchConfig, lists: &GrantLists, file: &Path) ->
 }
 
 /// The policies for every entry of `config`: `all` from `policy`, and each narrowed grant from `resolve` (the launch's
-/// resolution with a widened configuration). `check` refuses a widened policy the floor forbids (fnox's checks).
+/// resolution with a widened configuration).
 pub fn command_policies(
     config: &LaunchConfig,
     policy: &Policy,
     credentials: Credentials,
     resolve: impl Fn(&LaunchConfig) -> Result<Policy, String>,
-    check: impl Fn(&Policy) -> Result<(), String>,
 ) -> CommandPolicies {
     let widened = all(policy, credentials);
     let entries = config
@@ -86,9 +85,7 @@ pub fn command_policies(
         .map(|entry| {
             let policy = match &entry.value.grant {
                 Grant::All(AllGrant::All) => Ok(widened.clone()),
-                Grant::Lists(lists) => {
-                    resolve(&widened_config(config, lists, &entry.file)).and_then(|p| check(&p).map(|()| p))
-                }
+                Grant::Lists(lists) => resolve(&widened_config(config, lists, &entry.file)),
             };
             (entry.clone(), policy)
         })

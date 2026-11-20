@@ -5,7 +5,7 @@
 //! - `open https://…`: a plain confirmation; the browser opens a page.
 //! - `open` of a file or app the launch's sandbox could have written: refused. The agent could have put anything there,
 //!   and macOS would run it unsandboxed.
-//! - `open` of another URL scheme: the question names the app macOS would hand it to.
+//! - `open` of another URL scheme: the question says an app handles it.
 //! - Anything else `open` takes (an app by name, a file the sandbox can't write): the usual question, saying what opens.
 
 use std::path::{Path, PathBuf};
@@ -24,12 +24,7 @@ pub enum OpenCheck {
 }
 
 /// Checks a command's nodes (as matched) before it's offered to run outside the sandbox.
-pub fn check(
-    commands: &[String],
-    cwd: &Path,
-    policy: &Policy,
-    default_app: impl Fn(&str) -> Option<String>,
-) -> OpenCheck {
+pub fn check(commands: &[String], cwd: &Path, policy: &Policy) -> OpenCheck {
     let mut notes = Vec::new();
     for command in commands {
         let words: Vec<&str> = command.split_whitespace().collect();
@@ -44,12 +39,9 @@ pub fn check(
             }
             "open" => {
                 for target in words[1..].iter().copied().filter(|w| !w.starts_with('-')) {
-                    match classify(target, cwd, policy, &default_app) {
+                    match classify(target, cwd, policy) {
                         Target::Web => notes.push(format!("opens {target} in your browser")),
-                        Target::Scheme { app } => notes.push(format!(
-                            "hands {target} to {}",
-                            app.unwrap_or_else(|| "the app registered for it".into())
-                        )),
+                        Target::Scheme => notes.push(format!("opens {target} in the app registered for it")),
                         Target::Writable(path) => {
                             return OpenCheck::Refused {
                                 reason: format!(
@@ -74,12 +66,12 @@ pub fn check(
 
 enum Target {
     Web,
-    Scheme { app: Option<String> },
+    Scheme,
     Writable(PathBuf),
     Other,
 }
 
-fn classify(target: &str, cwd: &Path, policy: &Policy, default_app: &impl Fn(&str) -> Option<String>) -> Target {
+fn classify(target: &str, cwd: &Path, policy: &Policy) -> Target {
     let lower = target.to_ascii_lowercase();
     if lower.starts_with("https://") || lower.starts_with("http://") {
         return Target::Web;
@@ -91,32 +83,13 @@ fn classify(target: &str, cwd: &Path, policy: &Policy, default_app: &impl Fn(&st
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     {
-        return Target::Scheme {
-            app: default_app(scheme),
-        };
+        return Target::Scheme;
     }
     let path = crate::agent::canonical_target(&cwd.join(target));
     match policy.decide(&path, Access::Write).allowed {
         true => Target::Writable(path),
         false => Target::Other,
     }
-}
-
-/// The app macOS hands a URL scheme to, from Launch Services' record of the user's handlers; `None` when it can't tell.
-pub fn default_app(scheme: &str) -> Option<String> {
-    let plist = crate::config::home()
-        .join("Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist");
-    let out = std::process::Command::new("/usr/bin/plutil")
-        .args(["-extract", "LSHandlers", "json", "-o", "-"])
-        .arg(plist)
-        .output()
-        .ok()?;
-    let handlers: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).ok()?;
-    handlers
-        .iter()
-        .find(|h| h.get("LSHandlerURLScheme").and_then(serde_json::Value::as_str) == Some(scheme))
-        .and_then(|h| h.get("LSHandlerRoleAll").and_then(serde_json::Value::as_str))
-        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -139,8 +112,7 @@ mod tests {
     }
 
     fn check_one(command: &str) -> OpenCheck {
-        let apps = |scheme: &str| (scheme == "slack").then(|| "com.tinyspeck.slackmacgap".to_string());
-        check(&[command.to_string()], Path::new("/w"), &policy("/w"), apps)
+        check(&[command.to_string()], Path::new("/w"), &policy("/w"))
     }
 
     #[test]
@@ -159,10 +131,9 @@ mod tests {
         assert_eq!(
             check_one("open slack://channel"),
             OpenCheck::Ask {
-                note: "hands slack://channel to com.tinyspeck.slackmacgap".into()
+                note: "opens slack://channel in the app registered for it".into()
             }
         );
-        assert!(matches!(check_one("open zoommtg://x"), OpenCheck::Ask { note } if note.contains("registered")));
         assert!(
             matches!(check_one("open ./build/App.app"), OpenCheck::Refused { reason } if reason.contains("/w/build/App.app"))
         );

@@ -1054,8 +1054,7 @@ grant lists; the user's own files only): a matching call runs at that grant from
 daemon matches with a Rust port of the permissions extension's Bash analysis and glob (`agent/command.rs`), held
 identical by one fixture file run by both test suites (`pi/tests/fixtures/bash-matching.json`): every command node must
 match the same entry, and a command that writes a file through a redirect gets no grant. A narrowed grant's policy is
-the launch's resolved again with the grant's lists added, so it never reaches the floor either; with fnox on, one that
-would read the keychain or change a fnox file is refused.
+the launch's resolved again with the grant's lists added, so it never reaches the floor either.
 
 **The block question.** The agent asks for a rerun with `outside_sandbox: true` (and a `reason`) after a command
 failed in the sandbox. The daemon asks through pi's dialog record (`select`), inserted like the protected-write
@@ -1064,11 +1063,11 @@ agent's reason, and the refusals the kernel recorded for the call's last run. Op
 runs again, at `all`), deny, allow this command or an edited pattern (an `input` prefilled with the command and
 subcommand plus ` *`), in this project (its source checkout's `.piton/config.local.toml`) or everywhere (the global
 `config.toml`). Persisting appends one `[[sandbox.commands]]` entry with `grant = "all"`; new sessions use it. One
-question at a time per session, shared with protected writes; no answer in 10 minutes, a dismissal, or the run ending
-means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
+question at a time per session, shared with protected writes; no answer within `confirmation_timeout_ms` (host
+configuration, 10 minutes by default), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
 (`agent/open.rs`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
-scheme names the app macOS hands it to (Launch Services' handler record); a file or app the sandbox could have written
-is refused, since macOS would run it unsandboxed.
+scheme says it opens in the app registered for it; a file or app the sandbox could have written is refused, since macOS
+would run it unsandboxed.
 
 **Blocks with nothing to rerun** (an MCP server, an extension, pi itself). Every deny Piton emits carries
 `(with message "piton-<tag>")`: `<session>-<random>` for pi's sandbox, `<session>-<random>-<n>` for a call's. A
@@ -1076,7 +1075,9 @@ leading tagged `(deny file-write*)` labels writes outside every grant (nono's ow
 asks nono for no write grants, so every later grant still wins), and the keychain's Mach denies are repeated tagged.
 The daemon runs one `log stream` (outside any sandbox; `log` refuses inside one) for the Sandbox kernel extension's
 tagged reports and routes each to its session by tag (`daemon/refusals.rs`). A call's tag: kept for that call (shown
-when it's rerun). The session's tag: offered once per process, operation, and target as the narrowest `[sandbox]`
+when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fail. The session's tag, or a call
+forgotten since (its background job): a blocked process, every one brought to the user, in order, one question at a
+time, and each process, operation, and target once. It's offered as the narrowest `[sandbox]`
 entry that lifts it (`write_file`, `read`, `connect`, or `read` of `~/Library/Keychains` for the keychain's services),
 saved in this project or everywhere, with a session restart (stopped and resumed from its file). Refusals by the floor
 or the user's `deny`, and operations no entry lifts, are logged and shown as a notice, never offered. macOS reports

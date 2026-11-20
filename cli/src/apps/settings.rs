@@ -113,6 +113,9 @@ pub static CATALOG: &[Entry] = &[
         |c| json!(c.default_attach_mode),
     ),
     host("empty_grace_ms", Integer, Live, |c| json!(c.empty_grace_ms)),
+    host("confirmation_timeout_ms", Integer, Live, |c| {
+        json!(c.confirmation_timeout_ms)
+    }),
     Entry {
         key: "socket",
         scope: Scope::Host,

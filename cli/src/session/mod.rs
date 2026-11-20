@@ -439,7 +439,6 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         protected_write: None,
         commands,
         calls: commands::Calls::new(&session_tag),
-        session_tag: session_tag.clone(),
         question: None,
         process: commands::ProcessBlocks::default(),
         shared,
@@ -530,10 +529,8 @@ struct SessionTask {
     protected_write: Option<PendingWrite>,
     /// What approved commands run with: sandboxed sessions only.
     commands: Option<commands::Commands>,
-    /// The bash calls pi is running.
+    /// The bash calls pi is running, and whose sandbox each tag is.
     calls: commands::Calls,
-    /// pi's sandbox's tag; each call's is `<this>-<number>`.
-    session_tag: String,
     /// The block question waiting for the user: one per session, sharing the slot with protected writes.
     question: Option<commands::PendingQuestion>,
     /// A blocked process's question (an MCP server, an extension), and the refusals offered already.
@@ -1247,7 +1244,7 @@ impl SessionTask {
                     request,
                     tag,
                     reply,
-                    deadline: Instant::now() + commands::ANSWER_TIMEOUT,
+                    deadline: Instant::now() + Duration::from_millis(self.config.confirmation_timeout_ms),
                 });
                 self.on_pi_line(record.to_string());
             }
@@ -1335,12 +1332,15 @@ impl SessionTask {
     fn on_refusal(&mut self, refusal: crate::daemon::Refusal) {
         use crate::launch::sandbox::grant::{self, Credentials, NoLift};
         let summary = refusal.summary();
-        // A call's sandbox: kept for that call. A call that's long gone: nothing to do with it.
-        if refusal.tag != self.session_tag {
-            if let Some(id) = self.calls.by_tag(&refusal.tag) {
+        // A call's sandbox: kept for that call, shown when it's asked to run again. A typed command: the user saw it fail
+        // and it's never rerun. pi's own sandbox, or a call's background job outliving it: a blocked process, asked about.
+        match self.calls.owner(&refusal.tag) {
+            commands::TagOwner::Call(id) => {
                 self.calls.note(&id, &summary);
+                return;
             }
-            return;
+            commands::TagOwner::Typed | commands::TagOwner::Other => return,
+            commands::TagOwner::Session | commands::TagOwner::GoneCall => {}
         }
         let Some(commands) = &self.commands else { return };
         let key = lock(&self.shared).key;

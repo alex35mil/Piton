@@ -27,6 +27,9 @@ pub struct HostFile {
     pub default_attach_mode: Option<crate::launch::LaunchMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_grace_ms: Option<u64>,
+    /// How long a question about a blocked command waits for an answer before the command isn't run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_timeout_ms: Option<u64>,
     /// Hold the Mac awake while sessions are live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_awake: Option<bool>,
@@ -170,6 +173,7 @@ impl HostFile {
         nearer(&mut self.logging, n.logging);
         nearer(&mut self.default_attach_mode, n.default_attach_mode);
         nearer(&mut self.empty_grace_ms, n.empty_grace_ms);
+        nearer(&mut self.confirmation_timeout_ms, n.confirmation_timeout_ms);
         nearer(&mut self.keep_awake, n.keep_awake);
         nearer(&mut self.pi.command, n.pi.command);
         nearer(&mut self.pi.args, n.pi.args);
