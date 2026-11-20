@@ -145,7 +145,7 @@ export function setWorkflowPhase(
     parse(SetWorkflowPhaseValidator, input)
     assertEntityTracker(status, tracker)
     if (input.lifecycle !== "inProgress") throw new Error("setting workflow Phase requires fresh native In Progress")
-    const phaseMutation = planPhaseMutation(
+    const mutation = planPhaseMutation(
         tracker,
         phaseItem(status, "set workflow Phase"),
         input.phase,
@@ -153,7 +153,7 @@ export function setWorkflowPhase(
         input.native,
         resolveTool,
     )
-    return { status: { ...status, phase: input.phase }, changed: status.phase !== input.phase, phaseMutation }
+    return { status: { ...status, phase: input.phase }, metadataChanged: status.phase !== input.phase, ...mutation }
 }
 
 /** `phase` is the entity's metadata Phase: absent until set, and always absent without configured Phase. */
@@ -253,15 +253,25 @@ export function phaseItem(status: EntityStatus, operation: string): PhaseItem {
     return { entity: status.entity, tracker: requireTrackerItem(status.tracker, operation) }
 }
 
-/** Only a changed assignment carries the call that applies it; an unchanged one has nothing to run. */
-type Assignment<T> = (T & { changed: false }) | (T & { changed: true; mutation: PhaseProviderCall })
+/** The absolute native Phase assignment: a GitHub field value, or a Linear issue's or Project's full label set. */
+export type PhaseAssignment =
+    | { provider: "github"; field: string; value: string | null }
+    | { provider: "linear"; labels: string[] }
 
+/**
+ * Only a changed native assignment carries the call that applies it, as top-level `mutation` like every other
+ * prepared provider call; an unchanged one has nothing to run.
+ */
 export type PhaseMutation =
-    | Assignment<{ provider: "github"; field: string; value: string | null }>
-    | Assignment<{ provider: "linear"; labels: string[] }>
+    | { assignment: PhaseAssignment; nativeChanged: false }
+    | { assignment: PhaseAssignment; nativeChanged: true; mutation: PhaseProviderCall }
 
-function assignment<T extends object>(base: T, changed: boolean, mutation: () => PhaseProviderCall): Assignment<T> {
-    return changed ? { ...base, changed: true, mutation: mutation() } : { ...base, changed: false }
+function phaseMutation(
+    assignment: PhaseAssignment,
+    changed: boolean,
+    mutation: () => PhaseProviderCall,
+): PhaseMutation {
+    return changed ? { assignment, nativeChanged: true, mutation: mutation() } : { assignment, nativeChanged: false }
 }
 
 export function planPhaseMutation(
@@ -292,7 +302,7 @@ export function planPhaseMutation(
         const value = projected === null ? null : native.field.values[projected]
         const field = native.field.field
         const { repository, external } = item.tracker
-        return assignment({ provider: "github" as const, field, value }, facts.current !== value, () =>
+        return phaseMutation({ provider: "github", field, value }, facts.current !== value, () =>
             call("projects_write", {
                 method: "update_project_item",
                 owner: tracker.project.owner,
@@ -318,7 +328,7 @@ export function planPhaseMutation(
         if (projected !== null) labels.push(group.values[projected])
         const current = new Set(facts.applied)
         const changed = labels.length !== current.size || labels.some((id) => !current.has(id))
-        return assignment({ provider: "linear" as const, labels }, changed, () => {
+        return phaseMutation({ provider: "linear", labels }, changed, () => {
             // Only `id` and the full label set: the write changes nothing but labels.
             switch (record.resource) {
                 case "project":
