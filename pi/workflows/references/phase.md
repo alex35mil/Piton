@@ -20,7 +20,7 @@ Phase is optional: a GitHub Project field, or Linear label groups, chosen at [se
 | Implementation and its corrections, including commit steps | In Progress | Execution | Execution |
 | Final review, and the stop with the result | In Progress | Self-Review | Self-Review |
 | PR created, or revisions published, for external human review | In Review | keep last | absent |
-| Corrections on submitted work | In Progress | Execution | Execution |
+| Corrections after Self-Review, submitted or not | In Progress | Execution | Execution |
 | Final review of those corrections | In Progress | Self-Review | Self-Review |
 | Confirmed completion or cancellation | Done, Canceled | keep last | absent |
 
