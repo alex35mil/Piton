@@ -27,7 +27,7 @@ Related files, read when the step is reached:
    - Pass the actual provider evidence unchanged to review tools.
    - Review and merge address the base repository; contributor-branch writes address the head repository and ref. Identical ref names across forks don't establish repository identity.
    - Missing or deleted head-repository metadata prevents contributor-branch writes; never substitute the base repository.
-3. **Board membership.** Read configured Project membership through its own returned server and scope, using [Project handling](./project.md).
+3. **Board membership.** When the context's `project` is disabled, skip this step without asking about a Project. Otherwise, read configured Project membership through its own returned server and scope, using [Project handling](./project.md).
    - Preserve an existing card, including one automatically added to Backlog.
    - Ask Backlog or Todo only for explicit missing intake; that choice approves only membership and initial Status.
    - An explicit review request sets In Review, which stays through feedback, contributor changes, fixes, and testing until confirmed shipping or cancellation.
