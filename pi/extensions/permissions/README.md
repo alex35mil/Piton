@@ -89,6 +89,19 @@ Project setup's `inspect_permissions` tool reuses this extension's persistent se
 
 Setup's `configure_permissions` merges approved MCP `allow` and `ask` lists into the selected project/local file, preserving existing constraints and unrelated settings. It skips covered, fully blocked, or unavailable allows and reports partial blockers without removing them. An MCP write allow grants every operation exposed by that tool across its credential scope, not just the workflow's current repository or operation. See [setup permissions](../../workflows/references/setup/permissions.md#integration-convenience-permissions) for recommendations and approval behavior.
 
+## Bash in a sandboxed session under Piton
+
+In a sandboxed session Piton's daemon launched (`PITON_RUNTIME=sandbox` with `PITON_AGENT_SOCKET` and
+`PITON_SESSION_TOKEN`), the extension registers pi's own `bash` tool definition with operations that send each call to
+the daemon, and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
+sandbox, so the daemon runs each in its own, tagged with the call (`sandbox.ts`). pi's rendering, truncation,
+`shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `outside_sandbox`
+(after the sandbox blocked this exact command, run it again outside; the user is asked) and `reason`. Permission rules
+still decide first. Elsewhere pi's own bash stays. See "Asking when the sandbox blocks" in `docs/design.md`.
+
+The daemon matches `[[sandbox.commands]]` grants with a Rust port of this extension's Bash analysis and glob; both
+run the cases in `pi/tests/fixtures/bash-matching.json`.
+
 ## Safety Features
 
 - Bash is parsed with tree-sitter; command nodes are checked across newlines, lists, pipelines, compound statements, and nested substitutions

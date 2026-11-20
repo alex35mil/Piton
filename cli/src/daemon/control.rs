@@ -142,9 +142,10 @@ impl Daemon {
                 .await
                 .map_err(|refusal| refusal.to_string()),
         );
+        let paths = self.config().paths.clone();
         let planned = tokio::task::spawn_blocking({
             let git = git.clone();
-            move || crate::project::plan_removal(worker, force, &update, source_git(&git))
+            move || crate::project::plan_removal(worker, force, &update, source_git(&git), &paths)
         })
         .await;
         let removal = match planned {

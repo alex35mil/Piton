@@ -122,6 +122,13 @@ pub enum UpdateError {
     /// Waits for the user, also when an approval names a commit the remote has since moved past.
     #[error(transparent)]
     Blocked(Box<Blocked>),
+    /// The user's `piton(git-pull)` deny rule refuses an update that changes protected files.
+    #[error(
+        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [permissions] refuses \
+         it; update the source by hand",
+        files.join(", ")
+    )]
+    Denied { checkout: PathBuf, files: Vec<String> },
     /// The approved files can't be written as Git has them (a symlink or submodule, a folder swapped for a link).
     #[error("can't apply the approved change to {checkout}: {reason}")]
     Apply { checkout: PathBuf, reason: String },
@@ -147,6 +154,34 @@ pub enum Requested<'a> {
     Ask,
     Approve(&'a Sha),
     Skip,
+}
+
+/// What the user's permission rules say about an update that changes protected files: `piton(git-pull)` in the source
+/// checkout's `[permissions]`, matched as the permissions extension matches a tool name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRule {
+    /// Apply the changed protected files without asking.
+    Allow,
+    /// Don't: creating a worker is refused; deleting one leaves the source as it is.
+    Deny,
+    /// Ask the user (the client's question), as with no rule.
+    Ask,
+}
+
+impl PullRule {
+    /// The tool name the rules match.
+    pub const TOOL: &'static str = "piton(git-pull)";
+
+    /// From merged permission rules: a deny wins over an ask, an ask over an allow; no rule asks.
+    pub fn of(rules: &crate::config::PermissionSettings) -> Self {
+        let matches = |list: &[String]| list.iter().any(|rule| rule == Self::TOOL || rule == "*");
+        match (matches(&rules.deny), matches(&rules.ask), matches(&rules.allow)) {
+            (true, _, _) => PullRule::Deny,
+            (false, true, _) => PullRule::Ask,
+            (false, false, true) => PullRule::Allow,
+            (false, false, false) => PullRule::Ask,
+        }
+    }
 }
 
 impl<'a> From<&'a CreateUpdate> for Requested<'a> {
@@ -175,6 +210,7 @@ pub fn plan(
     checkout: &Path,
     branch: &str,
     requested: Requested<'_>,
+    rule: PullRule,
 ) -> Result<Plan, UpdateError> {
     let fetch_failed = |stderr: String| UpdateError::Fetch {
         checkout: checkout.to_path_buf(),
@@ -216,19 +252,31 @@ pub fn plan(
             },
         });
     }
-    match requested {
-        Requested::Skip => Ok(Plan::Skipped),
-        // An approval covers only the commit the user saw.
-        Requested::Approve(approved) if *approved == target => Ok(Plan::Sandboxed {
-            target,
-            approved: files,
-        }),
-        Requested::Approve(_) | Requested::Ask => Err(UpdateError::Blocked(Box::new(Blocked {
+    let blocked = |target: Sha, files: Vec<String>| {
+        UpdateError::Blocked(Box::new(Blocked {
             checkout: checkout.to_path_buf(),
             upstream: format!("origin/{branch}"),
             target,
             files,
-        }))),
+        }))
+    };
+    match (requested, rule) {
+        (Requested::Skip, _) => Ok(Plan::Skipped),
+        // The user's rule decides before anyone is asked.
+        (Requested::Ask | Requested::Approve(_), PullRule::Allow) => Ok(Plan::Sandboxed {
+            target,
+            approved: files,
+        }),
+        (Requested::Ask | Requested::Approve(_), PullRule::Deny) => Err(UpdateError::Denied {
+            checkout: checkout.to_path_buf(),
+            files,
+        }),
+        // An approval covers only the commit the user saw.
+        (Requested::Approve(approved), PullRule::Ask) if *approved == target => Ok(Plan::Sandboxed {
+            target,
+            approved: files,
+        }),
+        (Requested::Approve(_) | Requested::Ask, PullRule::Ask) => Err(blocked(target, files)),
     }
 }
 
@@ -498,7 +546,7 @@ pub mod tests {
         let (_dir, source, upstream) = repos();
         let target = push(&upstream, &[("src/lib.rs", Some("x"))]);
         let runner = Recorder::default();
-        let plan = plan(&runner, &source, "main", Requested::Ask).unwrap();
+        let plan = plan(&runner, &source, "main", Requested::Ask, PullRule::Ask).unwrap();
         assert_eq!(
             plan,
             Plan::Sandboxed {
@@ -513,7 +561,7 @@ pub mod tests {
             (1, 1, 1)
         );
         assert_eq!(
-            super::plan(&runner, &source, "main", Requested::Ask).unwrap(),
+            super::plan(&runner, &source, "main", Requested::Ask, PullRule::Ask).unwrap(),
             Plan::Current
         );
     }
@@ -533,7 +581,7 @@ pub mod tests {
             ],
         );
         let runner = Recorder::default();
-        let blocked = match plan(&runner, &source, "main", Requested::Ask) {
+        let blocked = match plan(&runner, &source, "main", Requested::Ask, PullRule::Ask) {
             Err(UpdateError::Blocked(blocked)) => blocked,
             other => panic!("expected Blocked, got {other:?}"),
         };
@@ -542,7 +590,7 @@ pub mod tests {
         assert_eq!(blocked.upstream, "origin/main");
         assert_eq!(head(&source), before, "nothing changed");
 
-        let plan = plan(&runner, &source, "main", Requested::Approve(&target)).unwrap();
+        let plan = plan(&runner, &source, "main", Requested::Approve(&target), PullRule::Ask).unwrap();
         apply(&runner, &source, &plan).unwrap();
         assert_eq!(head(&source), target.as_str());
         assert_eq!(
@@ -572,7 +620,7 @@ pub mod tests {
         git(&upstream, &["push", "-q", "origin", "HEAD:main"]);
         let target = Sha::try_from(git(&upstream, &["rev-parse", "HEAD"])).unwrap();
         let runner = Recorder::default();
-        let plan = plan(&runner, &source, "main", Requested::Approve(&target)).unwrap();
+        let plan = plan(&runner, &source, "main", Requested::Approve(&target), PullRule::Ask).unwrap();
         apply(&runner, &source, &plan).unwrap();
         let mode = std::fs::metadata(source.join(".pi/bin/run"))
             .unwrap()
@@ -590,10 +638,13 @@ pub mod tests {
         let newer = push(&upstream, &[(".pi/settings.json", Some("{}"))]);
         let runner = Recorder::default();
         assert!(matches!(
-            plan(&runner, &source, "main", Requested::Approve(&target)),
+            plan(&runner, &source, "main", Requested::Approve(&target), PullRule::Ask),
             Err(UpdateError::Blocked(b)) if b.target == newer && b.files == [".pi/settings.json", ".piton/config.toml"]
         ));
-        assert_eq!(plan(&runner, &source, "main", Requested::Skip).unwrap(), Plan::Skipped);
+        assert_eq!(
+            plan(&runner, &source, "main", Requested::Skip, PullRule::Ask).unwrap(),
+            Plan::Skipped
+        );
     }
 
     /// A symlink among the approved paths refuses before anything is written; a merge that fails puts the approved
@@ -609,7 +660,7 @@ pub mod tests {
         git(&upstream, &["push", "-q", "origin", "HEAD:main"]);
         let target = Sha::try_from(git(&upstream, &["rev-parse", "HEAD"])).unwrap();
         let runner = Recorder::default();
-        let planned = plan(&runner, &source, "main", Requested::Approve(&target)).unwrap();
+        let planned = plan(&runner, &source, "main", Requested::Approve(&target), PullRule::Ask).unwrap();
         assert!(matches!(
             apply(&runner, &source, &planned),
             Err(UpdateError::Apply { .. })
@@ -624,7 +675,7 @@ pub mod tests {
             &[(".piton/config.toml", Some("new")), ("blocker", Some("theirs"))],
         );
         std::fs::write(source.join("blocker"), "mine").unwrap();
-        let planned = plan(&runner, &source, "main", Requested::Approve(&target)).unwrap();
+        let planned = plan(&runner, &source, "main", Requested::Approve(&target), PullRule::Ask).unwrap();
         assert!(matches!(
             apply(&runner, &source, &planned),
             Err(UpdateError::Merge { .. })
@@ -646,7 +697,7 @@ pub mod tests {
         git(&source, &["update-ref", "refs/remotes/origin/main", &forged]);
         let runner = Recorder::default();
         assert_eq!(
-            plan(&runner, &source, "main", Requested::Ask).unwrap(),
+            plan(&runner, &source, "main", Requested::Ask, PullRule::Ask).unwrap(),
             Plan::Sandboxed {
                 target: real,
                 approved: vec![]
@@ -659,11 +710,11 @@ pub mod tests {
         let (_dir, source, _upstream) = repos();
         let runner = Recorder::default();
         assert!(matches!(
-            plan(&runner, &source, "nope", Requested::Ask),
+            plan(&runner, &source, "nope", Requested::Ask, PullRule::Ask),
             Err(UpdateError::Fetch { .. } | UpdateError::NoBranch { .. })
         ));
         git(&source, &["remote", "set-url", "origin", "/nonexistent/origin.git"]);
-        let failed = plan(&runner, &source, "main", Requested::Ask).unwrap_err();
+        let failed = plan(&runner, &source, "main", Requested::Ask, PullRule::Ask).unwrap_err();
         assert!(matches!(failed, UpdateError::Fetch { .. }));
         assert!(failed.to_string().contains("~/.ssh/known_hosts"), "{failed}");
     }

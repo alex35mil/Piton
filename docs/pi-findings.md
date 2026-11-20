@@ -199,6 +199,24 @@ A process in a Seatbelt sandbox can't apply another one (`sandbox_init` fails wi
 Piton daemon runs outside any sandbox (launchd), so this only affects running Piton's sandbox mode from a sandboxed
 agent session. Tests of sandbox mode run on the host.
 
+## The kernel's record of sandbox refusals
+
+Verified on the host, macOS 27.0.1, with `piton sandbox-exec` (#241's spike):
+
+- Each refusal is a `log stream` event from the Sandbox kernel extension (`senderImagePath` ends in `/Sandbox`),
+  within ~5 ms: `Sandbox: <process>(<pid>) deny(1) <operation> <path or service>`. Seen: `file-write-create`,
+  `file-write-data`, `file-read-data`, `mach-lookup com.apple.SecurityServer` (the keychain),
+  `user-preference-write <domain>` (`defaults write`). `log` refuses to run inside a sandbox.
+- A deny with `(with message "<text>")` appends `\n<text>` to its event. nono's own `(deny default)` has none.
+- One report per process: 200 refused writes in one process, to one path or to 200, logged one event. Separate
+  processes each get theirs, and the kernel folds repeats into `N duplicate reports for ...`.
+- The pid is the refused process (`touch`, not the shell that ran it), usually gone when the event arrives. macOS
+  returns another process's arguments but not its environment to a non-root reader (`KERN_PROCARGS2`), even for the
+  same user's processes.
+- A rerun with one more grant opens exactly that grant; `defaults write` works with `~/Library/Preferences` writable
+  (cfprefsd checks the caller's write access to the plist).
+- Other apps' refusals stream all the time (WhatsApp, sharingd, WebKit), so only tagged ones are Piton's.
+
 ## pi behind fnox's credential proxy
 
 Verified on the host with fnox 1.48.0, op 2.34.1, claude 2.1.309, pi 1.5.2 (#229):

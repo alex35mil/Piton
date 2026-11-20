@@ -298,7 +298,7 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         &[Access::Connect],
         literal(facts.agent_socket),
         Source::Piton {
-            what: "the agent socket (protected-write requests)".into(),
+            what: "the agent socket (protected writes, commands the daemon runs)".into(),
         },
     );
     rules.push(
@@ -320,6 +320,7 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         rules,
         keychain,
         network: grants.network,
+        tag: String::new(),
     };
     if let Some((value, origin)) = launch_agent {
         accept_widening(Widening::AgentDir, value, &agent, origin, &policy, config)?;
@@ -404,13 +405,12 @@ impl Grants {
             }
         }
 
-        // A preset both lists: the user's options fold into the profile's entry.
+        // A preset both list keeps the profile as its source.
         let mut presets: Vec<(Preset, Provenance)> =
             entries.presets.into_iter().map(|p| (p, from_profile.clone())).collect();
         for listed in &settings.presets {
-            match presets.iter_mut().find(|(p, _)| p.name() == listed.value.name()) {
-                Some((existing, _)) => existing.merge(&listed.value),
-                None => presets.push((listed.value.clone(), from_file(&listed.file))),
+            if !presets.iter().any(|(p, _)| *p == listed.value) {
+                presets.push((listed.value, from_file(&listed.file)));
             }
         }
 

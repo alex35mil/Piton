@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 pub use super::edit::Placement;
-use super::edit::{Change, EditError, edited, item_from_json, write_changes};
+use super::edit::{Change, EditError, append_table, edited, item_from_json, write_changes};
 use crate::config::{
     ConfigError,
     model::{
@@ -104,6 +104,70 @@ impl ConfigFile {
         Ok(content)
     }
 
+    /// Appends a `[[sandbox.commands]]` entry: what "Allow and persist" saves.
+    pub fn append_command_grant(&self, paths: &Paths, grant: &crate::config::CommandGrant) -> Result<(), EditError> {
+        let path = self.path(paths)?;
+        let value = toml::Value::try_from(grant).map_err(|e| EditError::Value {
+            path: path.clone(),
+            reason: e.to_string(),
+        })?;
+        let text = toml::to_string(&value).map_err(|e| EditError::Value {
+            path: path.clone(),
+            reason: e.to_string(),
+        })?;
+        let entry: toml_edit::DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| EditError::Parse {
+            path: path.clone(),
+            reason: e.to_string(),
+        })?;
+        let sharing = self.sharing;
+        append_table(&path, &["sandbox", "commands"], entry.as_table(), &|text, path| {
+            self.level.validate(text, path, sharing)
+        })
+    }
+
+    /// Adds `value` to the list at `key` (`sandbox.write_file`) in this file, keeping its entries; nothing when it's
+    /// already there.
+    pub fn append_to_list(&self, paths: &Paths, key: &str, value: &str) -> Result<(), EditError> {
+        let path = self.path(paths)?;
+        let current = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(source) => return Err(EditError::Io { path, source }),
+        };
+        let table: toml::Table = toml::from_str(&current).map_err(|e| EditError::Parse {
+            path: path.clone(),
+            reason: e.to_string(),
+        })?;
+        let mut item = Some(&toml::Value::Table(table));
+        for part in key.split('.') {
+            item = item.and_then(|v| v.get(part));
+        }
+        let mut list: Vec<serde_json::Value> = match item {
+            Some(toml::Value::Array(items)) => items
+                .iter()
+                .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+                .collect(),
+            Some(_) => {
+                return Err(EditError::Value {
+                    path,
+                    reason: format!("{key} isn't a list"),
+                });
+            }
+            None => Vec::new(),
+        };
+        if list.iter().any(|v| v.as_str() == Some(value)) {
+            return Ok(());
+        }
+        list.push(serde_json::Value::String(value.to_string()));
+        self.write(
+            paths,
+            &[KeyChange {
+                key: key.to_string(),
+                value: Some(serde_json::Value::Array(list)),
+            }],
+        )
+    }
+
     /// Writes `changes`, keeping comments and layout.
     pub fn write(&self, paths: &Paths, changes: &[KeyChange]) -> Result<(), EditError> {
         let path = self.path(paths)?;
@@ -158,5 +222,71 @@ impl<'a> Items<'a> {
                 value: item.as_ref(),
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AllGrant, CommandGrant, CommandPattern, Grant};
+
+    fn grant(pattern: &str) -> CommandGrant {
+        CommandGrant {
+            pattern: CommandPattern::new(pattern).unwrap(),
+            grant: Grant::All(AllGrant::All),
+        }
+    }
+
+    /// "Allow and persist" appends exactly one `[[sandbox.commands]]` entry, keeping the rest of the file; a project's
+    /// committed `config.toml` refuses it (a loosening key), its `config.local.toml` takes it.
+    #[test]
+    fn appends_a_command_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            home: dir.path().into(),
+            global: dir.path().join(".config/piton"),
+        };
+        let global = ConfigFile {
+            level: WriteLevel::Global,
+            sharing: Sharing::Shared,
+        };
+        let path = global.path(&paths).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "# mine\n[sandbox]\nwrite = [\"/a\"]\n").unwrap();
+        global.append_command_grant(&paths, &grant("husky install *")).unwrap();
+        global.append_command_grant(&paths, &grant("git push")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mine\n[sandbox]\nwrite = [\"/a\"]\n"), "{text}");
+        let parsed: toml::Table = toml::from_str(&text).unwrap();
+        let commands = parsed["sandbox"]["commands"].as_array().unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["match"].as_str(), Some("bash(husky install *)"));
+        assert_eq!(commands[0]["grant"].as_str(), Some("all"));
+        assert_eq!(commands[1]["match"].as_str(), Some("bash(git push)"));
+
+        let source = dir.path().join("repo");
+        let project = |sharing| ConfigFile {
+            level: WriteLevel::Repository { source: source.clone() },
+            sharing,
+        };
+        assert!(
+            project(Sharing::Shared)
+                .append_command_grant(&paths, &grant("x"))
+                .is_err()
+        );
+        project(Sharing::Local)
+            .append_command_grant(&paths, &grant("x"))
+            .unwrap();
+        let local = std::fs::read_to_string(source.join(".piton/config.local.toml")).unwrap();
+        assert!(local.contains("[[sandbox.commands]]"), "{local}");
+
+        // A process block's entry: added to the list once, keeping what's there.
+        global.append_to_list(&paths, "sandbox.write_file", "/h/x").unwrap();
+        global.append_to_list(&paths, "sandbox.write_file", "/h/x").unwrap();
+        global.append_to_list(&paths, "sandbox.write", "/b").unwrap();
+        let parsed: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed["sandbox"]["write_file"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["sandbox"]["write"].as_array().unwrap().len(), 2, "/a and /b");
+        assert_eq!(parsed["sandbox"]["commands"].as_array().unwrap().len(), 2, "kept");
     }
 }

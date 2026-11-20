@@ -333,6 +333,7 @@ mod tests {
             rules: Vec::new(),
             keychain: false,
             network: Vec::new(),
+            tag: String::new(),
         };
         let base: Env = [("PATH".to_string(), "/nonexistent".to_string())].into();
         let workspace = Path::new("/w");

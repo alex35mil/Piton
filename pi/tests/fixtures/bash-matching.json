@@ -1,0 +1,519 @@
+{
+    "analysis": [
+        {
+            "command": "echo one\necho two | sed 's/two/three/'\nFOO=$(rm file)",
+            "expected": {
+                "commands": ["echo one", "echo two", "sed 's/two/three/'", "rm file"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo one && npm test; rm file",
+            "expected": {
+                "commands": ["echo one", "npm test", "rm file"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "if true; then echo ok; fi",
+            "expected": {
+                "commands": ["true", "echo ok"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo \"$(rm file)\"",
+            "expected": {
+                "commands": ["echo \"$(rm file)\"", "rm file"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo 'a | b && c'",
+            "expected": {
+                "commands": ["echo 'a | b && c'"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo \"first\nsecond\"",
+            "expected": {
+                "commands": ["echo \"first\nsecond\""],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "FOO=bar",
+            "expected": {
+                "commands": [],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "export FOO=bar",
+            "expected": {
+                "commands": [],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "export FOO=$(rm file)",
+            "expected": {
+                "commands": ["rm file"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "cd . && npm test",
+            "cwd": ".",
+            "expected": {
+                "commands": ["npm test"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "cd '/work/repo' && npm test || false",
+            "cwd": ".",
+            "expected": {
+                "commands": ["npm test", "false"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "cd .. && npm test",
+            "cwd": ".",
+            "expected": {
+                "commands": ["cd ..", "npm test"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "true; cd . && npm test",
+            "cwd": ".",
+            "expected": {
+                "commands": ["true", "cd .", "npm test"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "cd ./ && git push",
+            "cwd": ".",
+            "expected": {
+                "commands": ["git push"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "cd . && git push",
+            "expected": {
+                "commands": ["cd .", "git push"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "eval 'rm file'",
+            "expected": {
+                "commands": ["eval 'rm file'"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "bash -c 'rm file'",
+            "expected": {
+                "commands": ["bash -c 'rm file'"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "$COMMAND file",
+            "expected": {
+                "commands": ["$COMMAND file"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "eval \"$(rm file)\"",
+            "expected": {
+                "commands": ["eval \"$(rm file)\"", "rm file"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi > output",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi >| output",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi >> output",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi &> output",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi &>> output",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi 2> output",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi >&output",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "if true; then echo hi > output; fi",
+            "expected": {
+                "commands": ["true", "echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "rm < /dev/null -rf victim",
+            "expected": {
+                "commands": ["rm -rf victim"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "! rm < /dev/null -rf victim",
+            "expected": {
+                "commands": ["rm -rf victim"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo >/dev/null hi",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo one 2>err two >out three",
+            "expected": {
+                "commands": ["echo one two three"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": ">output echo hi",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": ">/dev/null echo hi",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi > /dev/null",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi &>> /dev/null",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi >&/dev/null",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi 2> '/dev/null'",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi > \"/dev/null\"",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi > /dev/null.log",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi > /dev/null\r",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo hi < input",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi <<< text",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi >&2",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi >&\"2\"",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi >&\"-\"",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi 2>&1",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi 2>&-",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi 2>&word",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi 2>&$FD",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi <&3",
+            "expected": {
+                "commands": ["echo hi"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi > >(tee log)",
+            "expected": {
+                "commands": ["echo hi", "tee log"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo hi > >(tee log > output)",
+            "expected": {
+                "commands": ["echo hi", "tee log"],
+                "writesFile": true
+            }
+        },
+        {
+            "command": "echo '>'",
+            "expected": {
+                "commands": ["echo '>'"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "git push origin main\r",
+            "expected": {
+                "commands": ["git push origin main\r"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "husky install && git submodule update --init",
+            "expected": {
+                "commands": ["husky install", "git submodule update --init"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "mise install node@22",
+            "expected": {
+                "commands": ["mise install node@22"],
+                "writesFile": false
+            }
+        },
+        {
+            "command": "echo '",
+            "expected": null
+        },
+        {
+            "command": "echo $(true",
+            "expected": null
+        },
+        {
+            "command": "echo hi <> output",
+            "expected": null
+        },
+        {
+            "command": "FOO=bar > output",
+            "expected": null
+        }
+    ],
+    "matching": [
+        {
+            "pattern": "git push *",
+            "value": "git push",
+            "matches": true
+        },
+        {
+            "pattern": "git push *",
+            "value": "git push origin main",
+            "matches": true
+        },
+        {
+            "pattern": "git push *",
+            "value": "git pushx",
+            "matches": false
+        },
+        {
+            "pattern": "git push *",
+            "value": "git push\norigin",
+            "matches": false
+        },
+        {
+            "pattern": "git *",
+            "value": "git",
+            "matches": true
+        },
+        {
+            "pattern": "git",
+            "value": "git push",
+            "matches": false
+        },
+        {
+            "pattern": "git",
+            "value": "git",
+            "matches": true
+        },
+        {
+            "pattern": "*",
+            "value": "anything at all",
+            "matches": true
+        },
+        {
+            "pattern": "mise install node@*",
+            "value": "mise install node@22",
+            "matches": true
+        },
+        {
+            "pattern": "mise install node@*",
+            "value": "mise install python@3",
+            "matches": false
+        },
+        {
+            "pattern": "a.b *",
+            "value": "axb c",
+            "matches": false
+        },
+        {
+            "pattern": "a.b *",
+            "value": "a.b c",
+            "matches": true
+        },
+        {
+            "pattern": "x(y) *",
+            "value": "x(y) z",
+            "matches": true
+        },
+        {
+            "pattern": "echo $HOME *",
+            "value": "echo $HOME x",
+            "matches": true
+        },
+        {
+            "pattern": "rm -rf *",
+            "value": "rm -rf /",
+            "matches": true
+        },
+        {
+            "pattern": "*install*",
+            "value": "npm install",
+            "matches": true
+        },
+        {
+            "pattern": "npm * test",
+            "value": "npm run test",
+            "matches": true
+        },
+        {
+            "pattern": "npm * test",
+            "value": "npm test",
+            "matches": false
+        },
+        {
+            "pattern": "a\\b",
+            "value": "a\\b",
+            "matches": true
+        },
+        {
+            "pattern": "a|b",
+            "value": "a",
+            "matches": false
+        }
+    ]
+}

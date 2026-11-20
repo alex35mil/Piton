@@ -1,6 +1,7 @@
 //! One task per pi process. It owns pi's stdin and stdout, routes responses to the client that asked, broadcasts
 //! events, keeps the replay state that neither `get_state` nor `get_entries` contains, and runs the stop sequence.
 
+mod commands;
 mod info;
 mod prompts;
 mod replay;
@@ -181,6 +182,15 @@ pub enum SessionCmd {
     },
     /// The agent stopped waiting for a protected write (or got its answer): settle it if it's still pending.
     SettleProtectedWrite,
+    /// A bash call the agent asks the daemon to run (agent.sock): with a per-command grant, or after the user approves.
+    RunCommand {
+        request: crate::agent::RunRequest,
+        reply: oneshot::Sender<crate::agent::RunDecision>,
+    },
+    /// The agent stopped waiting for a run request: settle its question if it's still pending.
+    SettleQuestion,
+    /// A refusal the kernel recorded for this session's sandbox.
+    Refusal(crate::daemon::Refusal),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -233,6 +243,8 @@ pub struct SessionHandle {
     pub key: SessionKey,
     pub tx: mpsc::UnboundedSender<SessionCmd>,
     pub shared: Arc<Mutex<Shared>>,
+    /// The sandbox's tag, for a sandboxed session: the kernel's refusals carry it.
+    pub tag: Option<String>,
 }
 
 impl SessionHandle {
@@ -275,6 +287,9 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Called by a session task when it ends, and when its status changes.
 pub struct Hooks {
     pub ended: Box<dyn Fn(SessionKey) + Send + Sync>,
+    /// Restarts the session from its file (a process block's entry was saved): the daemon stops it and launches it
+    /// again, its clients following.
+    pub restart: Box<dyn Fn(SessionKey) + Send + Sync>,
     pub status_changed: Arc<Notify>,
     /// Wakes view connections to re-send the session list (they skip unchanged lists).
     pub list_changed: tokio::sync::broadcast::Sender<()>,
@@ -293,6 +308,13 @@ pub struct LaunchSpec {
     pub protected: crate::agent::ProtectedRoots,
     /// The credential proxy pi starts behind, when fnox is used for this workspace.
     pub proxy: Option<launch::fnox::Proxy>,
+    /// What commands the user approves run with, for sandboxed launches.
+    pub commands: Option<launch::sandbox::grant::CommandPolicies>,
+    /// The source checkout and the workspace's checkout.
+    pub source: PathBuf,
+    pub checkout: PathBuf,
+    /// The `[[sandbox.commands]]` the launch resolved.
+    pub grants: Vec<crate::config::Listed<crate::config::CommandGrant>>,
 }
 
 pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
@@ -366,7 +388,7 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
     let shared = Arc::new(Mutex::new(Shared {
         key: spec.key,
         checkout,
-        workspace: spec.workspace.path,
+        workspace: spec.workspace.path.clone(),
         mode: spec.mode,
         id: None,
         file: match &spec.session {
@@ -384,6 +406,7 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         key: spec.key,
         tx,
         shared: shared.clone(),
+        tag: spec.policy.as_ref().map(|p| p.tag.clone()).filter(|t| !t.is_empty()),
     };
 
     let stdin = child.stdin.take().expect("piped stdin");
@@ -401,10 +424,25 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         // Dropping stdin closes it: pi's orderly-shutdown signal.
     });
 
+    let session_tag = spec.policy.as_ref().map(|p| p.tag.clone()).unwrap_or_default();
+    let commands = spec.commands.map(|policies| commands::Commands {
+        policies,
+        shell: crate::agent::PiShell::read(&spec.env, &config.paths.home, &spec.workspace.path),
+        env: spec.env.clone(),
+        source: spec.source.clone(),
+        checkout: spec.checkout.clone(),
+        paths: config.paths.clone(),
+        grants: spec.grants.clone(),
+    });
     let task = SessionTask {
         config,
         protected: spec.protected,
         protected_write: None,
+        commands,
+        calls: commands::Calls::new(&session_tag),
+        session_tag: session_tag.clone(),
+        question: None,
+        process: commands::ProcessBlocks::default(),
         shared,
         hooks,
         pi_tx: Some(pi_tx),
@@ -491,6 +529,16 @@ struct SessionTask {
     protected: crate::agent::ProtectedRoots,
     /// The protected write waiting for the user: one per session.
     protected_write: Option<PendingWrite>,
+    /// What approved commands run with: sandboxed sessions only.
+    commands: Option<commands::Commands>,
+    /// The bash calls pi is running.
+    calls: commands::Calls,
+    /// pi's sandbox's tag; each call's is `<this>-<number>`.
+    session_tag: String,
+    /// The block question waiting for the user: one per session, sharing the slot with protected writes.
+    question: Option<commands::PendingQuestion>,
+    /// A blocked process's question (an MCP server, an extension), and the refusals offered already.
+    process: commands::ProcessBlocks,
     shared: Arc<Mutex<Shared>>,
     hooks: Hooks,
     pi_tx: Option<mpsc::UnboundedSender<String>>,
@@ -561,6 +609,7 @@ impl SessionTask {
         let mut end_reason = EndReason::PiExited;
         loop {
             let stop_deadline = self.stopping.as_ref().map(|(_, at)| *at);
+            let question_deadline = self.question.as_ref().map(|q| q.deadline);
             tokio::select! {
                 line = stdout.next_line(), if stdout_open => match line {
                     Ok(Some(line)) => self.on_pi_line(line),
@@ -592,6 +641,9 @@ impl SessionTask {
                 _ = child.wait(), if !stdout_open => break,
                 _ = sleep_until(stop_deadline.unwrap_or_else(Instant::now)), if stop_deadline.is_some() => {
                     self.advance_stop();
+                }
+                _ = sleep_until(question_deadline.unwrap_or_else(Instant::now)), if question_deadline.is_some() => {
+                    self.expire_question();
                 }
                 _ = sleep_until(self.empty_deadline.unwrap_or_else(Instant::now)), if self.empty_deadline.is_some() => {
                     self.empty_deadline = None;
@@ -722,6 +774,12 @@ impl SessionTask {
                 self.settle_protected_write();
                 self.publish_view_state();
             }
+            SessionCmd::RunCommand { request, reply } => self.run_command(request, reply),
+            SessionCmd::SettleQuestion => {
+                self.settle_question();
+                self.publish_view_state();
+            }
+            SessionCmd::Refusal(refusal) => self.on_refusal(refusal),
             SessionCmd::Stop { .. } => unreachable!("handled in run"),
         }
     }
@@ -745,9 +803,10 @@ impl SessionTask {
             return;
         };
         self.settle_protected_write();
-        if self.protected_write.is_some() {
+        self.settle_question();
+        if self.protected_write.is_some() || self.question.is_some() {
             let _ = reply.send(refuse(
-                "another protected write is waiting for the user; try again after it's answered".into(),
+                "another question is waiting for the user; try again after it's answered".into(),
             ));
             return;
         }
@@ -990,10 +1049,22 @@ impl SessionTask {
                     // Already answered by another client, expired, or unknown: pi would ignore it.
                     return;
                 }
-                // The daemon's own dialog: answered here, never sent to pi (which didn't ask).
+                // The daemon's own dialogs: answered here, never sent to pi (which didn't ask).
                 if self.protected_write.as_ref().is_some_and(|w| w.id == id) {
                     self.answer_protected_write(&command);
                     // The status first, then the state with it: the dialog closes in every client.
+                    self.sync_shared();
+                    self.publish_view_state();
+                    return;
+                }
+                if self.question.as_ref().is_some_and(|q| q.id == id) {
+                    self.answer_question(&command);
+                    self.sync_shared();
+                    self.publish_view_state();
+                    return;
+                }
+                if self.process.asking(&id) {
+                    self.answer_process(&command);
                     self.sync_shared();
                     self.publish_view_state();
                     return;
@@ -1110,6 +1181,7 @@ impl SessionTask {
             return;
         }
         let line: Arc<str> = line.into();
+        self.calls.track(&kind, &record);
         self.track(&kind, &record, &line);
         for tx in self.clients.values() {
             let _ = tx.send(Frame::Record(line.clone()));
@@ -1121,6 +1193,257 @@ impl SessionTask {
             self.internal(Internal::GetEntries);
         }
         self.settle_protected_write();
+        self.settle_question();
+        self.publish_view_state();
+    }
+
+    /// A bash call the agent asks the daemon to run: refused unless it's a sandboxed session's running call; run with a
+    /// per-command grant that matches it; otherwise, for a rerun, asked of the user.
+    fn run_command(&mut self, request: crate::agent::RunRequest, reply: oneshot::Sender<crate::agent::RunDecision>) {
+        use crate::agent::RunDecision;
+        let key = lock(&self.shared).key;
+        let Some(commands) = &self.commands else {
+            let _ = reply.send(RunDecision::NotRun {
+                reason: "only a sandboxed session runs commands through the daemon".into(),
+            });
+            return;
+        };
+        match commands.decide(&mut self.calls, &request) {
+            commands::First::Decided(decision) => {
+                match &decision {
+                    // Every call runs here; only a widened one is worth a line in the daemon log.
+                    RunDecision::Run(approved) => {
+                        if approved.policy.rules != commands.policies.launch.rules {
+                            crate::log!("session {key}: running a command with its per-command grant");
+                        }
+                    }
+                    RunDecision::NotRun { reason } => crate::log!("session {key}: command request refused: {reason}"),
+                }
+                let _ = reply.send(decision);
+            }
+            commands::First::Ask { refusals, tag, note } => {
+                self.settle_protected_write();
+                self.settle_question();
+                if self.protected_write.is_some() || self.question.is_some() {
+                    let _ = reply.send(RunDecision::NotRun {
+                        reason: "another question is waiting for the user; try again after it's answered".into(),
+                    });
+                    return;
+                }
+                self.next_internal += 1;
+                let id = format!("piton:block:{}", self.next_internal);
+                crate::log!("session {key}: asking to run a command outside the sandbox");
+                let record = crate::agent::block::dialog(
+                    &id,
+                    &crate::agent::block::Question {
+                        command: &request.command,
+                        reason: request.reason.as_deref(),
+                        refusals: &refusals,
+                        note: note.as_deref(),
+                    },
+                );
+                self.question = Some(commands::PendingQuestion {
+                    id,
+                    stage: commands::Stage::Choice,
+                    request,
+                    tag,
+                    reply,
+                    deadline: Instant::now() + commands::ANSWER_TIMEOUT,
+                });
+                self.on_pi_line(record.to_string());
+            }
+        }
+    }
+
+    /// A client's answer to the block question: ask for the pattern, or decide.
+    fn answer_question(&mut self, answer: &Map<String, Value>) {
+        use crate::agent::RunDecision;
+        let Some(pending) = self.question.take() else { return };
+        let key = lock(&self.shared).key;
+        let decision = match commands::answer(pending.stage, &pending.request.command, answer) {
+            commands::Next::AskPattern(scope) => {
+                self.next_internal += 1;
+                let id = format!("piton:block:{}", self.next_internal);
+                let record = crate::agent::block::pattern_dialog(&id, &pending.request.command, scope);
+                self.question = Some(commands::PendingQuestion {
+                    id,
+                    stage: commands::Stage::Pattern(scope),
+                    ..pending
+                });
+                self.on_pi_line(record.to_string());
+                return;
+            }
+            commands::Next::Deny => {
+                crate::log!("session {key}: the user denied running a command outside the sandbox");
+                RunDecision::NotRun {
+                    reason: "the user denied running it outside the sandbox".into(),
+                }
+            }
+            commands::Next::Run { persist } => {
+                let Some(commands) = &self.commands else { return };
+                let mut note = String::new();
+                if let Some((scope, pattern)) = persist {
+                    let shown = pattern.pattern().to_string();
+                    match commands.persist(scope, pattern) {
+                        Ok(path) => {
+                            crate::log!(
+                                "session {key}: saved a per-command grant for `{shown}` in {}",
+                                path.display()
+                            );
+                            note = format!(" (saved `bash({shown})` in {}; new sessions use it)", path.display());
+                        }
+                        Err(e) => {
+                            crate::log!("session {key}: couldn't save the per-command grant for `{shown}`: {e}");
+                            note = format!(" (couldn't save the grant: {e})");
+                        }
+                    }
+                }
+                crate::log!("session {key}: the user approved running a command outside the sandbox{note}");
+                RunDecision::Run(Box::new(commands.approved_rerun(&pending.request, &pending.tag)))
+            }
+        };
+        let _ = pending.reply.send(decision);
+    }
+
+    /// Ends the block question when it can't be answered any more: its dialog left (the run ended) or the agent
+    /// stopped waiting.
+    fn settle_question(&mut self) {
+        let Some(pending) = &self.question else { return };
+        let gone = !self.replay.has_dialog(&pending.id);
+        if !gone && !pending.reply.is_closed() {
+            return;
+        }
+        let Some(pending) = self.question.take() else { return };
+        crate::log!(
+            "session {}: a command question ended unanswered",
+            lock(&self.shared).key
+        );
+        match gone {
+            true => {
+                let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
+                    reason: "the run ended before the user answered".into(),
+                });
+            }
+            false => {
+                self.replay.answer_dialog(&pending.id);
+                self.sync_shared();
+            }
+        }
+    }
+
+    /// A refusal the kernel recorded for this session: kept for the bash call it belongs to, or, for a process that
+    /// isn't one, offered to the user as the entry that lifts it.
+    fn on_refusal(&mut self, refusal: crate::daemon::Refusal) {
+        use crate::launch::sandbox::grant::{self, Credentials, NoLift};
+        let summary = refusal.summary();
+        // A call's sandbox: kept for that call. A call that's long gone: nothing to do with it.
+        if refusal.tag != self.session_tag {
+            if let Some(id) = self.calls.by_tag(&refusal.tag) {
+                self.calls.note(&id, &summary);
+            }
+            return;
+        }
+        let Some(commands) = &self.commands else { return };
+        let key = lock(&self.shared).key;
+        if !self
+            .process
+            .first(&refusal.process, &refusal.operation, &refusal.target)
+        {
+            return;
+        }
+        let credentials: Credentials = commands.policies.credentials;
+        match grant::lift_for(
+            &commands.policies.launch,
+            &refusal.operation,
+            &refusal.target,
+            credentials,
+        ) {
+            Ok(lift) => {
+                crate::log!("session {key}: {} was blocked: {summary}", refusal.process);
+                self.next_internal += 1;
+                self.process.queue(commands::ProcessQuestion {
+                    id: format!("piton:process:{}", self.next_internal),
+                    process: refusal.process.clone(),
+                    refusal: summary,
+                    lift,
+                });
+                self.ask_next_process();
+            }
+            Err(why) => {
+                let reason = match why {
+                    NoLift::Floor => "never lifted",
+                    NoLift::Unsupported => "no [sandbox] entry lifts it",
+                };
+                crate::log!("session {key}: {} was blocked: {summary} ({reason})", refusal.process);
+                let changes = self.view.add_notice(format!(
+                    "The sandbox blocked {}: {summary} ({reason}).",
+                    refusal.process
+                ));
+                self.broadcast(changes);
+            }
+        }
+    }
+
+    /// Shows the next process question when nothing else is being asked.
+    fn ask_next_process(&mut self) {
+        self.settle_protected_write();
+        self.settle_question();
+        let busy = self.protected_write.is_some() || self.question.is_some();
+        let showing = self.process.asking.is_some();
+        if busy || showing {
+            return;
+        }
+        let Some(next) = self.process.next().cloned() else {
+            return;
+        };
+        let (key, value) = next.lift.entry();
+        let record = crate::agent::block::process_dialog(&next.id, &next.process, &next.refusal, (key, &value));
+        self.on_pi_line(record.to_string());
+    }
+
+    /// The user's answer to a process question: save the entry and restart, or leave it.
+    fn answer_process(&mut self, answer: &Map<String, Value>) {
+        use crate::agent::block::ProcessAnswer;
+        let Some(question) = self.process.asking.take() else {
+            return;
+        };
+        let key = lock(&self.shared).key;
+        match crate::agent::block::read_process_answer(answer) {
+            ProcessAnswer::Deny => {
+                crate::log!("session {key}: the user left {} blocked", question.process);
+                self.ask_next_process();
+            }
+            ProcessAnswer::Persist(scope) => {
+                let Some(commands) = &self.commands else { return };
+                match commands.persist_lift(scope, &question.lift) {
+                    Ok(path) => {
+                        let (entry, value) = question.lift.entry();
+                        crate::log!(
+                            "session {key}: saved `{entry} = [\"{value}\"]` in {}; restarting",
+                            path.display()
+                        );
+                        (self.hooks.restart)(key);
+                    }
+                    Err(e) => {
+                        crate::log!("session {key}: couldn't save the entry: {e}");
+                        let changes = self.view.add_notice(format!("Couldn't save the sandbox entry: {e}"));
+                        self.broadcast(changes);
+                        self.ask_next_process();
+                    }
+                }
+            }
+        }
+    }
+
+    /// No answer in time: the command doesn't run, and the dialog closes everywhere.
+    fn expire_question(&mut self) {
+        let Some(pending) = self.question.take() else { return };
+        crate::log!("session {}: a command question timed out", lock(&self.shared).key);
+        self.replay.answer_dialog(&pending.id);
+        let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
+            reason: "the user didn't answer in time; it didn't run".into(),
+        });
+        self.sync_shared();
         self.publish_view_state();
     }
 

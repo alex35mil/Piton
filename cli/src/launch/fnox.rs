@@ -358,6 +358,7 @@ mod tests {
             rules,
             keychain,
             network: Vec::new(),
+            tag: String::new(),
         }
     }
 

@@ -3,6 +3,8 @@
 // Prompt directives (anything else gets a short text reply):
 //   "slow <n>"   reply with n words, streamed slowly, so a test can attach mid-stream
 //   "tool"       call the built-in bash tool with `sleep 2; echo done`, then answer
+//   "bash <cmd>" call the bash tool with <cmd>; "rerun <reason>|<cmd>" with <cmd> and outside_sandbox (#241)
+//   "write <path>" call the `faux_write` tool: pi's own process writes <path> (a block that isn't a bash call)
 //   "ask"        ask a select dialog through the `faux_ask` tool, then answer with the choice
 //   "picture"    call the `faux_picture` tool, which returns a 2 MB image (larger than a phone's WebSocket message)
 //   "status"     call the `faux_status` tool, which sets a status line and a widget, then clears them on "status clear"
@@ -28,6 +30,21 @@ export default function (pi: ExtensionAPI) {
         if (slow) {
             const words = Array.from({ length: Number(slow[1]) }, (_, i) => `word${i}`).join(" ");
             return fauxAssistantMessage(fauxText(words));
+        }
+        const bash = /^bash (.+)$/s.exec(text);
+        if (bash) {
+            return fauxAssistantMessage([fauxToolCall("bash", { command: bash[1] })], { stopReason: "toolUse" });
+        }
+        const rerun = /^rerun ([^|]*)\|(.+)$/s.exec(text);
+        if (rerun) {
+            return fauxAssistantMessage(
+                [fauxToolCall("bash", { command: rerun[2], outside_sandbox: true, reason: rerun[1] })],
+                { stopReason: "toolUse" },
+            );
+        }
+        const write = /^write (.+)$/.exec(text);
+        if (write) {
+            return fauxAssistantMessage([fauxToolCall("faux_write", { path: write[1] })], { stopReason: "toolUse" });
         }
         if (text.startsWith("tool")) {
             return fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 2; echo done" })], {
@@ -96,6 +113,22 @@ export default function (pi: ExtensionAPI) {
                 workspaceMarker: process.env.PITON_WORKSPACE_MARKER ?? null,
             };
             return { content: [{ type: "text", text: JSON.stringify(env) }], details: env };
+        },
+    });
+
+    pi.registerTool({
+        name: "faux_write",
+        label: "Faux write",
+        description: "Write a file from pi's own process (test tool).",
+        parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        async execute(_id, params) {
+            const fs = await import("node:fs");
+            try {
+                fs.writeFileSync(String(params.path), "x");
+                return { content: [{ type: "text", text: "written" }], details: {} };
+            } catch (error) {
+                return { content: [{ type: "text", text: String(error) }], details: {} };
+            }
         },
     });
 

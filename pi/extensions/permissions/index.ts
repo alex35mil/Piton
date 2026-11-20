@@ -58,6 +58,7 @@ import {
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
+import { registerSandboxBash } from "./sandbox.js"
 
 export const EXTENSION = "permissions"
 const BUILT_IN_ALLOW_RULES = ["bash(true)", "bash(false)"]
@@ -125,6 +126,7 @@ const LOCAL_SKILL_SCOPES = new Set(["user", "project", "temporary"])
 let cachedDerivedSkillAllowState: DerivedSkillAllowState | undefined
 
 export default function (pi: ExtensionAPI) {
+    registerSandboxBash(pi)
     let mcpCatalog: McpToolCatalog = new Map()
     const disposeMcpCatalogListener = pi.events.on(MCP_TOOL_CATALOG_EVENT, (data) => {
         mcpCatalog = data instanceof Map ? new Map(data as McpToolCatalog) : new Map()
@@ -763,7 +765,8 @@ export function validatePermissionSettings(settings: PermissionSettings): Permis
     return settings
 }
 
-function matchPattern(pattern: string, value: string): boolean {
+/** The glob of permission rules: `*` is any text, and a trailing ` *` also matches the bare command. */
+export function matchPattern(pattern: string, value: string): boolean {
     const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")
     // Make trailing " .*" optional so "cmd *" also matches bare "cmd"
     const adjusted = escaped.replace(/ \.\*$/, "( .*)?")

@@ -99,6 +99,7 @@ function M.refusal_message(refusal)
         or kind == "unknown_default"
         or kind == "source_fetch"
         or kind == "protected_update"
+        or kind == "update_denied"
     then
         return "Can't create an agent: " .. cli.describe(refusal)
     elseif

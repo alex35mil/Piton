@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::config::{Connect, InstallMode, Preset, Profile};
+use crate::config::{Connect, Preset, Profile};
 
 /// Where a deny or a grant comes from: what `piton sandbox why` reports.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -167,29 +167,22 @@ pub const AGENT_DIR_WRITES: &[AgentDirWrite] = &[
     AgentDirWrite::Lock("trust.json"),
 ];
 
-/// The folders mise installs tools into: what the host runs. Written only with `install = "allow"`.
-pub const MISE_INSTALL_DIRS: &[&str] = &["~/.local/share/mise/installs", "~/.local/share/mise/downloads"];
-
 /// What a preset grants: folders, then files, as written (`~/...`). Each toolchain's are its caches and state; host
-/// builds reuse what the sandbox writes there, which is why none is on by default. None of them, without options,
-/// writes what the host executes or trusts (checked below): mise's installed tools and trusted configs, cargo's
-/// installed binaries, rustup's toolchains. `git` grants no path: it leaves out the Git rule instead (`resolve.rs`).
+/// builds reuse what the sandbox writes there, which is why none is on by default. None of them writes what the host
+/// executes or trusts (checked below): mise's installed tools and trusted configs, cargo's installed binaries, rustup's
+/// toolchains. An install that needs them is asked about and run by the daemon (#241). `git` grants no path: it
+/// leaves out the Git rule instead (`resolve.rs`).
 pub fn preset_grants(preset: &Preset) -> (Vec<&'static str>, &'static [&'static str]) {
     match preset {
         Preset::Git => (Vec::new(), &[]),
-        Preset::Mise(options) => {
-            let mut dirs = vec![
+        Preset::Mise => (
+            vec![
                 "~/Library/Caches/mise",
                 "~/.local/state/mise/incomplete-installs",
                 "~/.local/state/mise/tracked-configs",
-            ];
-            match options.install {
-                Some(InstallMode::Allow) => dirs.extend(MISE_INSTALL_DIRS),
-                // Installs that ask go through the host (#241); until then they fail in the sandbox, like `deny`.
-                Some(InstallMode::Ask | InstallMode::Deny) | None => {}
-            }
-            (dirs, &[])
-        }
+            ],
+            &[],
+        ),
         Preset::Rust => (
             vec![
                 "~/.cargo/registry",
@@ -266,7 +259,7 @@ mod tests {
             let (dirs, files) = preset_grants(&preset);
             match preset {
                 Preset::Git => assert!(dirs.is_empty() && files.is_empty(), "git grants no path"),
-                Preset::Mise(_) | Preset::Rust | Preset::Node | Preset::Swift => {
+                Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => {
                     assert!(!dirs.is_empty(), "{}", preset.name());
                 }
             }
@@ -274,8 +267,7 @@ mod tests {
         }
     }
 
-    /// No preset, with its default options, writes what the host executes or trusts: a sandboxed agent could then run
-    /// code on the host. Only `mise`'s `install = "allow"` (global configuration only) writes installed tools.
+    /// No preset writes what the host executes or trusts: a sandboxed agent could then run code on the host.
     #[test]
     fn presets_never_write_what_the_host_runs() {
         use std::path::Path;
@@ -289,17 +281,7 @@ mod tests {
             "~/.config/mise",
         ];
         let covers = |grant: &str, path: &str| Path::new(path).starts_with(grant) || Path::new(grant).starts_with(path);
-        let preset = |text: &str| -> Preset {
-            toml::from_str::<toml::Table>(text).unwrap()["p"]
-                .clone()
-                .try_into()
-                .unwrap()
-        };
-        let mut presets = Preset::ALL.to_vec();
-        for install in ["ask", "deny"] {
-            presets.push(preset(&format!("p = {{ name = \"mise\", install = \"{install}\" }}")));
-        }
-        for preset in &presets {
+        for preset in &Preset::ALL {
             let (dirs, files) = preset_grants(preset);
             for grant in dirs.iter().chain(files) {
                 for path in host_runs {
@@ -311,7 +293,5 @@ mod tests {
                 }
             }
         }
-        let allowed = preset("p = { name = \"mise\", install = \"allow\" }");
-        assert!(MISE_INSTALL_DIRS.iter().all(|d| preset_grants(&allowed).0.contains(d)));
     }
 }

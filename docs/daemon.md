@@ -42,8 +42,9 @@ Piton asks before changing anything, naming the files. Approved, Piton writes ex
 commit itself, and the rest of the update, with your hooks, still runs in the sandbox, so a hook can't change any
 other protected file. Declined, nothing changes (when deleting, you can delete without updating the source). The
 Neovim plugin asks; `piton worker` refuses and prints the flag that answers it (`--approve-source-update <sha>`, or
-`--skip-source-update` when deleting). Not asking at all comes with
-[#241](https://github.com/alex35mil/Piton/issues/241).
+`--skip-source-update` when deleting). To answer once for all updates, add `piton(git-pull)` to the source's
+`[permissions]`: in `allow`, the files are applied without asking; in `deny`, creating a worker is refused and deleting
+one leaves the source as it is.
 
 ## pi.nvim
 
@@ -335,10 +336,10 @@ close ([#248](https://github.com/alex35mil/Piton/issues/248), [#228](https://git
 they're open whatever `connect` says. A `connect` entry never reopens a credential or your `deny`: only `read` lifts a
 credential deny.
 
-The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, the `git` preset, and the `mise`
-preset's `install = "allow"` are accepted in the global `config.toml` or any `config.local.toml`, never in a project's
-`config.toml`, which travels with the repository: a repository can't open the sandbox for whoever clones it. `write`,
-`write_file`, toolchain presets, and `deny` may be set anywhere.
+The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `commands` (below), and the `git`
+preset are accepted in the global `config.toml` or any `config.local.toml`, never in a project's `config.toml`, which
+travels with the repository: a repository can't open the sandbox for whoever clones it. `write`, `write_file`,
+toolchain presets, and `deny` may be set anywhere.
 
 The `git` preset lets agents write Git's hooks and configuration, so `husky install`, `git remote add`, and
 `git submodule update --init` work in the sandbox, and the next Git command on the host may run an agent's code.
@@ -346,24 +347,9 @@ Hooks run in the sandbox either way.
 
 Paths are absolute, `~/...`, or `$VAR/...` from the daemon's login-shell environment (never the workspace's).
 
-A preset is its name, or a table with its name and options. No preset, with its default options, lets the sandbox
-write what the host runs or trusts (installed tools, `~/.cargo/bin`, rustup's toolchains, mise's trusted configs).
-The `mise` preset writes mise's cache and its install bookkeeping; its `install` option says how a sandboxed agent
-installs tools:
-
-```toml
-presets = ["rust", { name = "mise", install = "ask" }]
-```
-
-- `"ask"` (the default): each `mise install` is approved by you and run on the host. That needs the confirmation
-  gate of [#241](https://github.com/alex35mil/Piton/issues/241); until it exists, installs fail in the sandbox and you
-  run them on the host.
-- `"deny"`: installs fail in the sandbox.
-- `"allow"`: the sandbox may write mise's installed tools, so installs just work, and an agent can replace binaries
-  your host shell runs. The global `config.toml` or a `config.local.toml` only.
-
-Across levels, a preset's options are the nearest level's that sets them, so a project can turn `install` to `"deny"`.
-The apps edit `presets` as a list of names; a value with options is shown read-only and edited in the file.
+A preset is its name. No preset lets the sandbox write what the host runs or trusts (installed tools,
+`~/.cargo/bin`, rustup's toolchains, mise's trusted configs). The `mise` preset writes mise's cache and its install
+bookkeeping; `mise install` itself is asked about when the sandbox blocks it (below), or granted per command.
 
 A recommended global configuration for a developer Mac (the `standard` profile covers Git over SSH):
 
@@ -390,8 +376,44 @@ checkout or a granted folder) must point inside the checkout; otherwise the laun
 shared agent directory in your shell, your global mise configuration, or a `mise.toml` above the project that no
 sandboxed session can write.
 
+#### When the sandbox blocks something
+
+In a sandboxed session, the daemon runs every bash command and `!` command, each in its own sandbox with the same rules
+as pi's. When a command fails because the sandbox blocked it, the agent can ask to run it again outside the sandbox,
+and you're asked in the apps or pi.nvim:
+
+- **Allow once:** it runs again with everything open except the floor: protected files, configuration, pi's agent
+  directory, Piton's state, your `deny`, and credentials while fnox is on. The whole command runs again, so its side
+  effects repeat.
+- **Deny:** it stays failed.
+- **Allow this command, or a pattern, in this project or everywhere:** saves a per-command grant, and runs it.
+
+No answer in 10 minutes: it doesn't run. The agent can ask, never approve. `osascript` is never offered, and neither is
+`open` of a file or app the sandbox could have written; `open` of a link says where it goes.
+
+Per-command grants, in the global `config.toml` or a `config.local.toml`:
+
+```toml
+[[sandbox.commands]]
+match = "bash(husky install *)"
+grant = "all"                               # everything except the floor (what "allow" saves)
+
+[[sandbox.commands]]
+match = "bash(git push *)"
+grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed by hand: write, write_file, read, connect, presets
+```
+
+A matching command runs with its grant from the start, matched as `[permissions]` rules match (every part of a
+compound command must match the same entry; a command that writes a file with `>` gets none). Your `[permissions]`
+rules still decide first whether it runs at all.
+
+When something other than a command is blocked (an MCP server, an extension, pi), you're asked once per process and
+path whether to add the entry that lifts it (`write_file`, `read`, or `connect`) in this project or everywhere, which
+restarts the session. What the floor or your `deny` blocks is only shown, never offered.
+
 Known limits:
 
+- Commands the daemon runs don't go through fnox's credential proxy.
 - The network and Unix sockets aren't restricted yet: anything the agent can read can leave the machine
   ([#248](https://github.com/alex35mil/Piton/issues/248), [#228](https://github.com/alex35mil/Piton/issues/228)).
 - pi's own credentials (its `auth.json`, provider keys in its environment) are readable: the whole pi process is

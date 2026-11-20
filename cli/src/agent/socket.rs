@@ -1,9 +1,11 @@
 //! `agent.sock`: the socket sandboxed pis reach the daemon on, next to the control socket but separate from it. A
 //! sandbox may connect to this one socket (a `unix_socket` grant in its profile) and never to the control socket.
 //!
-//! One request per connection, one JSON line each way. A request names its session by the token the daemon gave that
-//! pi (`PITON_SESSION_TOKEN`): a request can act only for the session it came from, and only in the ways listed here.
-//! Today that's one: a protected write (see `write.rs`), answered only by the user through a client.
+//! One request per connection, one JSON line each way, except `run_command`, which streams the command's output as
+//! lines before its last one. A request names its session by the token the daemon gave that pi
+//! (`PITON_SESSION_TOKEN`): a request can act only for the session it came from, and only in the ways listed here: a
+//! protected write (see `write.rs`), and a bash call run through the daemon (see `run.rs`, `block.rs`), each answered
+//! only by the user through a client or by the user's own grants.
 
 use std::{
     collections::HashMap,
@@ -38,10 +40,7 @@ pub struct Tokens {
 impl Tokens {
     /// A new token for `key`.
     pub fn issue(&self, key: SessionKey) -> std::io::Result<String> {
-        use std::io::Read;
-        let mut bytes = [0u8; 32];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let token = random_bytes_hex(32)?;
         lock(&self.by_token).insert(token.clone(), key);
         Ok(token)
     }
@@ -55,6 +54,23 @@ impl Tokens {
     }
 }
 
+fn random_bytes_hex(n: usize) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut bytes = vec![0u8; n];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// `n` random bytes as hex; the clock's nanoseconds if the system's randomness can't be read (a tag, not a secret).
+pub fn random_hex(n: usize) -> String {
+    random_bytes_hex(n).unwrap_or_else(|_| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("{nanos:x}")
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
@@ -63,13 +79,33 @@ enum Request {
         path: PathBuf,
         content: String,
     },
+    RunCommand {
+        token: String,
+        #[serde(flatten)]
+        request: super::RunRequest,
+    },
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Response {
     ProtectedWrite(super::write::WriteOutcome),
-    Error { message: String },
+    /// A chunk of the running command's output, base64.
+    Output {
+        data: String,
+    },
+    /// The daemon's run ended: the exit code, or 128 + the signal.
+    Exit {
+        code: i32,
+    },
+    TimedOut,
+    /// Not run, with why: the user denied it, didn't answer, or the request doesn't match a running call.
+    NotRun {
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Binds the socket, owner-only and replacing a stale one.
@@ -100,6 +136,15 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
         return;
     };
     let response = match serde_json::from_str::<Request>(&line) {
+        Ok(Request::RunCommand { token, request }) => {
+            // Streams: the output lines, then the end. Closing the connection (the agent's stop or timeout) drops the
+            // run, which kills the command's process group.
+            tokio::select! {
+                () = run_command(&daemon, token, request, &mut write) => {}
+                _ = closed(&mut lines) => {}
+            }
+            return;
+        }
         // The agent's tool call holds the connection while the user decides; when it's aborted, the connection closes
         // and the wait ends, which the session sees (its reply channel closes) and settles.
         Ok(request) => tokio::select! {
@@ -110,9 +155,137 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
             message: format!("invalid request: {e}"),
         },
     };
-    let mut out = serde_json::to_string(&response).unwrap_or_default();
+    send(&mut write, &response).await;
+}
+
+async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, response: &Response) -> bool {
+    let mut out = serde_json::to_string(response).unwrap_or_default();
     out.push('\n');
-    let _ = write.write_all(out.as_bytes()).await;
+    write.write_all(out.as_bytes()).await.is_ok()
+}
+
+/// Decides a bash call with its session (a grant, the user's answer), runs it when approved, and streams it back.
+async fn run_command(
+    daemon: &Daemon,
+    token: String,
+    request: super::RunRequest,
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+) {
+    use super::{RunDecision, RunEnd, RunEvent};
+    let Some(handle) = daemon
+        .agent_tokens()
+        .session(&token)
+        .and_then(|key| daemon.session(key))
+    else {
+        send(
+            write,
+            &Response::Error {
+                message: "unknown or ended session".into(),
+            },
+        )
+        .await;
+        return;
+    };
+    let (reply, decision) = tokio::sync::oneshot::channel();
+    if handle.tx.send(SessionCmd::RunCommand { request, reply }).is_err() {
+        send(
+            write,
+            &Response::Error {
+                message: "unknown or ended session".into(),
+            },
+        )
+        .await;
+        return;
+    }
+    // Wakes the session when the agent stops waiting, so it closes the question at once.
+    let _wake = WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleQuestion);
+    let approved = match decision.await {
+        Ok(RunDecision::Run(approved)) => approved,
+        Ok(RunDecision::NotRun { reason }) => {
+            send(write, &Response::NotRun { reason }).await;
+            return;
+        }
+        Err(_) => {
+            send(
+                write,
+                &Response::Error {
+                    message: "the session ended before the user answered".into(),
+                },
+            )
+            .await;
+            return;
+        }
+    };
+    let helper = match crate::launch::helper() {
+        Ok(helper) => helper,
+        Err(e) => {
+            send(write, &Response::Error { message: e.to_string() }).await;
+            return;
+        }
+    };
+    let (events, mut output) = tokio::sync::mpsc::unbounded_channel();
+    let spec = super::RunSpec {
+        helper: &helper,
+        policy: &approved.policy,
+        shell: &approved.shell,
+        command: &approved.command,
+        cwd: &approved.cwd,
+        env: &approved.env,
+        timeout: approved.timeout,
+    };
+    let run = super::run(spec, events);
+    tokio::pin!(run);
+    let end = loop {
+        tokio::select! {
+            end = &mut run => break end,
+            Some(RunEvent::Output(chunk)) = output.recv() => {
+                if !send(write, &Response::Output { data: base64(&chunk) }).await {
+                    return;
+                }
+            }
+        }
+    };
+    // What the command printed before it ended.
+    while let Ok(RunEvent::Output(chunk)) = output.try_recv() {
+        if !send(write, &Response::Output { data: base64(&chunk) }).await {
+            return;
+        }
+    }
+    let session = handle.key;
+    let last = match end {
+        RunEnd::Exited { code } => {
+            crate::log!("session {session}: command run by the daemon exited with {code}");
+            Response::Exit { code }
+        }
+        RunEnd::TimedOut => {
+            crate::log!("session {session}: command run by the daemon timed out");
+            Response::TimedOut
+        }
+        RunEnd::Failed { reason } => {
+            crate::log!("session {session}: command run by the daemon failed: {reason}");
+            Response::Error { message: reason }
+        }
+    };
+    send(write, &last).await;
+}
+
+/// Standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            match i <= chunk.len() {
+                true => out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char),
+                false => out.push('='),
+            }
+        }
+    }
+    out
 }
 
 /// Resolves when the client closes its side (or sends more, which this protocol doesn't allow).
@@ -139,8 +312,7 @@ async fn respond(daemon: &Daemon, request: Request) -> Response {
                 return unknown();
             }
             // Wakes the session when the agent stops waiting, so it closes the dialog at once.
-            let session = handle.tx.clone();
-            let _wake = WakeOnDrop(session);
+            let _wake = WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleProtectedWrite);
             // Waits for the user, as long as it takes; the agent's tool call waits with it.
             match outcome.await {
                 Ok(outcome) => Response::ProtectedWrite(outcome),
@@ -149,15 +321,16 @@ async fn respond(daemon: &Daemon, request: Request) -> Response {
                 },
             }
         }
+        Request::RunCommand { .. } => unreachable!("handled with its stream"),
     }
 }
 
-/// Asks the session to look at its pending protected write when dropped: the agent stopped waiting.
-struct WakeOnDrop(tokio::sync::mpsc::UnboundedSender<SessionCmd>);
+/// Asks the session to look at its pending question when dropped: the agent stopped waiting.
+struct WakeOnDrop(tokio::sync::mpsc::UnboundedSender<SessionCmd>, fn() -> SessionCmd);
 
 impl Drop for WakeOnDrop {
     fn drop(&mut self) {
-        let _ = self.0.send(SessionCmd::SettleProtectedWrite);
+        let _ = self.0.send((self.1)());
     }
 }
 

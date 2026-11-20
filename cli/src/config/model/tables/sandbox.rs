@@ -1,9 +1,9 @@
 //! `[sandbox]`: what a sandboxed pi may do beyond Piton's base policy (`launch/sandbox/`). A profile adds a fixed set of
 //! entries; the user's lists add on top, and lists only add across levels.
 //!
-//! A key that loosens a protection (`profile`, `read`, `connect`, the `git` preset, the `mise` preset's
-//! `install = "allow"`) is accepted in the global `config.toml` or a `config.local.toml`, never a project's committed
-//! `config.toml`: a repository can't open the sandbox for whoever clones it.
+//! A key that loosens a protection (`profile`, `read`, `connect`, the `git` preset, `commands`) is accepted in the
+//! global `config.toml` or a `config.local.toml`, never a project's committed `config.toml`: a repository can't open
+//! the sandbox for whoever clones it.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +37,92 @@ pub struct SandboxTable {
     /// Paths denied like the built-in credential list: no read, write, or connect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// Per-command grants: a bash call that matches runs through the daemon with the launch's sandbox widened by the
+    /// grant (`[[sandbox.commands]]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<CommandGrant>,
+}
+
+/// `[[sandbox.commands]]`: what a matching command gets.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandGrant {
+    /// A `bash(...)` permission rule, matched by the daemon as the permissions extension matches it.
+    #[serde(rename = "match")]
+    pub pattern: CommandPattern,
+    pub grant: Grant,
+}
+
+/// The command pattern of a `bash(...)` rule: `bash(git push *)` is `git push *`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CommandPattern(String);
+
+impl CommandPattern {
+    pub fn new(pattern: &str) -> Result<Self, String> {
+        let pattern = pattern.trim();
+        match pattern.is_empty() || pattern.contains('\n') {
+            true => Err("a command pattern is one non-empty line".into()),
+            false => Ok(Self(pattern.to_string())),
+        }
+    }
+
+    /// The pattern inside `bash(...)`.
+    pub fn pattern(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for CommandPattern {
+    type Error = String;
+
+    fn try_from(rule: String) -> Result<Self, String> {
+        let inner = rule
+            .strip_prefix("bash(")
+            .and_then(|r| r.strip_suffix(')'))
+            .ok_or_else(|| format!("match {rule:?}: a `bash(...)` rule, such as \"bash(git push *)\""))?;
+        Self::new(inner).map_err(|why| format!("match {rule:?}: {why}"))
+    }
+}
+
+impl From<CommandPattern> for String {
+    fn from(pattern: CommandPattern) -> String {
+        format!("bash({})", pattern.0)
+    }
+}
+
+/// What a per-command grant gives the command beyond the launch's sandbox. Never the floor: protected files,
+/// configuration levels, the daemon's state, the user's `deny`, and credentials while fnox is on (`launch/sandbox/`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Grant {
+    /// `"all"`: everything except the floor. What "Allow and persist" saves.
+    All(AllGrant),
+    /// The `[sandbox]` grant lists, added as the user's own lists are.
+    Lists(GrantLists),
+}
+
+/// The word `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AllGrant {
+    All,
+}
+
+/// A narrowed grant: the `[sandbox]` lists that widen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantLists {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_file: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect: Vec<Connect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub presets: Vec<Preset>,
 }
 
 /// A built-in set of entries the sandbox starts from. Profiles only add: `strict` adds nothing to the base, and a
@@ -164,14 +250,13 @@ impl std::fmt::Display for NetworkTarget {
     }
 }
 
-/// A named bundle of grants. Written as its name, or as a table with the name and the preset's own options:
-/// `{ name = "mise", install = "allow" }`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(try_from = "toml::Value", into = "toml::Value")]
+/// A named bundle of grants, written as its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Preset {
-    /// mise's cache and install bookkeeping; with `install = "allow"`, its installed tools too. Each toolchain preset
+    /// mise's cache and install bookkeeping, never its installed tools (installs ask, #241). Each toolchain preset
     /// grants that toolchain's caches and state, which host builds reuse; the folders are in `launch/sandbox/policy.rs`.
-    Mise(MiseOptions),
+    Mise,
     /// Cargo's registry and git checkouts and rustup's downloads, never `~/.cargo/bin` or installed toolchains.
     Rust,
     /// npm, pnpm, bun, and Yarn caches.
@@ -184,49 +269,13 @@ pub enum Preset {
     Git,
 }
 
-/// The `mise` preset's options. Unset options are the nearest level's that sets them, else their default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MiseOptions {
-    /// How `mise install` runs for a sandboxed agent. Default: [`InstallMode::Ask`].
-    pub install: Option<InstallMode>,
-}
-
-/// How a sandboxed agent installs tools.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallMode {
-    /// The sandbox may write the installed tools: no prompt, and the agent can replace binaries the host runs. Global
-    /// configuration only.
-    Allow,
-    /// Each install is approved by the user and run on the host (#241); until that exists, installs fail in the
-    /// sandbox.
-    Ask,
-    /// Installs fail in the sandbox.
-    Deny,
-}
-
-impl InstallMode {
-    fn name(self) -> &'static str {
-        match self {
-            InstallMode::Allow => "allow",
-            InstallMode::Ask => "ask",
-            InstallMode::Deny => "deny",
-        }
-    }
-}
-
 impl Preset {
     #[cfg(test)]
-    pub const ALL: [Preset; 5] = [
-        Preset::Mise(MiseOptions { install: None }),
-        Preset::Rust,
-        Preset::Node,
-        Preset::Swift,
-        Preset::Git,
-    ];
+    pub const ALL: [Preset; 5] = [Preset::Mise, Preset::Rust, Preset::Node, Preset::Swift, Preset::Git];
 
     pub fn name(&self) -> &'static str {
         match self {
-            Preset::Mise(_) => "mise",
+            Preset::Mise => "mise",
             Preset::Rust => "rust",
             Preset::Node => "node",
             Preset::Swift => "swift",
@@ -234,98 +283,12 @@ impl Preset {
         }
     }
 
-    /// Folds a nearer entry for the same preset in: per option, the nearer value when it sets one.
-    pub fn merge(&mut self, nearer: &Preset) {
-        match (self, nearer) {
-            (Preset::Mise(options), Preset::Mise(n)) => {
-                if n.install.is_some() {
-                    options.install = n.install;
-                }
-            }
-            (Preset::Mise(_) | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git, _) => {}
-        }
-    }
-
     /// The key of a preset that loosens a protection (it lets the sandbox write what the host runs), or `None` for one
     /// any configuration file may list.
     fn loosening(&self) -> Option<&'static str> {
         match self {
-            Preset::Mise(options) => match options.install {
-                Some(InstallMode::Allow) => Some("sandbox.presets mise install = \"allow\""),
-                Some(InstallMode::Ask | InstallMode::Deny) | None => None,
-            },
             Preset::Git => Some("sandbox.presets git"),
-            Preset::Rust | Preset::Node | Preset::Swift => None,
-        }
-    }
-}
-
-impl TryFrom<toml::Value> for Preset {
-    type Error = String;
-
-    fn try_from(value: toml::Value) -> Result<Self, String> {
-        let names = "mise, rust, node, swift, or git";
-        let (name, mut options) = match value {
-            toml::Value::String(name) => (name, toml::Table::new()),
-            toml::Value::Table(mut table) => match table.remove("name") {
-                Some(toml::Value::String(name)) => (name, table),
-                Some(_) | None => return Err("a preset with options needs `name = \"...\"`".into()),
-            },
-            other @ (toml::Value::Integer(_)
-            | toml::Value::Float(_)
-            | toml::Value::Boolean(_)
-            | toml::Value::Datetime(_)
-            | toml::Value::Array(_)) => {
-                return Err(format!(
-                    "a preset is a name or a table with `name`, not {}",
-                    other.type_str()
-                ));
-            }
-        };
-        let preset = match name.as_str() {
-            "mise" => {
-                let install = match options.remove("install") {
-                    None => None,
-                    Some(toml::Value::String(mode)) => Some(match mode.as_str() {
-                        "allow" => InstallMode::Allow,
-                        "ask" => InstallMode::Ask,
-                        "deny" => InstallMode::Deny,
-                        other => return Err(format!("mise install {other:?}: \"allow\", \"ask\", or \"deny\"")),
-                    }),
-                    Some(_) => return Err("mise install: \"allow\", \"ask\", or \"deny\"".into()),
-                };
-                Preset::Mise(MiseOptions { install })
-            }
-            "rust" => Preset::Rust,
-            "node" => Preset::Node,
-            "swift" => Preset::Swift,
-            "git" => Preset::Git,
-            other => return Err(format!("unknown preset {other:?}: {names}")),
-        };
-        match options.keys().next() {
-            Some(key) => Err(format!("the {} preset has no option `{key}`", preset.name())),
-            None => Ok(preset),
-        }
-    }
-}
-
-impl From<Preset> for toml::Value {
-    /// The name alone when no option is set.
-    fn from(preset: Preset) -> Self {
-        let mut table = toml::Table::new();
-        match &preset {
-            Preset::Mise(MiseOptions { install: Some(mode) }) => {
-                table.insert("install".into(), toml::Value::String(mode.name().into()));
-            }
-            Preset::Mise(MiseOptions { install: None }) | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git => {
-            }
-        }
-        match table.is_empty() {
-            true => toml::Value::String(preset.name().into()),
-            false => {
-                table.insert("name".into(), toml::Value::String(preset.name().into()));
-                toml::Value::Table(table)
-            }
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => None,
         }
     }
 }
@@ -339,6 +302,7 @@ impl TableValue for SandboxTable {
                 ("sandbox.profile", self.profile.is_some()),
                 ("sandbox.read", !self.read.is_empty()),
                 ("sandbox.connect", !self.connect.is_empty()),
+                ("sandbox.commands", !self.commands.is_empty()),
             ],
         );
         for key in self.presets.iter().filter_map(Preset::loosening) {
@@ -362,6 +326,31 @@ impl TableValue for SandboxTable {
                 ));
             }
         }
+        for command in &self.commands {
+            match &command.grant {
+                Grant::All(AllGrant::All) => {}
+                Grant::Lists(lists) => lists
+                    .check()
+                    .map_err(|why| format!("sandbox.commands {}: {why}", String::from(command.pattern.clone())))?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl GrantLists {
+    fn check(&self) -> Result<(), String> {
+        for (key, paths) in [
+            ("write", &self.write),
+            ("write_file", &self.write_file),
+            ("read", &self.read),
+        ] {
+            if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
+                return Err(format!(
+                    "grant {key} {grant:?}: must be absolute, or start with `~/` or `$`"
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -376,13 +365,9 @@ impl Merge for SandboxTable {
         union(&mut self.write_file, n.write_file);
         union(&mut self.read, n.read);
         union(&mut self.connect, n.connect);
-        for preset in n.presets {
-            match self.presets.iter_mut().find(|p| p.name() == preset.name()) {
-                Some(existing) => existing.merge(&preset),
-                None => self.presets.push(preset),
-            }
-        }
+        union(&mut self.presets, n.presets);
         union(&mut self.deny, n.deny);
+        union(&mut self.commands, n.commands);
     }
 }
 
@@ -403,9 +388,10 @@ pub struct SandboxSettings {
     pub write_file: Vec<Listed<String>>,
     pub read: Vec<Listed<String>>,
     pub connect: Vec<Listed<Connect>>,
-    /// Each preset once, with the merged options; the file is the first that listed it.
     pub presets: Vec<Listed<Preset>>,
     pub deny: Vec<Listed<String>>,
+    /// Per-command grants, farthest file first; the first that matches a call decides.
+    pub commands: Vec<Listed<CommandGrant>>,
 }
 
 impl SandboxSettings {
@@ -419,6 +405,7 @@ impl SandboxSettings {
             connect,
             presets,
             deny,
+            commands,
         } = table;
         if let Some(profile) = profile {
             self.profile = Some(Listed {
@@ -430,16 +417,9 @@ impl SandboxSettings {
         add_listed(&mut self.write_file, write_file, file);
         add_listed(&mut self.read, read, file);
         add_listed(&mut self.connect, connect, file);
-        for preset in presets {
-            match self.presets.iter_mut().find(|p| p.value.name() == preset.name()) {
-                Some(existing) => existing.value.merge(&preset),
-                None => self.presets.push(Listed {
-                    value: preset,
-                    file: file.to_path_buf(),
-                }),
-            }
-        }
+        add_listed(&mut self.presets, presets, file);
         add_listed(&mut self.deny, deny, file);
+        add_listed(&mut self.commands, commands, file);
     }
 
     /// The profile in effect: the nearest file's, else the default.
@@ -495,13 +475,10 @@ mod tests {
         let mut s = SandboxSettings::default();
         assert_eq!(s.profile(), Profile::Standard, "the default");
         s.add(
-            table("profile = \"strict\"\nwrite = [\"/a\"]\npresets = [{ name = \"mise\", install = \"allow\" }]"),
+            table("profile = \"strict\"\nwrite = [\"/a\"]\npresets = [\"mise\"]"),
             global,
         );
-        s.add(
-            table("write = [\"/a\", \"/b\"]\npresets = [{ name = \"mise\", install = \"deny\" }]"),
-            repo,
-        );
+        s.add(table("write = [\"/a\", \"/b\"]\npresets = [\"mise\"]"), repo);
         assert_eq!(s.profile(), Profile::Strict);
         assert_eq!(s.profile.as_ref().unwrap().file, global);
         let writes: Vec<_> = s.write.iter().map(|l| (l.value.as_str(), l.file.as_path())).collect();
@@ -509,9 +486,7 @@ mod tests {
         assert_eq!(
             s.presets,
             [Listed {
-                value: Preset::Mise(MiseOptions {
-                    install: Some(InstallMode::Deny)
-                }),
+                value: Preset::Mise,
                 file: global.into()
             }]
         );
@@ -582,47 +557,70 @@ mod tests {
         );
     }
 
-    /// A preset is a name or a table; the same preset at several levels merges its options, the nearer set one
-    /// winning.
+    /// A preset is its name; the `mise` preset's former `install` option is refused like any unknown value.
     #[test]
-    fn presets_take_options() {
-        let mise = |install| Preset::Mise(MiseOptions { install });
-        let mut base = table("presets = [{ name = \"mise\", install = \"allow\" }, \"rust\"]");
-        assert_eq!(base.presets, [mise(Some(InstallMode::Allow)), Preset::Rust]);
-        base.merge(table("presets = [\"mise\"]"));
-        assert_eq!(
-            base.presets[0],
-            mise(Some(InstallMode::Allow)),
-            "a bare name keeps the options"
-        );
-        base.merge(table("presets = [{ name = \"mise\", install = \"deny\" }]"));
-        assert_eq!(base.presets[0], mise(Some(InstallMode::Deny)), "a nearer level narrows");
-        // Written back: the name alone without options.
-        let value =
-            toml::Value::try_from(table("presets = [\"rust\", { name = \"mise\", install = \"ask\" }]")).unwrap();
-        assert_eq!(
-            value["presets"].to_string(),
-            r#"["rust", { install = "ask", name = "mise" }]"#
-        );
+    fn presets_are_names() {
+        for preset in Preset::ALL {
+            let parsed = table(&format!("presets = [\"{}\"]", preset.name()));
+            assert_eq!(parsed.presets, [preset]);
+        }
         for bad in [
             "presets = [\"python\"]",
-            "presets = [{ install = \"ask\" }]",
-            "presets = [{ name = \"mise\", install = true }]",
-            "presets = [{ name = \"mise\", install = \"maybe\" }]",
-            "presets = [{ name = \"rust\", install = \"ask\" }]",
+            "presets = [{ name = \"mise\", install = \"ask\" }]",
+            "presets = [{ name = \"mise\" }]",
             "presets = [1]",
         ] {
             assert!(toml::from_str::<SandboxTable>(bad).is_err(), "{bad}");
         }
     }
 
+    /// `[[sandbox.commands]]`: a `bash(...)` rule and `all` or the grant lists.
+    #[test]
+    fn command_grants_parse() {
+        let parsed = table(
+            "[[commands]]\nmatch = \"bash(husky install *)\"\ngrant = \"all\"\n\n[[commands]]\nmatch = \"bash(git push \
+             *)\"\ngrant = { connect = [\"$SSH_AUTH_SOCK\"], write = [\"~/x\"] }\n",
+        );
+        assert_eq!(parsed.commands[0].pattern.pattern(), "husky install *");
+        assert_eq!(parsed.commands[0].grant, Grant::All(AllGrant::All));
+        assert_eq!(
+            parsed.commands[1].grant,
+            Grant::Lists(GrantLists {
+                connect: vec![Connect::Socket("$SSH_AUTH_SOCK".into())],
+                write: vec!["~/x".into()],
+                ..GrantLists::default()
+            })
+        );
+        assert!(parsed.check().is_ok());
+        // Written back as given.
+        let value = toml::Value::try_from(parsed).unwrap();
+        assert_eq!(value["commands"][0]["match"].as_str(), Some("bash(husky install *)"));
+        assert_eq!(value["commands"][0]["grant"].as_str(), Some("all"));
+        for bad in [
+            "[[commands]]\nmatch = \"git push *\"\ngrant = \"all\"",
+            "[[commands]]\nmatch = \"read(*)\"\ngrant = \"all\"",
+            "[[commands]]\nmatch = \"bash()\"\ngrant = \"all\"",
+            "[[commands]]\nmatch = \"bash(x)\"\ngrant = \"everything\"",
+            "[[commands]]\nmatch = \"bash(x)\"\ngrant = { deny = [\"/a\"] }",
+            "[[commands]]\nmatch = \"bash(x)\"",
+            "[[commands]]\nmatch = \"bash(x)\"\ngrant = \"all\"\nask = true",
+        ] {
+            assert!(toml::from_str::<SandboxTable>(bad).is_err(), "{bad}");
+        }
+        assert!(
+            table("[[commands]]\nmatch = \"bash(x)\"\ngrant = { write = [\"rel\"] }")
+                .check()
+                .is_err()
+        );
+    }
+
     /// Every key that loosens a protection is the user's own: the global file or a `config.local.toml`. Writes,
-    /// toolchains, installs that ask or are denied, and denies may be listed anywhere.
+    /// toolchains, and denies may be listed anywhere.
     #[test]
     fn loosening_keys_are_the_users_own() {
         assert_eq!(
-            table("presets = [{ name = \"mise\", install = \"allow\" }]").ruled_keys(),
-            [("sandbox.presets mise install = \"allow\"", Rule::USERS_OWN)]
+            table("[[commands]]\nmatch = \"bash(x)\"\ngrant = \"all\"").ruled_keys(),
+            [("sandbox.commands", Rule::USERS_OWN)]
         );
         assert_eq!(
             table("presets = [\"git\", \"rust\"]").ruled_keys(),
@@ -638,7 +636,6 @@ mod tests {
         );
         for text in [
             "presets = [\"mise\"]",
-            "presets = [{ name = \"mise\", install = \"deny\" }]",
             "presets = [\"rust\", \"swift\"]",
             "write = [\"/a\"]",
             "write_file = [\"/a\"]",
