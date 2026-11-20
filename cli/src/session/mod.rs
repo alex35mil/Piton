@@ -768,11 +768,13 @@ impl SessionTask {
             SessionCmd::ProtectedWrite { request, reply } => self.protected_write(request, reply),
             SessionCmd::SettleProtectedWrite => {
                 self.settle_protected_write();
+                self.ask_next_process();
                 self.publish_view_state();
             }
             SessionCmd::RunCommand { request, reply } => self.run_command(request, reply),
             SessionCmd::SettleQuestion => {
                 self.settle_question();
+                self.ask_next_process();
                 self.publish_view_state();
             }
             SessionCmd::Refusal(refusal) => self.on_refusal(refusal),
@@ -798,9 +800,7 @@ impl SessionTask {
             )));
             return;
         };
-        self.settle_protected_write();
-        self.settle_question();
-        if self.protected_write.is_some() || self.question.is_some() {
+        if self.asking() {
             let _ = reply.send(refuse(
                 "another question is waiting for the user; try again after it's answered".into(),
             ));
@@ -854,6 +854,7 @@ impl SessionTask {
             }
         };
         let _ = pending.reply.send(outcome);
+        self.ask_next_process();
     }
 
     fn watch(&mut self, watcher: ClientId, tx: WatchTx, from: WatchFrom) {
@@ -1188,8 +1189,9 @@ impl SessionTask {
             // The conversation was rewritten: rebuild the view from entries.
             self.internal(Internal::GetEntries);
         }
-        self.settle_protected_write();
-        self.settle_question();
+        // A question whose dialog left with the run frees the slot; a waiting process question is shown then. (The
+        // dialog it adds comes back through here, and finds the slot taken.)
+        self.ask_next_process();
         self.publish_view_state();
     }
 
@@ -1218,9 +1220,7 @@ impl SessionTask {
                 let _ = reply.send(decision);
             }
             commands::First::Ask { refusals, tag, note } => {
-                self.settle_protected_write();
-                self.settle_question();
-                if self.protected_write.is_some() || self.question.is_some() {
+                if self.asking() {
                     let _ = reply.send(RunDecision::NotRun {
                         reason: "another question is waiting for the user; try again after it's answered".into(),
                     });
@@ -1299,6 +1299,7 @@ impl SessionTask {
             }
         };
         let _ = pending.reply.send(decision);
+        self.ask_next_process();
     }
 
     /// Ends the block question when it can't be answered any more: its dialog left (the run ended) or the agent
@@ -1383,20 +1384,40 @@ impl SessionTask {
         }
     }
 
-    /// Shows the next process question when nothing else is being asked.
-    fn ask_next_process(&mut self) {
+    /// Whether the session's one question slot is taken: a protected write, a block question, or a process question.
+    /// Settles the ones that can't be answered any more first.
+    fn asking(&mut self) -> bool {
         self.settle_protected_write();
         self.settle_question();
-        let busy = self.protected_write.is_some() || self.question.is_some();
-        let showing = self.process.asking.is_some();
-        if busy || showing {
+        self.settle_process();
+        self.protected_write.is_some() || self.question.is_some() || self.process.asking.is_some()
+    }
+
+    /// A process question whose dialog left unanswered (the run it showed in ended) is asked again.
+    fn settle_process(&mut self) {
+        let Some(question) = &self.process.asking else { return };
+        if self.replay.has_dialog(&question.id) {
+            return;
+        }
+        self.process.requeue_unanswered();
+    }
+
+    /// Shows the next process question when nothing else is being asked. Called whenever the slot may have freed.
+    fn ask_next_process(&mut self) {
+        if self.asking() {
             return;
         }
         let Some(next) = self.process.next().cloned() else {
             return;
         };
+        // A fresh id, so a re-asked question is a new dialog every client shows.
+        self.next_internal += 1;
+        let id = format!("piton:process:{}", self.next_internal);
+        if let Some(asking) = &mut self.process.asking {
+            asking.id = id.clone();
+        }
         let (key, value) = next.lift.entry();
-        let record = crate::agent::block::process_dialog(&next.id, &next.process, &next.refusal, (key, &value));
+        let record = crate::agent::block::process_dialog(&id, &next.process, &next.refusal, (key, &value));
         self.on_pi_line(record.to_string());
     }
 
@@ -1442,6 +1463,7 @@ impl SessionTask {
         let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
             reason: "the user didn't answer in time; it didn't run".into(),
         });
+        self.ask_next_process();
         self.sync_shared();
         self.publish_view_state();
     }

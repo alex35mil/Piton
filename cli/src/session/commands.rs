@@ -98,6 +98,13 @@ impl ProcessBlocks {
         self.waiting.push_back(question);
     }
 
+    /// The question showing lost its dialog without an answer (the run it showed in ended): it's asked again, first.
+    pub fn requeue_unanswered(&mut self) {
+        if let Some(question) = self.asking.take() {
+            self.waiting.push_front(question);
+        }
+    }
+
     /// The next question to show, when none is showing.
     pub fn next(&mut self) -> Option<&ProcessQuestion> {
         if self.asking.is_none() {
@@ -716,8 +723,23 @@ mod tests {
         assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()));
         assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()), "one at a time");
         assert!(blocks.asking("a"));
+        // A question that lost its dialog unanswered (the run ended) is asked again, before the ones behind it.
+        blocks.requeue_unanswered();
+        assert!(blocks.asking.is_none());
+        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()));
         blocks.asking = None;
         assert_eq!(blocks.next().map(|q| q.id.clone()), Some("b".into()));
+        // Nothing is dropped, however many wait.
+        blocks.asking = None;
+        for i in 0..20 {
+            blocks.queue(question(&i.to_string()));
+        }
+        let mut shown = 0;
+        while blocks.next().is_some() {
+            shown += 1;
+            blocks.asking = None;
+        }
+        assert_eq!(shown, 20);
     }
 
     #[test]

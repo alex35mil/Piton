@@ -1076,8 +1076,10 @@ asks nono for no write grants, so every later grant still wins), and the keychai
 The daemon runs one `log stream` (outside any sandbox; `log` refuses inside one) for the Sandbox kernel extension's
 tagged reports and routes each to its session by tag (`daemon/refusals.rs`). A call's tag: kept for that call (shown
 when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fail. The session's tag, or a call
-forgotten since (its background job): a blocked process, every one brought to the user, in order, one question at a
-time, and each process, operation, and target once. It's offered as the narrowest `[sandbox]`
+forgotten since (its background job): a blocked process, every one brought to the user, in order, and each process,
+operation, and target once. The session asks one question at a time (protected writes, block questions, process
+questions); a process question waits for the slot, is shown as soon as it frees, and is asked again when its dialog
+leaves unanswered with the run it showed in. It's offered as the narrowest `[sandbox]`
 entry that lifts it (`write_file`, `read`, `connect`, or `read` of `~/Library/Keychains` for the keychain's services),
 saved in this project or everywhere, with a session restart (stopped and resumed from its file). Refusals by the floor
 or the user's `deny`, and operations no entry lifts, are logged and shown as a notice, never offered. macOS reports
