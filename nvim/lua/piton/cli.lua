@@ -29,6 +29,7 @@
 ---| { kind: "invalid_configuration", message: string }
 ---| { kind: "source_fetch", checkout: string, message: string }
 ---| { kind: "protected_update", checkout: string, upstream: string, target: string, files: string[] }
+---| { kind: "update_denied", checkout: string, files: string[] }
 ---| { kind: "tool_unavailable", tool: string, program: string }
 ---| { kind: "failed", message: string }
 
@@ -63,6 +64,7 @@ local REFUSAL_KINDS = {
     invalid_configuration = true,
     source_fetch = true,
     protected_update = true,
+    update_denied = true,
     tool_unavailable = true,
     failed = true,
 }
@@ -304,6 +306,11 @@ function M.describe(refusal_value)
         return ("Updating %s to %s changes protected files, which the sandbox can't write:\n%s"):format(
             r.checkout,
             r.upstream,
+            table.concat(util.head(r.files, 15), "\n")
+        )
+    elseif r.kind == "update_denied" then
+        return ("Updating %s changes protected files, and a `piton(git-pull)` deny rule refuses it; update it by hand:\n%s"):format(
+            r.checkout,
             table.concat(util.head(r.files, 15), "\n")
         )
     elseif r.kind == "tool_unavailable" then

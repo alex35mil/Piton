@@ -72,13 +72,15 @@ The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is
 - `commands/`: the command line, one file per command.
 - `config/`: configuration files (see "Configuration and state"). `state/`: the state database.
 - `daemon/`: the running daemon: startup, the session registry, the Unix socket (`rpc`, `control`, and the apps'
-  `view` connections), keep-awake, reloading the global files, and the local socket's messages (`protocol`).
+  `view` connections), keep-awake, reloading the global files, the local socket's messages (`protocol`), and the
+  kernel's record of sandbox refusals (`refusals`).
 - `session/`: one pi process, and the conversation model the apps render (`view`).
 - `launch/`: pi's environment and command line, and the sandbox (`sandbox`: the built-in policy, one launch's
   resolved rules, and applying them with the `nono` library; the only code that knows the backend).
 - `apps/`: serving the native apps: the `view` protocol, the tailnet WebSocket, browsing roots, the Settings list.
 - `agent/`: the bridge between a sandboxed agent and the daemon: which files are protected and their Seatbelt rules
-  (`protected`), `agent.sock` (`socket`), and a protected write asked of the user (`write`).
+  (`protected`), `agent.sock` (`socket`), a protected write asked of the user (`write`), bash calls the daemon runs
+  (`run`) and the per-command grants it matches (`command`), the block question (`block`), and `open` (`open`).
 - `project/`: a workspace's source or worker relation, and worker clones.
 - `tools/`: the external tools piton runs (mise, fnox, tailscale) and whether each is used.
 - `setup/`: `piton setup` and the launchd agent. `logging/`: Piton's own logs, the logging policy, the collector.
@@ -234,8 +236,11 @@ with `.piton/.local` linked to the source's.
     Then the merge runs in the sandbox with every rule in place, finding those paths done. Nothing is lifted, so a
     hook can't write any other protected file (`.piton/config.local.toml`, which no diff shows). A symlink or
     submodule among them refuses (change it by hand); a merge that fails puts the paths back from `HEAD`.
-  - Not asking comes with the universal question when the sandbox blocks something
-    ([#241](https://github.com/alex35mil/Piton/issues/241)), as a `piton(git-pull)` rule in `[sandbox.on_block]`.
+  - The user's permission rules can answer before anyone is asked: `piton(git-pull)` in the source checkout's
+    `[permissions]` (the host's rules: `[permissions]` and `[permissions.host]`). `allow` applies the update's
+    protected files without asking, through the same approval path; `deny` refuses creation (`update_denied`) and, on
+    deletion, deletes the worker and leaves the source as it is, with a warning; `ask` or no rule asks. A deny or ask
+    rule wins over an allow, and `*` counts.
   - An incoming-PR review that the pi package's `/pr` tools left untouched isn't an uncommitted change. Piton reads
     `.piton/.local/pull-requests/<number>/checkout.json`, which pi writes, and checks four fields: `phase`,
     `location.root`, and `workspace.{headSha, indexTree, diskCommit}`.
@@ -742,10 +747,9 @@ the line. A host or client file has one schema and is read whole.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
   - Every key that loosens the sandbox, `sandbox.profile`, `sandbox.read` (lifting a built-in credential deny),
-    `sandbox.connect`, the `mise` preset's `install = "allow"` (writing the tools the host runs), and the `git` preset
-    (letting agents write Git's hooks and configuration): the global `config.toml` or a `config.local.toml`, never a
-    project's `config.toml`, which travels with the repository, so a repository can't open the sandbox for whoever
-    clones it. Asking when the sandbox blocks something is #241's.
+    `sandbox.connect`, `sandbox.commands` (per-command grants), and the `git` preset (letting agents write Git's hooks
+    and configuration): the global `config.toml` or a `config.local.toml`, never a project's `config.toml`, which
+    travels with the repository, so a repository can't open the sandbox for whoever clones it.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
     repository's.
   - `web_search.api_key`: a `config.local.toml` only (a secret).
@@ -886,12 +890,9 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    `/` included) reopens a credential, a user deny, or the daemon's sockets. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
    (the Go build cache is linked straight into host builds), so a writable cache would run sandbox-written code on
    the host. Each preset (`mise`, `rust`, `node`, `swift`) grants one toolchain's caches and state as an informed
-   opt-in, documented as such. A preset is a name or `{ name = "...", <options> }`; options are typed per preset.
-   With its default options no preset writes what the host executes or trusts (a unit test lists those paths):
-   `mise` writes its cache and install bookkeeping, never its installed tools or trusted configs. Its `install`
-   option is `"ask"` by default (installs approved per command and run on the host, through #241's confirmation gate;
-   until then they fail in the sandbox), `"deny"`, or `"allow"` (the sandbox writes the installed tools; the user's own
-   files only, like every loosening knob).
+   opt-in, documented as such. A preset is its name. No preset writes what the host executes or trusts (a unit test
+   lists those paths): `mise` writes its cache and install bookkeeping, never its installed tools or trusted configs;
+   an install that needs them is asked about ("Asking when the sandbox blocks").
    The `git` preset grants no path: it leaves out the Git rule (6).
 3. **Credentials:** nono's deny groups (`deny_credentials`, keychains, browser data, macOS private data, shell
    history and rc files), vendored verbatim in `nono-deny-groups.json` at the `nono` version; `mise run
@@ -1005,6 +1006,86 @@ credential deny groups, since broad reads make the ~120 system-path allow entrie
 with nested re-allow is requested upstream ([nono#2310](https://github.com/nolabs-ai/nono/issues/2310)). A custom
 Seatbelt launcher is rejected: keeping the credential lists correct across macOS releases is security work nono
 shares.
+
+### Asking when the sandbox blocks
+
+When the sandbox blocks something a sandboxed agent needs, the user is asked, and nothing runs fully unsandboxed
+(#241). Permissions decide whether the agent may make a call; the sandbox decides what a running process may touch;
+when the sandbox blocks something, the user decides.
+
+**The floor** is what no approval lifts: protected files, every configuration level and pi's agent directory, the
+daemon's state and control socket, the user's own `[sandbox] deny`, and, while fnox is on, the credential denies (the
+sandbox could run `fnox get`). `all` is the launch's policy with everything else open: every write and connect allowed
+first, then the launch's rules with every liftable deny left out, so the floor still decides last
+(`launch/sandbox/grant.rs`, where each deny's source and target say whether it's floor, matched exhaustively). Git's
+control files and the credential denies (fnox off) aren't floor: `husky install` and Git's keychain sign-in work once
+approved.
+
+**Every bash call runs through the daemon.** A sandboxed process can't apply a new sandbox (pi-findings: "Sandboxes
+don't nest"), and a refusal can't be traced to the command that caused it afterwards: macOS reports the refused
+process's pid, which is usually gone, and hides another process's environment from a non-root reader. So in a
+sandboxed session the daemon, outside any sandbox, starts every bash call and `!` command itself, through
+`piton sandbox-exec` (`agent/run.rs`), each in its own sandbox: the session's policy, unless a grant or an approval
+widens it, tagged with the call. pi, its extensions, and MCP servers stay in pi's sandbox, which carries the session's
+tag; a process can't leave or widen its sandbox, so only the daemon can start one with more.
+
+- The permissions extension registers pi's own bash tool definition (rendering, truncation, session environment) with
+  operations that send `run_command {token, call_id, command, cwd, timeout, env, reason?, rerun}` over `agent.sock`
+  and stream the answer (output chunks, then the exit, a timeout, or why it didn't run), and handles `user_bash` the
+  same way (`call_id: "user:<n>"`). Outside a daemon-launched sandboxed session pi's own bash stays.
+- The daemon accepts a request only for a bash call pi reported running (`tool_execution_start`) with exactly that
+  command, once per call; a rerun only when that call's arguments asked for it (`outside_sandbox: true`). A typed
+  command always runs at the session's policy. The daemon picks the shell and `shellCommandPrefix` from pi's settings
+  files (the agent directory's and the workspace's `.pi/`, neither writable from the sandbox).
+- At the session's own policy the command gets the environment the extension sends (pi's shell environment); widened,
+  the session's launch environment, so a request can't point a granted command at its own `PATH`. Either reaches only
+  the command: `piton sandbox-exec` runs outside any sandbox until it applies one, and the dynamic loader reads `DYLD_*`
+  before `main`, so every sandboxed start (pi, environment tools, Git for workers, these commands) gives the helper only
+  its own variables and carries the command's environment in `PITON_LAUNCH_ENV`, which it unpacks after applying the
+  sandbox.
+- As in pi's bash, the call ends when the shell exits and its background jobs keep running; the agent's stop (the
+  connection closes) or the timeout kills the call's process group.
+- Limit: commands the daemon runs don't go through fnox's proxy. And pi reports a call running before its permission
+  gate decides, so another command could ask the daemon to run a call that's still waiting for an `ask` answer; only a
+  command a per-command grant covers runs widened that way, and a rerun always asks the user.
+
+**Per-command grants** (`[[sandbox.commands]]`, `match = "bash(...)"`, `grant = "all"` or a table of the `[sandbox]`
+grant lists; the user's own files only): a matching call runs at that grant from the start, never failing first. The
+daemon matches with a Rust port of the permissions extension's Bash analysis and glob (`agent/command.rs`), held
+identical by one fixture file run by both test suites (`pi/tests/fixtures/bash-matching.json`): every command node must
+match the same entry, and a command that writes a file through a redirect gets no grant. A narrowed grant's policy is
+the launch's resolved again with the grant's lists added, so it never reaches the floor either.
+
+**The block question.** The agent asks for a rerun with `outside_sandbox: true` (and a `reason`) after a command
+failed in the sandbox. The daemon asks through pi's dialog record (`select`), inserted like the protected-write
+dialog, so the apps and pi.nvim show it with their dialog UI; only a client answers. It names the command, the
+agent's reason, and the refusals the kernel recorded for the call's last run. Options: allow once (the whole command
+runs again, at `all`), deny, allow this command or an edited pattern (an `input` prefilled with the command and
+subcommand plus ` *`), in this project (its source checkout's `.piton/config.local.toml`) or everywhere (the global
+`config.toml`). Persisting appends one `[[sandbox.commands]]` entry with `grant = "all"`; new sessions use it. One
+question at a time per session, shared with protected writes; no answer within `confirmation_timeout_ms` (host
+configuration, 10 minutes by default), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
+(`agent/open.rs`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
+scheme says it opens in the app registered for it; a file or app the sandbox could have written is refused, since macOS
+would run it unsandboxed.
+
+**Blocks with nothing to rerun** (an MCP server, an extension, pi itself). Every deny Piton emits carries
+`(with message "piton-<tag>")`: `<session>-<random>` for pi's sandbox, `<session>-<random>-<n>` for a call's. A
+leading tagged `(deny file-write*)` labels writes outside every grant (nono's own default deny has no message; Piton
+asks nono for no write grants, so every later grant still wins), and the keychain's Mach denies are repeated tagged.
+The daemon runs one `log stream` (outside any sandbox; `log` refuses inside one) for the Sandbox kernel extension's
+tagged reports and routes each to its session by tag (`daemon/refusals.rs`). A call's tag: kept for that call (shown
+when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fail. The session's tag, or a call
+forgotten since (its background job): a blocked process, every one brought to the user, in order, and each process,
+operation, and target once. The session asks one question at a time (protected writes, block questions, process
+questions); a process question waits for the slot, is shown as soon as it frees, and is asked again when its dialog
+leaves unanswered with the run it showed in. It's offered as the narrowest `[sandbox]`
+entry that lifts it (`write_file`, `read`, `connect`, or `read` of `~/Library/Keychains` for the keychain's services),
+saved in this project or everywhere, with a session restart (stopped and resumed from its file). Refusals by the floor
+or the user's `deny`, and operations no entry lifts, are logged and shown as a notice, never offered. macOS reports
+only a process's first refusal and folds repeats; refusals inside commands that still succeeded aren't surfaced.
+
+Every request and its outcome is logged in the daemon log, never a command's output.
 
 ### Deploying from a sandbox
 

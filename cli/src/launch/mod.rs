@@ -121,7 +121,7 @@ fn parse_env0(bytes: &[u8]) -> Env {
 /// A launch whose environment, credential proxy, and, for a sandboxed one, policy are resolved.
 pub enum Prepared {
     Host { env: Env, proxy: Option<fnox::Proxy> },
-    Sandbox(Sandboxed),
+    Sandbox(Box<Sandboxed>),
 }
 
 /// A sandboxed launch's environment and policy, and the credential proxy it starts behind, checked against the policy.
@@ -129,6 +129,8 @@ pub struct Sandboxed {
     pub env: Env,
     pub resolution: sandbox::Resolution,
     pub proxy: Option<fnox::Proxy>,
+    /// What commands the user approves run with: `all` and each `[[sandbox.commands]]` entry's policy.
+    pub commands: sandbox::grant::CommandPolicies,
 }
 
 /// Builds a launch in `workspace` in `mode`.
@@ -146,7 +148,9 @@ pub async fn prepare(
             let proxy = proxy_for(tools, base, workspace, &mut env).await?;
             Prepared::Host { env, proxy }
         }
-        LaunchMode::Sandbox => Prepared::Sandbox(prepare_sandbox(config, tools, resolved, base, workspace).await?),
+        LaunchMode::Sandbox => Prepared::Sandbox(Box::new(
+            prepare_sandbox(config, tools, resolved, base, workspace).await?,
+        )),
     })
 }
 
@@ -205,12 +209,27 @@ pub async fn prepare_sandbox(
         }
     };
     let resolution = sandbox_policy(config, resolved, base, &launch_env, workspace)?;
-    let mut env = with_piton_vars(config, launch_env.into_env(), LaunchMode::Sandbox);
+    let widened = |c: &LaunchConfig| {
+        sandbox_policy(config, c, base, &launch_env, workspace)
+            .map(|r| r.policy)
+            .map_err(|e| e.to_string())
+    };
+    let mut env = with_piton_vars(config, launch_env.clone().into_env(), LaunchMode::Sandbox);
     let proxy = proxy_for(all_tools, base, workspace, &mut env).await?;
     if let Some(proxy) = &proxy {
         proxy.check_sandbox(&resolution.policy, &config.paths.home)?;
     }
-    Ok(Sandboxed { env, resolution, proxy })
+    let credentials = match &proxy {
+        Some(_) => sandbox::grant::Credentials::Floor,
+        None => sandbox::grant::Credentials::Liftable,
+    };
+    let commands = sandbox::grant::command_policies(resolved, &resolution.policy, credentials, widened);
+    Ok(Sandboxed {
+        env,
+        resolution,
+        proxy,
+        commands,
+    })
 }
 
 /// What Piton decides, set last so a repository's environment can't override it: the runtime (which permissions
@@ -262,7 +281,7 @@ pub fn command_line(config: &DaemonConfig, mode: LaunchMode, session: &SessionAr
                 "sandbox-exec".into(),
                 "--".into(),
             ];
-            // The helper runs pi with `execvp`, which searches the PATH it was started with: pi's.
+            // The helper starts pi with pi's environment from the handoff, finding it through pi's PATH.
             argv.extend(pi);
             argv
         }

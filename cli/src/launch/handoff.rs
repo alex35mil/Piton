@@ -32,6 +32,17 @@ pub enum HandoffError {
     Exec { program: String, source: std::io::Error },
 }
 
+/// The environment to start `piton sandbox-exec` with, so that `env` reaches only the command it runs: `own` (the
+/// helper's own variables, such as the policy) and the handoff carrying `env`. The helper runs outside any sandbox until
+/// it applies one, so nothing a sandboxed agent could have set (the workspace's `mise env`, a request's environment)
+/// may reach it: the dynamic loader reads `DYLD_*` before `main`.
+pub fn for_helper(env: &Env, own: Env) -> Result<Env, serde_json::Error> {
+    let handoff = encode(env, &own)?;
+    let mut out = own;
+    out.insert(HANDOFF_ENV.into(), handoff);
+    Ok(out)
+}
+
 /// The handoff's value for pi's environment `env`, behind a fnox started with `base`.
 pub fn encode(env: &Env, base: &Env) -> Result<String, serde_json::Error> {
     serde_json::to_string(&Handoff {
@@ -130,6 +141,19 @@ mod tests {
                 ("FROM_MISE", "1"),
             ])
         );
+    }
+
+    /// The helper gets only its own variables and the handoff; the command gets exactly `env`.
+    #[test]
+    fn the_helper_never_sees_the_command_s_environment() {
+        let command = env(&[("DYLD_INSERT_LIBRARIES", "/w/x.dylib"), ("PATH", "/w/bin")]);
+        let helper = for_helper(&command, env(&[("PITON_SANDBOX_POLICY", "{}")])).unwrap();
+        assert_eq!(
+            helper.keys().map(String::as_str).collect::<Vec<_>>(),
+            [HANDOFF_ENV, "PITON_SANDBOX_POLICY"]
+        );
+        let handoff: Handoff = serde_json::from_str(&helper[HANDOFF_ENV]).unwrap();
+        assert_eq!(merge(handoff.env, &handoff.base, &helper), command);
     }
 
     #[test]

@@ -128,6 +128,13 @@ pub enum WorkerRefusal {
     /// Fast-forwarding the source changes protected files: retry with the user's answer. Nothing has changed.
     #[error(transparent)]
     ProtectedUpdate(Blocked),
+    /// Fast-forwarding the source changes protected files, and the user's `piton(git-pull)` deny rule refuses it.
+    #[error(
+        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [permissions] refuses \
+         it; update the source by hand",
+        files.join(", ")
+    )]
+    UpdateDenied { checkout: PathBuf, files: Vec<String> },
     /// A tool workers need (mise, for trust) is enabled but not installed.
     #[error(transparent)]
     ToolUnavailable(crate::tools::Unavailable),
@@ -145,6 +152,7 @@ impl From<UpdateError> for WorkerRefusal {
     fn from(e: UpdateError) -> Self {
         match e {
             UpdateError::Blocked(blocked) => Self::ProtectedUpdate(*blocked),
+            UpdateError::Denied { checkout, files } => Self::UpdateDenied { checkout, files },
             UpdateError::Fetch { ref checkout, .. } | UpdateError::NoBranch { ref checkout, .. } => Self::SourceFetch {
                 checkout: checkout.clone(),
                 message: e.to_string(),
@@ -155,6 +163,22 @@ impl From<UpdateError> for WorkerRefusal {
 }
 
 type Result<T> = std::result::Result<T, WorkerRefusal>;
+
+/// What the source checkout's permission rules say about an update that changes protected files. The update runs on
+/// the host, so the host's rules apply: `[permissions]` and `[permissions.host]`.
+fn pull_rule(source: &Path, paths: &crate::config::Paths) -> Result<source::PullRule> {
+    let workspace = project::Workspace {
+        path: source.to_path_buf(),
+        checkout: source.to_path_buf(),
+        relation: Relation::Source,
+    };
+    let resolved = crate::config::resolve(&workspace, paths, crate::config::Runtime::Host)
+        .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
+    let permissions = resolved
+        .permissions
+        .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
+    Ok(source::PullRule::of(&permissions.merged))
+}
 
 fn failed(message: impl Into<String>) -> WorkerRefusal {
     WorkerRefusal::Failed {
@@ -227,7 +251,8 @@ pub fn create(
     let skip_list = workers.skip;
 
     let branch = ready_branch(&source)?;
-    let plan = source::plan(git, &source, &branch, (&request.update).into())?;
+    let rule = pull_rule(&source, paths)?;
+    let plan = source::plan(git, &source, &branch, (&request.update).into(), rule)?;
     source::apply(git, &source, &plan)?;
 
     // Created outside the cleanup below, so a failure never removes a directory this call didn't create.
@@ -488,6 +513,7 @@ pub fn plan_removal(
     force: bool,
     update: &DeleteUpdate,
     git: source::SourceGit<'_>,
+    paths: &crate::config::Paths,
 ) -> Result<Removal> {
     if !project::is_worker_layout(&worker.path, &worker.source) || !worker.path.join(".git").is_dir() {
         return Err(WorkerRefusal::NotAWorker {
@@ -504,9 +530,12 @@ pub fn plan_removal(
         (Err(e), _) => stale(e.to_string()),
         (Ok(_), source::SourceGit::Unavailable(why)) => stale(why),
         (Ok(branch), source::SourceGit::Ready(git)) => {
-            match source::plan(git, &worker.source, &branch, update.into()) {
+            let rule = pull_rule(&worker.source, paths)?;
+            match source::plan(git, &worker.source, &branch, update.into(), rule) {
                 Ok(plan) => AfterRemoval::Update(plan),
                 Err(UpdateError::Blocked(blocked)) => return Err(WorkerRefusal::ProtectedUpdate(*blocked)),
+                // The user's rule: the worker goes, the source stays as it is.
+                Err(e @ UpdateError::Denied { .. }) => stale(e.to_string()),
                 Err(
                     e @ (UpdateError::Fetch { .. }
                     | UpdateError::NoBranch { .. }
@@ -751,7 +780,8 @@ mod tests {
         mise: Option<&Mise>,
     ) -> Result<Option<String>> {
         let git = Recorder::default();
-        let removal = plan_removal(worker.clone(), force, update, source::SourceGit::Ready(&git))?;
+        let p = paths(worker.source.parent().unwrap());
+        let removal = plan_removal(worker.clone(), force, update, source::SourceGit::Ready(&git), &p)?;
         remove(&removal, mise, source::SourceGit::Ready(&git))
     }
 
@@ -953,6 +983,90 @@ mod tests {
         assert_eq!((git.ran("fetch"), git.ran("merge")), (1, 1));
     }
 
+    /// `piton(git-pull)` in the source's `[permissions]` answers the question before anyone is asked: `allow` applies
+    /// the protected files; `deny` refuses creation and leaves the source as it is on deletion; `ask` asks.
+    #[test]
+    fn the_git_pull_rule_decides_first() {
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        // As a project's setup keeps it: local configuration outside Git.
+        std::fs::write(source.join(".git/info/exclude"), "/.piton/*.local.*\n").unwrap();
+        let rule = |list: &str| {
+            let text = format!("[permissions]\n{list} = [\"piton(git-pull)\"]\n");
+            std::fs::write(source.join(".piton/config.local.toml"), text).unwrap();
+        };
+        let one = create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p).unwrap();
+
+        rule("deny");
+        let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
+        push_upstream(&source, ".piton/config.toml");
+        match create(
+            &request(&source, "two", CreateUpdate::Ask),
+            None,
+            &p,
+            &Recorder::default(),
+        ) {
+            Err(WorkerRefusal::UpdateDenied { files, .. }) => assert_eq!(files, [".piton/config.toml"]),
+            other => panic!("expected UpdateDenied, got {other:?}"),
+        }
+        let json = serde_json::to_value(WorkerRefusal::UpdateDenied {
+            checkout: source.clone(),
+            files: vec!["x".into()],
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "update_denied");
+        let warning = remove_with(&one, false, &DeleteUpdate::Ask, None).unwrap();
+        assert!(
+            warning.is_some_and(|w| w.contains("piton(git-pull)")),
+            "deleted, the source left"
+        );
+        assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), before);
+
+        rule("allow");
+        let git = Recorder::default();
+        create(&request(&source, "three", CreateUpdate::Ask), None, &p, &git).unwrap();
+        assert_ne!(
+            git_ok(&source, &["rev-parse", "HEAD"]).unwrap(),
+            before,
+            "applied without asking"
+        );
+
+        rule("ask");
+        push_upstream(&source, ".pi/settings.json");
+        assert!(matches!(
+            create(
+                &request(&source, "four", CreateUpdate::Ask),
+                None,
+                &p,
+                &Recorder::default()
+            ),
+            Err(WorkerRefusal::ProtectedUpdate(_))
+        ));
+    }
+
+    #[test]
+    fn git_pull_rules_combine_strictly() {
+        let settings = |allow: &[&str], ask: &[&str], deny: &[&str]| crate::config::PermissionSettings {
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            ask: ask.iter().map(|s| s.to_string()).collect(),
+            deny: deny.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let rule = |a: &[&str], b: &[&str], c: &[&str]| source::PullRule::of(&settings(a, b, c));
+        const PULL: &str = "piton(git-pull)";
+        let pull = PULL;
+        assert_eq!(rule(&[], &[], &[]), source::PullRule::Ask);
+        assert_eq!(rule(&[pull], &[], &[]), source::PullRule::Allow);
+        assert_eq!(rule(&[pull], &[pull], &[]), source::PullRule::Ask);
+        assert_eq!(rule(&[pull], &[], &["*"]), source::PullRule::Deny);
+        assert_eq!(
+            rule(&["bash(*)"], &[], &[]),
+            source::PullRule::Ask,
+            "other tools' rules"
+        );
+        assert_eq!(rule(&["*"], &[], &[]), source::PullRule::Allow);
+    }
+
     /// Deletion asks before it deletes anything; the answer updates on the host or leaves the source behind.
     #[test]
     fn deletion_asks_before_deleting() {
@@ -990,7 +1104,7 @@ mod tests {
         let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
         push_upstream(&source, "src/lib.rs");
         let unavailable = || source::SourceGit::Unavailable("mise env failed".into());
-        let removal = plan_removal(one.clone(), false, &DeleteUpdate::Ask, unavailable()).unwrap();
+        let removal = plan_removal(one.clone(), false, &DeleteUpdate::Ask, unavailable(), &p).unwrap();
         let warning = remove(&removal, None, unavailable()).unwrap();
         assert!(warning.is_some_and(|w| w.contains("mise env failed")));
         assert!(!one.path.exists());

@@ -96,7 +96,14 @@ pub struct Policy {
     /// (#228). They decide nothing yet: the network is open.
     #[serde(default)]
     pub network: Vec<NetworkGrant>,
+    /// The launch's tag: every deny rule carries it as its message, so the kernel's record of a refusal names the
+    /// session it came from (`(with message "piton-<tag>")`). Empty: untagged (`piton sandbox show`, tests).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tag: String,
 }
+
+/// The prefix of every launch's tag in the kernel's log.
+pub const TAG_PREFIX: &str = "piton-";
 
 /// A network destination the policy grants, and where the grant came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,7 +158,37 @@ impl Policy {
 
     /// The Seatbelt rules, in order. Filesystem and Mach rules first, network rules last: the library emits them in
     /// two groups (after its file allows, and after its network section), each in this order.
+    ///
+    /// With a tag, every deny carries it, and a leading tagged `(deny file-write*)` labels writes outside every grant
+    /// (the library's own default deny has no message). It shadows nothing: the library grants no writes of its own
+    /// for Piton's capability set, and every grant here comes after it.
     pub fn seatbelt(&self) -> Result<Vec<String>, String> {
+        let tagged = self.seatbelt_untagged()?;
+        if self.tag.is_empty() {
+            return Ok(tagged);
+        }
+        let message = format!("(with message \"{TAG_PREFIX}{}\")", escape_tag(&self.tag));
+        let tag = |rule: String| match rule.strip_prefix("(deny ").and_then(|r| r.strip_suffix(')')) {
+            Some(body) => format!("(deny {body} {message})"),
+            None => rule,
+        };
+        let is_network = |rule: &String| rule.starts_with("(allow network") || rule.starts_with("(deny network");
+        let (network, other): (Vec<String>, Vec<String>) = tagged.into_iter().partition(is_network);
+        let mut out = vec![tag("(deny file-write*)".into())];
+        out.extend(other.into_iter().map(tag));
+        // The library's keychain denies carry no message: repeated, tagged.
+        if !self.keychain {
+            out.extend(
+                KEYCHAIN_SERVICES
+                    .iter()
+                    .map(|s| tag(format!("(deny mach-lookup (global-name \"{s}\"))"))),
+            );
+        }
+        out.extend(network.into_iter().map(tag));
+        Ok(out)
+    }
+
+    fn seatbelt_untagged(&self) -> Result<Vec<String>, String> {
         let mut out = Vec::new();
         for rule in &self.rules {
             let filter = |path: &Path, network: bool| -> Result<String, String> {
@@ -241,6 +278,11 @@ const KEYCHAIN_SERVICES: [&str; 5] = [
     "com.apple.security.agent",
 ];
 
+/// A tag as a Seatbelt string's content: letters, digits, and `-` only.
+fn escape_tag(tag: &str) -> String {
+    tag.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect()
+}
+
 /// A path as a Seatbelt string literal's content.
 fn escape(path: &Path) -> Result<String, String> {
     let text = path
@@ -286,6 +328,7 @@ mod tests {
             ],
             keychain: false,
             network: Vec::new(),
+            tag: String::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a);
         assert!(d("/etc/hosts", Access::Read).allowed);
@@ -325,6 +368,7 @@ mod tests {
             ],
             keychain: false,
             network: Vec::new(),
+            tag: String::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a).allowed;
         assert!(!d("/H/.SSH/id_ed25519", Access::Read));
@@ -362,6 +406,7 @@ mod tests {
             ],
             keychain: true,
             network: Vec::new(),
+            tag: String::new(),
         };
         assert!(policy.decide(Path::new("/a/lock-1/x"), Access::Write).allowed);
         assert!(!policy.decide(Path::new("/a/lock"), Access::Write).allowed);
@@ -383,10 +428,38 @@ mod tests {
         assert!(
             Policy {
                 rules: vec![rule(Effect::Deny, &[Access::Write], "/a\nb", "x")],
-                ..policy
+                ..policy.clone()
             }
             .seatbelt()
             .is_err()
         );
+
+        // Tagged: every deny carries the launch's tag, a leading write deny labels the base's refusals, and the
+        // keychain denies are repeated with it. Allows and the order of everything else are unchanged.
+        let tagged = Policy {
+            tag: "abc\"1".into(),
+            keychain: false,
+            ..policy
+        }
+        .seatbelt()
+        .unwrap();
+        let message = r#"(with message "piton-abc1")"#;
+        assert_eq!(tagged[0], format!("(deny file-write* {message})"));
+        assert_eq!(
+            tagged[1],
+            format!(r#"(deny file-write* (subpath "/s/\"q\"") {message})"#)
+        );
+        assert!(
+            tagged
+                .iter()
+                .filter(|r| r.starts_with("(deny"))
+                .all(|r| r.ends_with(&format!("{message})")))
+        );
+        assert!(tagged.contains(&format!(
+            r#"(deny mach-lookup (global-name "com.apple.secd") {message})"#
+        )));
+        assert!(tagged.contains(&r#"(allow file-write* (prefix "/a/lock-"))"#.to_string()));
+        let first_network = tagged.iter().position(|r| r.contains("network")).unwrap();
+        assert!(tagged[first_network..].iter().all(|r| r.contains("network")));
     }
 }

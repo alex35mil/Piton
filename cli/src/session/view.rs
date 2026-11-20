@@ -645,6 +645,11 @@ impl View {
             .map(|item| Change::Replace { item: item.clone() })
     }
 
+    /// A warning the daemon adds to the conversation (a sandbox block it can't offer, a grant it couldn't save).
+    pub fn add_notice(&mut self, text: String) -> Vec<Change> {
+        vec![self.notice(NoticeLevel::Warning, text)]
+    }
+
     fn notice(&mut self, level: NoticeLevel, text: String) -> Change {
         let id = self.next();
         self.push(Item::Notice { id, level, text })

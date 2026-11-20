@@ -29,6 +29,8 @@ pub struct DaemonConfig {
     pub stop: StopConfig,
     /// How long a pi with no messages, no run, and no pending dialog may stay without clients.
     pub empty_grace_ms: u64,
+    /// How long a question about a blocked command waits for the user (`agent/block.rs`).
+    pub confirmation_timeout_ms: u64,
     pub tailnet: TailnetConfig,
     /// The external tools piton runs; whether each is used depends on what's installed (`crate::tools`).
     pub tools: ToolsConfig,
@@ -179,6 +181,7 @@ impl DaemonConfig {
                 term_grace_ms: host.stop.term_grace_ms.unwrap_or(3_000),
             },
             empty_grace_ms: host.empty_grace_ms.unwrap_or(10_000),
+            confirmation_timeout_ms: host.confirmation_timeout_ms.unwrap_or(600_000),
             tailnet: TailnetConfig {
                 enabled: host.tailnet.enabled.unwrap_or(true),
                 port: host.tailnet.port.unwrap_or(7357),

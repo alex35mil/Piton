@@ -9,6 +9,7 @@
 mod awake;
 mod control;
 mod protocol;
+mod refusals;
 mod rpc;
 mod socket;
 mod watch;
@@ -27,8 +28,11 @@ use tokio::{
     sync::Notify,
 };
 
-pub use self::protocol::{
-    AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello, PROTOCOL_VERSION,
+pub use self::{
+    protocol::{
+        AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello, PROTOCOL_VERSION,
+    },
+    refusals::Refusal,
 };
 use crate::{
     config::DaemonConfig,
@@ -158,6 +162,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     tokio::spawn(logging_expiry(daemon.clone()));
     crate::daemon::watch::spawn(daemon.clone());
     tokio::spawn(crate::agent::serve(daemon.clone(), agent_listener));
+    tokio::spawn(refusals::watch(daemon.clone()));
     let tailnet = daemon.config().tailnet.clone();
     // Remote access is optional: without Tailscale the daemon still serves local clients.
     match (tailnet.enabled, daemon.tools.tailscale.optional()) {
@@ -363,9 +368,6 @@ impl Daemon {
     /// Applies a change from the apps to its global file, then rereads the files.
     pub fn set_app_setting(&self, change: crate::apps::SettingChange) -> Result<(), crate::apps::SettingError> {
         let mut snapshot = lock(&self.app_settings);
-        // A value the apps show read-only (a preset with options) is edited in the file: saving the list control's
-        // names would drop the options.
-        snapshot.check_editable(&change)?;
         crate::apps::write_setting(&self.config().paths, &change)?;
         crate::log!(
             "config: {} ({:?}) changed from the apps",
@@ -382,6 +384,17 @@ impl Daemon {
 
     pub fn session(&self, key: SessionKey) -> Option<SessionHandle> {
         lock(&self.sessions).get(&key).cloned()
+    }
+
+    /// The live session a sandbox tag belongs to: pi's (`<key>-<random>`, set at launch) or one of its calls'
+    /// (`<key>-<random>-<n>`).
+    fn session_by_tag(&self, tag: &str) -> Option<SessionHandle> {
+        let key = tag.split_once('-')?.0.parse().ok()?;
+        self.session(key).filter(|s| {
+            s.tag
+                .as_deref()
+                .is_some_and(|own| tag == own || tag.strip_prefix(own).is_some_and(|rest| rest.starts_with('-')))
+        })
     }
 
     pub fn sessions_info(&self) -> Vec<crate::session::SessionInfo> {
@@ -404,16 +417,31 @@ impl Daemon {
         prepared: launch::Prepared,
         launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
-        let (mode, mut env, policy, proxy) = match prepared {
-            launch::Prepared::Host { env, proxy } => (LaunchMode::Host, env, None, proxy),
-            launch::Prepared::Sandbox(launch::Sandboxed { env, resolution, proxy }) => {
+        let (mode, mut env, mut policy, proxy, mut commands) = match prepared {
+            launch::Prepared::Host { env, proxy } => (LaunchMode::Host, env, None, proxy, None),
+            launch::Prepared::Sandbox(sandboxed) => {
+                let launch::Sandboxed {
+                    env,
+                    resolution,
+                    proxy,
+                    commands,
+                } = *sandboxed;
                 for link in &resolution.links {
                     crate::log!("sandbox in {}: {link}", workspace.path.display());
                 }
-                (LaunchMode::Sandbox, env, Some(resolution.policy), proxy)
+                (LaunchMode::Sandbox, env, Some(resolution.policy), proxy, Some(commands))
             }
         };
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
+        // The launch's tag: the kernel's record of a refusal by this session's sandbox (pi's, and any command the daemon
+        // runs for it) carries it, so the log watcher routes it here.
+        let tag = format!("{key}-{}", crate::agent::random_hex(8));
+        if let Some(policy) = &mut policy {
+            policy.tag = tag.clone();
+        }
+        if let Some(commands) = &mut commands {
+            commands.set_tag(&tag);
+        }
         // How this pi reaches the daemon for protected writes; set after the workspace's environment, so a
         // repository can't change it.
         let token = self.agent_tokens.issue(key).map_err(|source| LaunchError::Spawn {
@@ -426,12 +454,18 @@ impl Daemon {
             self.config().agent_socket().to_string_lossy().into_owned(),
         );
         let weak = Arc::downgrade(self);
+        let restarting = Arc::downgrade(self);
         let hooks = Hooks {
             ended: Box::new(move |key| {
                 if let Some(daemon) = weak.upgrade() {
                     daemon.agent_tokens.forget(key);
                     lock(&daemon.sessions).remove(&key);
                     let _ = daemon.list_changed.send(());
+                }
+            }),
+            restart: Box::new(move |key| {
+                if let Some(daemon) = restarting.upgrade() {
+                    tokio::spawn(async move { daemon.restart_session(key).await });
                 }
             }),
             status_changed: self.status_changed.clone(),
@@ -455,6 +489,10 @@ impl Daemon {
             policy,
             protected,
             proxy,
+            commands,
+            source: launch_config.source.clone(),
+            checkout: launch_config.checkout.clone(),
+            grants: launch_config.sandbox.commands.clone(),
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),
@@ -506,6 +544,25 @@ impl Daemon {
         .await
         .inspect_err(|e| crate::log!("launch refused: {e}"))?;
         self.launch(workspace, session, prepared, launch_config)
+    }
+
+    /// Stops a session and launches it again from its file, in the same workspace and mode, with the configuration as
+    /// it is now (a sandbox entry the user just saved).
+    async fn restart_session(self: &Arc<Self>, key: SessionKey) {
+        let Some(handle) = self.session(key) else { return };
+        let shared = handle.snapshot();
+        let Some(file) = shared.file.clone() else {
+            crate::log!("session {key}: not restarted: it has no session file yet");
+            return;
+        };
+        handle.stop(StopReason::Requested).await;
+        match self
+            .launch_in(&shared.workspace, shared.mode, SessionArg::Resume(file.into()))
+            .await
+        {
+            Ok(new) => crate::log!("session {key}: restarted as session {}", new.key),
+            Err(e) => crate::log!("session {key}: restart failed: {e}"),
+        }
     }
 
     /// The live session that has `file` open, other than `except`.

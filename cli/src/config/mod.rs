@@ -22,7 +22,10 @@ pub use self::{
     model::{
         daemon::{Build, DaemonConfig, TailnetConfig, ToolChoice, ToolConfig, default_socket},
         paths::{AGENTS_DIR, LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
-        tables::{Connect, InstallMode, Listed, NetworkTarget, Preset, Profile},
+        tables::{
+            AllGrant, CommandGrant, CommandPattern, Connect, Grant, GrantLists, Listed, NetworkTarget,
+            PermissionSettings, Preset, Profile, SandboxTable,
+        },
     },
     read::{
         global::{

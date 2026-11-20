@@ -5,6 +5,7 @@
 //! sandboxes itself and becomes pi. The daemon is never sandboxed.
 
 mod apply;
+pub mod grant;
 mod policy;
 mod resolve;
 mod rules;
@@ -17,7 +18,7 @@ pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
     policy::{Provenance, Source, WRITE_ROOTS, nono_version},
     resolve::{Facts, Resolution, resolve},
-    rules::{Access, Policy},
+    rules::{Access, Policy, TAG_PREFIX},
 };
 
 #[derive(Debug, thiserror::Error)]

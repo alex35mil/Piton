@@ -1,12 +1,35 @@
 import "./host-runtime.ts"
 
 import assert from "node:assert/strict"
+import * as fs from "node:fs"
 import { describe, it } from "node:test"
 
-import { analyzeBash, type BashAnalyzer } from "../extensions/permissions/bash.ts"
-import { resolveMode, type Mode, type PermissionSettings } from "../extensions/permissions/index.ts"
+import { analyzeBash, type BashAnalysis, type BashAnalyzer } from "../extensions/permissions/bash.ts"
+import { matchPattern, resolveMode, type Mode, type PermissionSettings } from "../extensions/permissions/index.ts"
 
 const noOverrides = new Map<string, Mode>()
+
+/** Cases shared with piton's Rust matcher (`cli/src/agent/command.rs`), which must decide them the same way. */
+const shared = JSON.parse(fs.readFileSync(new URL("./fixtures/bash-matching.json", import.meta.url), "utf-8")) as {
+    analysis: { command: string; cwd?: string; expected: BashAnalysis | null }[]
+    matching: { pattern: string; value: string; matches: boolean }[]
+}
+
+describe("Bash matching shared with the daemon", () => {
+    it("analyzes each shared command as the fixture says", async () => {
+        for (const { command, cwd, expected } of shared.analysis) {
+            const dir = cwd === undefined ? undefined : "/work/repo"
+            if (expected === null) await assert.rejects(analyzeBash(command, dir), command)
+            else assert.deepEqual(await analyzeBash(command, dir), expected, command)
+        }
+    })
+
+    it("matches each shared pattern as the fixture says", () => {
+        for (const { pattern, value, matches } of shared.matching) {
+            assert.equal(matchPattern(pattern, value), matches, `${pattern} ~ ${value}`)
+        }
+    })
+})
 
 function resolve(
     settings: PermissionSettings,
