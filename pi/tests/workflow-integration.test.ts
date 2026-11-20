@@ -1007,6 +1007,37 @@ describe("workflow integration configuration", () => {
         }
     })
 
+    it("returns the rendered PR body as the tool's text, ready to publish unchanged", async () => {
+        const cwd = temporaryProject()
+        try {
+            prepareWorkflowProject(cwd)
+            prepareArtifactPersistence(cwd)
+            const entityDir = writeGitHubGigEntity(cwd)
+            const ctx = { cwd } as ExtensionContext
+            type Tool = Parameters<ExtensionAPI["registerTool"]>[0]
+            const tools = new Map<string, Tool>()
+            registerIntegrations({
+                events: { on: () => () => {} },
+                on: () => {},
+                registerCommand: () => {},
+                registerTool: (tool: Tool) => tools.set(tool.name, tool),
+            } as unknown as ExtensionAPI)
+            const input = {
+                entityDir,
+                destination: "pullRequest" as const,
+                source: "# Result\n\n## Overview\n\nDelivered.\n\n## Verification\n\nTests passed.\n",
+            }
+            const result = await tools
+                .get("render_provider_body")!
+                .execute("render", input, undefined, undefined, withToolExecution(ctx))
+            const markdown = renderEntityProviderBody(ctx, input)
+            assert.deepEqual(result.content, [{ type: "text", text: markdown }])
+            assert.deepEqual(result.details, { markdown })
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
     it("keeps Linear tracker and GitHub forge contexts independent", () => {
         const cwd = temporaryProject()
         try {

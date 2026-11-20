@@ -321,15 +321,12 @@ export default function (pi: ExtensionAPI): void {
         name: "render_provider_body",
         label: "render_provider_body",
         description:
-            "Render a reviewed ## Overview visibly and collapse the remaining accepted source using GitHub or Linear syntax for the configured destination. Preserves content and adds eligible GitHub PR closing references outside the fold. Reads local configuration and metadata without external mutation.",
+            "Render a reviewed ## Overview visibly and collapse the remaining accepted source using GitHub or Linear syntax for the configured destination. Preserves content and adds eligible GitHub PR closing references outside the fold. Returns the rendered Markdown itself, ready to publish unchanged. Reads local configuration and metadata without external mutation.",
         parameters: RenderProviderBodySchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const input = parse(RenderProviderBodyValidator, params)
-            const result = { markdown: renderEntityProviderBody(ctx, input) }
-            return {
-                content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-                details: result,
-            }
+            const markdown = renderEntityProviderBody(ctx, input)
+            return { content: [{ type: "text" as const, text: markdown }], details: { markdown } }
         },
     })
 
