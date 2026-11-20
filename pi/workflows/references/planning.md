@@ -78,7 +78,7 @@ Accepting an Epic plan creates tracker issues, so it waits for the user.
 
 ## Changing a plan
 
-- **A decision the user makes in chat is final.** Edit the plan, republish it with a one-line [plan-update note](./integrations/shared.md#plan-update-notes), and continue. Phase stays where it is, and nothing is re-reviewed.
+- **A decision the user makes in chat is final.** Edit the plan, republish it with a one-line [plan-update note](./integrations/shared.md#plan-update-notes), and continue. Phase stays where it is until implementation resumes, and nothing is re-reviewed.
 - **When behavior or scope must differ from the plan,** ask. The answer is a chat decision. Implementation detail never changes the plan.
 - **Done work** refuses changes; separately initialized work owns them. Submitted work returns to In Progress for corrections.
 - **An Epic's Task list** changes only through review and acceptance: adding, removing, canceling, retitling, or reordering Tasks needs `review_epic` with `newReview`, the user's acceptance, and `accept_epic_tasks`. Any other `epic.md` edit needs neither.

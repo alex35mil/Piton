@@ -71,7 +71,7 @@ Every plan, interim, and final review follows [review](./review.md).
 
 ## Implementation and verification
 
-1. When implementation begins, set Execution through the Phase tool for the configured tracker, when Phase is configured. Lifecycle stays `inProgress`.
+1. Set Execution whenever implementation begins or resumes after Self-Review. Lifecycle stays `inProgress`.
 2. Implement the complete change at its owning abstraction. Leave unrelated working-tree changes untouched.
 3. Run focused checks while developing. Run all plan and Project Policy verification before final review.
 4. A Task runs its skill's parent synchronization. A Gig has none.
@@ -85,7 +85,7 @@ Every plan, interim, and final review follows [review](./review.md).
    - that nothing is pushed, and whether commit steps were committed locally.
 
    Then wait for "submit" or "ship it". After commit steps, or on "show me the diff", read [user review](./deliverable/user-review.md).
-9. **A fix the user asks for now:** apply it, rerun the affected checks, and update the completion artifact. Run a new final review, with `newReview`, only when the fix changes behavior.
+9. **A change the user asks for now:** set Execution, apply it, rerun the affected checks, and update the completion artifact. Set Self-Review; run a new final review (`newReview`) only when it changes behavior.
 10. When they ask to submit, read [submission](./deliverable/submission.md); when they ask to ship, read [shipping](./deliverable/shipping.md). Neither needs a prior acceptance of the completion artifact.
 
 **When the plan defines commit steps:** run steps 1–6 for each step, then read [commits](./deliverable/submission.md#commits) and commit it locally once its checks pass. Nothing is pushed before "submit". Run an interim review (`phase: "interim"`) first only when the step is risky or the user asks for one. After the last step, continue with step 7; the final review covers the whole branch.
