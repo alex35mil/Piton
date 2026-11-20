@@ -5,9 +5,11 @@
 //! credential and private-data denies are nono's `deny_*` groups, vendored verbatim (`nono-deny-groups.json`); the
 //! `cli:nono-policy-check` task reports upstream changes.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
-use crate::config::{InstallMode, Preset};
+use crate::config::{Connect, InstallMode, Preset, Profile};
 
 /// Where a deny or a grant comes from: what `piton sandbox why` reports.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -23,10 +25,52 @@ pub enum Source {
     Piton { what: String },
     /// pi's runtime state in its agent directory.
     AgentDir,
-    /// A shipped toolchain preset.
-    Preset { preset: String },
-    /// A `[sandbox]` key in a configuration file.
-    Config { key: String },
+    /// A preset, and where it was listed.
+    Preset { preset: String, from: Provenance },
+    /// A `[sandbox]` list entry, and where it was listed.
+    Config { key: String, from: Provenance },
+}
+
+/// Where a `[sandbox]` entry came from: the profile in effect, or a configuration file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Provenance {
+    Profile { profile: Profile },
+    File { path: PathBuf },
+}
+
+/// A profile's entries, as written: added before the user's own lists. Profiles only add: `strict` adds nothing, and
+/// each profile holds the one before it. The Tasks that close sockets (#248) and apps (#249) and filter the network
+/// (#228) enforce what `connect` here grants.
+pub struct ProfileEntries {
+    pub read: &'static [&'static str],
+    pub connect: Vec<Connect>,
+    pub presets: Vec<Preset>,
+}
+
+pub fn profile_entries(profile: Profile) -> ProfileEntries {
+    let entry = |text: &str| Connect::try_from(text.to_string()).expect("a profile's connect entries are valid");
+    // Git over SSH: the user's SSH agent (keys used, never read), and the host names and keys SSH checks.
+    let standard = ProfileEntries {
+        read: &["~/.ssh/config", "~/.ssh/known_hosts"],
+        connect: vec![entry("$SSH_AUTH_SOCK"), entry("*")],
+        presets: Vec::new(),
+    };
+    match profile {
+        Profile::Strict => ProfileEntries {
+            read: &[],
+            connect: Vec::new(),
+            presets: Vec::new(),
+        },
+        Profile::Standard => standard,
+        Profile::Yolo => {
+            let mut yolo = standard;
+            // Every Unix socket.
+            yolo.connect.push(entry("/"));
+            yolo.presets.push(Preset::Git);
+            yolo
+        }
+    }
 }
 
 /// The vendored copy of nono-cli's deny groups (`data/policy.json`, Apache-2.0).

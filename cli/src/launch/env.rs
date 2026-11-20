@@ -332,6 +332,7 @@ mod tests {
         let policy = Policy {
             rules: Vec::new(),
             keychain: false,
+            network: Vec::new(),
         };
         let base: Env = [("PATH".to_string(), "/nonexistent".to_string())].into();
         let workspace = Path::new("/w");

@@ -13,8 +13,8 @@ use crate::{
             level::{Chain, Level, LevelKind},
             paths::{FilePair, Paths, Sharing},
             tables::{
-                BranchesTable, Integration, Merge, PermissionSettings, PermissionsTable, SandboxTable, Table,
-                TableValue, WebSearchTable, WorkersTable,
+                BranchesTable, Integration, Merge, PermissionSettings, PermissionsTable, SandboxSettings, SandboxTable,
+                Table, TableValue, WebSearchTable, WorkersTable,
             },
         },
     },
@@ -329,8 +329,8 @@ pub fn resolve_global_project(paths: &Paths) -> Result<Resolved, ConfigError> {
 /// What a launch or a new worker needs from a workspace's configuration.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
-    /// The merged `[sandbox]` of the `.piton/` chain.
-    pub sandbox: SandboxTable,
+    /// The `[sandbox]` of the `.piton/` chain, each entry with the file it came from.
+    pub sandbox: SandboxSettings,
     /// The merged `[workers]`.
     pub workers: WorkersTable,
     /// The checkout whose `.piton/` was read (a worker's source).
@@ -360,8 +360,12 @@ pub fn resolve_launch(workspace: &Workspace, paths: &Paths) -> Result<LaunchConf
         }
     }
     let docs = Docs::read(&piton, &mut Vec::new());
+    let mut sandbox = SandboxSettings::default();
+    for (table, doc) in docs.parts::<SandboxTable>(Table::Sandbox)? {
+        sandbox.add(table, &doc.origin.path);
+    }
     Ok(LaunchConfig {
-        sandbox: docs.merged(Table::Sandbox)?,
+        sandbox,
         workers: docs.merged(Table::Workers)?,
         source: chain.source.clone(),
         checkout: chain.checkout.clone(),
@@ -619,8 +623,8 @@ mod tests {
             r#"
 [sandbox]
 presets = ["rust"]
-expose = ["~/.ssh/config"]
-allow = ["~/.cargo/registry"]
+read = ["~/.ssh/config"]
+write = ["~/.cargo/registry"]
 
 [permissions]
 deny = ["bash(rm -rf *)"]
@@ -641,7 +645,7 @@ default_mode = "ask"
         write(&t.global.join("agents/rules/a.md"), "rule\n");
         write(
             &parent.join(".piton/config.toml"),
-            "[sandbox]\nallow = [\"~/Projects/work/.pi\"]\n[tracker]\nprovider = \"github\"\n[forge]\nprovider = \"github\"\n",
+            "[sandbox]\nwrite = [\"~/Projects/work/.pi\"]\n[tracker]\nprovider = \"github\"\n[forge]\nprovider = \"github\"\n",
         );
         write(
             &repo.join(".piton/config.toml"),
@@ -663,7 +667,7 @@ mcp_server = "linear"
         );
         write(
             &repo.join(".piton/config.local.toml"),
-            "[sandbox]\nallow = [\"/local\"]\n[web_search]\napi_key = \"k\"\n",
+            "[sandbox]\nwrite = [\"/local\"]\n[web_search]\napi_key = \"k\"\n",
         );
         write(
             &repo.join(".piton/mcp.local.json"),
@@ -675,9 +679,20 @@ mcp_server = "linear"
         assert!(r.errors().is_empty(), "{:?}", r.errors());
         let s = r.sandbox.as_ref().unwrap();
         assert_eq!(s.presets, [crate::config::Preset::Rust, crate::config::Preset::Swift]);
-        assert_eq!(s.expose, ["~/.ssh/config"]);
-        assert_eq!(s.allow, ["~/.cargo/registry", "~/Projects/work/.pi", "/local"]);
+        assert_eq!(s.read, ["~/.ssh/config"]);
+        assert_eq!(s.write, ["~/.cargo/registry", "~/Projects/work/.pi", "/local"]);
         assert_eq!(s.deny, ["/r"]);
+        // A launch keeps each entry's file.
+        let launch = resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox;
+        let files: Vec<_> = launch.write.iter().map(|l| l.file.clone()).collect();
+        assert_eq!(
+            files,
+            [
+                t.global.join("config.toml"),
+                parent.join(".piton/config.toml"),
+                repo.join(".piton/config.local.toml")
+            ]
+        );
         assert_eq!(r.workers.as_ref().unwrap().skip, ["apps/.build"]);
 
         // Sandbox runtime: the host table isn't read; the repository's default_mode is nearest.
@@ -744,7 +759,7 @@ mcp_server = "linear"
     fn scope_rules_are_enforced() {
         let t = tree();
         let repo = t.home.join("repo");
-        write(&repo.join(".piton/config.toml"), "[sandbox]\nexpose = [\"~/.ssh\"]\n");
+        write(&repo.join(".piton/config.toml"), "[sandbox]\nread = [\"~/.ssh\"]\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.sandbox, Err(ConfigError::NotInProjectConfig { .. })));
         assert!(r.permissions.is_ok());
@@ -798,14 +813,14 @@ mcp_server = "linear"
         // A typo in the global [branches] leaves [sandbox] readable, and launches with it.
         write(
             &t.global.join("config.toml"),
-            "[branches]\nformt = 1\n[sandbox]\nallow = [\"/g\"]\n",
+            "[branches]\nformt = 1\n[sandbox]\nwrite = [\"/g\"]\n",
         );
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.branches, Err(ConfigError::Invalid { .. })));
-        assert_eq!(r.sandbox.as_ref().unwrap().allow, ["/g"]);
+        assert_eq!(r.sandbox.as_ref().unwrap().write, ["/g"]);
         assert_eq!(
-            resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox.allow,
-            ["/g"]
+            resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox.write[0].value,
+            "/g"
         );
         std::fs::remove_file(t.global.join("config.toml")).unwrap();
 

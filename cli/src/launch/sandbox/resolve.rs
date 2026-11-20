@@ -1,9 +1,10 @@
-//! One launch's [`Policy`]: Piton's built-in policy, the merged `[sandbox]` chain, and the launch's facts (workspace,
-//! agent directory, the daemon's state folder), as an ordered list of literal rules.
+//! One launch's [`Policy`]: Piton's base policy, the profile's entries, the `[sandbox]` chain's lists, and the launch's
+//! facts (workspace, agent directory, the daemon's state folder), as an ordered list of literal rules.
 //!
 //! Order, the last matching rule deciding:
-//! 1. writes: the workspace, the source's `.piton/.local`, temp, presets, `allow`, `allow_file`;
-//! 2. nono's credential denies; then `expose`, which lifts them (and reopens writes granted inside an exposed path);
+//! 1. grants: writes to the workspace, the source's `.piton/.local`, temp, presets, `write`, `write_file`; and
+//!    `connect` sockets, before every deny so none of them reopens one;
+//! 2. nono's credential denies; then `read`, which lifts them (and reopens writes granted inside a read path);
 //! 3. the host agent directory is read-only; the launch's agent directory's runtime state is writable;
 //! 4. the user's `deny`;
 //! 5. every configuration level, and what its entries link to, is read-only; protected files are read-only; so are
@@ -22,12 +23,12 @@ use std::{
 
 use super::{
     SandboxError,
-    policy::{self, AgentDirWrite, Source},
-    rules::{Access, Effect, Policy, Rule, Target},
+    policy::{self, AgentDirWrite, Provenance, Source},
+    rules::{Access, Effect, NetworkGrant, Policy, Rule, Target},
 };
 use crate::{
     agent::{GitControl, canonical_target, lexical},
-    config::{LOCAL_DIR, LaunchConfig, Preset, expand_home},
+    config::{Connect, LOCAL_DIR, LaunchConfig, Listed, Preset, Profile, expand_home},
     launch::{
         Env,
         env::{Origin, SandboxEnv, ToolSource, Widening},
@@ -63,6 +64,14 @@ const MAX_LINKS: usize = 40;
 pub struct Resolution {
     pub policy: Policy,
     pub links: Vec<UnfollowedLink>,
+    /// The profile in effect, and the file that chose it (`None`: the default).
+    pub profile: ProfileChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProfileChoice {
+    pub name: Profile,
+    pub set_in: Option<PathBuf>,
 }
 
 /// A grant whose path goes through a symlink a sandboxed session could have made, so the grant doesn't follow it: it
@@ -92,12 +101,9 @@ impl std::fmt::Display for UnfollowedLink {
 
 /// The launch's policy, or why the launch is refused.
 pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, SandboxError> {
-    let table = &config.sandbox;
     let expand = |grant: &str| expand_grant(grant, facts.home, facts.base_env);
     let mut rules = Rules::default();
-    let config_source = |key: &str| Source::Config {
-        key: format!("sandbox.{key}"),
-    };
+    let grants = Grants::of(config, facts)?;
 
     // 1. Writes.
     rules.push(
@@ -125,10 +131,11 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
             },
         );
     }
-    for preset in &table.presets {
+    for (preset, from) in &grants.presets {
         let (dirs, files) = policy::preset_grants(preset);
         let source = Source::Preset {
             preset: preset.name().into(),
+            from: from.clone(),
         };
         for dir in dirs {
             rules.push(Effect::Allow, &[Access::Write], subpath(&expand(dir)?), source.clone());
@@ -137,21 +144,19 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
             rules.push(Effect::Allow, &[Access::Write], literal(&expand(file)?), source.clone());
         }
     }
-    let allow: Vec<PathBuf> = table.allow.iter().map(|g| expand(g)).collect::<Result<_, _>>()?;
-    let allow_file: Vec<PathBuf> = table.allow_file.iter().map(|g| expand(g)).collect::<Result<_, _>>()?;
-    for path in &allow {
-        rules.push(Effect::Allow, &[Access::Write], subpath(path), config_source("allow"));
+    for (path, source) in &grants.write {
+        rules.push(Effect::Allow, &[Access::Write], subpath(path), source.clone());
     }
-    for path in &allow_file {
-        rules.push(
-            Effect::Allow,
-            &[Access::Write],
-            literal(path),
-            config_source("allow_file"),
-        );
+    for (path, source) in &grants.write_file {
+        rules.push(Effect::Allow, &[Access::Write], literal(path), source.clone());
+    }
+    // Sockets, before every deny: a `connect` entry (yolo's `/` too) never reopens a credential, a user deny, or the
+    // daemon's sockets. Only `read` lifts a credential deny.
+    for (path, source) in &grants.sockets {
+        rules.push(Effect::Allow, &[Access::Connect], subpath(path), source.clone());
     }
 
-    // 2. Credentials, and what the user exposes of them.
+    // 2. Credentials, and what `read` lifts of them.
     let all = [Access::Read, Access::Write, Access::Connect];
     let mut denied = Vec::new();
     for (path, source) in policy::nono_denies() {
@@ -159,28 +164,22 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         rules.push(Effect::Deny, &all, subpath(&path), source);
         denied.push(path);
     }
-    let exposed: Vec<PathBuf> = table.expose.iter().map(|g| expand(g)).collect::<Result<_, _>>()?;
-    for path in &exposed {
+    for (path, source) in &grants.read {
         rules.push(
             Effect::Allow,
             &[Access::Read, Access::Connect],
             subpath(path),
-            config_source("expose"),
+            source.clone(),
         );
     }
-    for path in allow.iter().filter(|p| exposed.iter().any(|e| p.starts_with(e))) {
-        rules.push(Effect::Allow, &[Access::Write], subpath(path), config_source("allow"));
+    let lifted = |p: &Path| grants.read.iter().any(|(r, _)| p.starts_with(r));
+    for (path, source) in grants.write.iter().filter(|(p, _)| lifted(p)) {
+        rules.push(Effect::Allow, &[Access::Write], subpath(path), source.clone());
     }
-    for path in allow_file.iter().filter(|p| exposed.iter().any(|e| p.starts_with(e))) {
-        rules.push(
-            Effect::Allow,
-            &[Access::Write],
-            literal(path),
-            config_source("allow_file"),
-        );
+    for (path, source) in grants.write_file.iter().filter(|(p, _)| lifted(p)) {
+        rules.push(Effect::Allow, &[Access::Write], literal(path), source.clone());
     }
-    let user_denied: Vec<PathBuf> = table.deny.iter().map(|g| expand(g)).collect::<Result<_, _>>()?;
-    denied.extend(user_denied.iter().cloned());
+    denied.extend(grants.deny.iter().map(|(p, _)| p.clone()));
 
     // 3. pi's agent directories: as named, so the runtime grants below resolve like every other grant.
     let host_agent = agent_dir(
@@ -231,8 +230,8 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
     }
 
     // 4. The user's denies.
-    for path in &user_denied {
-        rules.push(Effect::Deny, &all, subpath(path), config_source("deny"));
+    for (path, source) in &grants.deny {
+        rules.push(Effect::Deny, &all, subpath(path), source.clone());
     }
 
     // 5. Configuration and protected files.
@@ -263,8 +262,8 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
             what: "a protected file (.piton/ or .pi/): changed only with the user's approval".into(),
         },
     );
-    // The `git` preset (the user's own choice) leaves this rule out.
-    if !table.presets.contains(&Preset::Git) {
+    // The `git` preset (the user's own choice, or yolo's) leaves this rule out.
+    if !grants.presets.iter().any(|(p, _)| *p == Preset::Git) {
         rules.push(
             Effect::Deny,
             &[Access::Write],
@@ -312,15 +311,119 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
     );
 
     let keychains = facts.home.join("Library/Keychains");
-    let keychain = exposed
+    let keychain = grants
+        .read
         .iter()
-        .any(|e| keychains.starts_with(e) || e.starts_with(&keychains));
+        .any(|(r, _)| keychains.starts_with(r) || r.starts_with(&keychains));
     let (rules, links) = rules.finish(&[&config.checkout, &config.source]);
-    let policy = Policy { rules, keychain };
+    let policy = Policy {
+        rules,
+        keychain,
+        network: grants.network,
+    };
     if let Some((value, origin)) = launch_agent {
         accept_widening(Widening::AgentDir, value, &agent, origin, &policy, config)?;
     }
-    Ok(Resolution { policy, links })
+    let profile = ProfileChoice {
+        name: config.sandbox.profile(),
+        set_in: config.sandbox.profile.as_ref().map(|p| p.file.clone()),
+    };
+    Ok(Resolution { policy, links, profile })
+}
+
+/// The `[sandbox]` lists in effect: the profile's entries, then the user's, expanded to absolute paths, each with the
+/// rule source that names where it came from.
+struct Grants {
+    write: Vec<(PathBuf, Source)>,
+    write_file: Vec<(PathBuf, Source)>,
+    read: Vec<(PathBuf, Source)>,
+    sockets: Vec<(PathBuf, Source)>,
+    network: Vec<NetworkGrant>,
+    presets: Vec<(Preset, Provenance)>,
+    deny: Vec<(PathBuf, Source)>,
+}
+
+impl Grants {
+    /// A profile's entry whose variable isn't set (no `$SSH_AUTH_SOCK`) is left out; the user's own refuses the launch.
+    fn of(config: &LaunchConfig, facts: &Facts) -> Result<Self, SandboxError> {
+        let settings = &config.sandbox;
+        let profile = settings.profile();
+        let entries = policy::profile_entries(profile);
+        let from_profile = Provenance::Profile { profile };
+        let from_file = |file: &Path| Provenance::File {
+            path: file.to_path_buf(),
+        };
+        let source = |key: &str, from: Provenance| Source::Config {
+            key: format!("sandbox.{key}"),
+            from,
+        };
+        let expand = |grant: &str| expand_grant(grant, facts.home, facts.base_env);
+        let from_profile_entry = |grant: &str| match expand(grant) {
+            Ok(path) => Ok(Some(path)),
+            Err(SandboxError::UnsetVariable { .. }) => Ok(None),
+            Err(other) => Err(other),
+        };
+        let user = |key: &str, list: &[Listed<String>]| -> Result<Vec<(PathBuf, Source)>, SandboxError> {
+            list.iter()
+                .map(|l| Ok((expand(&l.value)?, source(key, from_file(&l.file)))))
+                .collect()
+        };
+
+        let mut read = Vec::new();
+        for grant in entries.read {
+            if let Some(path) = from_profile_entry(grant)? {
+                read.push((path, source("read", from_profile.clone())));
+            }
+        }
+        read.extend(user("read", &settings.read)?);
+
+        let mut sockets = Vec::new();
+        let mut network = Vec::new();
+        let connects = entries
+            .connect
+            .iter()
+            .map(|c| (c, from_profile.clone()))
+            .chain(settings.connect.iter().map(|l| (&l.value, from_file(&l.file))));
+        for (connect, from) in connects {
+            let is_profile = matches!(from, Provenance::Profile { .. });
+            let source = source("connect", from);
+            match connect {
+                Connect::Socket(grant) => {
+                    let path = match is_profile {
+                        true => from_profile_entry(grant)?,
+                        false => Some(expand(grant)?),
+                    };
+                    if let Some(path) = path {
+                        sockets.push((path, source));
+                    }
+                }
+                Connect::Network(target) => network.push(NetworkGrant {
+                    target: target.clone(),
+                    source,
+                }),
+            }
+        }
+
+        // A preset both lists: the user's options fold into the profile's entry.
+        let mut presets: Vec<(Preset, Provenance)> =
+            entries.presets.into_iter().map(|p| (p, from_profile.clone())).collect();
+        for listed in &settings.presets {
+            match presets.iter_mut().find(|(p, _)| p.name() == listed.value.name()) {
+                Some((existing, _)) => existing.merge(&listed.value),
+                None => presets.push((listed.value.clone(), from_file(&listed.file))),
+            }
+        }
+
+        Ok(Self {
+            write: user("write", &settings.write)?,
+            write_file: user("write_file", &settings.write_file)?,
+            read,
+            sockets,
+            network,
+            presets,
+            deny: user("deny", &settings.deny)?,
+        })
+    }
 }
 
 /// A value that widens the sandbox is accepted from the daemon's environment, or from a file the agent can't write.
@@ -880,12 +983,12 @@ mod tests {
     }
 
     #[test]
-    fn presets_allow_and_deny() {
+    fn presets_writes_and_denies() {
         let f = fixture(
             "",
-            "[sandbox]\npresets = [\"rust\"]\nallow = [\"~/out\"]\nallow_file = [\"~/f\"]\ndeny = [\"~/p/repo/secret\"]\n",
+            "[sandbox]\npresets = [\"rust\"]\nwrite = [\"~/out\"]\nwrite_file = [\"~/f\"]\ndeny = [\"~/p/repo/secret\"]\n",
         );
-        assert_eq!(launch_config(&f).sandbox.presets, [Preset::Rust]);
+        assert_eq!(launch_config(&f).sandbox.presets[0].value, Preset::Rust);
         let p = policy(&f);
         let h = &f.home;
         assert!(allowed(&p, &h.join(".cargo/registry/index/x"), Access::Write));
@@ -900,16 +1003,28 @@ mod tests {
         assert_eq!(
             p.decide(&f.repo.join("secret/k"), Access::Read).source,
             Source::Config {
-                key: "sandbox.deny".into()
+                key: "sandbox.deny".into(),
+                from: Provenance::File {
+                    path: f.repo.join(".piton/config.toml")
+                },
+            }
+        );
+        assert_eq!(
+            p.decide(&f.home.join(".cargo/registry/x"), Access::Write).source,
+            Source::Preset {
+                preset: "rust".into(),
+                from: Provenance::File {
+                    path: f.repo.join(".piton/config.toml")
+                },
             }
         );
     }
 
-    /// `allow` alone doesn't reopen a credential; `expose` (global only) does, and makes it writable with `allow`.
+    /// `write` alone doesn't reopen a credential; `read` (global only) does, and makes it writable with `write`.
     #[test]
-    fn expose_lifts_a_built_in_deny() {
+    fn read_lifts_a_built_in_deny() {
         let f = fixture(
-            "[sandbox]\nexpose = [\"~/.ssh/config\", \"~/Library/Keychains\"]\nallow = [\"~/Library/Keychains\", \"~/.aws\"]\n",
+            "[sandbox]\nprofile = \"strict\"\nread = [\"~/.ssh/config\", \"~/Library/Keychains\"]\nwrite = [\"~/Library/Keychains\", \"~/.aws\"]\n",
             "",
         );
         let p = policy(&f);
@@ -924,15 +1039,126 @@ mod tests {
         ));
         assert!(
             !allowed(&p, &h.join(".aws/credentials"), Access::Read),
-            "allow doesn't lift a deny"
+            "write doesn't lift a deny"
         );
         assert!(!allowed(&p, &h.join(".aws/credentials"), Access::Write));
         assert!(p.keychain);
     }
 
+    /// `strict` is the base: no profile entry. `standard` (the default) reads SSH's host files, connects to the SSH agent
+    /// and the network; `yolo` adds every socket and the `git` preset. Each entry names its profile.
+    #[test]
+    fn profiles_only_add() {
+        let agent = env(&[("SSH_AUTH_SOCK", "/private/tmp/agent.sock")]);
+        let resolve = |global: &str| {
+            let f = fixture(global, "");
+            let r = resolve_in(&f, &f.repo, &agent, &Env::new()).unwrap();
+            (f, r)
+        };
+        let profile_rules = |r: &Resolution| {
+            r.policy.rules.iter().filter(|rule| from_profile(&rule.source)).count() + r.policy.network.len()
+        };
+
+        let (f, strict) = resolve("[sandbox]\nprofile = \"strict\"\n");
+        assert_eq!(profile_rules(&strict), 0, "strict adds nothing");
+        assert_eq!(strict.profile.name, Profile::Strict);
+        assert_eq!(strict.profile.set_in, Some(f.home.join(".config/piton/config.toml")));
+        assert!(!allowed(&strict.policy, &f.home.join(".ssh/config"), Access::Read));
+
+        let (f, standard) = resolve("");
+        assert_eq!(standard.profile.name, Profile::Standard);
+        assert_eq!(standard.profile.set_in, None, "the default");
+        let p = &standard.policy;
+        assert!(allowed(p, &f.home.join(".ssh/config"), Access::Read));
+        assert!(allowed(p, &f.home.join(".ssh/known_hosts"), Access::Read));
+        assert!(
+            !allowed(p, &f.home.join(".ssh/id_ed25519"), Access::Read),
+            "keys stay closed"
+        );
+        assert_eq!(
+            p.decide(&f.home.join(".ssh/config"), Access::Read).source,
+            Source::Config {
+                key: "sandbox.read".into(),
+                from: Provenance::Profile {
+                    profile: Profile::Standard
+                },
+            }
+        );
+        assert!(
+            p.rules
+                .iter()
+                .any(|r| r.target == subpath(Path::new("/private/tmp/agent.sock")) && r.access == [Access::Connect])
+        );
+        assert_eq!(
+            p.network.iter().map(|g| g.target.clone()).collect::<Vec<_>>(),
+            [crate::config::NetworkTarget::Anywhere]
+        );
+        assert!(!allowed(p, &f.repo.join(".git/config"), Access::Write));
+
+        let (f, yolo) = resolve("[sandbox]\nprofile = \"yolo\"\n");
+        let p = &yolo.policy;
+        assert!(
+            allowed(p, &f.home.join(".ssh/config"), Access::Read),
+            "yolo holds standard"
+        );
+        assert!(allowed(p, &f.repo.join(".git/config"), Access::Write), "the git preset");
+        assert!(
+            p.rules
+                .iter()
+                .any(|r| r.target == subpath(Path::new("/")) && r.access == [Access::Connect])
+        );
+    }
+
+    fn from_profile(source: &Source) -> bool {
+        match source {
+            Source::Config { from, .. } | Source::Preset { from, .. } => matches!(from, Provenance::Profile { .. }),
+            Source::Workspace
+            | Source::BuiltIn { .. }
+            | Source::NonoGroup { .. }
+            | Source::Piton { .. }
+            | Source::AgentDir => false,
+        }
+    }
+
+    /// A `connect` entry, yolo's `/` included, never reopens a credential deny, the user's `deny`, or the daemon's
+    /// sockets: it sits before every deny. Only `read` lifts a credential deny.
+    #[test]
+    fn connect_never_reopens_a_deny() {
+        let f = fixture(
+            "[sandbox]\nprofile = \"yolo\"\nconnect = [\"~/.gnupg\", \"~/secret\"]\ndeny = [\"~/secret\"]\n",
+            "",
+        );
+        let p = policy(&f);
+        assert!(allowed(&p, Path::new("/private/tmp/any.sock"), Access::Connect));
+        for closed in [
+            f.home.join(".gnupg/S.gpg-agent"),
+            f.home.join("secret/s.sock"),
+            f.state.join("piton.sock"),
+        ] {
+            assert!(!allowed(&p, &closed, Access::Connect), "{}", closed.display());
+        }
+        assert!(allowed(&p, &f.state.join("agent.sock"), Access::Connect));
+    }
+
+    /// A profile's entry whose variable isn't set is left out; the user's own refuses the launch.
+    #[test]
+    fn unset_variables_skip_profile_entries_only() {
+        let f = fixture("", "");
+        let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
+        assert!(!r.policy.rules.iter().any(|rule| matches!(
+            &rule.source,
+            Source::Config { key, .. } if key == "sandbox.connect"
+        ) && rule.access == [Access::Connect]));
+        let g = fixture("[sandbox]\nconnect = [\"$NOPE/s.sock\"]\n", "");
+        assert!(matches!(
+            resolve_in(&g, &g.repo, &Env::new(), &Env::new()),
+            Err(SandboxError::UnsetVariable { .. })
+        ));
+    }
+
     #[test]
     fn grants_expand_from_the_daemons_environment() {
-        let f = fixture("[sandbox]\nallow = [\"$CACHE/x\"]\n", "");
+        let f = fixture("[sandbox]\nwrite = [\"$CACHE/x\"]\n", "");
         let p = policy_with(
             &f,
             &env(&[("CACHE", "/private/tmp/c")]),
@@ -1061,7 +1287,7 @@ mod tests {
 
     #[test]
     fn an_allow_replaced_with_a_link_grants_nothing() {
-        let f = fixture("[sandbox]\nallow = [\"~/d/cache\"]\n", "");
+        let f = fixture("[sandbox]\nwrite = [\"~/d/cache\"]\n", "");
         mkdir(&f.home.join("victim"));
         link(&f.home.join("victim"), &f.home.join("d/cache"));
         let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
@@ -1070,7 +1296,10 @@ mod tests {
         assert_eq!(
             r.links[0].source,
             Source::Config {
-                key: "sandbox.allow".into()
+                key: "sandbox.write".into(),
+                from: Provenance::File {
+                    path: f.home.join(".config/piton/config.toml")
+                },
             }
         );
     }
@@ -1078,7 +1307,7 @@ mod tests {
     /// A link the sandbox can't replace is followed: the user's own (a folder moved to another disk), like `/var`.
     #[test]
     fn a_link_above_every_grant_is_followed() {
-        let f = fixture("[sandbox]\nallow = [\"~/ln/cache\"]\n", "");
+        let f = fixture("[sandbox]\nwrite = [\"~/ln/cache\"]\n", "");
         mkdir(&f.home.join("real/cache"));
         link(&f.home.join("real"), &f.home.join("ln"));
         let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
@@ -1131,7 +1360,7 @@ mod tests {
     /// A resolved grant can make an entry replaceable that another grant's path goes through.
     #[test]
     fn what_resolved_grants_cover_is_replaceable_too() {
-        let f = fixture("[sandbox]\nallow = [\"~/l/b\", \"~/x/b/c/d\"]\n", "");
+        let f = fixture("[sandbox]\nwrite = [\"~/l/b\", \"~/x/b/c/d\"]\n", "");
         mkdir(&f.home.join("x/b"));
         mkdir(&f.home.join("victim/d"));
         link(&f.home.join("x"), &f.home.join("l"));
@@ -1195,12 +1424,27 @@ mod tests {
     /// Every rule is valid Seatbelt the library accepts.
     #[test]
     fn the_rules_are_accepted_by_the_library() {
-        let f = fixture(
-            "[sandbox]\nexpose = [\"~/Library/Keychains\"]\npresets = [\"mise\", \"rust\", \"node\", \"swift\"]\n",
-            "",
-        );
-        let caps = super::super::apply::capabilities(&policy(&f)).unwrap();
-        assert!(caps.platform_rules().iter().any(|r| r.contains("piton.sock")));
+        let agent = env(&[("SSH_AUTH_SOCK", "/private/tmp/agent.sock")]);
+        for profile in Profile::ALL {
+            let f = fixture(
+                &format!(
+                    "[sandbox]\nprofile = \"{}\"\nread = [\"~/Library/Keychains\"]\npresets = [\"mise\", \"rust\", \"node\", \"swift\"]\nconnect = [\"~/s.sock\", \"localhost:5432\"]\n",
+                    profile.name()
+                ),
+                "",
+            );
+            let p = policy_with(&f, &agent, &Env::new()).unwrap();
+            let caps = super::super::apply::capabilities(&p).unwrap();
+            let rules = caps.platform_rules();
+            assert!(rules.iter().any(|r| r.contains("piton.sock")), "{}", profile.name());
+            let every_socket = rules.iter().any(|r| r == r#"(allow network-outbound (subpath "/"))"#);
+            let ssh_agent = rules.iter().any(|r| r.contains("/private/tmp/agent.sock"));
+            match profile {
+                Profile::Strict => assert!(!every_socket && !ssh_agent),
+                Profile::Standard => assert!(!every_socket && ssh_agent),
+                Profile::Yolo => assert!(every_socket && ssh_agent),
+            }
+        }
     }
 
     fn from_file(file: &Path) -> Origin {
@@ -1265,7 +1509,7 @@ mod tests {
         assert!(resolve_env(&f, &f.repo, &Env::new(), &daemon).is_ok());
 
         // A file the launch's grants cover is writable wherever it is.
-        let g = fixture("[sandbox]\nallow = [\"~/shared\"]\n", "");
+        let g = fixture("[sandbox]\nwrite = [\"~/shared\"]\n", "");
         let granted = agent_from("~/elsewhere", from_file(&g.home.join("shared/mise.toml")));
         assert!(matches!(
             resolve_env(&g, &g.repo, &Env::new(), &granted),
@@ -1331,13 +1575,13 @@ mod tests {
                 .check_sandbox(&built_in, &f.home)
                 .is_ok()
         );
-        let exposed = fixture("[sandbox]\nexpose = [\"~/Library/Keychains\"]\n", "");
+        let exposed = fixture("[sandbox]\nread = [\"~/Library/Keychains\"]\n", "");
         assert!(matches!(
             proxy(vec![]).check_sandbox(&policy(&exposed), &exposed.home),
             Err(FnoxError::Keychain)
         ));
         // Exposing the whole Library opens the keychains too.
-        let library = fixture("[sandbox]\nexpose = [\"~/Library\"]\n", "");
+        let library = fixture("[sandbox]\nread = [\"~/Library\"]\n", "");
         assert!(matches!(
             proxy(vec![]).check_sandbox(&policy(&library), &library.home),
             Err(FnoxError::Keychain)

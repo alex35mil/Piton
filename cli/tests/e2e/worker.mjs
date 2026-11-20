@@ -33,7 +33,7 @@ function setup() {
     mkdirSync(join(source, ".piton"));
     writeFileSync(
         join(source, ".piton/config.toml"),
-        '[workers]\nskip = ["apps/.build/index-build"]\n[sandbox]\nallow = ["/source-grant"]\n',
+        '[workers]\nskip = ["apps/.build/index-build"]\n[sandbox]\nwrite = ["/source-grant"]\n',
     );
     git(source, "add", ".");
     git(source, "commit", "-q", "-m", "init");
@@ -58,7 +58,7 @@ function setup() {
             stop: { grace_ms: 3000, term_grace_ms: 1000 },
         },
         host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
-        project: { sandbox: { presets: ["rust"], allow: ["/global-grant"] } },
+        project: { sandbox: { presets: ["rust"], write: ["/global-grant"] } },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
     return { dir, source, log, env };
@@ -96,7 +96,7 @@ const tests = {
         assert.ok(lstatSync(join(worker, ".piton/.local")).isSymbolicLink());
         assert.ok(!existsSync(join(worker, "apps/.build/index-build")), "skip list honored");
         // An agent edits its worker's grants to widen its sandbox: ignored.
-        writeFileSync(join(worker, ".piton/config.toml"), '[sandbox]\nallow = ["/"]\n');
+        writeFileSync(join(worker, ".piton/config.toml"), '[sandbox]\nwrite = ["/"]\n');
 
         // The worker's sandbox, as the daemon resolves it: the global and source grants and the source's artifacts,
         // never the worker's edit; the worker's checkout is the protected `.pi/` root.

@@ -191,7 +191,7 @@ them to read a file as well as to write it.
 
 A session folder set with `sessionDir` (settings or a project's `.pi/settings.json`), `--session-dir`, or
 `PI_CODING_AGENT_SESSION_DIR` outside the agent directory isn't granted: a sandboxed pi can't create its session file
-there. Grant it with `[sandbox] allow`.
+there. Grant it with `[sandbox] write`.
 
 ## Sandboxes don't nest
 

@@ -151,10 +151,18 @@ pub static CATALOG: &[Entry] = &[
         },
         empty,
     ),
-    project("sandbox.allow", TextList, empty),
-    project("sandbox.allow_file", TextList, empty),
+    project(
+        "sandbox.profile",
+        ValueType::Choice {
+            options: &["strict", "standard", "yolo"],
+        },
+        |_| json!("standard"),
+    ),
+    project("sandbox.write", TextList, empty),
+    project("sandbox.write_file", TextList, empty),
+    project("sandbox.read", TextList, empty),
+    project("sandbox.connect", TextList, empty),
     project("sandbox.deny", TextList, empty),
-    project("sandbox.expose", TextList, empty),
     project("workers.skip", TextList, empty),
 ];
 

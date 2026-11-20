@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::policy::Source;
-use crate::agent::{GitControl, ProtectedRoots};
+use crate::{
+    agent::{GitControl, ProtectedRoots},
+    config::NetworkTarget,
+};
 
 /// What a process does to a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,8 +90,19 @@ pub struct Rule {
 pub struct Policy {
     /// In order; the last matching rule decides.
     pub rules: Vec<Rule>,
-    /// Keychain Mach services allowed: an `expose` covers the user's keychains.
+    /// Keychain Mach services allowed: a `read` entry covers the user's keychains.
     pub keychain: bool,
+    /// The network destinations `connect` grants, in order: carried for `piton sandbox show` and the network filter
+    /// (#228). They decide nothing yet: the network is open.
+    #[serde(default)]
+    pub network: Vec<NetworkGrant>,
+}
+
+/// A network destination the policy grants, and where the grant came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkGrant {
+    pub target: NetworkTarget,
+    pub source: Source,
 }
 
 /// Why an access is allowed or denied: the rule that decided, or the base.
@@ -268,9 +282,10 @@ mod tests {
                     source: Source::Workspace,
                 },
                 rule(Effect::Deny, &[Access::Read, Access::Write], "/h/.ssh", "deny"),
-                rule(Effect::Allow, &[Access::Read], "/h/.ssh/config", "expose"),
+                rule(Effect::Allow, &[Access::Read], "/h/.ssh/config", "read"),
             ],
             keychain: false,
+            network: Vec::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a);
         assert!(d("/etc/hosts", Access::Read).allowed);
@@ -290,7 +305,7 @@ mod tests {
         let policy = Policy {
             rules: vec![
                 rule(Effect::Deny, &[Access::Read, Access::Write], "/h/.ssh", "deny"),
-                rule(Effect::Allow, &[Access::Read], "/h/.ssh/config", "expose"),
+                rule(Effect::Allow, &[Access::Read], "/h/.ssh/config", "read"),
                 Rule {
                     effect: Effect::Allow,
                     access: vec![Access::Write],
@@ -309,6 +324,7 @@ mod tests {
                 },
             ],
             keychain: false,
+            network: Vec::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a).allowed;
         assert!(!d("/H/.SSH/id_ed25519", Access::Read));
@@ -345,6 +361,7 @@ mod tests {
                 },
             ],
             keychain: true,
+            network: Vec::new(),
         };
         assert!(policy.decide(Path::new("/a/lock-1/x"), Access::Write).allowed);
         assert!(!policy.decide(Path::new("/a/lock"), Access::Write).allowed);

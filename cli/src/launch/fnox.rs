@@ -82,12 +82,12 @@ pub enum FnoxError {
     Config { workspace: PathBuf, message: String },
     #[error(
         "fnox loads {file}, which this sandbox lets the agent change (and so which secrets go where); keep it out of the \
-         workspace and the sandbox's [sandbox] allow paths"
+         workspace and the sandbox's [sandbox] write paths"
     )]
     WritableConfig { file: PathBuf },
     #[error(
         "the sandbox can read your keychain, where fnox's secret-source credentials live: remove ~/Library/Keychains \
-         (and any folder containing it) from [sandbox] expose in your configuration (`piton config check` lists the \
+         (and any folder containing it) from [sandbox] read in your configuration (`piton config check` lists the \
          files)"
     )]
     Keychain,
@@ -354,7 +354,11 @@ mod tests {
     }
 
     fn policy(rules: Vec<Rule>, keychain: bool) -> Policy {
-        Policy { rules, keychain }
+        Policy {
+            rules,
+            keychain,
+            network: Vec::new(),
+        }
     }
 
     fn allow(access: Access, path: &str) -> Rule {

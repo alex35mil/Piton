@@ -8,7 +8,7 @@ use crate::{
     config::DaemonConfig,
     launch::{
         self,
-        sandbox::{Access, Resolution, Source},
+        sandbox::{Access, Provenance, Resolution, Source},
     },
 };
 
@@ -16,12 +16,12 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     let workspace = match &action {
         SandboxAction::Show { workspace } | SandboxAction::Why { workspace, .. } => workspace.clone(),
     };
-    let policy = match policy(config, workspace).await {
+    let (policy, profile) = match policy(config, workspace).await {
         Ok(resolution) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
             }
-            resolution.policy
+            (resolution.policy, resolution.profile)
         }
         Err(message) => {
             eprintln!("piton: {message}");
@@ -32,6 +32,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         SandboxAction::Show { .. } => {
             let output = serde_json::json!({
                 "nono_deny_groups": launch::sandbox::nono_version(),
+                "profile": profile,
                 "policy": policy,
             });
             println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
@@ -92,10 +93,20 @@ fn explain(source: &Source) -> String {
     match source {
         Source::Workspace => "the workspace is writable".into(),
         Source::BuiltIn { what } => format!("built in: {what}"),
-        Source::NonoGroup { group } => format!("built-in credential deny (nono's {group}); lift it with `expose`"),
+        Source::NonoGroup { group } => format!(
+            "built-in credential deny (nono's {group}); lift it with `read` in the global config.toml or a \
+             config.local.toml"
+        ),
         Source::Piton { what } => format!("Piton: {what}"),
         Source::AgentDir => "pi's runtime state in its agent directory".into(),
-        Source::Preset { preset } => format!("the {preset} preset"),
-        Source::Config { key } => format!("{key} in the configuration (`piton config check` lists the files)"),
+        Source::Preset { preset, from } => format!("the {preset} preset, {}", provenance(from)),
+        Source::Config { key, from } => format!("{key}, {}", provenance(from)),
+    }
+}
+
+fn provenance(from: &Provenance) -> String {
+    match from {
+        Provenance::Profile { profile } => format!("from the {} profile", profile.name()),
+        Provenance::File { path } => format!("listed in {}", path.display()),
     }
 }

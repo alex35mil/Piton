@@ -15,7 +15,7 @@ use std::path::PathBuf;
 pub use self::rules::{Effect, Rule, Target};
 pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
-    policy::{Source, WRITE_ROOTS, nono_version},
+    policy::{Provenance, Source, WRITE_ROOTS, nono_version},
     resolve::{Facts, Resolution, resolve},
     rules::{Access, Policy},
 };
