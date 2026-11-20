@@ -30,9 +30,9 @@ Each category gets one review and, when that review blocked, one verification pa
 ## Handling a round
 
 1. **Read the rendered findings.** The tool renders the reviewer's validated report. Never show raw reviewer prose as the finding list.
-2. **Check each blocking finding** against repository evidence, active rules, and the bar for credible complexity. Then choose:
-   - **Accept:** evidence confirms it and established requirements decide the fix. Fix it at the owning abstraction and run the affected verification. Record nothing.
-   - **Reject:** evidence disproves it, or it conflicts with a user decision or a higher-priority rule. Record it with the reason.
+2. **Check each blocking finding** against repository evidence, active rules, and the [credible-case bar](./planning.md#credible-cases). Then choose:
+   - **Accept:** evidence confirms it and established requirements decide the fix. Fix it at the owning abstraction and run the affected verification. Record nothing. Removing handling that has no credible case lists the case under `## Unhandled cases`.
+   - **Reject:** evidence disproves it, it asks for handling the bar doesn't justify, or it conflicts with a user decision or a higher-priority rule. Record it with the reason.
    - **Needs the user's decision:** fixing it needs an unsettled product, domain, scope, or tradeoff decision. Record it, ask the user, and wait before editing.
 3. **Record** rejected findings and ones needing a decision with `record_review_response`. The verification pass and later reviews read that record.
 4. **After a blocked review,** call the review tool again for the verification pass.

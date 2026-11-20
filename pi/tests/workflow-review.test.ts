@@ -43,6 +43,7 @@ import {
     recordRoundResponse,
     renderReviewRoundResult,
 } from "../workflows/extensions/review/round.ts"
+import { REVIEW_CREDIBLE_CASE_INSTRUCTIONS } from "../workflows/extensions/review/context.ts"
 
 function runResult(finalOutput: string, exitCode = 0): ReviewAgentRunResult {
     return { exitCode, finalOutput, stderr: "", events: [] }
@@ -913,6 +914,8 @@ describe("workflow reviewer isolation", () => {
                 completionSnapshot: finalSnapshot,
             })
             assert.match(finalPrompt, /final-001\/candidate\.md \(completion artifact under review\)/)
+            assert.ok(finalPrompt.includes(REVIEW_CREDIBLE_CASE_INSTRUCTIONS))
+            assert.doesNotMatch(finalPrompt, /credible-complexity rule/)
             assert.match(finalPrompt, /Fixed the defect/)
             assert.doesNotMatch(finalPrompt, /Edited after the snapshot/)
             assert.match(finalPrompt, /# report\.md \(context\)/)
@@ -1189,6 +1192,8 @@ describe("standalone review", () => {
                 buildStandaloneReviewPrompt(root, { target, ...(context ? { context } : {}) })
 
             const uncommitted = await prompt({ kind: "uncommitted" }, "Keep base.md stable.")
+            assert.ok(uncommitted.includes(REVIEW_CREDIBLE_CASE_INSTRUCTIONS))
+            assert.doesNotMatch(uncommitted, /credible-complexity rule/)
             assert.match(uncommitted, /^\+unstaged change$/m)
             assert.doesNotMatch(uncommitted, /^\+committed step$/m)
             assert.match(uncommitted, /\?\? untracked\.md/)

@@ -79,7 +79,7 @@ Every plan, interim, and final review follows [review](./review.md).
 6. Resolve every unchecked `pending.md` entry, or move it to separately queued work. A missing file counts as empty.
 7. Set Self-Review when Phase is configured, then call `review_task` or `review_gig` with `phase: "final"` and handle the cycle. The reviewer sees the completion artifact and every change on the branch.
 8. **Stop with one message:**
-   - the completion artifact's Overview;
+   - the completion artifact's Overview, and its unhandled cases, one line each;
    - any open concerns from the review, one line each;
    - for a Task, any edit made to the parent `epic.md`, in one line;
    - that nothing is pushed, and whether commit steps were committed locally.
@@ -92,7 +92,7 @@ Every plan, interim, and final review follows [review](./review.md).
 
 ## Completion artifact
 
-Write the completion artifact directly, before final review, so the reviewer can check its claims against the work. Both kinds use this shape:
+Write it before final review, so the reviewer can check its claims against the work. Both kinds use this shape:
 
 ```markdown
 # Result
@@ -106,6 +106,10 @@ Write the completion artifact directly, before final review, so the reviewer can
 
 Optional deeper code or architecture explanation; omit when unnecessary.
 
+## Unhandled cases
+
+- `<case left out>` — `<why>`
+
 ## Verification
 
 - `<command or manual check>` — `<actual result>`
@@ -116,9 +120,9 @@ Optional deeper code or architecture explanation; omit when unnecessary.
 ```
 
 - Describe actual outcomes, not plans or a transcript. It must make sense without the conversation.
-- Include only the delivered behavior, material changes, limitations, and verification of the Deliverable itself. Leave out workflow housekeeping: tracker or forge state, lifecycle, Priority, labels, review state, projection, and branch, PR, or merge steps.
-- Omit the **Not run** list when every planned check ran.
-- Keep it current after every review change, implementation change, or rerun. Keep provider metadata and links out of it.
+- Leave out workflow housekeeping: tracker or forge state, lifecycle, Priority, labels, review state, projection, and branch, PR, or merge steps.
+- Omit **Not run** when every planned check ran, and Unhandled cases when there are none ([credible cases](./planning.md#credible-cases)).
+- Keep it current after every change or rerun. Keep provider metadata and links out of it.
 - Research or audit work that continues into implementation keeps `report.md` as prior evidence and adds `result.md`.
 
 When the output is a UI mockup, layout, or visual concept, read [design artifacts](./deliverable/extras.md#design-artifacts).
