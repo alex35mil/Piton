@@ -26,7 +26,8 @@ pub struct RunRequest {
     #[serde(default)]
     pub timeout: Option<f64>,
     /// pi's shell environment for the call (its `PI_*` variables, its bin folder on `PATH`): used when the call runs
-    /// at the session's own policy, where it grants nothing the agent doesn't have.
+    /// at the session's own policy. Like every command's environment, it reaches only the command, after the sandbox is
+    /// applied, never the unsandboxed helper.
     #[serde(default)]
     pub env: Env,
     /// Why the agent asks to rerun, shown to the user.
@@ -151,7 +152,6 @@ pub enum RunEnd {
 /// Runs `spec`, sending its output to `events` as it comes, until the shell exits. Dropping the returned future (the
 /// agent stopped waiting) or the timeout kills the process group.
 pub async fn run(spec: RunSpec<'_>, events: mpsc::UnboundedSender<RunEvent>) -> RunEnd {
-    let mut env = spec.env.clone();
     let policy = match serde_json::to_string(spec.policy) {
         Ok(policy) => policy,
         Err(e) => {
@@ -160,7 +160,19 @@ pub async fn run(spec: RunSpec<'_>, events: mpsc::UnboundedSender<RunEvent>) -> 
             };
         }
     };
-    env.insert(crate::launch::sandbox::POLICY_ENV.into(), policy);
+    // The helper is unsandboxed until it applies the policy: the command's environment (which a request may have
+    // chosen) reaches only the command, after the sandbox is on.
+    let own = [(crate::launch::sandbox::POLICY_ENV.to_string(), policy)]
+        .into_iter()
+        .collect();
+    let env = match crate::launch::handoff::for_helper(spec.env, own) {
+        Ok(env) => env,
+        Err(e) => {
+            return RunEnd::Failed {
+                reason: format!("can't encode the environment: {e}"),
+            };
+        }
+    };
     let child = Command::new(spec.helper)
         .args(["sandbox-exec", "--", spec.shell, "-c", spec.command])
         .current_dir(spec.cwd)
@@ -261,14 +273,16 @@ impl Drop for KillGroup {
 mod tests {
     use super::*;
 
-    /// A stand-in for `piton sandbox-exec`: runs the rest of its arguments after `--`, so the tests need no sandbox
-    /// (sandboxes don't nest). Says first whether it got a policy.
+    /// A stand-in for `piton sandbox-exec`: says what it got itself (a policy, the command's `X`), then runs the rest of
+    /// its arguments after `--` in the environment the handoff carries, so the tests need no sandbox (sandboxes don't
+    /// nest).
     fn fake_helper(dir: &Path) -> std::path::PathBuf {
         let path = dir.join("helper");
         std::fs::write(
             &path,
             "#!/bin/sh\n[ \"$1\" = sandbox-exec ] && [ \"$2\" = -- ] || exit 99\nshift 2\necho \"policy=${PITON_SANDBOX_POLICY:+set} \
-             x=$X\"\nexec \"$@\"\n",
+             own-x=${X:-none}\"\nexec /usr/bin/env -i $(printf '%s' \"$PITON_LAUNCH_ENV\" | /usr/bin/python3 -I -c 'import \
+             json,sys,shlex; print(\" \".join(shlex.quote(k+\"=\"+v) for k,v in json.load(sys.stdin)[\"env\"].items()))') \"$@\"\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -346,16 +360,20 @@ mod tests {
             helper: &helper,
             policy: &policy,
             shell: "/bin/sh",
-            command: "echo out; echo err >&2; pwd; exit 3",
+            command: "echo out; echo err >&2; pwd; echo cmd-x=$X; exit 3",
             cwd: dir.path(),
             env: &env,
             timeout: None,
         })
         .await;
-        assert!(out.contains("policy=set x=1"), "{out}");
+        assert!(
+            out.contains("policy=set own-x=none"),
+            "the helper doesn't get the command's environment: {out}"
+        );
         assert!(out.contains("out\n") && out.contains("err\n"), "{out}");
         let cwd = std::fs::canonicalize(dir.path()).unwrap();
         assert!(out.contains(&cwd.display().to_string()), "{out}");
+        assert!(out.contains("cmd-x=1"), "the command does: {out}");
         assert_eq!(end, RunEnd::Exited { code: 3 });
     }
 

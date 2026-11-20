@@ -293,7 +293,7 @@ pub fn command_line(config: &DaemonConfig, mode: LaunchMode, session: &SessionAr
                 "sandbox-exec".into(),
                 "--".into(),
             ];
-            // The helper runs pi with `execvp`, which searches the PATH it was started with: pi's.
+            // The helper starts pi with pi's environment from the handoff, finding it through pi's PATH.
             argv.extend(pi);
             argv
         }

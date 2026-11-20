@@ -59,9 +59,10 @@ pub fn contained(
 ) -> Result<Contained, String> {
     Ok(match containment {
         Containment::Apply => {
-            let mut env = env.clone();
             let policy = serde_json::to_string(policy).map_err(|e| format!("can't encode the sandbox: {e}"))?;
-            env.insert(POLICY_ENV.into(), policy);
+            // The helper is unsandboxed until it applies the policy: `env` reaches only the command.
+            let env = crate::launch::handoff::for_helper(env, [(POLICY_ENV.to_string(), policy)].into_iter().collect())
+                .map_err(|e| format!("can't encode the environment: {e}"))?;
             let mut sandboxed: Vec<std::ffi::OsString> = vec!["sandbox-exec".into(), "--".into(), program.into()];
             sandboxed.extend(args);
             Contained {

@@ -334,11 +334,10 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
     // Behind fnox, fnox runs with the daemon's base environment and pi's travels past it in the handoff, which this
     // binary unpacks: `sandbox-exec` for a sandboxed launch, `launch-exec` for a host one.
     let (argv, env) = match (&spec.proxy, spec.mode) {
-        (None, LaunchMode::Host | LaunchMode::Sandbox) => {
-            let mut env = spec.env.clone();
-            env.extend(extra);
-            (argv, env)
-        }
+        (None, LaunchMode::Host) => (argv, spec.env.clone()),
+        // The helper is unsandboxed until it applies the policy, and pi's environment includes the workspace's (which a
+        // sandboxed agent could have set, `DYLD_*` included): it reaches only pi, through the handoff.
+        (None, LaunchMode::Sandbox) => (argv, launch::handoff::for_helper(&spec.env, extra).map_err(encoding)?),
         (Some(proxy), LaunchMode::Sandbox) => (
             proxy.wrap(argv),
             proxy.environment(&spec.env, &extra).map_err(encoding)?,

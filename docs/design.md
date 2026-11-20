@@ -1037,9 +1037,12 @@ tag; a process can't leave or widen its sandbox, so only the daemon can start on
   command, once per call; a rerun only when that call's arguments asked for it (`outside_sandbox: true`). A typed
   command always runs at the session's policy. The daemon picks the shell and `shellCommandPrefix` from pi's settings
   files (the agent directory's and the workspace's `.pi/`, neither writable from the sandbox).
-- At the session's own policy the command gets the environment the extension sends (pi's shell environment, which
-  grants nothing new); widened, the session's launch environment, so a request can't point a granted command at its
-  own `PATH`.
+- At the session's own policy the command gets the environment the extension sends (pi's shell environment); widened,
+  the session's launch environment, so a request can't point a granted command at its own `PATH`. Either reaches only
+  the command: `piton sandbox-exec` runs outside any sandbox until it applies one, and the dynamic loader reads `DYLD_*`
+  before `main`, so every sandboxed start (pi, environment tools, Git for workers, these commands) gives the helper only
+  its own variables and carries the command's environment in `PITON_LAUNCH_ENV`, which it unpacks after applying the
+  sandbox.
 - As in pi's bash, the call ends when the shell exits and its background jobs keep running; the agent's stop (the
   connection closes) or the timeout kills the call's process group.
 - Limit: commands the daemon runs don't go through fnox's proxy. And pi reports a call running before its permission

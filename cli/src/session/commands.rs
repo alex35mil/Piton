@@ -326,7 +326,8 @@ pub enum First {
 
 /// Which environment a run gets.
 enum RunEnv {
-    /// At the session's own policy: the extension's (pi's shell environment), which grants nothing new.
+    /// At the session's own policy: the extension's (pi's shell environment). It reaches only the command, inside its
+    /// sandbox (`launch::handoff::for_helper`), never the helper that applies it.
     Request,
     /// Widened: the session's launch environment, so a request can't point a granted command at its own `PATH`.
     Launch,
