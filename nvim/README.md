@@ -14,9 +14,10 @@ sandbox settings, pi processes, and deletion. This plugin owns the editor UI, no
   nearest `[tracker]` and `[forge]` of Piton's configuration chain (`config.toml` in the source's `.piton/` or its
   parent folders'; never the global folder), read through `piton config get`; the plugin reads no configuration file
   itself. Each role reads with its own MCP registration (`mcp_server`), which must specify
-  `Authorization: Bearer ${ENV_VAR}`; the credential is resolved through `mise exec -C <source>`, never read into
-  Neovim. Either role alone is enough. Without a tracker or a GitHub forge, named agents still work and the queue shows
-  as unavailable.
+  `Authorization: Bearer ${ENV_VAR}`. curl reads that variable from its own environment, which
+  [`queue.with_credential`](#queue-credentials) supplies (by default, the environment Neovim was started with); the
+  credential is never read into Neovim. Either role alone is enough. Without a tracker or a GitHub forge, named agents
+  still work and the queue shows as unavailable.
 
 ## Setup
 
@@ -92,6 +93,11 @@ require("piton").setup({
     confirm = function(message)
         return vim.fn.confirm(message, "&Yes\n&No", 2) == 1
     end,
+    queue = {
+        with_credential = function(command, credential)
+            return command
+        end,
+    },
 })
 ```
 
@@ -103,6 +109,42 @@ require("piton").setup({
 - **`icons`** are shared by tab labels and the agent picker; either can be overridden independently.
 - **`confirm(message)`** synchronously returns **true** to proceed or **false** to keep the worker. Adapt a dialog
   wrapper here. Do not pass `vim.fn.confirm` directly: its numeric result is rejected, not treated as truthy.
+- **`queue.with_credential(command, credential)`** supplies the queue's credential; see below.
+
+### Queue credentials
+
+The queue reads the tracker and forge with `curl`, run with the source checkout as its working directory. curl
+imports the variable the MCP registration names (`--variable %VAR`) and expands it into the `Authorization` header
+itself, so the token never passes through Neovim's environment, memory, or logs. `with_credential` decides what
+environment curl runs in: it receives curl's argv and `{ variable, source }` (the variable's name and the source
+checkout) and returns the command to run, usually curl's argv behind a prefix that runs a command with the secret set.
+It never sees the value. A command that can't supply the variable makes the queue refuse with the variable's name.
+
+- **Environment variable (the default):** export it in the shell that starts Neovim; curl inherits it.
+
+- **mise:** the variable is set by the checkout's mise configuration (for example `mise.local.toml`):
+
+  ```lua
+  queue = {
+      with_credential = function(command)
+          return vim.list_extend({ "mise", "exec", "--" }, command)
+      end,
+  }
+  ```
+
+- **fnox:** the secret is in fnox's configuration (global, a parent folder's `fnox.toml`, or the checkout's
+  `fnox.local.toml`). Mark it `env = "exec"` so `fnox exec` passes the real value while sessions behind
+  `fnox proxy` keep the placeholder. `--only` resolves just that secret:
+
+  ```lua
+  queue = {
+      with_credential = function(command, credential)
+          return vim.list_extend({ "fnox", "exec", "--only", credential.variable, "--" }, command)
+      end,
+  }
+  ```
+
+Any other secret manager works the same way, as long as its runner sets the variable for the command it runs.
 
 After opening a worker and its corresponding file (when present), Piton calls pi.nvim's existing public API:
 `require("pi").show({ layout = "float", draft = draft })`. Opening a source tab doesn't open chat. Reusing an existing

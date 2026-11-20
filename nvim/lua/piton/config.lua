@@ -4,15 +4,27 @@
 ---@field icon string
 ---@field name string
 
+--- The credential a queue request needs: the environment variable its MCP registration names, and the source
+--- checkout the request is for (also the command's working directory).
+---@class PitonCredential
+---@field variable string
+---@field source string
+
+--- Wraps the queue's curl command so it runs with `credential.variable` set in its environment. Returns the command
+--- to run; it never sees the credential's value.
+---@alias PitonWithCredential fun(command: string[], credential: PitonCredential): string[]
+
 ---@class PitonOptions
 ---@field tabs? { new?: fun(), set_label?: fun(label: PitonTabLabel) }
 ---@field icons? { agent?: string, source?: string }
 ---@field confirm? fun(message: string): boolean Synchronous yes/no confirmation; true means proceed.
+---@field queue? { with_credential?: PitonWithCredential }
 
 ---@class PitonConfig
 ---@field tabs { new: fun(), set_label: fun(label: PitonTabLabel) }
 ---@field icons { agent: string, source: string }
 ---@field confirm fun(message: string): boolean
+---@field queue { with_credential: PitonWithCredential }
 
 local M = {}
 
@@ -32,6 +44,12 @@ local function defaults()
         confirm = function(message)
             return vim.fn.confirm(message, "&Yes\n&No", 2) == 1
         end,
+        queue = {
+            -- The command as is: curl reads the credential from the environment Neovim was started with.
+            with_credential = function(command)
+                return command
+            end,
+        },
     }
 end
 
@@ -61,12 +79,15 @@ function M.setup(opts)
     if opts == nil then
         opts = {}
     end
-    validate(opts, { tabs = "table", icons = "table", confirm = "function" }, "piton")
+    validate(opts, { tabs = "table", icons = "table", confirm = "function", queue = "table" }, "piton")
     if opts.tabs then
         validate(opts.tabs, { new = "function", set_label = "function" }, "piton.tabs")
     end
     if opts.icons then
         validate(opts.icons, { agent = "string", source = "string" }, "piton.icons")
+    end
+    if opts.queue then
+        validate(opts.queue, { with_credential = "function" }, "piton.queue")
     end
     options = vim.tbl_deep_extend("force", defaults(), opts)
 end

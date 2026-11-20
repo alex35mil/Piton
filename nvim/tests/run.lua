@@ -107,6 +107,8 @@ test("configuration merges defaults, resets, and rejects invalid options atomica
         { icons = { agent = 3 } },
         { icons = { worker = "W" } },
         { confirm = true },
+        { queue = { with_credential = true } },
+        { queue = { credential = function() end } },
     }) do
         local ok = pcall(piton.setup, invalid)
         assert(not ok, vim.inspect(invalid))
@@ -508,6 +510,51 @@ test("queue reads its tracker and credential through piton config get", function
         stdout = vim.json.encode({ format = 3, error = { kind = "invalid", message = "invalid config.toml" } }),
     }
     fails("invalid config.toml", function() queue.load(source) end)
+end)
+
+test("queue requests run curl in the source through the configured credential hook", function()
+    local queue = require("piton.queue")
+    local connection = { source = "/p/repo", config = {}, credential = "TOKEN" }
+    local runs = {}
+    local result = { code = 0, stdout = '{"data":{}}\n200' }
+    replace(util, "exec", function(cmd, opts)
+        runs[#runs + 1] = { cmd = cmd, cwd = opts.cwd, stdin = opts.stdin }
+        return result
+    end)
+    local function post()
+        return queue.post(connection, "https://api", "Bearer {{VAR}}", "query", {})
+    end
+
+    -- Default: bare curl, which imports the variable itself; the value never appears in the command.
+    equal({ status = 200, body = { data = {} } }, post())
+    local curl = runs[1].cmd
+    equal("curl", curl[1])
+    assert(vim.list_contains(curl, "%TOKEN") and vim.list_contains(curl, "Authorization: Bearer {{TOKEN}}"))
+    equal("/p/repo", runs[1].cwd)
+    equal({ query = "query", variables = vim.empty_dict() }, vim.json.decode(runs[1].stdin))
+
+    -- A configured hook gets curl and the credential, and its command is what runs.
+    local seen
+    piton.setup({ queue = { with_credential = function(command, credential)
+        seen = credential
+        return vim.list_extend({ "fnox", "exec", "--only", credential.variable, "--" }, command)
+    end } })
+    post()
+    equal({ variable = "TOKEN", source = "/p/repo" }, seen)
+    equal(vim.list_extend({ "fnox", "exec", "--only", "TOKEN", "--" }, curl), runs[2].cmd)
+    equal("/p/repo", runs[2].cwd)
+
+    -- A hook that doesn't return a command refuses before running anything.
+    for _, invalid in ipairs({ {}, "curl", { 1 }, { cmd = "curl" } }) do
+        piton.setup({ queue = { with_credential = function() return invalid end } })
+        fails("must return a command", post)
+    end
+    equal(2, #runs)
+
+    -- curl can't import the variable: name it, and point at the option.
+    piton.setup()
+    result = { code = 2, stderr = "curl: Variable 'TOKEN' import failure" }
+    fails("TOKEN isn't set for queue requests in /p/repo. Supply it through piton's queue.with_credential", post)
 end)
 
 test("close_tab dispatches close or delete through the public API", function()
