@@ -27,7 +27,8 @@ Piton: the user's setup for running pi coding agents on macOS.
 ## Rules
 
 - Run project tasks through mise from the repository root: `mise run <task>` (`pi:test`, `pi:typecheck`,
-  `cli:build`, `cli:test`, `cli:lint`, `apps:build`, `apps:test`, `nvim:test`, `build`, `test`, `lint`, `format`).
+  `cli:build`, `cli:test`, `cli:lint`, `apps:build`, `apps:test`, `apps:test:unit`, `apps:test:e2e`, `nvim:test`,
+  `build`, `test`, `lint`, `format`).
   `mise tasks` lists them.
 - `apps/Piton.xcodeproj` and `apps/*/Info.plist` are generated from `apps/project.yml` by XcodeGen. Never edit or
   commit them; Info.plist keys go in the target's `info.properties`.

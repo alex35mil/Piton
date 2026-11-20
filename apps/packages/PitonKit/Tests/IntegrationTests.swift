@@ -3,10 +3,22 @@ import Testing
 
 @testable import PitonKit
 
-// PitonKit's Connection against a real daemon and real pi (faux model, host mode). Runs when PITON_BIN names a built piton
-// binary: `mise run apps:e2e` (or `PITON_BIN=$PWD/../cli/target/debug/piton swift test` in apps/).
+// PitonKit's Connection against a real daemon and real pi (faux model, host mode), always this checkout's debug build of
+// piton: `mise run apps:test:e2e` builds it first. Never the environment's `PITON_BIN`: the daemon sets that in every
+// session to the installed piton, which may be older than the code under test.
 
-private let pitonBin = ProcessInfo.processInfo.environment["PITON_BIN"]
+private let repo = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()  // Tests
+    .deletingLastPathComponent()  // PitonKit
+    .deletingLastPathComponent()  // packages
+    .deletingLastPathComponent()  // apps
+    .deletingLastPathComponent()  // repo
+private let pitonBin = repo.appendingPathComponent("cli/target/debug/piton").path
+
+struct PitonNotBuilt: Error, CustomStringConvertible {
+    let path: String
+    var description: String { "no piton binary at \(path): run `mise run cli:build` (or `mise run apps:test:e2e`)" }
+}
 
 /// A daemon in a scratch directory, stopped when the test ends.
 private final class Daemon: @unchecked Sendable {
@@ -19,6 +31,7 @@ private final class Daemon: @unchecked Sendable {
     private var environment: [String: String] = [:]
 
     init() throws {
+        guard FileManager.default.isExecutableFile(atPath: pitonBin) else { throw PitonNotBuilt(path: pitonBin) }
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).resolvingSymlinksInPath()
         dir = tmp.appendingPathComponent("pitonkit-\(UUID().uuidString.prefix(8))")
         // Native apps start sessions only in checkouts under a root.
@@ -29,13 +42,7 @@ private final class Daemon: @unchecked Sendable {
             at: workspace.appendingPathComponent(".git"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: agent, withIntermediateDirectories: true)
         socket = dir.appendingPathComponent("piton.sock").path
-        let fixtures = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // Tests
-            .deletingLastPathComponent()  // PitonKit
-            .deletingLastPathComponent()  // packages
-            .deletingLastPathComponent()  // apps
-            .deletingLastPathComponent()  // repo
-            .appendingPathComponent("cli/tests/fixtures")
+        let fixtures = repo.appendingPathComponent("cli/tests/fixtures")
         let ext = fixtures.appendingPathComponent("faux-extension.ts").path
         // The tailnet listener on loopback, with a fake `tailscale` that says the client is the owner's phone.
         let tailscale = fixtures.appendingPathComponent("fake-tailscale.sh").path
@@ -94,7 +101,7 @@ private final class Daemon: @unchecked Sendable {
 
     private func launch() throws {
         process = Process()
-        process.executableURL = URL(fileURLWithPath: pitonBin!)
+        process.executableURL = URL(fileURLWithPath: pitonBin)
         process.arguments = ["daemon"]
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
@@ -213,7 +220,7 @@ private func assistantText(_ model: SessionModel) -> String? {
     return nil
 }
 
-@Suite(.enabled(if: pitonBin != nil, "set PITON_BIN to a built piton binary"), .serialized)
+@Suite(.serialized)
 struct IntegrationTests {
     @Test func startStreamAndSettle() async throws {
         let daemon = try Daemon()

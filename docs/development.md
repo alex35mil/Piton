@@ -44,8 +44,9 @@ docs/              confirmed documentation
 | `mise run cli:install` | Install the stable binary and (re)load its launchd agent (host only; ends all sessions) |
 | `mise run apps:generate` | Generate `apps/Piton.xcodeproj` from `apps/project.yml` |
 | `mise run apps:build` | Build the iOS (simulator) and macOS apps into `apps/.build/xcode` |
-| `mise run apps:test` | Swift package tests (protocol fixtures; integration tests skipped) |
-| `mise run apps:e2e` | PitonKit's `Connection` against a real daemon and pi (faux model, host mode) |
+| `mise run apps:test` | Every Swift package test: `apps:test:unit`, then `apps:test:e2e` |
+| `mise run apps:test:unit` | Swift package unit tests (protocol fixtures; no daemon or pi) |
+| `mise run apps:test:e2e` | PitonKit's `Connection` against this checkout's debug daemon and real pi (faux model, host mode) |
 | `mise run nvim:test` | Clean headless module-load and editor-integration checks (mocked dependencies) |
 | `mise run logs:install` | Install the independent paired-iPhone log collector (host only) |
 | `mise run build` / `test` / `lint` / `format` | Aggregate project tasks |
@@ -54,6 +55,9 @@ docs/              confirmed documentation
 - Protocol fixtures (`apps/packages/PitonKit/Tests/Fixtures`) are written by the daemon test `fixtures`
   (`cli/src/session/view.rs`), which fails when they're stale. After a protocol change, run
   `PITON_WRITE_FIXTURES=1 cargo test fixtures` in `cli/`, then fix PitonKit until `mise run apps:test` passes.
+- The app integration tests always run this checkout's debug build (`cli/target/debug/piton`), never the installed
+  `piton` the daemon names in a session's `PITON_BIN`: `apps:test` and `apps:test:e2e` build it first, and a bare
+  `swift test` fails them when it's missing.
 
 ## Apps
 
@@ -160,8 +164,7 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
   `defaults write com.apple.dt.Xcode IDEPackageSupportDisableManifestSandbox -bool YES`.
 - Sandboxes don't nest, so a sandboxed worker can't start a sandboxed pi: the e2e tests run pi in host mode and check
   a sandboxed launch's policy through `piton sandbox show`; `sh cli/tests/probe/protected.sh` checks the applied
-  sandbox from a host shell. In a sandboxed session, `PITON_BIN` is the installed `piton`, which may be older than the
-  code: run `apps:test` with `PITON_BIN=$PWD/cli/target/debug/piton` after changing the daemon's protocol.
+  sandbox from a host shell.
 - Installing the daemon and launching apps are host-only.
 
 ## Workflow reports and session analysis

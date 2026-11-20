@@ -136,9 +136,13 @@ xcodebuild -project Piton.xcodeproj -scheme 'Piton macOS' -configuration Debug -
 {% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} 'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox'{% endif %}
 """
 
+# The Swift package tests: unit tests (protocol fixtures and the like), and the integration tests (IntegrationTests),
+# which run PitonKit against this checkout's debug piton and real pi (faux model, host mode).
+
 [tasks."apps:test"]
-description = "Run Swift package tests"
+description = "Run every Swift package test: unit, then integration against the debug piton"
 dir = "apps"
+depends = ["cli:build"]
 run = """
 set -eu
 logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-test-logs.XXXXXX")
@@ -148,16 +152,28 @@ swift test --quiet\
 {% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} --disable-sandbox{% endif %}
 """
 
-[tasks."apps:e2e"]
-description = "PitonKit against a real daemon and pi (faux model, host mode)"
+[tasks."apps:test:unit"]
+description = "Run the Swift package unit tests (no daemon or pi)"
+dir = "apps"
+run = """
+set -eu
+logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-test-logs.XXXXXX")
+trap 'rm -rf "$logs"' EXIT
+export PITON_LOGS_DIR="$logs"
+swift test --quiet --skip IntegrationTests\
+{% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} --disable-sandbox{% endif %}
+"""
+
+[tasks."apps:test:e2e"]
+description = "PitonKit against the debug piton daemon and real pi (faux model, host mode)"
 dir = "apps"
 depends = ["cli:build"]
 run = """
 set -eu
-logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-e2e-logs.XXXXXX")
+logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-test-logs.XXXXXX")
 trap 'rm -rf "$logs"' EXIT
 export PITON_LOGS_DIR="$logs"
-PITON_BIN="$MISE_PROJECT_ROOT/cli/target/debug/piton" swift test --quiet --filter IntegrationTests\
+swift test --quiet --filter IntegrationTests\
 {% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} --disable-sandbox{% endif %}
 """
 
@@ -299,7 +315,7 @@ depends = ["cli:build", "apps:build"]
 [tasks.test]
 description = "Run every test suite"
 # One after another: the e2e suites run real pi with timing-sensitive streaming, and flake when they share the CPU.
-run = [{ task = "cli:test" }, { task = "apps:test" }, { task = "apps:e2e" }, { task = "nvim:test" }, { task = "pi:test" }]
+run = [{ task = "cli:test" }, { task = "apps:test" }, { task = "nvim:test" }, { task = "pi:test" }]
 
 [tasks.lint]
 description = "Run every static check"
