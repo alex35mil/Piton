@@ -68,10 +68,10 @@ end
 
 --- Run a command; yields inside `M.async`, blocks otherwise.
 ---@param cmd string[]
----@param opts? { stdin: string }
+---@param opts? { stdin?: string, cwd?: string }
 ---@return vim.SystemCompleted
 function M.exec(cmd, opts)
-    local system_opts = { text = true, stdin = opts and opts.stdin }
+    local system_opts = { text = true, stdin = opts and opts.stdin, cwd = opts and opts.cwd }
     local co, main = coroutine.running()
     if not co or main then
         return vim.system(cmd, system_opts):wait()

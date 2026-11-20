@@ -1,7 +1,8 @@
 -- The source's queue: queued (Todo and Backlog) work from the nearest
 -- `[tracker]` of piton's configuration chain (`config.toml`), and incoming
 -- pull requests from the nearest `[forge]`, each read with the credential its
--- own MCP registration names. All of it comes from `piton config get`; the
+-- own MCP registration names, supplied to curl by the user's
+-- `queue.with_credential` hook. All of it comes from `piton config get`; the
 -- plugin reads no configuration file itself. Keys are as the file has them
 -- (snake_case: `mcp_server`, `owner_type`).
 
@@ -199,8 +200,10 @@ end
 ---@field status integer HTTP status.
 ---@field body any Decoded JSON body.
 
---- POST a GraphQL request with curl, inside the source's mise environment so
---- the credential resolves there and never passes through Neovim.
+--- POST a GraphQL request with curl, in the source checkout. curl imports the
+--- credential from its own environment (`--variable %VAR`) and expands it into
+--- the header, so the value never passes through Neovim; the user's
+--- `queue.with_credential` hook wraps the command to supply that environment.
 ---@param connection QueueConnection
 ---@param url string
 ---@param authorization string Authorization header, with `{{VAR}}` for the credential.
@@ -209,12 +212,7 @@ end
 ---@return QueueResponse
 function M.post(connection, url, authorization, query, variables)
     local var = connection.credential
-    local result = util.exec({
-        "mise",
-        "exec",
-        "-C",
-        connection.source,
-        "--",
+    local curl = {
         "curl",
         "--silent",
         "--show-error",
@@ -231,7 +229,9 @@ function M.post(connection, url, authorization, query, variables)
         "--write-out",
         "\n%{http_code}",
         url,
-    }, {
+    }
+    local result = util.exec(M.with_credential(curl, { variable = var, source = connection.source }), {
+        cwd = connection.source,
         -- An empty Lua table encodes as a JSON array; GraphQL needs an object.
         stdin = vim.json.encode({ query = query, variables = next(variables) and variables or vim.empty_dict() }),
     })
@@ -239,7 +239,10 @@ function M.post(connection, url, authorization, query, variables)
     if result.code ~= 0 then
         local stderr = vim.trim(result.stderr or "")
         if stderr:find("Variable '" .. var .. "' import fail", 1, true) then
-            util.refuse(var .. " isn't set in the environment of " .. connection.source)
+            util.refuse(
+                ("%s isn't set for queue requests in %s. Supply it through piton's queue.with_credential option "
+                    .. "(see the plugin's README)."):format(var, connection.source)
+            )
         end
         util.refuse("Request to " .. url .. " failed: " .. stderr)
     end
@@ -253,6 +256,23 @@ function M.post(connection, url, authorization, query, variables)
         status = tonumber(status) --[[@as integer]],
         body = ok and decoded or body,
     }
+end
+
+--- `command` as the user's `queue.with_credential` hook wraps it; refuses when
+--- the hook doesn't return a command.
+---@param command string[]
+---@param credential PitonCredential
+---@return string[]
+function M.with_credential(command, credential)
+    local wrapped = require("piton.config").get().queue.with_credential(vim.deepcopy(command), credential)
+    local valid = type(wrapped) == "table" and #wrapped > 0 and vim.islist(wrapped)
+    for _, arg in ipairs(valid and wrapped or {}) do
+        valid = valid and type(arg) == "string"
+    end
+    if not valid then
+        util.refuse("piton's queue.with_credential must return a command (a non-empty list of strings)")
+    end
+    return wrapped
 end
 
 --- The `data` of a successful GraphQL response; refuses otherwise.
