@@ -548,8 +548,8 @@ describe("Deliverable merge-resolution comment", () => {
             git(root, ["push", "origin", gig.branch])
             const prepared = prepare()
             assert.equal(prepared.merge, merge)
-            assert.equal(prepared.call.tool, fixtureToolName("github", "add_issue_comment"))
-            const { body, ...address } = prepared.call.arguments
+            assert.equal(prepared.mutation.tool, fixtureToolName("github", "add_issue_comment"))
+            const { body, ...address } = prepared.mutation.arguments
             assert.deepEqual(address, { ...repo, issue_number: 7 })
             assert.ok(body.startsWith("**Merge conflict resolved**"))
             assert.ok(body.includes(summary))
