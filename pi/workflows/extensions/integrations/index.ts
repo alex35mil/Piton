@@ -729,16 +729,14 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
             return {
                 ...base(input.operation),
                 ...(input.change === "phase"
-                    ? {
-                          phaseMutation: planPhaseMutation(
-                              configuredTracker!,
-                              phaseItem(entity!.status, name),
-                              entity!.status.phase,
-                              input.lifecycle,
-                              input.native,
-                              (server, operation) => getMcpToolName(server, operation, tools),
-                          ),
-                      }
+                    ? planPhaseMutation(
+                          configuredTracker!,
+                          phaseItem(entity!.status, name),
+                          entity!.status.phase,
+                          input.lifecycle,
+                          input.native,
+                          (server, operation) => getMcpToolName(server, operation, tools),
+                      )
                     : {}),
                 roles: { tracker: tracker(trackerBoard) },
                 entity: entity!,

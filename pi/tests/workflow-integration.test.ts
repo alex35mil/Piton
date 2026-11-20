@@ -1273,11 +1273,9 @@ describe("workflow integration configuration", () => {
                 },
                 mcpTools,
             )
-            assert.partialDeepStrictEqual(context.phaseMutation, {
-                provider: "github",
-                field: "Phase",
-                value: "Execution",
-                changed: true,
+            assert.partialDeepStrictEqual(context, {
+                assignment: { provider: "github", field: "Phase", value: "Execution" },
+                nativeChanged: true,
                 mutation: { tool: "mcp__github__projects_write" },
             })
         } finally {
@@ -1336,27 +1334,23 @@ describe("workflow integration configuration", () => {
                 },
             })
             const prepared = await prepare(githubPhaseReads(target))
-            assert.deepEqual((prepared.details as { phaseMutation: unknown }).phaseMutation, {
-                provider: "github",
-                field: "Phase",
-                value: "Execution",
-                changed: true,
+            // The call is top-level `mutation`, as every prepare tool returns it (#301).
+            assert.partialDeepStrictEqual(prepared.details, {
+                assignment: { provider: "github", field: "Phase", value: "Execution" },
+                nativeChanged: true,
                 mutation: update("Execution"),
             })
             // Lifecycle comes from the item's Status.
             const cleared = await prepare(githubPhaseReads(target, null, "Done"))
-            assert.deepEqual((cleared.details as { phaseMutation: unknown }).phaseMutation, {
-                provider: "github",
-                field: "Phase",
-                value: null,
-                changed: false,
+            assert.partialDeepStrictEqual(cleared.details, {
+                assignment: { provider: "github", field: "Phase", value: null },
+                nativeChanged: false,
             })
+            assert.equal("mutation" in (cleared.details as object), false)
             const inReview = await prepare(githubPhaseReads(target, "Execution", "In Review"))
-            assert.deepEqual((inReview.details as { phaseMutation: unknown }).phaseMutation, {
-                provider: "github",
-                field: "Phase",
-                value: null,
-                changed: true,
+            assert.partialDeepStrictEqual(inReview.details, {
+                assignment: { provider: "github", field: "Phase", value: null },
+                nativeChanged: true,
                 mutation: update(null),
             })
             await assert.rejects(prepare(githubPhaseReads({ ...target, issueNumber: 43 })), /durable issue/)
@@ -1463,10 +1457,9 @@ describe("workflow integration configuration", () => {
                 },
                 mcpTools,
             )
-            assert.deepEqual(context.phaseMutation, {
-                provider: "linear",
-                labels: ["customer", "execution"],
-                changed: true,
+            assert.partialDeepStrictEqual(context, {
+                assignment: { provider: "linear", labels: ["customer", "execution"] },
+                nativeChanged: true,
                 mutation: {
                     tool: "mcp__linear__save_issue",
                     arguments: { id: "linear-uuid", labels: ["customer", "execution"] },

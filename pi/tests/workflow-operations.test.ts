@@ -160,11 +160,11 @@ describe("workflow operations", () => {
                         resolveTool,
                     )
                     assert.deepEqual(result.status, { ...saved, phase })
-                    assert.equal(result.changed, phase !== "planning")
-                    assert.equal(result.phaseMutation.changed, phase !== "planning")
-                    assert.equal("mutation" in result.phaseMutation, phase !== "planning")
-                    if (result.phaseMutation.provider === "linear")
-                        assert.deepEqual(result.phaseMutation.labels, ["unrelated", phase])
+                    assert.equal(result.metadataChanged, phase !== "planning")
+                    assert.equal(result.nativeChanged, phase !== "planning")
+                    assert.equal("mutation" in result, phase !== "planning")
+                    if (result.assignment.provider === "linear")
+                        assert.deepEqual(result.assignment.labels, ["unrelated", phase])
                 }
                 assert.deepEqual(original, saved)
             }
@@ -327,24 +327,20 @@ describe("workflow operations", () => {
             assert.deepEqual(result.details, {
                 entity: "11-example",
                 phase: "execution",
-                changed: true,
-                phaseMutation: {
-                    provider: "github",
-                    field: "Phase",
-                    value: "Execution",
-                    changed: true,
-                    mutation: {
-                        tool: "mcp__github__projects_write",
-                        arguments: {
-                            method: "update_project_item",
-                            owner: "example",
-                            owner_type: "user",
-                            project_number: 2,
-                            item_owner: "example",
-                            item_repo: "repo",
-                            issue_number: 11,
-                            updated_field: { name: "Phase", value: "Execution" },
-                        },
+                metadataChanged: true,
+                assignment: { provider: "github", field: "Phase", value: "Execution" },
+                nativeChanged: true,
+                mutation: {
+                    tool: "mcp__github__projects_write",
+                    arguments: {
+                        method: "update_project_item",
+                        owner: "example",
+                        owner_type: "user",
+                        project_number: 2,
+                        item_owner: "example",
+                        item_repo: "repo",
+                        issue_number: 11,
+                        updated_field: { name: "Phase", value: "Execution" },
                     },
                 },
             })

@@ -26,7 +26,7 @@ import {
 } from "./phase.js"
 import { GitHubPhaseInputSchema, GitHubPhaseInputValidator, githubPhaseFacts } from "./github-phase-evidence.js"
 
-async function updateEntity<T extends { status: EntityStatus; changed: boolean }>(
+async function updateEntity<T extends { status: EntityStatus; metadataChanged: boolean }>(
     cwd: string,
     raw: string,
     name: string,
@@ -38,7 +38,7 @@ async function updateEntity<T extends { status: EntityStatus; changed: boolean }
         assertArtifactPersistencePrepared(root)
         const tracker = requireTracker(loadIntegrationRoles(root), name)
         const result = operation(readEntityStatus(directory), tracker, directory)
-        if (result.changed) writeEntityStatus(directory, result.status)
+        if (result.metadataChanged) writeEntityStatus(directory, result.status)
         const { status, ...outcome } = result
         return { entity: path.basename(directory), ...(status.phase ? { phase: status.phase } : {}), ...outcome }
     })
@@ -49,7 +49,7 @@ export function registerWorkflowOperations(pi: ExtensionAPI, mcpTools: McpToolCa
     const resolveTool = (server: string, operation: string) => getMcpToolName(server, operation, mcpTools)
     const { entityDir, phase, lifecycle } = SetWorkflowPhaseSchema.properties
     const description = (facts: string) =>
-        `Set In Progress workflow Phase and calculate reconciliation from ${facts}. Local metadata only; a changed assignment carries the registered provider call as \`mutation\`, to run unchanged. Does not change lifecycle or grant approval.`
+        `Set In Progress workflow Phase and calculate reconciliation from ${facts}. Local metadata only. \`metadataChanged\` and \`nativeChanged\` report each side; a changed native assignment carries the registered provider call as top-level \`mutation\`, to run unchanged. Does not change lifecycle or grant approval.`
 
     const name = "set_github_workflow_phase"
     tools.registerTool({

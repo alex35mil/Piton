@@ -180,11 +180,11 @@ describe("shared workflow Phase", () => {
                 for (const lifecycle of lifecycles) {
                     const expected = lifecycle === "inProgress" ? phase : null
                     assert.equal(projectedPhase(lifecycle, phase), expected)
-                    const field = planPhaseMutation(github, entity, phase, lifecycle, githubFacts)
+                    const field = planPhaseMutation(github, entity, phase, lifecycle, githubFacts).assignment
                     assert.equal(field.provider, "github")
                     if (field.provider !== "github") assert.fail("expected GitHub")
                     assert.equal(field.value, expected === null ? null : phaseValues[expected])
-                    const labels = planPhaseMutation(linear, entity, phase, lifecycle, linearFacts())
+                    const labels = planPhaseMutation(linear, entity, phase, lifecycle, linearFacts()).assignment
                     assert.equal(labels.provider, "linear")
                     if (labels.provider !== "linear") assert.fail("expected Linear")
                     assert.deepEqual(labels.labels, [
@@ -215,18 +215,14 @@ describe("shared workflow Phase", () => {
         })
         const set = planPhaseMutation(github, "gig", "execution", "inProgress", githubFacts)
         assert.deepEqual(set, {
-            provider: "github",
-            field: "Phase",
-            value: "Execution",
-            changed: true,
+            assignment: { provider: "github", field: "Phase", value: "Execution" },
+            nativeChanged: true,
             mutation: githubCall("Execution"),
         })
         const selected = { ...githubFacts, current: "Execution" }
         assert.deepEqual(planPhaseMutation(github, "gig", "execution", "inReview", selected), {
-            provider: "github",
-            field: "Phase",
-            value: null,
-            changed: true,
+            assignment: { provider: "github", field: "Phase", value: null },
+            nativeChanged: true,
             mutation: githubCall(null),
         })
         assert.equal("mutation" in planPhaseMutation(github, "gig", "execution", "inProgress", selected), false)
@@ -238,16 +234,14 @@ describe("shared workflow Phase", () => {
         ] as const) {
             const labels = ["customer-label", "other-execution", "execution"]
             assert.deepEqual(planPhaseMutation(linear, entity, "execution", "inProgress", linearFacts()), {
-                provider: "linear",
-                labels,
-                changed: true,
+                assignment: { provider: "linear", labels },
+                nativeChanged: true,
                 mutation: { tool, arguments: { id, labels } },
             })
             const unchanged = planPhaseMutation(linear, entity, "planning", "inProgress", linearFacts())
             assert.deepEqual(unchanged, {
-                provider: "linear",
-                labels: ["customer-label", "other-execution", "planning"],
-                changed: false,
+                assignment: { provider: "linear", labels: ["customer-label", "other-execution", "planning"] },
+                nativeChanged: false,
             })
         }
 
@@ -296,10 +290,8 @@ describe("shared workflow Phase", () => {
     it("clears native Phase for an entity whose metadata has no Phase yet, but won't project one", () => {
         const selected = { ...githubFacts, current: phaseValues.execution }
         assert.partialDeepStrictEqual(planPhaseMutation(github, "gig", undefined, "inReview", selected), {
-            provider: "github",
-            field: "Phase",
-            value: null,
-            changed: true,
+            assignment: { provider: "github", field: "Phase", value: null },
+            nativeChanged: true,
         })
         assert.throws(() => planPhaseMutation(github, "gig", undefined, "inProgress", selected), /set it/)
         const contract = phaseProjectionContract(undefined, github, "gig")
@@ -311,20 +303,20 @@ describe("shared workflow Phase", () => {
     it("recognizes no-op and clearing assignments without losing unrelated labels", () => {
         const facts = linearFacts()
         facts.applied = ["customer-label", "execution", "other-execution"]
-        assert.equal(planPhaseMutation(linear, "gig", "execution", "inProgress", facts).changed, false)
+        assert.equal(planPhaseMutation(linear, "gig", "execution", "inProgress", facts).nativeChanged, false)
         const cleared = planPhaseMutation(linear, "gig", "selfReview", "inReview", facts)
-        assert.equal(cleared.provider, "linear")
-        if (cleared.provider !== "linear") assert.fail("expected Linear")
-        assert.deepEqual(cleared.labels, ["customer-label", "other-execution"])
-        assert.equal(cleared.changed, true)
+        assert.equal(cleared.assignment.provider, "linear")
+        if (cleared.assignment.provider !== "linear") assert.fail("expected Linear")
+        assert.deepEqual(cleared.assignment.labels, ["customer-label", "other-execution"])
+        assert.equal(cleared.nativeChanged, true)
         assert.equal(
             planPhaseMutation(github, "gig", "selfReview", "inProgress", {
                 ...githubFacts,
                 current: "Self-Review",
-            }).changed,
+            }).nativeChanged,
             false,
         )
-        assert.equal(planPhaseMutation(github, "gig", "selfReview", "done", githubFacts).changed, false)
+        assert.equal(planPhaseMutation(github, "gig", "selfReview", "done", githubFacts).nativeChanged, false)
     })
 
     it("requires the exact GitHub field name and type", () => {
@@ -381,14 +373,12 @@ describe("shared workflow Phase", () => {
                 },
             })
             assert.equal(
-                planPhaseMutation(github, "gig", "execution", selected.lifecycle, selected.native).changed,
+                planPhaseMutation(github, "gig", "execution", selected.lifecycle, selected.native).nativeChanged,
                 false,
             )
             assert.partialDeepStrictEqual(plan(githubPhaseReads(target, null)), {
-                provider: "github",
-                field: "Phase",
-                value: "Planning",
-                changed: true,
+                assignment: { provider: "github", field: "Phase", value: "Planning" },
+                nativeChanged: true,
             })
             // Complete native MCP results are accepted as well as decoded JSON.
             const reads = githubPhaseReads(target)
@@ -405,10 +395,8 @@ describe("shared workflow Phase", () => {
             const reads = githubPhaseReads(target, "Self-Review", "In Review")
             assert.equal(facts(reads).lifecycle, "inReview")
             assert.partialDeepStrictEqual(plan(reads), {
-                provider: "github",
-                field: "Phase",
-                value: null,
-                changed: true,
+                assignment: { provider: "github", field: "Phase", value: null },
+                nativeChanged: true,
             })
             assert.throws(() => facts(githubPhaseReads(target, "Planning", "Blocked")), /configured: Backlog, Todo/)
             assert.throws(
