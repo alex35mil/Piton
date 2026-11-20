@@ -239,11 +239,31 @@ Verified on the host with fnox 1.48.0, op 2.34.1, claude 2.1.309, pi 1.5.2 (#229
   `FNOX_DAEMON=off`; each rule's variable holds a `fnox_proxy_<hex>` placeholder unless the rule sets one.
 - `fnox config-files` lists the files fnox loads from a folder, nearest first, each followed by its imports, then the
   global config.
+- `fnox proxy rules` prints `egress:`, `audit:`, then one line per rule ending in `env=<VAR>`, the variable that holds
+  its placeholder, without resolving secrets.
 - `gh` 2.96.0 (Go) on macOS 27 refuses fnox's certificate ("x509: certificate is not trusted"), with or without
   `SSL_CERT_FILE`; `curl` with the same placeholder gets the token injected (HTTP 200).
 - Git over HTTPS to GitHub signs in only with `Authorization: Basic`; `Bearer` and `token` get 401. fnox 1.48 can't
   substitute a placeholder inside Basic, so Git over HTTPS doesn't work behind it (jdx/fnox#1151 proposed it, closed
   unmerged).
+
+## pi's Claude Code in the sandbox
+
+Verified with claude 2.1.309, pi 1.5.2, and pi-claude-code at `d5b5e04` (#311):
+
+- The extension reads `PI_CLAUDE_CODE_CONFIG_DIR` through pi's provider auth context, which is pi's process
+  environment, and runs `claude` with it as `CLAUDE_CONFIG_DIR`.
+- In a fresh `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN` alone signs in: `claude auth status` reports
+  `loggedIn: true`, `authMethod: "oauth_token"` (without it, `"none"`). No keychain access.
+- `claude auth status` writes `.claude.json`, its lock, and `backups/` in the folder. A `claude -p` turn with the
+  extension's flags writes `.claude.json`, `.last-cleanup`, `sessions/`, and `projects/<cwd>/` in the folder.
+- `claude` locks the folder itself with `proper-lockfile`: it creates `<CLAUDE_CONFIG_DIR>.lock`, a folder beside it
+  (seen as a sandbox block of `~/.config/claude.lock`).
+- The log cache is `~/Library/Caches/claude-cli-nodejs/<cwd>/` (`mcp-logs-<server>/`, `errors/`), whatever
+  `CLAUDE_CONFIG_DIR` is.
+- The keychain login's entry is `Claude Code-credentials` plus `-<first 8 hex of sha256(config folder)>` when
+  `CLAUDE_CONFIG_DIR` is set: each folder has its own login.
+- The extension's relay listens on `127.0.0.1` at a random port and reaches Anthropic from pi's process.
 
 ## Not yet verified
 

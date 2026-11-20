@@ -368,6 +368,9 @@ impl Daemon {
     /// Applies a change from the apps to its global file, then rereads the files.
     pub fn set_app_setting(&self, change: crate::apps::SettingChange) -> Result<(), crate::apps::SettingError> {
         let mut snapshot = lock(&self.app_settings);
+        // A value the apps show read-only (a preset with options) is edited in the file: saving the list control's
+        // names would drop the options.
+        snapshot.check_editable(&change)?;
         crate::apps::write_setting(&self.config().paths, &change)?;
         crate::log!(
             "config: {} ({:?}) changed from the apps",
@@ -417,19 +420,30 @@ impl Daemon {
         prepared: launch::Prepared,
         launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
-        let (mode, mut env, mut policy, proxy, mut commands) = match prepared {
-            launch::Prepared::Host { env, proxy } => (LaunchMode::Host, env, None, proxy, None),
+        let (mode, mut env, mut policy, proxy, mut commands, warnings) = match prepared {
+            launch::Prepared::Host { env, proxy } => (LaunchMode::Host, env, None, proxy, None, Vec::new()),
             launch::Prepared::Sandbox(sandboxed) => {
                 let launch::Sandboxed {
                     env,
                     resolution,
                     proxy,
                     commands,
+                    warnings,
                 } = *sandboxed;
                 for link in &resolution.links {
                     crate::log!("sandbox in {}: {link}", workspace.path.display());
                 }
-                (LaunchMode::Sandbox, env, Some(resolution.policy), proxy, Some(commands))
+                for warning in &warnings {
+                    crate::log!("sandbox in {}: {warning}", workspace.path.display());
+                }
+                (
+                    LaunchMode::Sandbox,
+                    env,
+                    Some(resolution.policy),
+                    proxy,
+                    Some(commands),
+                    warnings,
+                )
             }
         };
         let key = self.next_key.fetch_add(1, Ordering::Relaxed);
@@ -493,6 +507,7 @@ impl Daemon {
             source: launch_config.source.clone(),
             checkout: launch_config.checkout.clone(),
             grants: launch_config.sandbox.commands.clone(),
+            warnings,
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),

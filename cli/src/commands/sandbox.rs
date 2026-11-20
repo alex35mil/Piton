@@ -8,7 +8,7 @@ use crate::{
     config::DaemonConfig,
     launch::{
         self,
-        sandbox::{Access, Provenance, Resolution, Source},
+        sandbox::{Access, Resolution, Source},
     },
 };
 
@@ -17,9 +17,12 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         SandboxAction::Show { workspace } | SandboxAction::Why { workspace, .. } => workspace.clone(),
     };
     let (policy, profile) = match policy(config, workspace).await {
-        Ok(resolution) => {
+        Ok((resolution, warnings)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
+            }
+            for warning in &warnings {
+                eprintln!("piton: warning: {warning}");
             }
             (resolution.policy, resolution.profile)
         }
@@ -69,7 +72,10 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     }
 }
 
-async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Resolution, String> {
+async fn policy(
+    config: &DaemonConfig,
+    workspace: Option<PathBuf>,
+) -> Result<(Resolution, Vec<launch::LaunchWarning>), String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -85,7 +91,7 @@ async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Res
     let tools = crate::tools::Tools::resolve(config, &base);
     launch::prepare_sandbox(config, &tools, &resolved, &base, &workspace.path)
         .await
-        .map(|sandboxed| sandboxed.resolution)
+        .map(|sandboxed| (sandboxed.resolution, sandboxed.warnings))
         .map_err(|e| e.to_string())
 }
 
@@ -99,14 +105,7 @@ fn explain(source: &Source) -> String {
         ),
         Source::Piton { what } => format!("Piton: {what}"),
         Source::AgentDir => "pi's runtime state in its agent directory".into(),
-        Source::Preset { preset, from } => format!("the {preset} preset, {}", provenance(from)),
-        Source::Config { key, from } => format!("{key}, {}", provenance(from)),
-    }
-}
-
-fn provenance(from: &Provenance) -> String {
-    match from {
-        Provenance::Profile { profile } => format!("from the {} profile", profile.name()),
-        Provenance::File { path } => format!("listed in {}", path.display()),
+        Source::Preset { preset, from } => format!("the {preset} preset, {from}"),
+        Source::Config { key, from } => format!("{key}, {from}"),
     }
 }

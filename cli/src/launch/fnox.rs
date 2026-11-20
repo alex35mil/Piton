@@ -18,7 +18,7 @@ use tokio::process::Command;
 
 use super::{
     Env,
-    sandbox::{Access, Policy},
+    sandbox::{Access, Policy, Provenance, Source},
 };
 use crate::{agent::canonical_target, tools::Program};
 
@@ -32,6 +32,8 @@ pub struct Proxy {
     pub program: Program,
     pub files: Vec<PathBuf>,
     pub env: Env,
+    /// The variables fnox sets to a placeholder in pi's environment: one per proxy rule (`fnox proxy rules`).
+    pub variables: Vec<String>,
 }
 
 impl Proxy {
@@ -67,10 +69,51 @@ impl Proxy {
             return Err(FnoxError::WritableConfig { file: file.clone() });
         }
         let keychains = canonical_target(&home.join("Library/Keychains"));
-        if policy.keychain || policy.decide(&keychains, Access::Read).allowed {
-            return Err(FnoxError::Keychain);
+        let read = policy.decide(&keychains, Access::Read);
+        if policy.keychain || read.allowed {
+            // A `read` entry inside the keychains folder reopens the services without deciding the folder itself.
+            let opened_by = match read.source {
+                Source::Preset { preset, from } => KeychainOpener::Preset { preset, from },
+                Source::Config { from, .. } => KeychainOpener::Read { from: Some(from) },
+                Source::Workspace
+                | Source::BuiltIn { .. }
+                | Source::NonoGroup { .. }
+                | Source::Piton { .. }
+                | Source::AgentDir => KeychainOpener::Read { from: None },
+            };
+            return Err(FnoxError::Keychain { opened_by });
         }
         Ok(())
+    }
+}
+
+/// What opened the keychain to a sandbox fnox refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeychainOpener {
+    /// A preset's keychain login (`pi-claude-code` with `login = "keychain"`).
+    Preset { preset: String, from: Provenance },
+    /// A `[sandbox] read` entry covering `~/Library/Keychains` or inside it, and where it came from when it decides the
+    /// folder itself.
+    Read { from: Option<Provenance> },
+}
+
+impl std::fmt::Display for KeychainOpener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeychainOpener::Preset { preset, from } => write!(
+                f,
+                "the {preset} preset's `login = \"keychain\"` ({from}); sign `claude` in with a setup token instead: \
+                 remove the login option, or set `login = \"token\"`"
+            ),
+            KeychainOpener::Read { from } => {
+                let from = from.as_ref().map(|from| format!(" ({from})")).unwrap_or_default();
+                write!(
+                    f,
+                    "a `read` entry for ~/Library/Keychains{from}; remove ~/Library/Keychains, any folder containing \
+                     it, and anything inside it from [sandbox] read (`piton config check` lists the files)"
+                )
+            }
+        }
     }
 }
 
@@ -85,12 +128,8 @@ pub enum FnoxError {
          workspace and the sandbox's [sandbox] write paths"
     )]
     WritableConfig { file: PathBuf },
-    #[error(
-        "the sandbox can read your keychain, where fnox's secret-source credentials live: remove ~/Library/Keychains \
-         (and any folder containing it) from [sandbox] read in your configuration (`piton config check` lists the \
-         files)"
-    )]
-    Keychain,
+    #[error("the sandbox can read your keychain, where fnox's secret-source credentials live, because of {opened_by}")]
+    Keychain { opened_by: KeychainOpener },
 }
 
 /// Whether `workspace`'s launches go behind the proxy: `None` when no `[proxy]` applies there. `env` is the daemon's
@@ -134,7 +173,22 @@ pub async fn prepare(program: &Program, env: &Env, workspace: &Path) -> Result<O
         program: program.clone(),
         files,
         env: env.clone(),
+        variables: rule_variables(&strip_ansi(&String::from_utf8_lossy(&rules.stdout))),
     }))
+}
+
+/// The placeholder variables `fnox proxy rules` names: each rule's line ends with `env=<VAR>` (fnox 1.48).
+fn rule_variables(rules: &str) -> Vec<String> {
+    let mut variables: Vec<String> = Vec::new();
+    for line in rules.lines() {
+        let Some(var) = line.split_whitespace().find_map(|word| word.strip_prefix("env=")) else {
+            continue;
+        };
+        if !var.is_empty() && !variables.iter().any(|v| v == var) {
+            variables.push(var.to_string());
+        }
+    }
+    variables
 }
 
 /// pi's environment behind the proxy: `FNOX_*` variables only as the daemon's base environment has them, so a
@@ -314,6 +368,7 @@ mod tests {
             },
             files: vec![],
             env: Env::new(),
+            variables: vec![],
         };
         assert_eq!(
             proxy.wrap(vec!["pi".into(), "--mode".into(), "rpc".into()]),
@@ -331,6 +386,20 @@ mod tests {
                 "rpc"
             ]
         );
+    }
+
+    /// `fnox proxy rules` as fnox 1.48 prints it: each rule's placeholder variable is read.
+    #[test]
+    fn reads_the_rules_placeholder_variables() {
+        let output = "egress: Permissive\naudit: true\n\
+            CLAUDE_CODE_OAUTH_TOKEN -> https://api.anthropic.com methods=* paths=* header=authorization env=CLAUDE_CODE_OAUTH_TOKEN\n\
+            GH -> https://api.githubcopilot.com methods=* paths=* header=authorization env=GITHUB_PERSONAL_ACCESS_TOKEN\n\
+            GH -> https://api.github.com methods=* paths=* header=authorization env=GITHUB_PERSONAL_ACCESS_TOKEN\n";
+        assert_eq!(
+            rule_variables(output),
+            ["CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"]
+        );
+        assert!(rule_variables("egress: Permissive\naudit: true\n").is_empty());
     }
 
     #[test]
@@ -380,6 +449,7 @@ mod tests {
             },
             files: vec!["/w/shared/secrets.toml".into(), "/h/.config/fnox/config.toml".into()],
             env: Env::new(),
+            variables: vec![],
         };
         let home = Path::new("/h");
         // Reads are open by default; deny the keychain as the built-in policy does.
@@ -402,8 +472,37 @@ mod tests {
             vec![closed_keychain.clone(), allow(Access::Read, "/h/Library/Keychains")],
             false,
         );
-        assert!(matches!(proxy.check_sandbox(&exposed, home), Err(FnoxError::Keychain)));
-        let services = policy(vec![closed_keychain], true);
-        assert!(matches!(proxy.check_sandbox(&services, home), Err(FnoxError::Keychain)));
+        assert!(matches!(
+            proxy.check_sandbox(&exposed, home),
+            Err(FnoxError::Keychain {
+                opened_by: KeychainOpener::Read { from: None }
+            })
+        ));
+        let services = policy(vec![closed_keychain.clone()], true);
+        assert!(matches!(
+            proxy.check_sandbox(&services, home),
+            Err(FnoxError::Keychain { .. })
+        ));
+        // The rule that opened it is named: the preset's keychain login, with the file that set it.
+        let preset_login = Rule {
+            source: Source::Preset {
+                preset: "pi-claude-code".into(),
+                from: Provenance::File {
+                    path: "/h/.config/piton/config.local.toml".into(),
+                },
+            },
+            ..allow(Access::Read, "/h/Library/Keychains")
+        };
+        let by_preset = policy(vec![closed_keychain, preset_login], true);
+        let refusal = proxy.check_sandbox(&by_preset, home).unwrap_err();
+        assert!(matches!(
+            &refusal,
+            FnoxError::Keychain { opened_by: KeychainOpener::Preset { preset, .. } } if preset == "pi-claude-code"
+        ));
+        let message = refusal.to_string();
+        assert!(
+            message.contains("login = \"keychain\"") && message.contains("config.local.toml"),
+            "{message}"
+        );
     }
 }

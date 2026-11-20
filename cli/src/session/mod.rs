@@ -315,6 +315,8 @@ pub struct LaunchSpec {
     pub checkout: PathBuf,
     /// The `[[sandbox.commands]]` the launch resolved.
     pub grants: Vec<crate::config::Listed<crate::config::CommandGrant>>,
+    /// What the session starts with a warning about.
+    pub warnings: Vec<launch::LaunchWarning>,
 }
 
 pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
@@ -448,7 +450,11 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         pending: HashMap::new(),
         next_internal: 0,
         replay: Replay::default(),
-        fnox: spec.proxy.as_ref().map(|_| FnoxStartup::default()),
+        startup: Startup {
+            warnings: spec.warnings,
+            fnox: spec.proxy.as_ref().map(|_| launch::fnox::StartupLog::default()),
+            announced: false,
+        },
         stderr_tail: Vec::new(),
         writer: None,
         stopping: None,
@@ -542,8 +548,8 @@ struct SessionTask {
     pending: HashMap<String, Pending>,
     next_internal: u64,
     replay: Replay,
-    /// fnox's startup warnings, for a session behind the proxy.
-    fnox: Option<FnoxStartup>,
+    /// How this pi started: the launch's warnings and fnox's.
+    startup: Startup,
     stderr_tail: Vec<String>,
     writer: Option<ClientId>,
     stopping: Option<(StopPhase, Instant)>,
@@ -568,23 +574,38 @@ struct Watcher {
 
 const STDERR_TAIL: usize = 20;
 
-/// The secrets fnox couldn't read when it started this pi, and whether attached clients were told yet: fnox prints its
-/// warnings before it starts pi, so they're announced once pi's first record arrives.
+/// How this pi started, for the user: the launch's warnings, the secrets fnox couldn't read (for a session behind the
+/// proxy), and whether attached clients were told yet. fnox prints its warnings before it starts pi, so everything is
+/// announced once pi's first record arrives.
 #[derive(Default)]
-struct FnoxStartup {
-    log: launch::fnox::StartupLog,
+struct Startup {
+    warnings: Vec<launch::LaunchWarning>,
+    fnox: Option<launch::fnox::StartupLog>,
     announced: bool,
 }
 
-/// The id of the records the daemon sends about fnox in pi's `extension_ui_request` format.
-const FNOX_UI_ID: &str = "piton:fnox";
+impl Startup {
+    /// The conversation's notice: the launch's warnings, then fnox's, one paragraph each.
+    fn notice(&self) -> Option<String> {
+        let lines: Vec<String> = self
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .chain(self.fnox.as_ref().and_then(launch::fnox::StartupLog::notice))
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n\n"))
+    }
+}
 
-/// The warning notification for an attached client (pi.nvim), when fnox couldn't read a secret.
-fn fnox_notify(fnox: &FnoxStartup) -> Option<Arc<str>> {
-    let message = fnox.log.notice()?;
+/// The id of the records the daemon sends about how pi started in pi's `extension_ui_request` format.
+const STARTUP_UI_ID: &str = "piton:startup";
+
+/// The warning notification for an attached client (pi.nvim), when the startup notice has something.
+fn startup_notify(startup: &Startup) -> Option<Arc<str>> {
+    let message = startup.notice()?;
     let record = json!({
         "type": "extension_ui_request",
-        "id": FNOX_UI_ID,
+        "id": STARTUP_UI_ID,
         "method": "notify",
         "notifyType": "warning",
         "message": message,
@@ -613,7 +634,7 @@ impl SessionTask {
                 },
                 line = stderr.next_line(), if stderr_open => match line {
                     Ok(Some(line)) => {
-                        if self.fnox.as_mut().is_some_and(|f| f.log.read(&line)) {
+                        if self.startup.fnox.as_mut().is_some_and(|log| log.read(&line)) {
                             self.on_unresolved_secrets();
                         }
                         self.stderr_tail.push(line);
@@ -704,7 +725,7 @@ impl SessionTask {
                     let _ = tx.send(Frame::Record(line));
                 }
                 // A client that attaches after the announcement gets the notification too.
-                if let Some(notify) = self.fnox.as_ref().filter(|f| f.announced).and_then(fnox_notify) {
+                if let Some(notify) = Some(&self.startup).filter(|s| s.announced).and_then(startup_notify) {
                     let _ = tx.send(Frame::Record(notify));
                 }
                 self.clients.insert(client, tx);
@@ -1117,35 +1138,42 @@ impl SessionTask {
 
     /// fnox named another secret it couldn't read: the conversation's notice and the status entry show the list.
     fn on_unresolved_secrets(&mut self) {
-        let Some(fnox) = &self.fnox else { return };
-        let (Some(notice), Some(status)) = (fnox.log.notice(), fnox.log.status()) else {
+        let Some(status) = self.startup.fnox.as_ref().and_then(launch::fnox::StartupLog::status) else {
             return;
         };
-        let changes = self.view.set_startup_notice(notice);
-        self.broadcast(changes);
+        if let Some(notice) = self.startup.notice() {
+            let changes = self.view.set_startup_notice(notice);
+            self.broadcast(changes);
+        }
         let record = json!({
             "type": "extension_ui_request",
-            "id": FNOX_UI_ID,
+            "id": STARTUP_UI_ID,
             "method": "setStatus",
             "statusKey": "piton-fnox",
             "statusText": status,
         });
         self.emit_record(record);
-        // A warning read after pi's first record: tell the clients again, with the whole list.
-        if let Some(notify) = self.fnox.as_ref().filter(|f| f.announced).and_then(fnox_notify) {
+        // A warning read after pi's first record: tell the clients again, with the whole notice.
+        if let Some(notify) = Some(&self.startup).filter(|s| s.announced).and_then(startup_notify) {
             for tx in self.clients.values() {
                 let _ = tx.send(Frame::Record(notify.clone()));
             }
         }
     }
 
-    /// pi is up, so fnox has printed its startup warnings: tell the attached clients once.
-    fn announce_fnox(&mut self) {
-        let Some(fnox) = self.fnox.as_mut().filter(|f| !f.announced) else {
+    /// pi is up, so fnox has printed its startup warnings: show the startup notice and tell the attached clients once.
+    fn announce_startup(&mut self) {
+        if self.startup.announced {
             return;
-        };
-        fnox.announced = true;
-        if let Some(notify) = fnox_notify(fnox) {
+        }
+        self.startup.announced = true;
+        if !self.startup.warnings.is_empty()
+            && let Some(notice) = self.startup.notice()
+        {
+            let changes = self.view.set_startup_notice(notice);
+            self.broadcast(changes);
+        }
+        if let Some(notify) = startup_notify(&self.startup) {
             for tx in self.clients.values() {
                 let _ = tx.send(Frame::Record(notify.clone()));
             }
@@ -1164,7 +1192,7 @@ impl SessionTask {
     }
 
     fn on_pi_line(&mut self, line: String) {
-        self.announce_fnox();
+        self.announce_startup();
         let Ok(Value::Object(record)) = serde_json::from_str::<Value>(&line) else {
             return;
         };
@@ -1736,4 +1764,31 @@ fn command_type(command: &Map<String, Value>) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The startup notice holds the launch's warnings, then the secrets fnox couldn't read; nothing when both are empty.
+    #[test]
+    fn the_startup_notice_holds_launch_warnings_and_fnox_secrets() {
+        assert_eq!(Startup::default().notice(), None);
+        let mut startup = Startup {
+            warnings: vec![launch::LaunchWarning::ClaudeCodeNoToken],
+            fnox: Some(launch::fnox::StartupLog::default()),
+            announced: false,
+        };
+        let notice = startup.notice().unwrap();
+        assert!(notice.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{notice}");
+        let log = startup.fnox.as_mut().unwrap();
+        log.read("fnox proxy: 'GH' is not set; requests that need it are refused until it is");
+        let notice = startup.notice().unwrap();
+        let (warning, fnox) = notice.split_once("\n\n").unwrap();
+        assert!(
+            warning.contains("CLAUDE_CODE_OAUTH_TOKEN") && fnox.contains("GH"),
+            "{notice}"
+        );
+        assert!(startup_notify(&startup).unwrap().contains("piton:startup"));
+    }
 }

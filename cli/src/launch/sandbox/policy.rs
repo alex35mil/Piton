@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::config::{Connect, Preset, Profile};
+use crate::config::{ClaudeLogin, Connect, Preset, Profile};
 
 /// Where a deny or a grant comes from: what `piton sandbox why` reports.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -37,6 +37,15 @@ pub enum Source {
 pub enum Provenance {
     Profile { profile: Profile },
     File { path: PathBuf },
+}
+
+impl std::fmt::Display for Provenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Provenance::Profile { profile } => write!(f, "from the {} profile", profile.name()),
+            Provenance::File { path } => write!(f, "listed in {}", path.display()),
+        }
+    }
 }
 
 /// A profile's entries, as written: added before the user's own lists. Profiles only add: `strict` adds nothing, and
@@ -167,24 +176,45 @@ pub const AGENT_DIR_WRITES: &[AgentDirWrite] = &[
     AgentDirWrite::Lock("trust.json"),
 ];
 
-/// What a preset grants: folders, then files, as written (`~/...`). Each toolchain's are its caches and state; host
-/// builds reuse what the sandbox writes there, which is why none is on by default. None of them writes what the host
-/// executes or trusts (checked below): mise's installed tools and trusted configs, cargo's installed binaries, rustup's
-/// toolchains. An install that needs them is asked about and run by the daemon (#241). `git` grants no path: it
-/// leaves out the Git rule instead (`resolve.rs`).
-pub fn preset_grants(preset: &Preset) -> (Vec<&'static str>, &'static [&'static str]) {
+/// What a preset grants, as written (`~/...`): added to the `[sandbox]` lists of the same names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PresetGrants {
+    pub write: Vec<&'static str>,
+    pub write_file: Vec<&'static str>,
+    pub read: Vec<&'static str>,
+    pub connect: Vec<Connect>,
+}
+
+/// The keychains: what `login = "keychain"` reads (which reopens the keychain's services).
+pub const KEYCHAINS: &str = "~/Library/Keychains";
+
+/// Where `claude` caches its logs (env-paths' cache folder, per working folder): it doesn't follow `CLAUDE_CONFIG_DIR`.
+pub const CLAUDE_CODE_CACHE: &str = "~/Library/Caches/claude-cli-nodejs";
+
+/// What a preset grants. Each toolchain's are its caches and state; host builds reuse what the sandbox writes there,
+/// which is why none is on by default. None of them writes what the host executes or trusts (checked below): mise's
+/// installed tools and trusted configs, cargo's installed binaries, rustup's toolchains. An install that needs them is
+/// asked about and run by the daemon (#241). `git` grants no path: it leaves out the Git rule instead (`resolve.rs`).
+/// `pi-claude-code`'s config folder and its lock (`<folder>.lock` beside it: `claude` locks the folder itself with
+/// `proper-lockfile`) come from the launch's environment, so `resolve.rs` grants them; here are its fixed parts.
+pub fn preset_grants(preset: &Preset) -> PresetGrants {
+    let writes = |write: &[&'static str], write_file: &[&'static str]| PresetGrants {
+        write: write.to_vec(),
+        write_file: write_file.to_vec(),
+        ..PresetGrants::default()
+    };
     match preset {
-        Preset::Git => (Vec::new(), &[]),
-        Preset::Mise => (
-            vec![
+        Preset::Git => PresetGrants::default(),
+        Preset::Mise => writes(
+            &[
                 "~/Library/Caches/mise",
                 "~/.local/state/mise/incomplete-installs",
                 "~/.local/state/mise/tracked-configs",
             ],
             &[],
         ),
-        Preset::Rust => (
-            vec![
+        Preset::Rust => writes(
+            &[
                 "~/.cargo/registry",
                 "~/.cargo/git",
                 "~/.rustup/tmp",
@@ -197,8 +227,8 @@ pub fn preset_grants(preset: &Preset) -> (Vec<&'static str>, &'static [&'static 
                 "~/.cargo/.global-cache",
             ],
         ),
-        Preset::Node => (
-            vec![
+        Preset::Node => writes(
+            &[
                 "~/.npm",
                 "~/Library/pnpm",
                 "~/.local/share/pnpm",
@@ -208,8 +238,8 @@ pub fn preset_grants(preset: &Preset) -> (Vec<&'static str>, &'static [&'static 
             ],
             &[],
         ),
-        Preset::Swift => (
-            vec![
+        Preset::Swift => writes(
+            &[
                 "~/Library/Caches/org.swift.swiftpm",
                 "~/Library/org.swift.swiftpm",
                 "~/.cache/clang/ModuleCache",
@@ -217,6 +247,17 @@ pub fn preset_grants(preset: &Preset) -> (Vec<&'static str>, &'static [&'static 
             ],
             &[],
         ),
+        Preset::PiClaudeCode(options) => PresetGrants {
+            write: vec![CLAUDE_CODE_CACHE],
+            // The extension's relay listens on 127.0.0.1 at a random port; it reaches Anthropic from pi's process.
+            connect: vec![Connect::Network(crate::config::NetworkTarget::LocalAnyPort)],
+            // Keychain sign-in goes through the keychain's services, not file writes: the files stay unwritable.
+            read: match options.login() {
+                ClaudeLogin::Token => Vec::new(),
+                ClaudeLogin::Keychain => vec![KEYCHAINS],
+            },
+            write_file: Vec::new(),
+        },
     }
 }
 
@@ -256,14 +297,33 @@ mod tests {
     #[test]
     fn presets_grant_paths_under_home() {
         for preset in Preset::ALL {
-            let (dirs, files) = preset_grants(&preset);
+            let grants = preset_grants(&preset);
             match preset {
-                Preset::Git => assert!(dirs.is_empty() && files.is_empty(), "git grants no path"),
-                Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => {
-                    assert!(!dirs.is_empty(), "{}", preset.name());
+                Preset::Git => assert_eq!(grants, PresetGrants::default(), "git grants no path"),
+                Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::PiClaudeCode(_) => {
+                    assert!(!grants.write.is_empty(), "{}", preset.name());
                 }
             }
-            assert!(dirs.iter().chain(files).all(|p| p.starts_with("~/")));
+            let paths = grants.write.iter().chain(&grants.write_file).chain(&grants.read);
+            assert!(paths.into_iter().all(|p| p.starts_with("~/")));
+        }
+    }
+
+    /// `pi-claude-code` reads the keychain only with `login = "keychain"`, and never writes it.
+    #[test]
+    fn the_claude_code_preset_opens_the_keychain_only_for_its_keychain_login() {
+        use crate::config::ClaudeCodeOptions;
+        let preset = |login| preset_grants(&Preset::PiClaudeCode(ClaudeCodeOptions { login }));
+        for login in [None, Some(ClaudeLogin::Token)] {
+            assert!(preset(login).read.is_empty());
+        }
+        let keychain = preset(Some(ClaudeLogin::Keychain));
+        assert_eq!(keychain.read, [KEYCHAINS]);
+        for login in [None, Some(ClaudeLogin::Token), Some(ClaudeLogin::Keychain)] {
+            let grants = preset(login);
+            assert_eq!(grants.write, [CLAUDE_CODE_CACHE]);
+            assert!(grants.write_file.is_empty());
+            assert_eq!(grants.connect, [Connect::try_from("localhost:*".to_string()).unwrap()]);
         }
     }
 
@@ -282,8 +342,8 @@ mod tests {
         ];
         let covers = |grant: &str, path: &str| Path::new(path).starts_with(grant) || Path::new(grant).starts_with(path);
         for preset in &Preset::ALL {
-            let (dirs, files) = preset_grants(preset);
-            for grant in dirs.iter().chain(files) {
+            let grants = preset_grants(preset);
+            for grant in grants.write.iter().chain(&grants.write_file) {
                 for path in host_runs {
                     assert!(
                         !covers(grant, path),

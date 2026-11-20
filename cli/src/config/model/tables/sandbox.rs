@@ -169,6 +169,8 @@ pub enum Connect {
 pub enum NetworkTarget {
     /// `localhost:PORT`: a port on this Mac.
     LocalPort { port: u16 },
+    /// `localhost:*`: every port on this Mac, every local service included.
+    LocalAnyPort,
     /// `*:PORT`: a port on any host.
     AnyHostPort { port: u16 },
     /// `*`: any host, any port.
@@ -191,6 +193,9 @@ impl TryFrom<String> for Connect {
         if entry == "*" {
             return Ok(Connect::Network(NetworkTarget::Anywhere));
         }
+        if entry == "localhost:*" {
+            return Ok(Connect::Network(NetworkTarget::LocalAnyPort));
+        }
         let (host, port) = match entry.rsplit_once(':') {
             Some((host, port)) => {
                 let port = port
@@ -204,7 +209,7 @@ impl TryFrom<String> for Connect {
         };
         let target = match (host, port) {
             ("localhost", Some(port)) => NetworkTarget::LocalPort { port },
-            ("localhost", None) => return Err(bad("name the port: `localhost:PORT`")),
+            ("localhost", None) => return Err(bad("name the port: `localhost:PORT`, or `localhost:*` for every port")),
             ("*", Some(port)) => NetworkTarget::AnyHostPort { port },
             ("*", None) => NetworkTarget::Anywhere,
             (host, port) => {
@@ -242,6 +247,7 @@ impl std::fmt::Display for NetworkTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NetworkTarget::LocalPort { port } => write!(f, "localhost:{port}"),
+            NetworkTarget::LocalAnyPort => write!(f, "localhost:*"),
             NetworkTarget::AnyHostPort { port } => write!(f, "*:{port}"),
             NetworkTarget::Anywhere => write!(f, "*"),
             NetworkTarget::Host { host, port: Some(port) } => write!(f, "{host}:{port}"),
@@ -250,9 +256,10 @@ impl std::fmt::Display for NetworkTarget {
     }
 }
 
-/// A named bundle of grants, written as its name.
+/// A named bundle of grants. Written as its name, or as a table with the name and the preset's own options:
+/// `{ name = "pi-claude-code", login = "keychain" }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(try_from = "toml::Value", into = "toml::Value")]
 pub enum Preset {
     /// mise's cache and install bookkeeping, never its installed tools (installs ask, #241). Each toolchain preset
     /// grants that toolchain's caches and state, which host builds reuse; the folders are in `launch/sandbox/policy.rs`.
@@ -267,11 +274,57 @@ pub enum Preset {
     /// writable, so `husky install` and `git remote add` work in the sandbox, and the next Git command on the host may
     /// run an agent's code (`agent/git.rs`). Hooks run in the sandbox either way.
     Git,
+    /// What the pi-claude-code extension's `claude` writes: the config folder `PI_CLAUDE_CODE_CONFIG_DIR` names (never
+    /// the interactive Claude Code's, which loads hooks and plugins), and its log cache; the extension's local relay;
+    /// and, with `login = "keychain"`, the keychain.
+    PiClaudeCode(ClaudeCodeOptions),
+}
+
+/// The `pi-claude-code` preset's options. Unset options are the nearest level's that sets them, else their default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClaudeCodeOptions {
+    /// How the extension's `claude` signs in. Default: [`ClaudeLogin::Token`].
+    pub login: Option<ClaudeLogin>,
+}
+
+impl ClaudeCodeOptions {
+    pub fn login(&self) -> ClaudeLogin {
+        self.login.unwrap_or_default()
+    }
+}
+
+/// How the extension's `claude` signs in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClaudeLogin {
+    /// `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` in pi's environment (a placeholder behind fnox): no keychain.
+    #[default]
+    Token,
+    /// A `claude auth login` saved in the keychain: the keychain opens to the sandbox. Refused while fnox applies.
+    Keychain,
+}
+
+impl ClaudeLogin {
+    pub fn name(self) -> &'static str {
+        match self {
+            ClaudeLogin::Token => "token",
+            ClaudeLogin::Keychain => "keychain",
+        }
+    }
 }
 
 impl Preset {
     #[cfg(test)]
-    pub const ALL: [Preset; 5] = [Preset::Mise, Preset::Rust, Preset::Node, Preset::Swift, Preset::Git];
+    pub const ALL: [Preset; 6] = [
+        Preset::Mise,
+        Preset::Rust,
+        Preset::Node,
+        Preset::Swift,
+        Preset::Git,
+        Preset::PiClaudeCode(ClaudeCodeOptions { login: None }),
+    ];
+
+    /// Every preset's name, as written.
+    pub const NAMES: [&'static str; 6] = ["mise", "rust", "node", "swift", "git", "pi-claude-code"];
 
     pub fn name(&self) -> &'static str {
         match self {
@@ -280,15 +333,111 @@ impl Preset {
             Preset::Node => "node",
             Preset::Swift => "swift",
             Preset::Git => "git",
+            Preset::PiClaudeCode(_) => "pi-claude-code",
         }
     }
 
-    /// The key of a preset that loosens a protection (it lets the sandbox write what the host runs), or `None` for one
-    /// any configuration file may list.
+    /// Whether this entry sets any of its preset's options.
+    pub fn has_options(&self) -> bool {
+        match self {
+            Preset::PiClaudeCode(options) => options.login.is_some(),
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git => false,
+        }
+    }
+
+    /// Folds a nearer entry for the same preset in: per option, the nearer value when it sets one.
+    pub fn merge(&mut self, nearer: &Preset) {
+        match (self, nearer) {
+            (Preset::PiClaudeCode(options), Preset::PiClaudeCode(n)) => {
+                if n.login.is_some() {
+                    options.login = n.login;
+                }
+            }
+            (Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::PiClaudeCode(_), _) => {
+            }
+        }
+    }
+
+    /// The key of a preset that loosens a protection (it lets the sandbox write what the host runs, or opens what it
+    /// otherwise closes), or `None` for one any configuration file may list.
     fn loosening(&self) -> Option<&'static str> {
         match self {
             Preset::Git => Some("sandbox.presets git"),
+            Preset::PiClaudeCode(_) => Some("sandbox.presets pi-claude-code"),
             Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => None,
+        }
+    }
+}
+
+impl TryFrom<toml::Value> for Preset {
+    type Error = String;
+
+    fn try_from(value: toml::Value) -> Result<Self, String> {
+        let (name, mut options) = match value {
+            toml::Value::String(name) => (name, toml::Table::new()),
+            toml::Value::Table(mut table) => match table.remove("name") {
+                Some(toml::Value::String(name)) => (name, table),
+                Some(_) | None => return Err("a preset with options needs `name = \"...\"`".into()),
+            },
+            other @ (toml::Value::Integer(_)
+            | toml::Value::Float(_)
+            | toml::Value::Boolean(_)
+            | toml::Value::Datetime(_)
+            | toml::Value::Array(_)) => {
+                return Err(format!(
+                    "a preset is a name or a table with `name`, not {}",
+                    other.type_str()
+                ));
+            }
+        };
+        let preset = match name.as_str() {
+            "mise" => Preset::Mise,
+            "rust" => Preset::Rust,
+            "node" => Preset::Node,
+            "swift" => Preset::Swift,
+            "git" => Preset::Git,
+            "pi-claude-code" => {
+                let login = match options.remove("login") {
+                    None => None,
+                    Some(toml::Value::String(login)) => Some(match login.as_str() {
+                        "token" => ClaudeLogin::Token,
+                        "keychain" => ClaudeLogin::Keychain,
+                        other => return Err(format!("pi-claude-code login {other:?}: \"token\" or \"keychain\"")),
+                    }),
+                    Some(_) => return Err("pi-claude-code login: \"token\" or \"keychain\"".into()),
+                };
+                Preset::PiClaudeCode(ClaudeCodeOptions { login })
+            }
+            other => return Err(format!("unknown preset {other:?}: {}", Preset::NAMES.join(", "))),
+        };
+        match options.keys().next() {
+            Some(key) => Err(format!("the {} preset has no option `{key}`", preset.name())),
+            None => Ok(preset),
+        }
+    }
+}
+
+impl From<Preset> for toml::Value {
+    /// The name alone when no option is set.
+    fn from(preset: Preset) -> Self {
+        let mut table = toml::Table::new();
+        match &preset {
+            Preset::PiClaudeCode(ClaudeCodeOptions { login: Some(login) }) => {
+                table.insert("login".into(), toml::Value::String(login.name().into()));
+            }
+            Preset::PiClaudeCode(ClaudeCodeOptions { login: None })
+            | Preset::Mise
+            | Preset::Rust
+            | Preset::Node
+            | Preset::Swift
+            | Preset::Git => {}
+        }
+        match table.is_empty() {
+            true => toml::Value::String(preset.name().into()),
+            false => {
+                table.insert("name".into(), toml::Value::String(preset.name().into()));
+                toml::Value::Table(table)
+            }
         }
     }
 }
@@ -365,7 +514,12 @@ impl Merge for SandboxTable {
         union(&mut self.write_file, n.write_file);
         union(&mut self.read, n.read);
         union(&mut self.connect, n.connect);
-        union(&mut self.presets, n.presets);
+        for preset in n.presets {
+            match self.presets.iter_mut().find(|p| p.name() == preset.name()) {
+                Some(existing) => existing.merge(&preset),
+                None => self.presets.push(preset),
+            }
+        }
         union(&mut self.deny, n.deny);
         union(&mut self.commands, n.commands);
     }
@@ -417,7 +571,22 @@ impl SandboxSettings {
         add_listed(&mut self.write_file, write_file, file);
         add_listed(&mut self.read, read, file);
         add_listed(&mut self.connect, connect, file);
-        add_listed(&mut self.presets, presets, file);
+        // A preset is listed once, with the file that decided it: the nearest that sets one of its options, else the
+        // first that lists it.
+        for preset in presets {
+            match self.presets.iter_mut().find(|p| p.value.name() == preset.name()) {
+                Some(existing) => {
+                    existing.value.merge(&preset);
+                    if preset.has_options() {
+                        existing.file = file.to_path_buf();
+                    }
+                }
+                None => self.presets.push(Listed {
+                    value: preset,
+                    file: file.to_path_buf(),
+                }),
+            }
+        }
         add_listed(&mut self.deny, deny, file);
         add_listed(&mut self.commands, commands, file);
     }
@@ -513,6 +682,11 @@ mod tests {
             Ok(Connect::Socket("~/.orbstack/run/docker.sock".into()))
         );
         assert_eq!(parse("localhost:5432"), net(NetworkTarget::LocalPort { port: 5432 }));
+        assert_eq!(parse("localhost:*"), net(NetworkTarget::LocalAnyPort));
+        assert_eq!(
+            String::from(Connect::Network(NetworkTarget::LocalAnyPort)),
+            "localhost:*"
+        );
         assert_eq!(parse("*:22"), net(NetworkTarget::AnyHostPort { port: 22 }));
         assert_eq!(parse("*"), net(NetworkTarget::Anywhere));
         assert_eq!(
@@ -557,20 +731,96 @@ mod tests {
         );
     }
 
-    /// A preset is its name; the `mise` preset's former `install` option is refused like any unknown value.
+    /// A preset is its name, or a table with its name and its own options; anything else is refused, the `mise`
+    /// preset's former `install` option included. Written back as its name when no option is set.
     #[test]
-    fn presets_are_names() {
+    fn presets_are_names_or_tables_with_options() {
         for preset in Preset::ALL {
             let parsed = table(&format!("presets = [\"{}\"]", preset.name()));
             assert_eq!(parsed.presets, [preset]);
+            assert_eq!(toml::Value::from(preset), toml::Value::String(preset.name().into()));
+            let named = table(&format!("presets = [{{ name = \"{}\" }}]", preset.name()));
+            assert_eq!(named.presets, [preset], "a table with only the name");
         }
+        let claude = |login| Preset::PiClaudeCode(ClaudeCodeOptions { login });
+        for (text, login) in [("token", ClaudeLogin::Token), ("keychain", ClaudeLogin::Keychain)] {
+            let parsed = table(&format!(
+                "presets = [{{ name = \"pi-claude-code\", login = \"{text}\" }}]"
+            ));
+            assert_eq!(parsed.presets, [claude(Some(login))]);
+            let back = toml::Value::from(claude(Some(login)));
+            assert_eq!(back.get("login").and_then(toml::Value::as_str), Some(text));
+            assert_eq!(back.get("name").and_then(toml::Value::as_str), Some("pi-claude-code"));
+        }
+        assert_eq!(claude(None), Preset::PiClaudeCode(ClaudeCodeOptions::default()));
+        assert_eq!(
+            ClaudeCodeOptions::default().login(),
+            ClaudeLogin::Token,
+            "the default login"
+        );
         for bad in [
             "presets = [\"python\"]",
+            "presets = [\"claude\"]",
             "presets = [{ name = \"mise\", install = \"ask\" }]",
-            "presets = [{ name = \"mise\" }]",
+            "presets = [{ name = \"rust\", login = \"token\" }]",
+            "presets = [{ name = \"pi-claude-code\", login = \"oauth\" }]",
+            "presets = [{ name = \"pi-claude-code\", login = true }]",
+            "presets = [{ name = \"pi-claude-code\", config = \"~/x\" }]",
+            "presets = [{ login = \"token\" }]",
             "presets = [1]",
         ] {
             assert!(toml::from_str::<SandboxTable>(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// One preset entry per name: a nearer level's options win one by one, and the preset's file is the one that
+    /// decided it (the nearest that sets an option, else the first that lists it).
+    #[test]
+    fn preset_options_merge_per_option_and_name_their_file() {
+        let claude = |login| Preset::PiClaudeCode(ClaudeCodeOptions { login });
+        let mut merged = table("presets = [{ name = \"pi-claude-code\", login = \"keychain\" }]");
+        merged.merge(table("presets = [\"pi-claude-code\", \"rust\"]"));
+        assert_eq!(
+            merged.presets,
+            [claude(Some(ClaudeLogin::Keychain)), Preset::Rust],
+            "a nearer entry without the option keeps it"
+        );
+        merged.merge(table("presets = [{ name = \"pi-claude-code\", login = \"token\" }]"));
+        assert_eq!(merged.presets, [claude(Some(ClaudeLogin::Token)), Preset::Rust]);
+
+        let (global, local) = (Path::new("/g/config.toml"), Path::new("/r/.piton/config.local.toml"));
+        let mut s = SandboxSettings::default();
+        s.add(table("presets = [\"pi-claude-code\"]"), global);
+        s.add(table("presets = [\"pi-claude-code\"]"), local);
+        assert_eq!(s.presets.len(), 1);
+        assert_eq!(s.presets[0].file, global, "no option: the first file");
+        s.add(
+            table("presets = [{ name = \"pi-claude-code\", login = \"keychain\" }]"),
+            local,
+        );
+        assert_eq!(
+            s.presets,
+            [Listed {
+                value: claude(Some(ClaudeLogin::Keychain)),
+                file: local.into()
+            }],
+            "the file that set the login"
+        );
+    }
+
+    /// The `pi-claude-code` preset loosens the sandbox whatever its options: the user's own files only.
+    #[test]
+    fn the_claude_code_preset_is_the_users_own() {
+        for text in [
+            "presets = [\"pi-claude-code\"]",
+            "presets = [{ name = \"pi-claude-code\", login = \"token\" }]",
+            "presets = [{ name = \"pi-claude-code\", login = \"keychain\" }]",
+        ] {
+            assert_eq!(
+                table(text).ruled_keys(),
+                [("sandbox.presets pi-claude-code", Rule::USERS_OWN)],
+                "{text}"
+            );
         }
     }
 

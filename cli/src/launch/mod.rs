@@ -131,6 +131,93 @@ pub struct Sandboxed {
     pub proxy: Option<fnox::Proxy>,
     /// What commands the user approves run with: `all` and each `[[sandbox.commands]]` entry's policy.
     pub commands: sandbox::grant::CommandPolicies,
+    /// What the session starts with a warning about.
+    pub warnings: Vec<LaunchWarning>,
+}
+
+/// Something a sandboxed session starts despite, and tells the user about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchWarning {
+    /// The `pi-claude-code` preset couldn't open the config folder `PI_CLAUDE_CODE_CONFIG_DIR` names.
+    ClaudeCodeFolder(sandbox::ClaudeCodeFolder),
+    /// The `pi-claude-code` preset signs in with a token, and pi's environment has none.
+    ClaudeCodeNoToken,
+}
+
+/// The variable `claude setup-token`'s token goes in.
+pub const CLAUDE_CODE_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+impl std::fmt::Display for LaunchWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use sandbox::ClaudeCodeFolder;
+        let blocked = "so Claude Code's own files stay closed: pi's claude-code models may fail, and what `claude` \
+                       writes there is asked about like any blocked process";
+        let fix = "set PI_CLAUDE_CODE_CONFIG_DIR to a folder of its own (e.g. ~/.config/pi/claude) in your shell or \
+                   global mise configuration";
+        match self {
+            LaunchWarning::ClaudeCodeFolder(folder) => match folder {
+                ClaudeCodeFolder::Unset => write!(
+                    f,
+                    "The pi-claude-code preset is on, but PI_CLAUDE_CODE_CONFIG_DIR isn't set, {blocked}; {fix}."
+                ),
+                ClaudeCodeFolder::Interactive { path } => write!(
+                    f,
+                    "The pi-claude-code preset doesn't open {}: it's the interactive Claude Code's folder, whose hooks, \
+                     plugins, and MCP servers run on the host, {blocked}; {fix}.",
+                    path.display()
+                ),
+                ClaudeCodeFolder::Closed { path, reason } => write!(
+                    f,
+                    "The pi-claude-code preset doesn't open {}: {reason}, {blocked}; {fix}.",
+                    path.display()
+                ),
+                ClaudeCodeFolder::AgentWritable { path, set_by, checkout } => write!(
+                    f,
+                    "The pi-claude-code preset doesn't open {}: it was set by {set_by}, which a sandboxed session can \
+                     write, and it leads out of the checkout {}, {blocked}; {fix}.",
+                    path.display(),
+                    checkout.display()
+                ),
+                ClaudeCodeFolder::Granted(path) => write!(f, "The pi-claude-code preset opens {}.", path.display()),
+            },
+            LaunchWarning::ClaudeCodeNoToken => write!(
+                f,
+                "The pi-claude-code preset signs claude in with a token, but {CLAUDE_CODE_TOKEN} isn't in pi's \
+                 environment or among fnox's proxy rules: pi's claude-code models won't sign in. Put the token from \
+                 `claude setup-token` behind fnox (or in your environment), or set `login = \"keychain\"`."
+            ),
+        }
+    }
+}
+
+/// The warnings for a sandboxed launch: the `pi-claude-code` preset's folder when it isn't opened, and its token
+/// login with no token in pi's `env` or among the `proxy`'s variables.
+fn launch_warnings(resolution: &sandbox::Resolution, env: &Env, proxy: Option<&fnox::Proxy>) -> Vec<LaunchWarning> {
+    use sandbox::ClaudeCodeFolder;
+
+    use crate::config::ClaudeLogin;
+    let Some(claude_code) = &resolution.claude_code else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    match &claude_code.folder {
+        ClaudeCodeFolder::Granted(_) => {}
+        folder @ (ClaudeCodeFolder::Unset
+        | ClaudeCodeFolder::Interactive { .. }
+        | ClaudeCodeFolder::Closed { .. }
+        | ClaudeCodeFolder::AgentWritable { .. }) => warnings.push(LaunchWarning::ClaudeCodeFolder(folder.clone())),
+    }
+    match claude_code.login {
+        ClaudeLogin::Token => {
+            let in_env = env.get(CLAUDE_CODE_TOKEN).is_some_and(|v| !v.trim().is_empty());
+            let from_proxy = proxy.is_some_and(|p| p.variables.iter().any(|v| v == CLAUDE_CODE_TOKEN));
+            if !in_env && !from_proxy {
+                warnings.push(LaunchWarning::ClaudeCodeNoToken);
+            }
+        }
+        ClaudeLogin::Keychain => {}
+    }
+    warnings
 }
 
 /// Builds a launch in `workspace` in `mode`.
@@ -224,11 +311,13 @@ pub async fn prepare_sandbox(
         None => sandbox::grant::Credentials::Liftable,
     };
     let commands = sandbox::grant::command_policies(resolved, &resolution.policy, credentials, widened);
+    let warnings = launch_warnings(&resolution, &env, proxy.as_ref());
     Ok(Sandboxed {
         env,
         resolution,
         proxy,
         commands,
+        warnings,
     })
 }
 
@@ -451,6 +540,82 @@ mod tests {
             check_workspace_links(&repo.join("in/../out")),
             Err(LaunchError::WorkspaceLink { .. })
         ));
+    }
+
+    /// The `pi-claude-code` preset's warnings: its folder when it isn't opened, and its token login with no token in pi's
+    /// environment or among fnox's rules. Nothing without the preset.
+    #[test]
+    fn the_claude_code_preset_warns_instead_of_refusing() {
+        use sandbox::{ClaudeCode, ClaudeCodeFolder};
+
+        use crate::config::ClaudeLogin;
+        let resolution = |claude_code: Option<ClaudeCode>| sandbox::Resolution {
+            policy: sandbox::Policy {
+                rules: Vec::new(),
+                keychain: false,
+                network: Vec::new(),
+                tag: String::new(),
+            },
+            links: Vec::new(),
+            profile: sandbox::ProfileChoice {
+                name: crate::config::Profile::Standard,
+                set_in: None,
+            },
+            claude_code,
+        };
+        let preset = |folder, login| resolution(Some(ClaudeCode { folder, login }));
+        let granted = ClaudeCodeFolder::Granted("/h/.config/pi/claude".into());
+        let token: Env = [(CLAUDE_CODE_TOKEN.to_string(), "sk-ant-oat01-x".to_string())].into();
+        let proxy = |variables: Vec<String>| fnox::Proxy {
+            program: crate::tools::Program {
+                program: "fnox".into(),
+                args: vec![],
+            },
+            files: vec![],
+            env: Env::new(),
+            variables,
+        };
+
+        assert!(launch_warnings(&resolution(None), &Env::new(), None).is_empty());
+        assert!(launch_warnings(&preset(granted.clone(), ClaudeLogin::Token), &token, None).is_empty());
+        let behind_fnox = proxy(vec![CLAUDE_CODE_TOKEN.into()]);
+        assert!(
+            launch_warnings(
+                &preset(granted.clone(), ClaudeLogin::Token),
+                &Env::new(),
+                Some(&behind_fnox)
+            )
+            .is_empty(),
+            "fnox supplies the token"
+        );
+        assert_eq!(
+            launch_warnings(
+                &preset(granted.clone(), ClaudeLogin::Token),
+                &Env::new(),
+                Some(&proxy(vec![]))
+            ),
+            [LaunchWarning::ClaudeCodeNoToken]
+        );
+        assert!(launch_warnings(&preset(granted, ClaudeLogin::Keychain), &Env::new(), None).is_empty());
+        let unset = launch_warnings(
+            &preset(ClaudeCodeFolder::Unset, ClaudeLogin::Keychain),
+            &Env::new(),
+            None,
+        );
+        assert_eq!(unset, [LaunchWarning::ClaudeCodeFolder(ClaudeCodeFolder::Unset)]);
+        assert!(unset[0].to_string().contains("PI_CLAUDE_CODE_CONFIG_DIR isn't set"));
+        let interactive = ClaudeCodeFolder::Interactive {
+            path: "/h/.claude".into(),
+        };
+        let both = launch_warnings(&preset(interactive.clone(), ClaudeLogin::Token), &Env::new(), None);
+        assert_eq!(
+            both,
+            [
+                LaunchWarning::ClaudeCodeFolder(interactive),
+                LaunchWarning::ClaudeCodeNoToken
+            ]
+        );
+        assert!(both[0].to_string().contains("interactive Claude Code"));
     }
 
     #[test]

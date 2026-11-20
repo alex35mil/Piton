@@ -13,11 +13,13 @@ mod rules;
 use std::path::PathBuf;
 
 #[cfg(test)]
+pub use self::resolve::{ClaudeCode, ProfileChoice};
+#[cfg(test)]
 pub use self::rules::{Effect, Rule, Target};
 pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
     policy::{Provenance, Source, WRITE_ROOTS, nono_version},
-    resolve::{Facts, Resolution, resolve},
+    resolve::{ClaudeCodeFolder, Facts, Resolution, resolve},
     rules::{Access, Policy, TAG_PREFIX},
 };
 

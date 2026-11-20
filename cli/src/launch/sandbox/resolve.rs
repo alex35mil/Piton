@@ -28,7 +28,7 @@ use super::{
 };
 use crate::{
     agent::{GitControl, canonical_target, lexical},
-    config::{Connect, LOCAL_DIR, LaunchConfig, Listed, Preset, Profile, expand_home},
+    config::{ClaudeCodeOptions, ClaudeLogin, Connect, LOCAL_DIR, LaunchConfig, Listed, Preset, Profile, expand_home},
     launch::{
         Env,
         env::{Origin, SandboxEnv, ToolSource, Widening},
@@ -66,6 +66,36 @@ pub struct Resolution {
     pub links: Vec<UnfollowedLink>,
     /// The profile in effect, and the file that chose it (`None`: the default).
     pub profile: ProfileChoice,
+    /// The `pi-claude-code` preset, when it's on: what became of its config folder, and how `claude` signs in.
+    pub claude_code: Option<ClaudeCode>,
+}
+
+/// The `pi-claude-code` preset of a launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCode {
+    pub folder: ClaudeCodeFolder,
+    pub login: ClaudeLogin,
+}
+
+/// The config folder `PI_CLAUDE_CODE_CONFIG_DIR` names, as the `pi-claude-code` preset found it. Only `Granted` is
+/// writable; every other case starts the session with a warning, `claude`'s writes there meeting the block question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeCodeFolder {
+    /// Writable, as named.
+    Granted(PathBuf),
+    /// `PI_CLAUDE_CODE_CONFIG_DIR` isn't set: the extension's `claude` uses the interactive Claude Code's folder.
+    Unset,
+    /// It's the interactive Claude Code's folder (`$CLAUDE_CONFIG_DIR`, or `~/.claude`), whose hooks, plugins, and MCP
+    /// servers run on the host.
+    Interactive { path: PathBuf },
+    /// It would open what the sandbox closes.
+    Closed { path: PathBuf, reason: String },
+    /// A file a sandboxed session can write set it, and it leads out of the checkout.
+    AgentWritable {
+        path: PathBuf,
+        set_by: String,
+        checkout: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -100,10 +130,76 @@ impl std::fmt::Display for UnfollowedLink {
 }
 
 /// The launch's policy, or why the launch is refused.
+///
+/// The `pi-claude-code` preset's folder is decided against the policy without it (whether the file that named it is
+/// writable there), then added when it's accepted.
 pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, SandboxError> {
+    let grants = Grants::of(config, facts)?;
+    let unopened = build(config, facts, &grants, None)?;
+    let claude_code = grants.claude_code.as_ref().map(|(options, _)| ClaudeCode {
+        folder: claude_code_folder(config, facts, &unopened),
+        login: options.login(),
+    });
+    let granted = match (claude_code.as_ref().map(|c| &c.folder), grants.claude_code.as_ref()) {
+        (Some(ClaudeCodeFolder::Granted(folder)), Some((_, from))) => Some((folder, from)),
+        (
+            Some(
+                ClaudeCodeFolder::Unset
+                | ClaudeCodeFolder::Interactive { .. }
+                | ClaudeCodeFolder::Closed { .. }
+                | ClaudeCodeFolder::AgentWritable { .. },
+            )
+            | None,
+            _,
+        )
+        | (Some(ClaudeCodeFolder::Granted(_)), None) => None,
+    };
+    let built = match granted {
+        Some(folder) => build(config, facts, &grants, Some(folder))?,
+        None => unopened,
+    };
+    if let Some((value, origin)) = facts.launch_env.widening(Widening::AgentDir)
+        && let Some(refusal) = widening_refusal(&built.agent, origin, &built.policy, config, None)
+    {
+        return Err(SandboxError::Widening {
+            var: Widening::AgentDir.var(),
+            value: value.to_string(),
+            set_by: refusal.set_by,
+            checkout: refusal.checkout,
+        });
+    }
+    let profile = ProfileChoice {
+        name: config.sandbox.profile(),
+        set_in: config.sandbox.profile.as_ref().map(|p| p.file.clone()),
+    };
+    Ok(Resolution {
+        policy: built.policy,
+        links: built.links,
+        profile,
+        claude_code,
+    })
+}
+
+/// One build of a launch's policy, and what the checks after it need.
+struct Built {
+    policy: Policy,
+    links: Vec<UnfollowedLink>,
+    /// The credential denies and the user's, expanded.
+    denied: Vec<PathBuf>,
+    /// pi's agent directories, as named: the host's and the launch's.
+    host_agent: PathBuf,
+    agent: PathBuf,
+}
+
+/// The policy, with the `pi-claude-code` preset's config folder writable when it's given.
+fn build(
+    config: &LaunchConfig,
+    facts: &Facts,
+    grants: &Grants,
+    claude_code: Option<(&PathBuf, &Provenance)>,
+) -> Result<Built, SandboxError> {
     let expand = |grant: &str| expand_grant(grant, facts.home, facts.base_env);
     let mut rules = Rules::default();
-    let grants = Grants::of(config, facts)?;
 
     // 1. Writes.
     rules.push(
@@ -131,18 +227,14 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
             },
         );
     }
-    for (preset, from) in &grants.presets {
-        let (dirs, files) = policy::preset_grants(preset);
+    if let Some((folder, from)) = claude_code {
         let source = Source::Preset {
-            preset: preset.name().into(),
+            preset: CLAUDE_CODE_PRESET.into(),
             from: from.clone(),
         };
-        for dir in dirs {
-            rules.push(Effect::Allow, &[Access::Write], subpath(&expand(dir)?), source.clone());
-        }
-        for file in files {
-            rules.push(Effect::Allow, &[Access::Write], literal(&expand(file)?), source.clone());
-        }
+        rules.push(Effect::Allow, &[Access::Write], subpath(folder), source.clone());
+        // `claude` locks the folder itself with `proper-lockfile`: an empty `<folder>.lock` folder beside it.
+        rules.push(Effect::Allow, &[Access::Write], subpath(&lock_of(folder)), source);
     }
     for (path, source) in &grants.write {
         rules.push(Effect::Allow, &[Access::Write], subpath(path), source.clone());
@@ -263,7 +355,7 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         },
     );
     // The `git` preset (the user's own choice, or yolo's) leaves this rule out.
-    if !grants.presets.iter().any(|(p, _)| *p == Preset::Git) {
+    if !grants.presets.iter().any(|(p, _)| matches!(p, Preset::Git)) {
         rules.push(
             Effect::Deny,
             &[Access::Write],
@@ -319,18 +411,76 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
     let policy = Policy {
         rules,
         keychain,
-        network: grants.network,
+        network: grants.network.clone(),
         tag: String::new(),
     };
-    if let Some((value, origin)) = launch_agent {
-        accept_widening(Widening::AgentDir, value, &agent, origin, &policy, config)?;
-    }
-    let profile = ProfileChoice {
-        name: config.sandbox.profile(),
-        set_in: config.sandbox.profile.as_ref().map(|p| p.file.clone()),
-    };
-    Ok(Resolution { policy, links, profile })
+    Ok(Built {
+        policy,
+        links,
+        denied,
+        host_agent,
+        agent,
+    })
 }
+
+/// The `pi-claude-code` preset's name, as its rules name it.
+const CLAUDE_CODE_PRESET: &str = "pi-claude-code";
+
+/// What becomes of the folder `PI_CLAUDE_CODE_CONFIG_DIR` names: read like pi's agent directory, and never the
+/// interactive Claude Code's folder or one that would open what the sandbox closes. `unopened` is the launch's policy
+/// without it.
+fn claude_code_folder(config: &LaunchConfig, facts: &Facts, unopened: &Built) -> ClaudeCodeFolder {
+    let Some((value, origin)) = facts.launch_env.widening(Widening::ClaudeCodeConfigDir) else {
+        return ClaudeCodeFolder::Unset;
+    };
+    let path = env_dir(value, facts.home, facts.workspace);
+    let real = canonical_target(&path);
+    let overlaps = |other: &Path| real.starts_with(other) || other.starts_with(&real);
+    let interactive = [
+        facts.base_env.get(CLAUDE_CONFIG_DIR).map(String::as_str),
+        facts.launch_env.value(CLAUDE_CONFIG_DIR),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|v| !v.is_empty())
+    .map(|v| env_dir(v, facts.home, facts.workspace))
+    .chain([facts.home.join(".claude")]);
+    let agent_dirs = [&unopened.host_agent, &unopened.agent];
+    let reason = match closed_reason(&real, config, facts, &unopened.denied) {
+        Some(reason) => Some(reason),
+        None => agent_dirs
+            .iter()
+            .map(|d| canonical_target(d))
+            .find(|d| overlaps(d))
+            .map(|agent| format!("it overlaps pi's agent directory {}", agent.display())),
+    };
+    if let Some(reason) = reason {
+        return ClaudeCodeFolder::Closed { path, reason };
+    }
+    for folder in interactive {
+        if overlaps(&canonical_target(&folder)) {
+            return ClaudeCodeFolder::Interactive { path };
+        }
+    }
+    match widening_refusal(&path, origin, &unopened.policy, config, Some(&path)) {
+        Some(refusal) => ClaudeCodeFolder::AgentWritable {
+            path,
+            set_by: refusal.set_by,
+            checkout: refusal.checkout,
+        },
+        None => ClaudeCodeFolder::Granted(path),
+    }
+}
+
+/// The `proper-lockfile` lock of a folder: `<folder>.lock` beside it.
+fn lock_of(folder: &Path) -> PathBuf {
+    let mut lock = folder.as_os_str().to_os_string();
+    lock.push(".lock");
+    PathBuf::from(lock)
+}
+
+/// The interactive Claude Code's config folder, when it isn't `~/.claude`.
+const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 
 /// The `[sandbox]` lists in effect: the profile's entries, then the user's, expanded to absolute paths, each with the
 /// rule source that names where it came from.
@@ -342,6 +492,9 @@ struct Grants {
     network: Vec<NetworkGrant>,
     presets: Vec<(Preset, Provenance)>,
     deny: Vec<(PathBuf, Source)>,
+    /// The `pi-claude-code` preset, when it's on: its options and where they came from. Its config folder is decided
+    /// from the launch's environment ([`claude_code_folder`]).
+    claude_code: Option<(ClaudeCodeOptions, Provenance)>,
 }
 
 impl Grants {
@@ -370,7 +523,40 @@ impl Grants {
                 .collect()
         };
 
+        // A preset both list keeps the profile as its source.
+        let mut presets: Vec<(Preset, Provenance)> =
+            entries.presets.into_iter().map(|p| (p, from_profile.clone())).collect();
+        for listed in &settings.presets {
+            if !presets.iter().any(|(p, _)| p.name() == listed.value.name()) {
+                presets.push((listed.value, from_file(&listed.file)));
+            }
+        }
+
+        // Each preset's entries come first in their lists, named after the preset.
+        let mut write = Vec::new();
+        let mut write_file = Vec::new();
         let mut read = Vec::new();
+        let mut preset_connects = Vec::new();
+        for (preset, from) in &presets {
+            let granted = policy::preset_grants(preset);
+            let source = Source::Preset {
+                preset: preset.name().into(),
+                from: from.clone(),
+            };
+            for path in granted.write {
+                write.push((expand(path)?, source.clone()));
+            }
+            for path in granted.write_file {
+                write_file.push((expand(path)?, source.clone()));
+            }
+            for path in granted.read {
+                read.push((expand(path)?, source.clone()));
+            }
+            preset_connects.extend(granted.connect.into_iter().map(|c| (c, source.clone())));
+        }
+        write.extend(user("write", &settings.write)?);
+        write_file.extend(user("write_file", &settings.write_file)?);
+
         for grant in entries.read {
             if let Some(path) = from_profile_entry(grant)? {
                 read.push((path, source("read", from_profile.clone())));
@@ -383,79 +569,84 @@ impl Grants {
         let connects = entries
             .connect
             .iter()
-            .map(|c| (c, from_profile.clone()))
-            .chain(settings.connect.iter().map(|l| (&l.value, from_file(&l.file))));
-        for (connect, from) in connects {
-            let is_profile = matches!(from, Provenance::Profile { .. });
-            let source = source("connect", from);
+            .map(|c| (c.clone(), from_profile.clone()))
+            .chain(settings.connect.iter().map(|l| (l.value.clone(), from_file(&l.file))))
+            .map(|(c, from)| {
+                let is_profile = matches!(from, Provenance::Profile { .. });
+                (c, is_profile, source("connect", from))
+            })
+            .chain(preset_connects.into_iter().map(|(c, source)| (c, true, source)));
+        for (connect, optional, source) in connects {
             match connect {
                 Connect::Socket(grant) => {
-                    let path = match is_profile {
-                        true => from_profile_entry(grant)?,
-                        false => Some(expand(grant)?),
+                    let path = match optional {
+                        true => from_profile_entry(&grant)?,
+                        false => Some(expand(&grant)?),
                     };
                     if let Some(path) = path {
                         sockets.push((path, source));
                     }
                 }
-                Connect::Network(target) => network.push(NetworkGrant {
-                    target: target.clone(),
-                    source,
-                }),
+                Connect::Network(target) => network.push(NetworkGrant { target, source }),
             }
         }
 
-        // A preset both list keeps the profile as its source.
-        let mut presets: Vec<(Preset, Provenance)> =
-            entries.presets.into_iter().map(|p| (p, from_profile.clone())).collect();
-        for listed in &settings.presets {
-            if !presets.iter().any(|(p, _)| *p == listed.value) {
-                presets.push((listed.value, from_file(&listed.file)));
-            }
-        }
+        let claude_code = presets.iter().find_map(|(preset, from)| match preset {
+            Preset::PiClaudeCode(options) => Some((*options, from.clone())),
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git => None,
+        });
 
         Ok(Self {
-            write: user("write", &settings.write)?,
-            write_file: user("write_file", &settings.write_file)?,
+            write,
+            write_file,
             read,
             sockets,
             network,
             presets,
             deny: user("deny", &settings.deny)?,
+            claude_code,
         })
     }
 }
 
+/// Why a widening value isn't accepted: who set it, and the checkout it leads out of.
+struct WideningRefusal {
+    /// The file that set it, or what the tool said when it named none.
+    set_by: String,
+    checkout: PathBuf,
+}
+
 /// A value that widens the sandbox is accepted from the daemon's environment, or from a file the agent can't write.
 /// One the agent could have written (or a tool that names no file) is accepted only while it leads into the
-/// checkout. `path` is the value as the policy uses it.
-fn accept_widening(
-    widening: Widening,
-    value: &str,
+/// checkout. `path` is the value as the policy uses it; a file inside `opens` (the folder the value would open) counts
+/// as writable.
+fn widening_refusal(
     path: &Path,
     origin: &Origin,
     policy: &Policy,
     config: &LaunchConfig,
-) -> Result<(), SandboxError> {
+    opens: Option<&Path>,
+) -> Option<WideningRefusal> {
     let set_by = match origin {
-        Origin::Daemon => return Ok(()),
+        Origin::Daemon => return None,
         Origin::Tool { tool, source } => match source {
-            ToolSource::File(file) => match agent_writable(file, policy, config) {
-                true => file.display().to_string(),
-                false => return Ok(()),
-            },
+            ToolSource::File(file) => {
+                let inside = opens.is_some_and(|folder| {
+                    let real = canonical_target(folder);
+                    lexical(file).starts_with(folder) || canonical_target(file).starts_with(&real)
+                });
+                match inside || agent_writable(file, policy, config) {
+                    true => file.display().to_string(),
+                    false => return None,
+                }
+            }
             ToolSource::Unknown => format!("{tool}, which named no file"),
         },
     };
     let checkout = canonical_target(&config.checkout);
     match canonical_target(path).starts_with(&checkout) {
-        true => Ok(()),
-        false => Err(SandboxError::Widening {
-            var: widening.var(),
-            value: value.to_string(),
-            set_by,
-            checkout,
-        }),
+        true => None,
+        false => Some(WideningRefusal { set_by, checkout }),
     }
 }
 
@@ -705,10 +896,16 @@ fn literal(path: &Path) -> Target {
 /// folder), else `~/.pi/agent`. As named, with no symlink followed: its rules get their real paths like every other
 /// rule.
 fn agent_dir(value: Option<&str>, home: &Path, workspace: &Path) -> PathBuf {
-    let dir = value
-        .map(|v| workspace.join(expand_home(v, home)))
-        .unwrap_or_else(|| home.join(".pi/agent"));
-    lexical(&dir)
+    match value {
+        Some(value) => env_dir(value, home, workspace),
+        None => lexical(&home.join(".pi/agent")),
+    }
+}
+
+/// A folder an environment variable names (with `~`; a relative one from the workspace, pi's working folder), as
+/// named.
+fn env_dir(value: &str, home: &Path, workspace: &Path) -> PathBuf {
+    lexical(&workspace.join(expand_home(value, home)))
 }
 
 /// The launch's agent directory comes from the workspace's environment, so it can't be where it would open what the
@@ -720,42 +917,49 @@ fn check_agent_dir(
     facts: &Facts,
     denied: &[PathBuf],
 ) -> Result<(), SandboxError> {
-    let refuse = |reason: String| {
-        Err(SandboxError::AgentDir {
-            path: agent.to_path_buf(),
-            reason,
-        })
-    };
-    let overlaps = |other: &Path| agent.starts_with(other) || other.starts_with(agent);
-    let home = canonical_target(facts.home);
-    if home.starts_with(agent) {
-        return refuse("it's the home folder or contains it".into());
-    }
-    if agent != host_agent && agent.starts_with(host_agent) {
-        return refuse(format!(
+    let reason = match agent != host_agent && agent.starts_with(host_agent) {
+        true => Some(format!(
             "it's inside the host's agent directory {}",
             host_agent.display()
-        ));
+        )),
+        false => closed_reason(agent, config, facts, denied),
+    };
+    match reason {
+        Some(reason) => Err(SandboxError::AgentDir {
+            path: agent.to_path_buf(),
+            reason,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Why a writable folder the launch's environment names (`dir`, canonical) would open what the sandbox otherwise
+/// closes, or `None` when it wouldn't.
+fn closed_reason(dir: &Path, config: &LaunchConfig, facts: &Facts, denied: &[PathBuf]) -> Option<String> {
+    let overlaps = |other: &Path| dir.starts_with(other) || other.starts_with(dir);
+    let home = canonical_target(facts.home);
+    if home.starts_with(dir) {
+        return Some("it's the home folder or contains it".into());
     }
     // A project's `.pi/` (settings, extensions) anywhere in the checkout: pi loads it in that folder.
     let pi = std::ffi::OsStr::new(".pi");
-    if let Ok(inside) = agent.strip_prefix(canonical_target(&config.checkout))
+    if let Ok(inside) = dir.strip_prefix(canonical_target(&config.checkout))
         && inside
             .components()
             .any(|c| matches!(c, Component::Normal(name) if name.eq_ignore_ascii_case(pi)))
     {
-        return refuse("it's inside a .pi folder of the checkout, whose files pi loads".into());
+        return Some("it's inside a .pi folder of the checkout, whose files pi loads".into());
     }
     if let Some(level) = config.levels.iter().map(|l| canonical_target(l)).find(|l| overlaps(l)) {
-        return refuse(format!("it overlaps the configuration level {}", level.display()));
+        return Some(format!("it overlaps the configuration level {}", level.display()));
     }
     if overlaps(&canonical_target(facts.state_dir)) {
-        return refuse("it overlaps the daemon's state folder".into());
+        return Some("it overlaps the daemon's state folder".into());
     }
     if let Some(deny) = denied.iter().map(|d| canonical_target(d)).find(|d| overlaps(d)) {
-        return refuse(format!("it overlaps the denied path {}", deny.display()));
+        return Some(format!("it overlaps the denied path {}", deny.display()));
     }
-    Ok(())
+    None
 }
 
 /// A grant as a literal absolute path: `~` and `$HOME` from the user database, other `$VAR`s (a whole leading
@@ -1548,7 +1752,7 @@ mod tests {
     #[test]
     fn fnox_checks_against_resolved_policies() {
         use crate::{
-            launch::fnox::{FnoxError, Proxy},
+            launch::fnox::{FnoxError, KeychainOpener, Proxy},
             tools::Program,
         };
         let proxy = |files: Vec<PathBuf>| Proxy {
@@ -1558,6 +1762,7 @@ mod tests {
             },
             files,
             env: Env::new(),
+            variables: vec![],
         };
         let f = fixture("", "");
         let global = f.home.join(".config/fnox/config.toml");
@@ -1578,13 +1783,211 @@ mod tests {
         let exposed = fixture("[sandbox]\nread = [\"~/Library/Keychains\"]\n", "");
         assert!(matches!(
             proxy(vec![]).check_sandbox(&policy(&exposed), &exposed.home),
-            Err(FnoxError::Keychain)
+            Err(FnoxError::Keychain {
+                opened_by: KeychainOpener::Read {
+                    from: Some(Provenance::File { .. })
+                }
+            })
         ));
         // Exposing the whole Library opens the keychains too.
         let library = fixture("[sandbox]\nread = [\"~/Library\"]\n", "");
         assert!(matches!(
             proxy(vec![]).check_sandbox(&policy(&library), &library.home),
-            Err(FnoxError::Keychain)
+            Err(FnoxError::Keychain { .. })
         ));
+        // So does the pi-claude-code preset's keychain login, named with the file that set it; the token login
+        // doesn't.
+        let token = fixture("[sandbox]\npresets = [\"pi-claude-code\"]\n", "");
+        assert!(proxy(vec![]).check_sandbox(&policy(&token), &token.home).is_ok());
+        let keychain = fixture(
+            "[sandbox]\npresets = [{ name = \"pi-claude-code\", login = \"keychain\" }]\n",
+            "",
+        );
+        let global_file = keychain.home.join(".config/piton/config.toml");
+        assert!(matches!(
+            proxy(vec![]).check_sandbox(&policy(&keychain), &keychain.home),
+            Err(FnoxError::Keychain {
+                opened_by: KeychainOpener::Preset { preset, from: Provenance::File { path } }
+            }) if preset == "pi-claude-code" && path == global_file
+        ));
+    }
+
+    const CLAUDE_PRESET: &str = "[sandbox]\npresets = [\"pi-claude-code\"]\n";
+
+    fn claude_from(value: &str, origin: Origin) -> SandboxEnv {
+        SandboxEnv::for_tests(&[(Widening::ClaudeCodeConfigDir.var(), value, origin)])
+    }
+
+    fn claude_folder(r: &Resolution) -> &ClaudeCodeFolder {
+        &r.claude_code.as_ref().expect("the preset is on").folder
+    }
+
+    /// The `pi-claude-code` preset opens the folder `PI_CLAUDE_CODE_CONFIG_DIR` names and its lock beside it, the log
+    /// cache, and the extension's relay on any local port; never the keychain with the token login.
+    #[test]
+    fn the_claude_code_preset_opens_its_own_folder() {
+        let f = fixture(CLAUDE_PRESET, "");
+        let folder = f.home.join(".config/pi/claude");
+        let env = claude_from("~/.config/pi/claude", Origin::Daemon);
+        let r = resolve_env(&f, &f.repo, &Env::new(), &env).unwrap();
+        assert_eq!(claude_folder(&r), &ClaudeCodeFolder::Granted(folder.clone()));
+        assert_eq!(r.claude_code.as_ref().unwrap().login, ClaudeLogin::Token);
+        let p = &r.policy;
+        for path in [
+            folder.join(".claude.json"),
+            folder.join("sessions/x"),
+            f.home.join(".config/pi/claude.lock"),
+            f.home.join(".config/pi/claude.lock/x"),
+            f.home.join("Library/Caches/claude-cli-nodejs/-w/mcp-logs-x/log.jsonl"),
+        ] {
+            assert!(allowed(p, &path, Access::Write), "{}", path.display());
+        }
+        assert!(!allowed(p, &f.home.join(".config/pi/other"), Access::Write));
+        assert!(!allowed(p, &f.home.join(".claude/settings.json"), Access::Write));
+        let keychain = f.home.join("Library/Keychains/login.keychain-db");
+        assert!(!allowed(p, &keychain, Access::Read));
+        assert!(!p.keychain);
+        assert!(
+            p.network
+                .iter()
+                .any(|g| g.target == crate::config::NetworkTarget::LocalAnyPort
+                    && matches!(&g.source, Source::Preset { preset, .. } if preset == "pi-claude-code"))
+        );
+        assert!(matches!(
+            p.decide(&folder.join("x"), Access::Write).source,
+            Source::Preset { preset, .. } if preset == "pi-claude-code"
+        ));
+
+        // Without the preset: nothing of it.
+        let none = fixture("", "");
+        let r = resolve_env(&none, &none.repo, &Env::new(), &env).unwrap();
+        assert!(r.claude_code.is_none());
+        assert!(!allowed(
+            &r.policy,
+            &none.home.join(".config/pi/claude/x"),
+            Access::Write
+        ));
+    }
+
+    /// `login = "keychain"` reads the keychain (which reopens its services); its files stay unwritable.
+    #[test]
+    fn the_keychain_login_reads_the_keychain() {
+        let f = fixture(
+            "[sandbox]\npresets = [{ name = \"pi-claude-code\", login = \"keychain\" }]\n",
+            "",
+        );
+        let r = resolve_env(&f, &f.repo, &Env::new(), &SandboxEnv::daemon(&Env::new())).unwrap();
+        assert_eq!(r.claude_code.as_ref().unwrap().login, ClaudeLogin::Keychain);
+        let keychain = f.home.join("Library/Keychains/login.keychain-db");
+        assert!(allowed(&r.policy, &keychain, Access::Read));
+        assert!(!allowed(&r.policy, &keychain, Access::Write));
+        assert!(r.policy.keychain);
+    }
+
+    /// Every folder the preset won't open, and why: the session starts anyway, `claude`'s writes there blocked.
+    #[test]
+    fn the_claude_code_folder_is_never_what_the_sandbox_closes() {
+        let f = fixture(CLAUDE_PRESET, "");
+        let resolve_with = |base: &Env, env: &SandboxEnv| resolve_env(&f, &f.repo, base, env).unwrap();
+        let folder_of = |base: &Env, env: &SandboxEnv| claude_folder(&resolve_with(base, env)).clone();
+        let none = Env::new();
+
+        assert_eq!(folder_of(&none, &SandboxEnv::daemon(&none)), ClaudeCodeFolder::Unset);
+        // The interactive Claude Code's folder: `~/.claude`, or `CLAUDE_CONFIG_DIR` from the daemon or pi's env.
+        assert!(matches!(
+            folder_of(&none, &claude_from("~/.claude", Origin::Daemon)),
+            ClaudeCodeFolder::Interactive { .. }
+        ));
+        let interactive = env(&[("CLAUDE_CONFIG_DIR", "~/.config/claude")]);
+        let same = SandboxEnv::for_tests(&[
+            (Widening::ClaudeCodeConfigDir.var(), "~/.config/claude", Origin::Daemon),
+            ("CLAUDE_CONFIG_DIR", "~/.config/claude", Origin::Daemon),
+        ]);
+        assert!(matches!(
+            folder_of(&interactive, &same),
+            ClaudeCodeFolder::Interactive { .. }
+        ));
+        assert!(matches!(folder_of(&none, &same), ClaudeCodeFolder::Interactive { .. }));
+        assert!(matches!(
+            folder_of(&interactive, &claude_from("~/.config/claude/inner", Origin::Daemon)),
+            ClaudeCodeFolder::Interactive { .. }
+        ));
+        // What the sandbox closes: home, a configuration level, the daemon's state, a credential, pi's agent dir.
+        for (value, why) in [
+            ("~", "home folder"),
+            ("~/.config/piton", "configuration level"),
+            ("~/.local/state/piton", "state folder"),
+            ("~/.ssh/claude", "denied path"),
+            ("~/.pi/agent/claude", "agent directory"),
+        ] {
+            let r = resolve_with(&none, &claude_from(value, Origin::Daemon));
+            match claude_folder(&r) {
+                ClaudeCodeFolder::Closed { reason, .. } => assert!(reason.contains(why), "{value}: {reason}"),
+                other @ (ClaudeCodeFolder::Granted(_)
+                | ClaudeCodeFolder::Unset
+                | ClaudeCodeFolder::Interactive { .. }
+                | ClaudeCodeFolder::AgentWritable { .. }) => panic!("{value}: {other:?}"),
+            }
+            assert!(!allowed(
+                &r.policy,
+                &env_dir(value, &f.home, &f.repo).join("x"),
+                Access::Write
+            ));
+        }
+    }
+
+    /// Like pi's agent directory, the folder follows the file that set it: one a sandboxed session can write (the
+    /// workspace's `mise.toml`, a file inside the folder itself) may name it only inside the checkout.
+    #[test]
+    fn the_claude_code_folder_follows_the_file_that_set_it() {
+        let f = fixture(CLAUDE_PRESET, "");
+        let folder_of = |env: &SandboxEnv| claude_folder(&resolve_env(&f, &f.repo, &Env::new(), env).unwrap()).clone();
+        let own = from_file(&f.repo.join("mise.toml"));
+        assert!(matches!(
+            folder_of(&claude_from("~/.config/pi/claude", own.clone())),
+            ClaudeCodeFolder::AgentWritable { .. }
+        ));
+        assert_eq!(
+            folder_of(&claude_from(".claude-pi", own)),
+            ClaudeCodeFolder::Granted(f.repo.join(".claude-pi"))
+        );
+        // A file above the checkout no session can write.
+        let above = from_file(&f.home.join("p/mise.toml"));
+        assert_eq!(
+            folder_of(&claude_from("~/.config/pi/claude", above)),
+            ClaudeCodeFolder::Granted(f.home.join(".config/pi/claude"))
+        );
+        // A file inside the folder it names would be writable once the folder opens.
+        let inside = from_file(&f.home.join(".config/pi/claude/mise.toml"));
+        assert!(matches!(
+            folder_of(&claude_from("~/.config/pi/claude", inside)),
+            ClaudeCodeFolder::AgentWritable { .. }
+        ));
+        let unknown = Origin::Tool {
+            tool: crate::launch::env::EnvTool::Mise,
+            source: ToolSource::Unknown,
+        };
+        assert!(matches!(
+            folder_of(&claude_from("~/.config/pi/claude", unknown)),
+            ClaudeCodeFolder::AgentWritable { .. }
+        ));
+    }
+
+    /// A folder that's a symlink is granted as named, not followed: the agent could have swapped it.
+    #[test]
+    fn a_linked_claude_code_folder_isnt_followed() {
+        let f = fixture(CLAUDE_PRESET, "");
+        let elsewhere = f.home.join("elsewhere");
+        mkdir(&elsewhere);
+        link(&elsewhere, &f.home.join(".config/pi/claude"));
+        let r = resolve_env(
+            &f,
+            &f.repo,
+            &Env::new(),
+            &claude_from("~/.config/pi/claude", Origin::Daemon),
+        )
+        .unwrap();
+        assert!(!allowed(&r.policy, &elsewhere.join("x"), Access::Write));
+        assert_eq!(reported(&r), [f.home.join(".config/pi/claude")]);
     }
 }
