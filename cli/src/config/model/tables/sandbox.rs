@@ -1,54 +1,171 @@
-//! `[sandbox]`: what a sandboxed pi may do beyond Piton's built-in policy (`launch/sandbox/`). Lists only add across
-//! levels.
+//! `[sandbox]`: what a sandboxed pi may do beyond Piton's base policy (`launch/sandbox/`). A profile adds a fixed set of
+//! entries; the user's lists add on top, and lists only add across levels.
 //!
-//! A knob that loosens a protection (`expose`, the `git` preset, the `mise` preset's `install = "allow"`) is accepted
-//! in the global `config.toml` or a `config.local.toml`, never a project's committed `config.toml`: a repository can't
-//! open the sandbox for whoever clones it. Knobs are on or off; asking when the sandbox blocks something is #241's.
-//!
-//! Keys of the nono-CLI backend and the network keys are refused with a message that says what replaces them.
+//! A key that loosens a protection (`profile`, `read`, `connect`, the `git` preset, the `mise` preset's
+//! `install = "allow"`) is accepted in the global `config.toml` or a `config.local.toml`, never a project's committed
+//! `config.toml`: a repository can't open the sandbox for whoever clones it.
+
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::{Merge, Rule, TableValue, is_grant_path, present, union};
 
+/// One file's `[sandbox]`, as written.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxTable {
-    /// Writable folders, beyond the workspace and the built-in write roots.
+    /// Which built-in set of entries the sandbox starts from. Unset: the nearer level's, else [`Profile::Standard`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<Profile>,
+    /// Writable folders: each folder and everything below it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<String>,
-    /// Writable files.
+    pub write: Vec<String>,
+    /// Writable files: exactly each path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow_file: Vec<String>,
+    pub write_file: Vec<String>,
+    /// Paths whose built-in credential deny is lifted: readable (and connectable) then; writable only through `write`
+    /// or `write_file`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read: Vec<String>,
+    /// Sockets, ports, and hosts the sandbox may connect to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect: Vec<Connect>,
+    /// Named bundles: toolchain caches, and `git`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub presets: Vec<Preset>,
     /// Paths denied like the built-in credential list: no read, write, or connect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    /// Named permissions beyond the default: toolchain caches, and `git`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub presets: Vec<Preset>,
-    /// Paths whose built-in deny is lifted. Readable then; writable only through `allow` or `allow_file`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expose: Vec<String>,
-
-    // Removed keys, read only to say what replaces them (see `check`).
-    #[serde(default, skip_serializing)]
-    base: Option<toml::Value>,
-    #[serde(default, skip_serializing)]
-    groups: Option<toml::Value>,
-    #[serde(default, skip_serializing)]
-    bypass: Option<toml::Value>,
-    #[serde(default, skip_serializing)]
-    read: Option<toml::Value>,
-    #[serde(default, skip_serializing)]
-    read_file: Option<toml::Value>,
-    #[serde(default, skip_serializing)]
-    unix_socket: Option<toml::Value>,
-    #[serde(default, skip_serializing)]
-    network: Option<toml::Value>,
 }
 
-/// A named permission beyond the default. Written as its name, or as a table with the name and the preset's own
-/// options: `{ name = "mise", install = "allow" }`.
+/// A built-in set of entries the sandbox starts from. Profiles only add: `strict` adds nothing to the base, and a
+/// profile's entry is removed only by choosing another profile. The entries are in `launch/sandbox/policy.rs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    /// The base alone.
+    Strict,
+    /// What most users need to try Piton without configuring anything.
+    #[default]
+    Standard,
+    /// Standard and more.
+    Yolo,
+}
+
+impl Profile {
+    #[cfg(test)]
+    pub const ALL: [Profile; 3] = [Profile::Strict, Profile::Standard, Profile::Yolo];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Profile::Strict => "strict",
+            Profile::Standard => "standard",
+            Profile::Yolo => "yolo",
+        }
+    }
+}
+
+/// A `connect` entry: what the sandbox may connect to, by intent. Piton enforces each the way it can: sockets and ports
+/// in the sandbox, named hosts through its proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum Connect {
+    /// Unix sockets at and below a path, as written (`/`, `~/…`, or `$VAR/…`); `/` is every socket.
+    Socket(String),
+    /// A network destination.
+    Network(NetworkTarget),
+}
+
+/// A network destination a `connect` entry names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NetworkTarget {
+    /// `localhost:PORT`: a port on this Mac.
+    LocalPort { port: u16 },
+    /// `*:PORT`: a port on any host.
+    AnyHostPort { port: u16 },
+    /// `*`: any host, any port.
+    Anywhere,
+    /// A named host or IP address (`github.com`, `*.npmjs.org`, `10.0.0.5`), on one port or every port.
+    Host { host: String, port: Option<u16> },
+}
+
+impl TryFrom<String> for Connect {
+    type Error = String;
+
+    fn try_from(entry: String) -> Result<Self, String> {
+        let bad = |why: &str| format!("connect {entry:?}: {why}");
+        if entry.starts_with('/') || entry.starts_with('~') || entry.starts_with('$') {
+            return match is_grant_path(&entry) {
+                true => Ok(Connect::Socket(entry)),
+                false => Err(bad("a socket path is absolute, or starts with `~/` or `$`")),
+            };
+        }
+        if entry == "*" {
+            return Ok(Connect::Network(NetworkTarget::Anywhere));
+        }
+        let (host, port) = match entry.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|p| *p != 0)
+                    .ok_or_else(|| bad("the port is a number from 1 to 65535"))?;
+                (host, Some(port))
+            }
+            None => (entry.as_str(), None),
+        };
+        let target = match (host, port) {
+            ("localhost", Some(port)) => NetworkTarget::LocalPort { port },
+            ("localhost", None) => return Err(bad("name the port: `localhost:PORT`")),
+            ("*", Some(port)) => NetworkTarget::AnyHostPort { port },
+            ("*", None) => NetworkTarget::Anywhere,
+            (host, port) => {
+                let name = host.strip_prefix("*.").unwrap_or(host);
+                let valid = !name.is_empty()
+                    && name
+                        .split('.')
+                        .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+                if !valid {
+                    return Err(bad(
+                        "expected a socket path, `localhost:PORT`, `*:PORT`, `*`, or a host (`github.com`, \
+                         `*.npmjs.org`, `10.0.0.5`) with an optional `:PORT`",
+                    ));
+                }
+                NetworkTarget::Host {
+                    host: host.to_ascii_lowercase(),
+                    port,
+                }
+            }
+        };
+        Ok(Connect::Network(target))
+    }
+}
+
+impl From<Connect> for String {
+    fn from(connect: Connect) -> String {
+        match connect {
+            Connect::Socket(path) => path,
+            Connect::Network(target) => target.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for NetworkTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkTarget::LocalPort { port } => write!(f, "localhost:{port}"),
+            NetworkTarget::AnyHostPort { port } => write!(f, "*:{port}"),
+            NetworkTarget::Anywhere => write!(f, "*"),
+            NetworkTarget::Host { host, port: Some(port) } => write!(f, "{host}:{port}"),
+            NetworkTarget::Host { host, port: None } => write!(f, "{host}"),
+        }
+    }
+}
+
+/// A named bundle of grants. Written as its name, or as a table with the name and the preset's own options:
+/// `{ name = "mise", install = "allow" }`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "toml::Value", into = "toml::Value")]
 pub enum Preset {
@@ -117,8 +234,8 @@ impl Preset {
         }
     }
 
-    /// Folds a nearer level's entry for the same preset in: per option, the nearer value when it sets one.
-    fn merge(&mut self, nearer: Preset) {
+    /// Folds a nearer entry for the same preset in: per option, the nearer value when it sets one.
+    pub fn merge(&mut self, nearer: &Preset) {
         match (self, nearer) {
             (Preset::Mise(options), Preset::Mise(n)) => {
                 if n.install.is_some() {
@@ -213,64 +330,17 @@ impl From<Preset> for toml::Value {
     }
 }
 
-/// Where network filtering is planned; users who need a network key say so there.
-const NETWORK_ISSUE: &str = "https://github.com/alex35mil/Piton/issues/228";
-
-impl SandboxTable {
-    /// The first removed key the table sets, with what to do instead.
-    fn removed_key(&self) -> Option<String> {
-        let presets = "Piton has a built-in default; add toolchain grants with `presets` (mise, rust, node, swift)";
-        let readable = "everything is readable by default except the built-in denies; use `expose` in the global \
-                        config.toml or a config.local.toml for a denied path";
-        let removed = |key: &str, why: &str| format!("sandbox.{key} was removed: {why}");
-        if self.base.is_some() {
-            return Some(removed("base", presets));
-        }
-        if self.groups.is_some() {
-            return Some(removed("groups", presets));
-        }
-        if self.bypass.is_some() {
-            return Some(removed(
-                "bypass",
-                "use `expose` in the global config.toml or a config.local.toml to lift a built-in deny for a path",
-            ));
-        }
-        if self.read.is_some() {
-            return Some(removed("read", readable));
-        }
-        if self.read_file.is_some() {
-            return Some(removed("read_file", readable));
-        }
-        if self.unix_socket.is_some() {
-            return Some(format!(
-                "sandbox.unix_socket isn't supported yet: the sandbox network is open, so pi already reaches every \
-                 Unix socket. Restricting it is planned; if you need this, say so in {NETWORK_ISSUE}"
-            ));
-        }
-        let network = self.network.as_ref()?;
-        let set = |key: &str| network.as_table().is_some_and(|t| t.contains_key(key));
-        Some(match (set("open_port"), set("profile")) {
-            (true, _) => format!(
-                "sandbox.network.open_port isn't supported yet: the sandbox network is open, so pi already reaches \
-                 every localhost port. Restricting it is planned; if you need this, say so in {NETWORK_ISSUE}"
-            ),
-            (false, true) => format!(
-                "sandbox.network.profile isn't supported yet: the sandbox network is open. Network filtering is \
-                 planned; if you need it, say so in {NETWORK_ISSUE}"
-            ),
-            (false, false) => format!(
-                "[sandbox.network] isn't supported yet: the sandbox network is open. Network filtering is planned; \
-                 if you need it, say so in {NETWORK_ISSUE}"
-            ),
-        })
-    }
-}
-
 impl TableValue for SandboxTable {
-    /// Every knob that loosens a protection: the global file or a `config.local.toml`, never a project's
-    /// `config.toml`.
+    /// Every key that loosens a protection: the global file or a `config.local.toml`, never a project's `config.toml`.
     fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
-        let mut keys = present(Rule::USERS_OWN, &[("sandbox.expose", !self.expose.is_empty())]);
+        let mut keys = present(
+            Rule::USERS_OWN,
+            &[
+                ("sandbox.profile", self.profile.is_some()),
+                ("sandbox.read", !self.read.is_empty()),
+                ("sandbox.connect", !self.connect.is_empty()),
+            ],
+        );
         for key in self.presets.iter().filter_map(Preset::loosening) {
             if !keys.iter().any(|(k, _)| *k == key) {
                 keys.push((key, Rule::USERS_OWN));
@@ -280,14 +350,11 @@ impl TableValue for SandboxTable {
     }
 
     fn check(&self) -> Result<(), String> {
-        if let Some(message) = self.removed_key() {
-            return Err(message);
-        }
         for (key, paths) in [
-            ("allow", &self.allow),
-            ("allow_file", &self.allow_file),
+            ("write", &self.write),
+            ("write_file", &self.write_file),
+            ("read", &self.read),
             ("deny", &self.deny),
-            ("expose", &self.expose),
         ] {
             if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
                 return Err(format!(
@@ -300,18 +367,95 @@ impl TableValue for SandboxTable {
 }
 
 impl Merge for SandboxTable {
-    /// Lists only add; a nearer level can't remove a grant or a deny.
+    /// Lists only add; a nearer level can't remove a grant or a deny. The nearest `profile` wins.
     fn merge(&mut self, n: Self) {
-        union(&mut self.allow, n.allow);
-        union(&mut self.allow_file, n.allow_file);
-        union(&mut self.deny, n.deny);
+        if n.profile.is_some() {
+            self.profile = n.profile;
+        }
+        union(&mut self.write, n.write);
+        union(&mut self.write_file, n.write_file);
+        union(&mut self.read, n.read);
+        union(&mut self.connect, n.connect);
         for preset in n.presets {
             match self.presets.iter_mut().find(|p| p.name() == preset.name()) {
-                Some(existing) => existing.merge(preset),
+                Some(existing) => existing.merge(&preset),
                 None => self.presets.push(preset),
             }
         }
-        union(&mut self.expose, n.expose);
+        union(&mut self.deny, n.deny);
+    }
+}
+
+/// One entry of a list, with the file that listed it first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed<T> {
+    pub value: T,
+    pub file: PathBuf,
+}
+
+/// The `[sandbox]` of a launch's whole chain, every entry with the file it came from: what `piton sandbox show` and
+/// `why` name. The profile's own entries are added by the sandbox (`launch/sandbox/`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SandboxSettings {
+    /// The nearest file's `profile`; `None` when no file sets one.
+    pub profile: Option<Listed<Profile>>,
+    pub write: Vec<Listed<String>>,
+    pub write_file: Vec<Listed<String>>,
+    pub read: Vec<Listed<String>>,
+    pub connect: Vec<Listed<Connect>>,
+    /// Each preset once, with the merged options; the file is the first that listed it.
+    pub presets: Vec<Listed<Preset>>,
+    pub deny: Vec<Listed<String>>,
+}
+
+impl SandboxSettings {
+    /// Folds in one file's table, files farthest first.
+    pub fn add(&mut self, table: SandboxTable, file: &Path) {
+        let SandboxTable {
+            profile,
+            write,
+            write_file,
+            read,
+            connect,
+            presets,
+            deny,
+        } = table;
+        if let Some(profile) = profile {
+            self.profile = Some(Listed {
+                value: profile,
+                file: file.to_path_buf(),
+            });
+        }
+        add_listed(&mut self.write, write, file);
+        add_listed(&mut self.write_file, write_file, file);
+        add_listed(&mut self.read, read, file);
+        add_listed(&mut self.connect, connect, file);
+        for preset in presets {
+            match self.presets.iter_mut().find(|p| p.value.name() == preset.name()) {
+                Some(existing) => existing.value.merge(&preset),
+                None => self.presets.push(Listed {
+                    value: preset,
+                    file: file.to_path_buf(),
+                }),
+            }
+        }
+        add_listed(&mut self.deny, deny, file);
+    }
+
+    /// The profile in effect: the nearest file's, else the default.
+    pub fn profile(&self) -> Profile {
+        self.profile.as_ref().map(|p| p.value).unwrap_or_default()
+    }
+}
+
+fn add_listed<T: PartialEq>(list: &mut Vec<Listed<T>>, values: Vec<T>, file: &Path) {
+    for value in values {
+        if !list.iter().any(|l| l.value == value) {
+            list.push(Listed {
+                value,
+                file: file.to_path_buf(),
+            });
+        }
     }
 }
 
@@ -325,13 +469,117 @@ mod tests {
 
     #[test]
     fn lists_only_add() {
-        let mut base =
-            table("allow = [\"/a\"]\ndeny = [\"/secret\"]\npresets = [\"rust\"]\nexpose = [\"~/.ssh/config\"]\n");
-        base.merge(table("allow = [\"/a\", \"/b\"]\npresets = [\"swift\", \"rust\"]\n"));
-        assert_eq!(base.allow, ["/a", "/b"]);
+        let mut base = table(
+            "write = [\"/a\"]\ndeny = [\"/secret\"]\npresets = [\"rust\"]\nread = [\"~/.ssh/config\"]\nprofile = \"strict\"\n",
+        );
+        base.merge(table(
+            "write = [\"/a\", \"/b\"]\npresets = [\"swift\", \"rust\"]\nconnect = [\"*:22\"]\n",
+        ));
+        assert_eq!(base.write, ["/a", "/b"]);
         assert_eq!(base.deny, ["/secret"], "a nearer level can't drop a deny");
         assert_eq!(base.presets, [Preset::Rust, Preset::Swift]);
-        assert_eq!(base.expose, ["~/.ssh/config"]);
+        assert_eq!(base.read, ["~/.ssh/config"]);
+        assert_eq!(
+            base.profile,
+            Some(Profile::Strict),
+            "a level without a profile keeps it"
+        );
+        base.merge(table("profile = \"yolo\""));
+        assert_eq!(base.profile, Some(Profile::Yolo), "the nearest wins");
+    }
+
+    /// Each entry keeps the first file that listed it; the nearest profile wins.
+    #[test]
+    fn settings_keep_where_each_entry_came_from() {
+        let (global, repo) = (Path::new("/g/config.toml"), Path::new("/r/.piton/config.toml"));
+        let mut s = SandboxSettings::default();
+        assert_eq!(s.profile(), Profile::Standard, "the default");
+        s.add(
+            table("profile = \"strict\"\nwrite = [\"/a\"]\npresets = [{ name = \"mise\", install = \"allow\" }]"),
+            global,
+        );
+        s.add(
+            table("write = [\"/a\", \"/b\"]\npresets = [{ name = \"mise\", install = \"deny\" }]"),
+            repo,
+        );
+        assert_eq!(s.profile(), Profile::Strict);
+        assert_eq!(s.profile.as_ref().unwrap().file, global);
+        let writes: Vec<_> = s.write.iter().map(|l| (l.value.as_str(), l.file.as_path())).collect();
+        assert_eq!(writes, [("/a", global), ("/b", repo)]);
+        assert_eq!(
+            s.presets,
+            [Listed {
+                value: Preset::Mise(MiseOptions {
+                    install: Some(InstallMode::Deny)
+                }),
+                file: global.into()
+            }]
+        );
+    }
+
+    #[test]
+    fn profiles_are_named() {
+        for profile in Profile::ALL {
+            let parsed: SandboxTable = toml::from_str(&format!("profile = \"{}\"", profile.name())).unwrap();
+            assert_eq!(parsed.profile, Some(profile));
+        }
+        assert!(toml::from_str::<SandboxTable>("profile = \"open\"").is_err());
+    }
+
+    /// Every form a `connect` entry takes, and what isn't one.
+    #[test]
+    fn connect_entries_are_typed() {
+        let parse = |text: &str| Connect::try_from(text.to_string());
+        let net = |t| Ok(Connect::Network(t));
+        assert_eq!(parse("$SSH_AUTH_SOCK"), Ok(Connect::Socket("$SSH_AUTH_SOCK".into())));
+        assert_eq!(parse("/"), Ok(Connect::Socket("/".into())));
+        assert_eq!(
+            parse("~/.orbstack/run/docker.sock"),
+            Ok(Connect::Socket("~/.orbstack/run/docker.sock".into()))
+        );
+        assert_eq!(parse("localhost:5432"), net(NetworkTarget::LocalPort { port: 5432 }));
+        assert_eq!(parse("*:22"), net(NetworkTarget::AnyHostPort { port: 22 }));
+        assert_eq!(parse("*"), net(NetworkTarget::Anywhere));
+        assert_eq!(
+            parse("GitHub.com:22"),
+            net(NetworkTarget::Host {
+                host: "github.com".into(),
+                port: Some(22)
+            })
+        );
+        assert_eq!(
+            parse("*.npmjs.org"),
+            net(NetworkTarget::Host {
+                host: "*.npmjs.org".into(),
+                port: None
+            })
+        );
+        assert_eq!(
+            parse("10.0.0.5:8080"),
+            net(NetworkTarget::Host {
+                host: "10.0.0.5".into(),
+                port: Some(8080)
+            })
+        );
+        for bad in [
+            "localhost",
+            "github.com:0",
+            "github.com:x",
+            "github.com:70000",
+            "a..b",
+            "",
+            "https://github.com",
+            "~x",
+            "foo bar",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        // Written back as given (hosts lowercased).
+        let value = toml::Value::try_from(table("connect = [\"*:22\", \"$SSH_AUTH_SOCK\", \"Example.com\"]")).unwrap();
+        assert_eq!(
+            value["connect"].to_string(),
+            r#"["*:22", "$SSH_AUTH_SOCK", "example.com"]"#
+        );
     }
 
     /// A preset is a name or a table; the same preset at several levels merges its options, the nearer set one
@@ -368,10 +616,10 @@ mod tests {
         }
     }
 
-    /// Every knob that loosens a protection is the user's own: the global file or a `config.local.toml`. Toolchains,
-    /// and installs that ask or are denied, may be listed anywhere.
+    /// Every key that loosens a protection is the user's own: the global file or a `config.local.toml`. Writes,
+    /// toolchains, installs that ask or are denied, and denies may be listed anywhere.
     #[test]
-    fn loosening_knobs_are_the_users_own() {
+    fn loosening_keys_are_the_users_own() {
         assert_eq!(
             table("presets = [{ name = \"mise\", install = \"allow\" }]").ruled_keys(),
             [("sandbox.presets mise install = \"allow\"", Rule::USERS_OWN)]
@@ -381,57 +629,44 @@ mod tests {
             [("sandbox.presets git", Rule::USERS_OWN)]
         );
         assert_eq!(
-            table("expose = [\"~/.ssh/config\"]").ruled_keys(),
-            [("sandbox.expose", Rule::USERS_OWN)]
+            table("profile = \"yolo\"\nread = [\"~/.ssh/config\"]\nconnect = [\"*\"]").ruled_keys(),
+            [
+                ("sandbox.profile", Rule::USERS_OWN),
+                ("sandbox.read", Rule::USERS_OWN),
+                ("sandbox.connect", Rule::USERS_OWN)
+            ]
         );
         for text in [
             "presets = [\"mise\"]",
             "presets = [{ name = \"mise\", install = \"deny\" }]",
             "presets = [\"rust\", \"swift\"]",
-            "allow = [\"/a\"]",
+            "write = [\"/a\"]",
+            "write_file = [\"/a\"]",
+            "deny = [\"/a\"]",
         ] {
             assert!(table(text).ruled_keys().is_empty(), "{text}");
         }
-        assert!(
-            toml::from_str::<SandboxTable>("git = \"unprotected\"").is_err(),
-            "the key is a preset"
-        );
     }
 
     #[test]
     fn paths_are_checked() {
-        assert!(table("allow = [\"relative/path\"]").check().is_err());
-        assert!(table("expose = [\"x\"]").check().is_err());
-        assert!(table("allow = [\"~/x\", \"/abs\", \"$TMPDIR/x\"]").check().is_ok());
-        assert!(toml::from_str::<SandboxTable>("presets = [\"python\"]").is_err());
+        assert!(table("write = [\"relative/path\"]").check().is_err());
+        assert!(table("read = [\"x\"]").check().is_err());
+        assert!(table("write = [\"~/x\", \"/abs\", \"$TMPDIR/x\"]").check().is_ok());
     }
 
-    /// Each removed key fails the table with what replaces it; network keys point at the filtering issue.
+    /// Earlier keys are unknown keys, like any typo.
     #[test]
-    fn removed_keys_say_what_replaces_them() {
-        let err = |text: &str| table(text).check().unwrap_err();
-        assert!(err("base = \"mise-dev\"").starts_with("sandbox.base was removed: "));
-        assert!(err("groups = [\"git_config\"]").contains("`presets`"));
-        assert!(err("bypass = [\"~/x\"]").contains("`expose`"));
-        assert!(err("read = [\"~/x\"]").contains("readable by default"));
-        assert!(err("read_file = [\"~/x\"]").contains("readable by default"));
+    fn earlier_keys_are_unknown() {
         for text in [
-            "unix_socket = [\"$SSH_AUTH_SOCK\"]",
-            "[network]\nopen_port = [0]",
-            "[network]\nprofile = false",
+            "allow = [\"/a\"]",
+            "allow_file = [\"/a\"]",
+            "expose = [\"~/.ssh/config\"]",
+            "base = \"mise-dev\"",
+            "unix_socket = [\"/s\"]",
             "[network]\n",
         ] {
-            let message = err(text);
-            assert!(message.contains("isn't supported yet"), "{message}");
-            assert!(message.ends_with(&format!("say so in {NETWORK_ISSUE}")), "{message}");
+            assert!(toml::from_str::<SandboxTable>(text).is_err(), "{text}");
         }
-        assert!(err("[network]\nopen_port = [0]").starts_with("sandbox.network.open_port "));
-        assert!(err("[network]\nprofile = false").starts_with("sandbox.network.profile "));
-    }
-
-    #[test]
-    fn removed_keys_are_never_written_back() {
-        let value = toml::Value::try_from(table("allow = [\"/a\"]")).unwrap();
-        assert_eq!(value.as_table().unwrap().keys().collect::<Vec<_>>(), ["allow"]);
     }
 }

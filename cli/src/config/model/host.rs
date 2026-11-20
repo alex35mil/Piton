@@ -32,9 +32,6 @@ pub struct HostFile {
     pub keep_awake: Option<bool>,
     #[serde(default, skip_serializing_if = "PiTable::is_empty")]
     pub pi: PiTable,
-    /// Removed: read only to say so (see `check`).
-    #[serde(default, skip_serializing)]
-    sandbox: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "EnvTable::is_empty")]
     pub env: EnvTable,
     #[serde(default, skip_serializing_if = "StopTable::is_empty")]
@@ -152,9 +149,6 @@ impl HostFile {
         if self.pi.command.as_ref().is_some_and(Vec::is_empty) {
             return Err("pi.command must not be empty".into());
         }
-        if self.sandbox.is_some() {
-            return Err("sandbox.command was removed: Piton applies the sandbox itself and no longer runs nono".into());
-        }
         for (name, tool) in [
             ("mise", &self.tools.mise),
             ("fnox", &self.tools.fnox),
@@ -179,7 +173,6 @@ impl HostFile {
         nearer(&mut self.keep_awake, n.keep_awake);
         nearer(&mut self.pi.command, n.pi.command);
         nearer(&mut self.pi.args, n.pi.args);
-        nearer(&mut self.sandbox, n.sandbox);
         nearer(&mut self.env.login_shell, n.env.login_shell);
         nearer(&mut self.stop.grace_ms, n.stop.grace_ms);
         nearer(&mut self.stop.term_grace_ms, n.stop.term_grace_ms);
@@ -212,9 +205,6 @@ mod tests {
     fn empty_commands_are_refused() {
         let file: HostFile = toml::from_str("[pi]\ncommand = []\n").unwrap();
         assert!(file.check().is_err());
-        // Piton applies the sandbox itself: the program setting is gone.
-        let file: HostFile = toml::from_str("[sandbox]\ncommand = [\"nono\"]\n").unwrap();
-        assert!(file.check().unwrap_err().contains("no longer runs nono"));
         let file: HostFile = toml::from_str("[tools.mise]\ncommand = []\n").unwrap();
         assert!(file.check().unwrap_err().contains("tools.mise.command"));
     }

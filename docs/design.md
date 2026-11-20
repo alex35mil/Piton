@@ -221,8 +221,8 @@ with `.piton/.local` linked to the source's.
   `core.fsmonitor`, and the files they read, including ones Git ignores, like husky's `.husky/_/`) may be the agent's.
   The daemon fetches the default branch and fast-forwards inside the sandbox a launch in the source gets, with every
   hook on: the user's hooks keep running, contained, and no Git that could run them runs on the host. The fetch
-  authenticates the way the agent's Git does (SSH with `~/.ssh/config` and `known_hosts` exposed; HTTPS with the
-  keychain exposed); when it can't, creation is refused naming that. The target is the commit `git ls-remote`
+  authenticates the way the agent's Git does (SSH through the SSH agent with `~/.ssh/config` and `known_hosts`
+  readable, as the `standard` profile grants; HTTPS with the keychain in `read`); when it can't, creation is refused naming that. The target is the commit `git ls-remote`
   reports, never a remote-tracking ref an agent could have rewritten. Read-only Git commands run on the host with
   hooks and fsmonitor off.
   - An update that changes protected files (`.piton/`, `.pi/`) needs the user, since the sandbox can't write them. The
@@ -741,21 +741,21 @@ the line. A host or client file has one schema and is read whole.
   mise environment; a pi started outside Piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
-  - Every knob that loosens the sandbox, `sandbox.expose` (lifting a built-in credential deny), the `mise` preset's
-    `install = "allow"` (writing the tools the host runs), and the `git` preset (letting agents write Git's hooks and
-    configuration): the global `config.toml` or a `config.local.toml`, never a project's `config.toml`, which travels
-    with the repository, so a repository can't open the sandbox for whoever clones it. Knobs are on or off; asking when
-    the sandbox blocks something is #241's.
+  - Every key that loosens the sandbox, `sandbox.profile`, `sandbox.read` (lifting a built-in credential deny),
+    `sandbox.connect`, the `mise` preset's `install = "allow"` (writing the tools the host runs), and the `git` preset
+    (letting agents write Git's hooks and configuration): the global `config.toml` or a `config.local.toml`, never a
+    project's `config.toml`, which travels with the repository, so a repository can't open the sandbox for whoever
+    clones it. Asking when the sandbox blocks something is #241's.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
     repository's.
   - `web_search.api_key`: a `config.local.toml` only (a secret).
   - `branches.username`: the same files, as a personal value.
   - Everything else, keep-awake included: either file, any level.
 - **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
-  - `[sandbox]`: lists (`presets`, `allow`, `allow_file`, `deny`, `expose`) only add; a preset named at several
-    levels takes each option from the nearest level that sets it. The daemon's `launch/sandbox`
-    module, the only code that knows the backend, resolves the merged table with the built-in policy into each
-    launch's rules ("Agent access").
+  - `[sandbox]`: the nearest `profile` wins; lists (`write`, `write_file`, `read`, `connect`, `presets`, `deny`) only
+    add, each entry keeping the file that listed it; a preset named at several levels takes each option from the
+    nearest level that sets it. The daemon's `launch/sandbox` module, the only code that knows the backend, resolves
+    them with the base policy and the profile's entries into each launch's rules ("Agent access").
   - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
     and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
@@ -856,15 +856,34 @@ credentials. Unlike them, Piton sandboxes the whole pi process, not each shell c
 extension and pi package, local MCP servers, and whatever they start are inside one OS boundary, where per-command
 sandboxing would leave them all with the user's access behind application-level checks (OpenCode's experimental
 whole-agent sandbox still trusts its plugins and MCP servers). The cost: pi's own credentials are readable inside,
-and the network can't be closed without cutting pi off from its model provider.
+and the network can be closed only to everything but pi's own destinations (a proxy, #228).
+
+**The model.** The base is the floor: everything that can be closed is closed, and every grant list is empty. A
+profile (`[sandbox] profile`: `strict`, `standard` by default, `yolo`) is a fixed set of list entries
+(`launch/sandbox/policy.rs`, `profile_entries`), each profile holding the one before; `strict` adds nothing. The
+user's lists (`write`, `write_file`, `read`, `connect`, `presets`, `deny`) add on top across levels. A profile's
+entry is removed only by choosing another profile: there are no negative entries, so what a level grants is always
+what it lists. Every list entry keeps where it came from (a profile, or the file that listed it), carried in each
+rule's source (`Source::Config` and `Source::Preset` with a `Provenance`), so `piton sandbox why` names it. Each Task
+that closes more of the base (sockets #248, apps #249, the network #228) adds the entries that reopen it to the
+profiles. `connect` is typed at parse time (`Connect`: a socket path, or a `NetworkTarget`: `localhost:PORT`,
+`*:PORT`, `*`, a named host): socket entries become connect rules; network entries are carried in the policy
+(`Policy::network`) for the proxy.
+
+**Permissions and the sandbox are separate layers.** `[permissions]` decides whether the agent may make a call,
+before it runs; the sandbox decides what a running process may touch. Neither feeds the other. Claude Code merges
+`Read`/`Edit` denies into its sandbox, but its sandbox wraps only shell commands; Piton's wraps pi itself, its MCP
+servers, and the daemon's `mise env`, so a permission deny made a sandbox deny would hide pi's own `auth.json` from
+pi or a `mise.local.toml` from mise. A path no process may touch is a `[sandbox] deny`.
 
 Each sandboxed launch gets an ordered list of rules (`launch/sandbox/`), the last matching one deciding, as Seatbelt
 does; `piton sandbox show` prints them and `piton sandbox why` names the one that decides an access:
 
-1. **Base:** everything is readable, nothing is writable, the network is open (pi has to reach its model provider;
-   fetch, MCP, and installs need it too).
-2. **Writes:** the workspace, `<source>/.piton/.local/`, the temp folders and `/dev`, the `presets`, `allow`, and
-   `allow_file`. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
+1. **Base:** everything is readable, nothing is writable, connects are open (pi has to reach its model provider;
+   fetch, MCP, and installs need it too) until #248 and #228 close them.
+2. **Grants:** writes to the workspace, `<source>/.piton/.local/`, the temp folders and `/dev`, the `presets`,
+   `write`, and `write_file`; and the `connect` socket allows, placed before every deny so no `connect` entry (yolo's
+   `/` included) reopens a credential, a user deny, or the daemon's sockets. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
    (the Go build cache is linked straight into host builds), so a writable cache would run sandbox-written code on
    the host. Each preset (`mise`, `rust`, `node`, `swift`) grants one toolchain's caches and state as an informed
    opt-in, documented as such. A preset is a name or `{ name = "...", <options> }`; options are typed per preset.
@@ -877,9 +896,9 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
 3. **Credentials:** nono's deny groups (`deny_credentials`, keychains, browser data, macOS private data, shell
    history and rc files), vendored verbatim in `nono-deny-groups.json` at the `nono` version; `mise run
    cli:nono-policy-check` reports upstream changes, and a test fails when the crate is bumped without re-vendoring.
-   Read, write, exec, and Unix connect are denied; metadata stays visible. `expose` (the user's own files) lifts one, readable
-   then, writable with `allow`; exposing `~/Library/Keychains` also reopens the keychain Mach services the library
-   always closes.
+   Read, write, exec, and Unix connect are denied; metadata stays visible. `read` (the user's own files, or a
+   profile) lifts one, readable and connectable then, writable with `write`; a `read` covering `~/Library/Keychains`
+   also reopens the keychain Mach services the library always closes.
 4. **pi's agent directory:** read-only, except its runtime state (`sessions/`, `auth.json`, `models-store.json`,
    `mcp-auth.json`, `crashes.json`, `mcp.log` and its rotation, their locks, and MCP's per-server token-refresh
    locks: credentials, catalogs, and logs). Its settings, project trust (`trust.json`), MCP servers, extensions,
@@ -912,8 +931,8 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    it would also break `git worktree add` and checking out initialized submodules, which create such `.git` files. Nor
    the git directories Git keeps inside `.git` for linked worktrees (`worktrees/`) and submodules (`modules/`).
    Hook logic in tracked files (husky, lefthook) runs wherever Git runs; the daemon's Git that runs hooks runs in the
-   sandbox ("Workers"). The `git` preset drops these Git rules, for users who'd rather let agents set up hooks; it's
-   accepted only in the user's own files ("Where a key may be set"), so a repository can't turn the protection off for
+   sandbox ("Workers"). The `git` preset (in `yolo`, or listed) drops these Git rules, for users who'd rather let
+   agents set up hooks; it's accepted only in the user's own files ("Where a key may be set"), so a repository can't turn the protection off for
    whoever clones it.
 7. **The daemon:** its state folder (the socket's folder: `~/.local/state/piton/`) is closed (read, write, connect)
    except `logs/` for reading and `agent.sock` for connecting; the control socket (`piton.sock`) is denied to connect
@@ -931,14 +950,13 @@ inside the launch's checkout or source checkout (a session in the whole checkout
 launch's workspace is a subfolder) or covered by another write grant, as written or resolved, computed to a fixed
 point. Below a link it doesn't follow, it keeps the rest as written, which matches nothing while the link is there.
 The daemon logs each such grant and `piton sandbox show` warns about it; a user who links a granted folder elsewhere
-grants the real path. A link outside the checkout made by a session elsewhere whose `allow` was wider is still
+grants the real path. A link outside the checkout made by a session elsewhere whose `write` was wider is still
 followed when this launch's grants don't cover it. A sandboxed launch is refused when the workspace path given goes
 through a symlink inside a git checkout that leads out of it; the user's own links outside any checkout work.
 
 `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
 
-Known limits: the network isn't restricted, so anything readable can leave (domain filtering:
-[#228](https://github.com/alex35mil/Piton/issues/228)); pi's own credentials are readable, except keys behind the
+Known limits: the network and Unix sockets aren't restricted yet, so anything readable can leave (#248, #228); pi's own credentials are readable, except keys behind the
 credential proxy ("Launching pi"); macOS only.
 
 **Protected files** are everything a later pi loads from the workspace that could widen what an agent may do without

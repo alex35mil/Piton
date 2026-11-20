@@ -34,8 +34,8 @@ below).
 
 Creating or deleting a worker fast-forwards its source checkout. The fetch and the fast-forward run in the sandbox a
 session in the source gets, with your hooks on; nothing of it runs outside the sandbox. The fetch authenticates the way
-an agent's Git does: over SSH with `~/.ssh/config` and `~/.ssh/known_hosts` in `expose`, over HTTPS with the keychain
-exposed. When it can't, creating a worker fails naming that; deleting one leaves the source as it is, with a warning.
+an agent's Git does: over SSH through your SSH agent with `~/.ssh/config` and `~/.ssh/known_hosts` readable (the
+`standard` profile's entries), over HTTPS with the keychain in `read`. When it can't, creating a worker fails naming that; deleting one leaves the source as it is, with a warning.
 
 An update that changes protected files (`.piton/`, `.pi/`) needs your approval, since the sandbox can't write them.
 Piton asks before changing anything, naming the files. Approved, Piton writes exactly those files from the upstream
@@ -226,7 +226,7 @@ placeholder = "sk-ant-oat01-placeholder"   # claude checks the token's shape
 > read every secret your service account can. Piton refuses a sandboxed launch behind fnox when the sandbox can read
 > the keychain. So does the source update of a worker's creation, which runs your hooks in that sandbox (a deletion
 > leaves the source as it is, with a warning): remove
-> `~/Library/Keychains` (and any folder containing it, like `~/Library`) from `[sandbox] expose` and `allow` in your
+> `~/Library/Keychains` (and any folder containing it, like `~/Library`) from `[sandbox] read` and `write` in your
 > configuration (the global `config.toml` or a `config.local.toml`; `piton config check` lists the files). With the
 > Claude token behind the proxy, the sandbox doesn't need it. Git over HTTPS authenticates through the keychain, so
 > with it closed, the sandbox's Git (an agent's, and worker updates) fetches over SSH.
@@ -245,8 +245,22 @@ Limits:
 
 ### Sandbox
 
-A sandboxed pi works with no configuration. Piton's built-in policy, the same idea as Claude Code's, Codex's, and
-Gemini CLI's:
+A sandboxed pi works with no configuration. The sandbox is built in three layers, each only adding to the one before:
+
+1. **The base**, the floor every launch gets (below). Everything that can be closed is closed.
+2. **A profile:** `strict`, `standard` (the default), or `yolo`, a fixed set of entries in the lists below.
+3. **Your lists** in `[sandbox]`, in any `config.toml` of the chain.
+
+A profile's entry is removed only by choosing another profile, never by a negative entry; your `deny` closes a path
+whatever grants it. Host mode is the no-sandbox option.
+
+**Two layers, separate.** `[permissions]` rules decide whether the agent may make a call (run it, ask first, or refuse)
+before it runs; the sandbox decides what a running process may touch. Neither changes the other. The whole pi process
+is sandboxed (pi, its extensions, MCP servers, `mise env`), so a permission rule like `read(*.env)` stops pi's `read`
+tool, not `cat .env` in bash, and turning it into a sandbox rule would block pi and your tools too. A path no process
+may touch goes in `[sandbox] deny`.
+
+The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
 
 - **Reads:** everything, except credentials and private data: SSH and GPG keys, cloud and registry credentials
   (`~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.npmrc`, `~/.netrc`, ...), keychains and password
@@ -257,7 +271,7 @@ Gemini CLI's:
   sandboxed agent run code on the host. Not pi's settings, project trust, MCP servers, extensions, managed
   binaries, or packages, which host sessions load: changing a setting, trusting a project, adding an MCP server, or
   installing or updating a pi package from a sandboxed session fails, so do those in a host session. A session folder
-  moved out of the agent directory (`sessionDir`, `PI_CODING_AGENT_SESSION_DIR`) needs `allow`.
+  moved out of the agent directory (`sessionDir`, `PI_CODING_AGENT_SESSION_DIR`) needs `write`.
 - **Always closed:** protected files (`.piton/`, `.pi/`, except the lock pi takes to read `.pi/settings.json`) and
   every configuration level, the daemon's state folder (except `logs/` for reading and `agent.sock`), and the
   daemon's control socket.
@@ -270,24 +284,61 @@ Gemini CLI's:
   `.git` file or symlink in a subfolder pointing at a repository it built elsewhere, whose settings Git uses when run
   in that folder; check a folder an agent created before running Git there. Hooks still run in the sandbox; only
   writing these files is closed. The `git` preset (below) lifts it.
-- **Network:** open: pi has to reach its model provider, and fetch, web search, MCP, and installs need it too.
+- **Network and Unix sockets:** open for now. Closing sockets except `agent.sock` and DNS
+  ([#248](https://github.com/alex35mil/Piton/issues/248)) and the network except through Piton's proxy
+  ([#228](https://github.com/alex35mil/Piton/issues/228)) make the base strict; `connect` entries (below) then say what
+  opens.
 
-`[sandbox]` adds to that, in any `config.toml` of the chain; lists only add across levels:
+The profiles, each holding the one before it:
+
+```toml
+# strict: nothing
+
+# standard (the default): Git over SSH through your SSH agent (keys used, never read), and the network
+read = ["~/.ssh/config", "~/.ssh/known_hosts"]
+connect = ["$SSH_AUTH_SOCK", "*"]
+
+# yolo: standard, plus
+presets = ["git"]
+connect = ["/"]   # every Unix socket
+```
+
+A profile entry whose variable isn't set (no `$SSH_AUTH_SOCK`) is left out. Toolchain presets are in no profile: host
+builds reuse what the sandbox writes there, so turn on the ones you build with.
+
+`[sandbox]`; lists only add across levels:
 
 ```toml
 [sandbox]
-presets = []     # toolchains whose caches and state may be written: "mise", "rust", "node", "swift";
-                 # host builds reuse what the sandbox writes there, turn on the ones you build with.
-                 # "git": agents may write Git's hooks and configuration (see below)
-allow = []       # more writable folders
-allow_file = []  # more writable files
-deny = []        # paths closed like the credentials: no read, write, or connect
-expose = []      # lift a built-in deny for a path (readable then; writable with allow)
+profile = "standard"  # strict | standard | yolo; the nearest file that sets it wins
+write = []            # writable folders: each folder and everything below it
+write_file = []       # writable files: exactly each path
+read = []             # lift a built-in credential deny for a path (readable then; writable with write)
+connect = []          # sockets, ports, and hosts (below)
+presets = []          # "mise", "rust", "node", "swift": toolchain caches and state;
+                      # "git": agents may write Git's hooks and configuration (see below)
+deny = []             # paths closed like the credentials: no read, write, or connect
 ```
 
-The knobs that loosen a protection are yours alone: `expose`, the `git` preset, and the `mise` preset's
-`install = "allow"` are accepted in the global `config.toml` or any `config.local.toml`, never in a project's
-`config.toml`, which travels with the repository: a repository can't open the sandbox for whoever clones it.
+`connect` entries, by what you want to reach:
+
+| Entry | Reaches |
+| --- | --- |
+| `/path`, `~/path`, `$VAR/path` | Unix sockets at and below the path; `/` is every socket |
+| `localhost:PORT` | a port on this Mac |
+| `*:PORT` | a port on any host |
+| `*` | any host, any port |
+| `github.com`, `github.com:22`, `*.npmjs.org`, `10.0.0.5` | a named host or address, any port or one |
+
+Sockets and ports are enforced by the sandbox, named hosts by a proxy Piton runs; until sockets and the network
+close ([#248](https://github.com/alex35mil/Piton/issues/248), [#228](https://github.com/alex35mil/Piton/issues/228)),
+they're open whatever `connect` says. A `connect` entry never reopens a credential or your `deny`: only `read` lifts a
+credential deny.
+
+The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, the `git` preset, and the `mise`
+preset's `install = "allow"` are accepted in the global `config.toml` or any `config.local.toml`, never in a project's
+`config.toml`, which travels with the repository: a repository can't open the sandbox for whoever clones it. `write`,
+`write_file`, toolchain presets, and `deny` may be set anywhere.
 
 The `git` preset lets agents write Git's hooks and configuration, so `husky install`, `git remote add`, and
 `git submodule update --init` work in the sandbox, and the next Git command on the host may run an agent's code.
@@ -314,18 +365,19 @@ presets = ["rust", { name = "mise", install = "ask" }]
 Across levels, a preset's options are the nearest level's that sets them, so a project can turn `install` to `"deny"`.
 The apps edit `presets` as a list of names; a value with options is shown read-only and edited in the file.
 
-A recommended global configuration for a developer Mac:
+A recommended global configuration for a developer Mac (the `standard` profile covers Git over SSH):
 
 ```toml
 [sandbox]
 presets = ["mise", "rust", "node"]
-expose = ["~/.ssh/config", "~/.ssh/known_hosts"]  # git over SSH; the agent socket is reachable already
 ```
 
 And per project, in its `.piton/config.toml`, what its builds need, e.g. `presets = ["swift"]`.
 
 `piton sandbox why PATH [--write | --connect] [--workspace DIR]` says whether a sandboxed pi there may read, write, or
-connect to PATH, and which rule decides; `piton sandbox show` prints every rule.
+connect to PATH, and which rule decides: built in, or an entry from a profile or the file that lists it.
+`piton sandbox show` prints the profile (and the file that chose it), every rule with where it came from, and the
+network destinations `connect` grants.
 
 A grant doesn't follow a symlink a sandboxed agent could have made: the path itself, or a link inside the project's
 checkout or another grant. When a granted folder (say `~/Library/Developer/Xcode/DerivedData`, or pi's `sessions/`) is a
@@ -340,15 +392,12 @@ sandboxed session can write.
 
 Known limits:
 
-- The network isn't restricted: anything the agent can read can leave the machine. Filtering by domain is planned in
-  [#228](https://github.com/alex35mil/Piton/issues/228); say so there if you need it.
+- The network and Unix sockets aren't restricted yet: anything the agent can read can leave the machine
+  ([#248](https://github.com/alex35mil/Piton/issues/248), [#228](https://github.com/alex35mil/Piton/issues/228)).
 - pi's own credentials (its `auth.json`, provider keys in its environment) are readable: the whole pi process is
   sandboxed, and pi needs them. Keys in its environment can be placeholders instead, with the credential proxy
   (above).
 - macOS only.
-
-Keys of the earlier nono-CLI backend (`base`, `groups`, `bypass`, `read`, `read_file`, `unix_socket`,
-`[sandbox.network]`, and `[sandbox] command` in `config.host.toml`) are refused with what replaces them.
 
 ### State
 

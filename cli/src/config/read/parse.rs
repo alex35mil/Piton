@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn tables_are_parsed_on_their_own() {
         let d = doc(
-            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\nallow = [\"/r\"]\n",
+            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\nwrite = [\"/r\"]\n",
             LevelKind::Repository,
             Sharing::Shared,
         )
@@ -287,7 +287,7 @@ mod tests {
             d.part::<PermissionsTable>(Table::Permissions).unwrap().unwrap().allow,
             ["read"]
         );
-        assert_eq!(d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().allow, ["/r"]);
+        assert_eq!(d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().write, ["/r"]);
         assert!(d.part::<Integration>(Table::Tracker).unwrap().is_some());
         assert!(d.part::<Integration>(Table::Forge).unwrap().is_none());
     }
@@ -309,7 +309,9 @@ mod tests {
         use Sharing::{Local, Shared};
         // Loosening the sandbox: the user's own files only, so a repository can't open it to itself.
         for loosening in [
-            "[sandbox]\nexpose = [\"~/.ssh/config\"]\n",
+            "[sandbox]\nread = [\"~/.ssh/config\"]\n",
+            "[sandbox]\nconnect = [\"*\"]\n",
+            "[sandbox]\nprofile = \"yolo\"\n",
             "[sandbox]\npresets = [\"git\"]\n",
             "[sandbox]\npresets = [{ name = \"mise\", install = \"allow\" }]\n",
         ] {
@@ -326,7 +328,7 @@ mod tests {
             assert!(part(loosening, Global, Shared, Table::Sandbox).is_ok(), "{loosening}");
             assert!(part(loosening, Global, Local, Table::Sandbox).is_ok(), "{loosening}");
         }
-        assert!(part("[sandbox]\nallow = [\"/r\"]\n", Repository, Shared, Table::Sandbox).is_ok());
+        assert!(part("[sandbox]\nwrite = [\"/r\"]\n", Repository, Shared, Table::Sandbox).is_ok());
         // Integrations: project only.
         for table in [Table::Tracker, Table::Forge] {
             let text = format!("[{}]\nprovider = \"github\"\n", table.name());
@@ -358,8 +360,7 @@ mod tests {
         let path = Path::new("config.host.toml");
         let host: HostFile = parse_global("roots = [\"~/p\"]\nkeep_awake = false\n", path).unwrap();
         assert_eq!(host.keep_awake, Some(false));
-        let err = parse_global::<HostFile>("[sandbox]\ncommand = [\"nono\"]\n", path).unwrap_err();
-        assert!(err.to_string().contains("no longer runs nono"), "{err}");
+        assert!(parse_global::<HostFile>("[sandbox]\ncommand = [\"nono\"]\n", path).is_err());
         assert!(parse_global::<HostFile>("[pi]\ncommand = []\n", path).is_err());
         assert!(parse_global::<HostFile>("[host]\nroots = []\n", path).is_err());
         let client: ClientFile = parse_global("text_font = \"Inter\"\n", Path::new("config.client.toml")).unwrap();

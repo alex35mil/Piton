@@ -113,8 +113,8 @@ pub enum SourceGit<'a> {
 pub enum UpdateError {
     #[error(
         "can't fetch {checkout} inside the sandbox: {stderr}. Sandboxed Git authenticates the way an agent's does: over \
-         SSH, `~/.ssh/config` and `~/.ssh/known_hosts` in [sandbox] expose; over HTTPS through the keychain, \
-         `~/Library/Keychains` in [sandbox] expose"
+         SSH, through the SSH agent and `~/.ssh/config` and `~/.ssh/known_hosts`, which the standard profile \
+         grants; over HTTPS through the keychain, `~/Library/Keychains` in [sandbox] read"
     )]
     Fetch { checkout: PathBuf, stderr: String },
     #[error("origin has no branch {branch} for {checkout}")]

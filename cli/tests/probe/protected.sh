@@ -38,7 +38,7 @@ mkdir "$linked"
 ln -s "$linked" "$src/cache"
 marker="# piton protected-file probe
 [sandbox]
-allow = [\"$src/cache\"]"
+write = [\"$src/cache\"]"
 printf '%s\n' "$marker" > "$src/.piton/config.toml"
 echo 'skill' > "$src/.agents/skills/s/SKILL.md"
 echo 'a' > "$src/src/a.rs"
@@ -57,7 +57,7 @@ config_home=${PITON_CONFIG_HOME:-$HOME/.config/piton}
 connect="$scratch/connect.py"
 echo 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])' > "$connect"
 # Checks of a real path: "skip" when it doesn't exist (a missing file would fail as if denied), otherwise the given
-# expectation, or the policy's own decision for paths the user's configuration may expose.
+# expectation, or the policy's own decision for paths the user's configuration may lift with `read`.
 needs() { if [ -e "$1" ] || [ -S "$1" ]; then echo "$2"; else echo skip; fi; }
 policy_says() {
     if "$piton" sandbox why --workspace "$src" "$1" >/dev/null 2>&1; then echo ok; else echo denied; fi
@@ -132,7 +132,7 @@ attempt denied "write through a granted symlink"        'touch cache/x'
 attempt ok     "read system files"                      'cat /etc/hosts'
 attempt ok     "read git config"                        "test ! -e $HOME/.gitconfig || cat $HOME/.gitconfig"
 attempt "$EXPECT_SSH_KEY" "read an SSH key"              "cat '$SSH_KEY'"
-# Denied by default; allowed when the configuration exposes the keychains.
+# Denied by default; allowed when the configuration lists the keychains in `read`.
 attempt "$EXPECT_KEYCHAIN" "read the login keychain"     "cat $KEYCHAIN"
 attempt "$EXPECT_HISTORY" "read shell history"           "cat $HOME/.zsh_history"
 # Other case: APFS is case-insensitive, and so is Seatbelt's matching there; denies and the allows inside them hold.
