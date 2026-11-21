@@ -346,6 +346,30 @@ pub struct LaunchConfig {
 /// checked by [`resolve`] in the pi package.
 pub fn resolve_launch(workspace: &Workspace, paths: &Paths) -> Result<LaunchConfig, ConfigError> {
     let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
+    let (piton, levels) = existing_levels(&chain)?;
+    let docs = Docs::read(&piton, &mut Vec::new());
+    let mut sandbox = SandboxSettings::default();
+    for (table, doc) in docs.parts::<SandboxTable>(Table::Sandbox)? {
+        sandbox.add(table, &doc.origin.path);
+    }
+    Ok(LaunchConfig {
+        sandbox,
+        workers: docs.merged(Table::Workers)?,
+        source: chain.source.clone(),
+        checkout: chain.checkout.clone(),
+        levels,
+    })
+}
+
+/// A workspace's existing level folders of both chains, farthest first, without reading their files: what
+/// [`resolve_launch`] closes in the sandbox, and what `piton config protected` protects outside a session.
+pub fn launch_levels(workspace: &Workspace, paths: &Paths) -> Result<Vec<PathBuf>, ConfigError> {
+    let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
+    Ok(existing_levels(&chain)?.1)
+}
+
+/// The existing `.piton/` levels, and every existing level folder of both chains, farthest first.
+fn existing_levels(chain: &Chain) -> Result<(Vec<Level>, Vec<PathBuf>), ConfigError> {
     let mut piton = Vec::new();
     let mut levels = Vec::new();
     for level in &chain.piton {
@@ -359,18 +383,7 @@ pub fn resolve_launch(workspace: &Workspace, paths: &Paths) -> Result<LaunchConf
             levels.push(level.dir.clone());
         }
     }
-    let docs = Docs::read(&piton, &mut Vec::new());
-    let mut sandbox = SandboxSettings::default();
-    for (table, doc) in docs.parts::<SandboxTable>(Table::Sandbox)? {
-        sandbox.add(table, &doc.origin.path);
-    }
-    Ok(LaunchConfig {
-        sandbox,
-        workers: docs.merged(Table::Workers)?,
-        source: chain.source.clone(),
-        checkout: chain.checkout.clone(),
-        levels,
-    })
+    Ok((piton, levels))
 }
 
 /// A level folder that exists but can't be listed is an error: skipping it would silently drop a deny rule.

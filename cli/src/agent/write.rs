@@ -92,10 +92,15 @@ impl WriteDecision {
     }
 }
 
-/// The dialog record for a request, in pi's `extension_ui_request` format.
-pub fn write_dialog(id: &str, path: &Path, current: Option<&str>, content: &str) -> Value {
+/// The dialog record for a request, in pi's `extension_ui_request` format. The prompt says what the file controls, since
+/// the diff is the user's only check: `write (protected): <path> (runs code in every session)`.
+pub fn write_dialog(id: &str, path: &Path, controls: super::Controls, current: Option<&str>, content: &str) -> Value {
+    let prompt = match controls.label() {
+        Some(label) => format!("write (protected): {} ({label})", path.display()),
+        None => format!("write (protected): {}", path.display()),
+    };
     let title = json!({
-        "prompt": format!("write (protected): {}", path.display()),
+        "prompt": prompt,
         "toolName": "write",
         "toolInput": {"path": path, "content": content},
         "current": current,
@@ -331,7 +336,14 @@ mod tests {
 
     #[test]
     fn the_dialog_is_pi_nvims_diff_format_with_the_current_content() {
-        let d = write_dialog("piton:w:1", Path::new("/r/.piton/config.toml"), Some("old"), "{}");
+        use super::super::Controls;
+        let d = write_dialog(
+            "piton:w:1",
+            Path::new("/r/.piton/config.toml"),
+            Controls::Other,
+            Some("old"),
+            "{}",
+        );
         assert_eq!(d["type"], "extension_ui_request");
         assert_eq!(d["method"], "select");
         let title: Value = serde_json::from_str(d["title"].as_str().unwrap()).unwrap();
@@ -339,9 +351,28 @@ mod tests {
         assert_eq!(title["toolInput"]["path"], "/r/.piton/config.toml");
         assert_eq!(title["toolInput"]["content"], "{}");
         assert_eq!(title["current"], "old");
-        let new = write_dialog("piton:w:2", Path::new("/r/.pi/x"), None, "y");
+        assert_eq!(title["prompt"], "write (protected): /r/.piton/config.toml");
+        let new = write_dialog("piton:w:2", Path::new("/r/.pi/x"), Controls::Other, None, "y");
         let title: Value = serde_json::from_str(new["title"].as_str().unwrap()).unwrap();
         assert_eq!(title["current"], Value::Null);
+    }
+
+    /// The prompt says what the file controls; nothing else in the dialog changes.
+    #[test]
+    fn the_prompt_names_what_the_file_controls() {
+        use super::super::Controls;
+        let prompt = |controls| {
+            let d = write_dialog("piton:w:1", Path::new("/g/config.toml"), controls, None, "");
+            let title: Value = serde_json::from_str(d["title"].as_str().unwrap()).unwrap();
+            title["prompt"].as_str().unwrap().to_string()
+        };
+        assert_eq!(
+            prompt(Controls::Sandbox),
+            "write (protected): /g/config.toml (can loosen the sandbox)"
+        );
+        assert!(prompt(Controls::Code).ends_with(" (runs code in every session)"));
+        assert!(prompt(Controls::Secrets).ends_with(" (decides where secrets go)"));
+        assert_eq!(prompt(Controls::Other), "write (protected): /g/config.toml");
     }
 
     /// What the daemon writes for an approved source update: a Git blob's mode, and removal that clears emptied folders

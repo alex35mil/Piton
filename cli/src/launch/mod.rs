@@ -574,6 +574,7 @@ mod tests {
                 tag: String::new(),
             },
             links: Vec::new(),
+            agent_dirs: ["/h/.pi/agent".into(), "/h/.pi/agent".into()],
             profile: sandbox::ProfileChoice {
                 name: crate::config::Profile::Standard,
                 set_in: None,

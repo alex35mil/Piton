@@ -34,8 +34,8 @@ From the laptop: keep working in pi.nvim exactly as today, and pick up a session
 ## Principles
 
 - **Transparent to pi.** Piton runs `pi --mode rpc` in the workspace with the environment the user's shell would give
-  it. It never changes pi's settings, agent directory, session files, or extensions, and never computes pi's session
-  folder itself. Per-folder agent directories (set through mise) keep working because Piton makes no assumption about
+  it. It never changes pi's settings, agent directory, session files, or extensions, except to write a change the user
+  approved as a diff ("Protected files"), and never computes pi's session folder itself. Per-folder agent directories (set through mise) keep working because Piton makes no assumption about
   them.
 - **Build on pi's protocol, don't replace it.** pi.nvim gets raw pi RPC. Piton types only the fields it acts on
   (command ids and types, event types, extension UI requests); everything else passes through as JSON.
@@ -699,7 +699,8 @@ Four stores, each with one job; every value has exactly one home.
 | Client storage | each app's container | hosts it connects to, a device's own preference values, imported fonts, log capture, unsent work | that app |
 | Memory | the daemon | live pis, session views, temporary switches, pending protected writes | the daemon |
 
-Piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, trust).
+Piton never touches pi's own files (`<agent-dir>`: settings, auth, sessions, trust), except to write a change to one
+that the user approved as a diff ("Protected files").
 
 #### Config files
 
@@ -918,7 +919,8 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
 4. **pi's agent directory:** read-only, except its runtime state (`sessions/`, `auth.json`, `models-store.json`,
    `mcp-auth.json`, `crashes.json`, `mcp.log` and its rotation, their locks, and MCP's per-server token-refresh
    locks: credentials, catalogs, and logs). Its settings, project trust (`trust.json`), MCP servers, extensions,
-   skills, prompts, themes, managed binaries, and packages decide what a later pi loads, host sessions included.
+   skills, prompts, themes, managed binaries, and packages decide what a later pi loads, host sessions included, so
+   they change only through a write the user approves ("Protected files").
    pi locks `settings.json` and `trust.json` even to read them, so their locks (`<file>.lock/`) are writable; the
    files aren't. `docs/pi-findings.md` lists every write pi makes there, from its source. A workspace's `mise.toml` can
    set `PI_CODING_AGENT_DIR`, so the launch is refused when it's the home folder or above it, inside the host's own
@@ -932,8 +934,12 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    is writable is judged by this launch's policy, so a session opened in a parent folder can edit that folder's
    `mise.toml` for later launches in projects below it, as with links planted from another workspace.
 5. **The user's `deny`.**
-6. **Configuration:** every level of both chains, and what their entries link to (a dotfiles repository), is
-   write-denied; protected files (below) too. The workspace's own `.agents/` stays writable. So are Git's hooks and
+6. **Configuration:** every level of both chains, and what their entries and pi's agent directories' entries link to
+   (a dotfiles repository), is write-denied; protected files (below) too. Every folder on the way to a level, an agent
+   directory, or a link target is fixed in place (a literal write deny on the folder, not what's in it, as for the
+   files fnox loads): Seatbelt checks a rename only against the paths it names, so otherwise an agent in a dotfiles
+   workspace could move a linked folder aside and put its own in its place. These files change only through a write
+   the user approves ("Protected files"). The workspace's own `.agents/` stays writable. So are Git's hooks and
    configuration (`agent/git.rs`), which Git on the host runs: in any `.git` folder of the checkout and its source,
    `hooks/`, `config`, `config.worktree`, and `commondir` (which points Git at another git directory); the
    checkout's own `.git`, which can't be removed or replaced; and, for a checkout whose `.git` is a file (a linked
@@ -985,7 +991,27 @@ workspace's checkout, since a session (and fnox) can start in a subfolder. `AGEN
 grants nothing unless the user opts in with `skill_grants = true` in `[permissions]`; with it on, an agent that edits a
 skill can grant itself the tools it lists. Without protection, a sandboxed agent in the source checkout could add `allow = ["bash(*)"]` to
 `[permissions.host]` in `.piton/config.toml`, and a host session in the same checkout would run any command without asking from its
-next tool call. Changes are gated where they're written:
+next tool call.
+
+Outside the checkout, every configuration file the user edits by hand is protected the same way, so an agent can help
+set up a project or a dotfiles repository by proposing changes: the launch's configuration levels (the global tier
+and its `agents/`, `.piton/` and `.agents/` in parent folders), pi's agent directories (the host's and a per-folder
+one, except the runtime state the sandbox lets pi write: sessions, logins, catalogs, logs, locks), the files fnox
+loads for the launch (`fnox config-files`), and the real targets of the symlinks in those levels and agent
+directories (a global `config.toml` or pi's `settings.json` linked into dotfiles), shown and written at the real
+path. Nothing else on the floor is ever proposable: the daemon's state folder and control socket, credentials, and
+the folders on the way to these files. An agent directory or link target that holds the home folder or a checkout,
+or overlaps the state folder, a credential deny, or the user's `[sandbox] deny`, is left out whole: a session in a
+parent folder can edit that folder's `.agents/` (its own there), and a link it planted there to `~/.ssh` must not
+make keys proposable from a session below. `agent/protected.rs` (`Protected`) is the one definition: the daemon builds
+it at every launch, sandboxed or on the host, from the levels, the agent directories the launch resolved, and the
+fnox files, and gives pi a copy in `PITON_PROTECTED` (set after the workspace's environment), which `piton config
+protected` answers from. Outside a session it answers from the workspace (levels and `PI_CODING_AGENT_DIR` or
+`~/.pi/agent`, no fnox files). Changing that copy only changes where pi sends a write: the sandbox still denies the
+direct write, and the daemon checks the path against its own. The sandbox closes these files as rules 4 and 6 of
+"Agent access" say; no command approval ("Allow once", `grant = "all"`) opens them.
+
+Changes are gated where they're written:
 
 1. **OS sandbox.** Each sandboxed launch carries raw Seatbelt rules: `(deny file-write* ...)` with regexes
    for `<source>/.piton` (excluding `<source>/.piton/.local`), `.pi` at any depth in the checkout (excluding
@@ -1004,8 +1030,15 @@ next tool call. Changes are gated where they're written:
    and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
    approve: answers come only from clients. One pending request per session; it ends when the agent stops waiting or
    its run ends. Every protected write asks. The dialog carries the file's current content, so the
-   apps show a diff without reading the file. On approval the daemon walks the path from the checkout without
-   following any symlink, so a folder the agent swapped for a link while the user decided can't redirect the write.
+   apps show a diff without reading the file. Its `prompt` says what the file controls, since the diff is the user's
+   only check: "can loosen the sandbox" (the global `config.toml`, any `config.local.toml`), "runs code in every
+   session" (an agent directory's `extensions/`, `npm/`, `git/`, `bin/`, `settings.json`, `trust.json`, `mcp.json`; a
+   project `.pi/`'s extensions, settings, and MCP servers; `config.host.toml` and its local file; a level's
+   `mcp.json` and `mcp.local.json`), "decides where secrets go" (fnox files), a linked file by the path it's reached
+   through. On approval the daemon walks the path from the file's root (the checkout, the level, the agent directory,
+   or a linked file's real folder) without following any symlink, so a folder the agent swapped for a link while the
+   user decided can't redirect the write; the folders above a root outside the checkout are fixed in place by the
+   sandbox.
    Only a pi running outside Piton (no session token) has the permissions extension ask itself and write directly,
    whatever `defaultMode` or auto-accept says.
 
@@ -1028,9 +1061,10 @@ When the sandbox blocks something a sandboxed agent needs, the user is asked, an
 (#241). Permissions decide whether the agent may make a call; the sandbox decides what a running process may touch;
 when the sandbox blocks something, the user decides.
 
-**The floor** is what no approval lifts: protected files, every configuration level and pi's agent directory, the
-daemon's state and control socket, the user's own `[sandbox] deny`, the files fnox loads, and, while fnox is on, the
-credential denies (the sandbox could run `fnox get`). `all` is the launch's policy with everything else open: writes
+**The floor** is what no approval lifts: protected files, every configuration level and pi's agent directory (and
+the folders on the way to them), the daemon's state and control socket, the user's own `[sandbox] deny`, the files
+fnox loads, and, while fnox is on, the credential denies (the sandbox could run `fnox get`). The configuration in it
+changes only through a write the user approves ("Protected files"); the rest never. `all` is the launch's policy with everything else open: writes
 below every entry of `/` (nono refuses a write grant on `/` itself) and every connect allowed first, then the launch's
 rules with every liftable deny left out, so the floor still decides last
 (`launch/sandbox/grant.rs`, where each deny's source and target say whether it's floor, matched exhaustively). Git's

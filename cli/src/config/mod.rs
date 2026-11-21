@@ -32,7 +32,7 @@ pub use self::{
             GlobalConfig, GlobalResolved, client, daemon, daemon_lenient, global, global_candidates, host, own_files,
             resolve_global,
         },
-        resolve::{LaunchConfig, Resolved, Runtime, resolve, resolve_launch},
+        resolve::{LaunchConfig, Resolved, Runtime, launch_levels, resolve, resolve_launch},
     },
     write::{
         edit::{EditError, Placement},

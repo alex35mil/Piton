@@ -18,8 +18,8 @@ pub use self::resolve::{ClaudeCode, ProfileChoice};
 pub use self::rules::{Effect, Rule, Target};
 pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
-    policy::{Provenance, Source, WRITE_ROOTS, nono_version},
-    resolve::{ClaudeCodeFolder, Facts, Resolution, Silenced, resolve, silenced},
+    policy::{Provenance, Source, WRITE_ROOTS, agent_dir_runtime, nono_version},
+    resolve::{ClaudeCodeFolder, Facts, Resolution, Silenced, agent_dir, never_configuration, resolve, silenced},
     rules::{Access, Policy, TAG_PREFIX},
 };
 

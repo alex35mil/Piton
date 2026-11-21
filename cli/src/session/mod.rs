@@ -9,7 +9,7 @@ mod view;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
@@ -304,8 +304,8 @@ pub struct LaunchSpec {
     /// The sandbox, for sandboxed launches: `piton sandbox-exec` reads it from the environment and removes it before
     /// pi starts.
     pub policy: Option<launch::sandbox::Policy>,
-    /// What this session's protected files are (canonical source and checkout).
-    pub protected: crate::agent::ProtectedRoots,
+    /// What this session's protected files are: the checkout's and the configuration the user edits by hand.
+    pub protected: crate::agent::Protected,
     /// The credential proxy pi starts behind, when fnox is used for this workspace.
     pub proxy: Option<launch::fnox::Proxy>,
     /// What commands the user approves run with, for sandboxed launches.
@@ -510,7 +510,8 @@ enum Sent {
 /// A protected write the user is being asked about: the dialog's id, and where the outcome goes.
 struct PendingWrite {
     id: String,
-    /// The checkout the path is in: the write walks from here without following symlinks.
+    /// The folder the write starts from (the checkout, a configuration level, pi's agent directory, a linked file's
+    /// folder): it walks from here without following symlinks.
     root: PathBuf,
     path: PathBuf,
     content: String,
@@ -530,7 +531,7 @@ enum StopPhase {
 
 struct SessionTask {
     config: Arc<DaemonConfig>,
-    protected: crate::agent::ProtectedRoots,
+    protected: crate::agent::Protected,
     /// The protected write waiting for the user: one per session.
     protected_write: Option<PendingWrite>,
     /// What approved commands run with: sandboxed sessions only.
@@ -843,7 +844,7 @@ impl SessionTask {
         let refuse = |reason: String| WriteOutcome::Refused { reason };
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
         let path = crate::agent::canonical_target(&request.path);
-        let Some(root) = self.protected.protected_root(&path).map(Path::to_path_buf) else {
+        let Some(file) = self.protected.check(&path) else {
             let _ = reply.send(refuse(format!(
                 "{} isn't a protected file of this session; write it with the write or edit tool",
                 request.path.display()
@@ -861,10 +862,10 @@ impl SessionTask {
         self.next_internal += 1;
         let id = format!("piton:write:{}", self.next_internal);
         crate::log!("session {key}: asking about a protected write to {}", path.display());
-        let record = write_dialog(&id, &path, before.as_deref(), &request.content);
+        let record = write_dialog(&id, &path, file.controls, before.as_deref(), &request.content);
         self.protected_write = Some(PendingWrite {
             id,
-            root,
+            root: file.root,
             path,
             content: request.content,
             reply,
@@ -1473,7 +1474,10 @@ impl SessionTask {
                 format!("The sandbox blocked {process}: {summary} (your [sandbox] deny).")
             }
             Err(NoLift::Decided(DeniedBy::FnoxConfig)) => {
-                format!("The sandbox blocked {process}: {summary} (a file fnox loads; never writable).")
+                format!(
+                    "The sandbox blocked {process}: {summary} (a file fnox loads; changed only through a write you \
+                     approve)."
+                )
             }
             Err(NoLift::Decided(DeniedBy::Floor)) => {
                 format!("The sandbox blocked {process}: {summary} (never lifted).")

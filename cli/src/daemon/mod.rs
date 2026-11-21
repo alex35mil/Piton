@@ -420,8 +420,23 @@ impl Daemon {
         prepared: launch::Prepared,
         launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
-        let (mode, mut env, mut policy, proxy, mut commands, warnings) = match prepared {
-            launch::Prepared::Host { env, proxy } => (LaunchMode::Host, env, None, proxy, None, Vec::new()),
+        let config = self.config();
+        let (mode, mut env, mut policy, proxy, mut commands, warnings, agent_dirs) = match prepared {
+            launch::Prepared::Host { env, proxy } => {
+                // pi's agent directories as the sandbox would name them: the host's (the daemon's environment) and
+                // this launch's (its environment).
+                let named = |env: &crate::launch::Env| {
+                    launch::sandbox::agent_dir(
+                        env.get("PI_CODING_AGENT_DIR")
+                            .filter(|v| !v.is_empty())
+                            .map(String::as_str),
+                        &config.paths.home,
+                        &workspace.path,
+                    )
+                };
+                let agent_dirs = [named(&self.base_env), named(&env)];
+                (LaunchMode::Host, env, None, proxy, None, Vec::new(), agent_dirs)
+            }
             launch::Prepared::Sandbox(sandboxed) => {
                 let launch::Sandboxed {
                     env,
@@ -443,6 +458,7 @@ impl Daemon {
                     proxy,
                     Some(commands),
                     warnings,
+                    resolution.agent_dirs,
                 )
             }
         };
@@ -465,8 +481,29 @@ impl Daemon {
         env.insert(crate::agent::TOKEN_ENV.into(), token);
         env.insert(
             crate::agent::SOCKET_ENV.into(),
-            self.config().agent_socket().to_string_lossy().into_owned(),
+            config.agent_socket().to_string_lossy().into_owned(),
         );
+        // What this session's protected files are, the one definition the daemon checks a write against; pi asks
+        // `piton config protected`, which answers from it. Set after the workspace's environment too.
+        let fnox_files: &[std::path::PathBuf] = proxy.as_ref().map_or(&[], |p| p.files.as_slice());
+        let mut excluded = launch::sandbox::never_configuration(&launch_config, &config.paths.home, &self.base_env);
+        excluded.push(config.state_dir());
+        let protected = crate::agent::Protected::new(&crate::agent::ProtectedFacts {
+            source: &launch_config.source,
+            checkout: &launch_config.checkout,
+            levels: &launch_config.levels,
+            agent_dirs: &agent_dirs,
+            fnox_files,
+            global: &config.paths.global,
+            home: &config.paths.home,
+            excluded: &excluded,
+        });
+        match serde_json::to_string(&protected) {
+            Ok(json) => {
+                env.insert(crate::agent::PROTECTED_ENV.into(), json);
+            }
+            Err(e) => crate::log!("session {key}: can't describe its protected files to pi: {e}"),
+        }
         let weak = Arc::downgrade(self);
         let restarting = Arc::downgrade(self);
         let hooks = Hooks {
@@ -488,11 +525,6 @@ impl Daemon {
         let relation = match &workspace.relation {
             Relation::Source => String::new(),
             Relation::Worker { source, .. } => format!(", worker of {}", source.display()),
-        };
-        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let protected = crate::agent::ProtectedRoots {
-            source: canonical(&launch_config.source),
-            checkout: canonical(&launch_config.checkout),
         };
         let spec = LaunchSpec {
             key,

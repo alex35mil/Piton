@@ -547,13 +547,17 @@ describe("protected files", () => {
         const asked: string[] = []
         const isProtected = (file: string) => {
             asked.push(file)
-            return !file.startsWith("/other/")
+            return !file.startsWith("/other/") && !file.startsWith("/etc/")
         }
         for (const output of [
             "sh: .piton/config.toml: Operation not permitted",
             "rm: /u/repo/.pi/settings.json: Operation not permitted",
             "error: unable to unlink old '.piton/config.toml': Operation not permitted",
             "sh: .PITON/config.toml: Operation not permitted",
+            "sh: apps/fnox.local.toml: Operation not permitted",
+            // Configuration outside the checkout: the global tier, pi's agent directory.
+            "sh: /Users/a/.config/piton/config.toml: Operation not permitted",
+            "mkdir: /Users/a/.pi/agent/extensions/x: Operation not permitted",
         ]) {
             assert.equal(deniedProtectedWrite(output, isProtected), true, output)
         }
@@ -570,8 +574,8 @@ describe("protected files", () => {
         ]) {
             assert.equal(deniedProtectedWrite(output, isProtected), false, output)
         }
-        // Only names that could be protected are asked about.
-        assert.deepEqual(asked, ["/other/repo/.piton"])
+        // Only absolute paths and names that could be protected are asked about.
+        assert.deepEqual(asked, ["/etc/hosts", "/other/repo/.piton"])
     })
 
     it("asks on the host even when edits are allowed, and leaves other files alone", async () => {
