@@ -1,7 +1,7 @@
 //! `[sandbox]`: what a sandboxed pi may do beyond Piton's base policy (`launch/sandbox/`). A profile adds a fixed set of
 //! entries; the user's lists add on top, and lists only add across levels.
 //!
-//! A key that loosens a protection (`profile`, `read`, `connect`, the `git` preset, `commands`) is accepted in the
+//! A key that loosens a protection (`profile`, `read`, `connect`, `bind`, the `git` preset, `commands`) is accepted in the
 //! global `config.toml` or a `config.local.toml`, never a project's committed `config.toml`: a repository can't open
 //! the sandbox for whoever clones it.
 
@@ -24,13 +24,17 @@ pub struct SandboxTable {
     /// Writable files: exactly each path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_file: Vec<String>,
-    /// Paths whose built-in credential deny is lifted: readable (and connectable) then; writable only through `write`
-    /// or `write_file`.
+    /// Paths whose built-in credential deny is lifted for reading: readable then; writable only through `write` or
+    /// `write_file`, connectable only through `connect`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read: Vec<String>,
-    /// Sockets, ports, and hosts the sandbox may connect to.
+    /// Sockets, ports, and hosts the sandbox may connect to. A socket entry at or inside a credential folder opens just
+    /// that path, for connecting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connect: Vec<Connect>,
+    /// Paths where processes may create Unix sockets (`bind`): each path and everything below it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bind: Vec<String>,
     /// Named bundles: toolchain caches, and `git`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
@@ -125,6 +129,8 @@ pub struct GrantLists {
     pub read: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connect: Vec<Connect>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bind: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
 }
@@ -455,6 +461,7 @@ impl TableValue for SandboxTable {
                 ("sandbox.profile", self.profile.is_some()),
                 ("sandbox.read", !self.read.is_empty()),
                 ("sandbox.connect", !self.connect.is_empty()),
+                ("sandbox.bind", !self.bind.is_empty()),
                 ("sandbox.commands", !self.commands.is_empty()),
             ],
         );
@@ -471,6 +478,7 @@ impl TableValue for SandboxTable {
             ("write", &self.write),
             ("write_file", &self.write_file),
             ("read", &self.read),
+            ("bind", &self.bind),
             ("deny", &self.deny),
             ("silence", &self.silence),
         ] {
@@ -498,6 +506,7 @@ impl GrantLists {
             ("write", &self.write),
             ("write_file", &self.write_file),
             ("read", &self.read),
+            ("bind", &self.bind),
         ] {
             if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
                 return Err(format!(
@@ -519,6 +528,7 @@ impl Merge for SandboxTable {
         union(&mut self.write_file, n.write_file);
         union(&mut self.read, n.read);
         union(&mut self.connect, n.connect);
+        union(&mut self.bind, n.bind);
         for preset in n.presets {
             match self.presets.iter_mut().find(|p| p.name() == preset.name()) {
                 Some(existing) => existing.merge(&preset),
@@ -548,6 +558,7 @@ pub struct SandboxSettings {
     pub write_file: Vec<Listed<String>>,
     pub read: Vec<Listed<String>>,
     pub connect: Vec<Listed<Connect>>,
+    pub bind: Vec<Listed<String>>,
     pub presets: Vec<Listed<Preset>>,
     pub deny: Vec<Listed<String>>,
     pub silence: Vec<Listed<String>>,
@@ -564,6 +575,7 @@ impl SandboxSettings {
             write_file,
             read,
             connect,
+            bind,
             presets,
             deny,
             silence,
@@ -579,6 +591,7 @@ impl SandboxSettings {
         add_listed(&mut self.write_file, write_file, file);
         add_listed(&mut self.read, read, file);
         add_listed(&mut self.connect, connect, file);
+        add_listed(&mut self.bind, bind, file);
         // A preset is listed once, with the file that decided it: the nearest that sets one of its options, else the
         // first that lists it.
         for preset in presets {
@@ -871,6 +884,22 @@ mod tests {
                 .check()
                 .is_err()
         );
+        // `bind` in a grant: paths, checked like `write`.
+        let bind = table("[[commands]]\nmatch = \"bash(x)\"\ngrant = { bind = [\"$TMPDIR\"] }");
+        assert_eq!(
+            bind.commands[0].grant,
+            Grant::Lists(GrantLists {
+                bind: vec!["$TMPDIR".into()],
+                ..GrantLists::default()
+            })
+        );
+        assert!(bind.check().is_ok());
+        assert!(
+            table("[[commands]]\nmatch = \"bash(x)\"\ngrant = { bind = [\"rel\"] }")
+                .check()
+                .is_err()
+        );
+        assert!(table("bind = [\"rel\"]").check().is_err());
     }
 
     /// Every key that loosens a protection is the user's own: the global file or a `config.local.toml`. Writes,
@@ -886,11 +915,12 @@ mod tests {
             [("sandbox.presets git", Rule::USERS_OWN)]
         );
         assert_eq!(
-            table("profile = \"yolo\"\nread = [\"~/.ssh/config\"]\nconnect = [\"*\"]").ruled_keys(),
+            table("profile = \"yolo\"\nread = [\"~/.ssh/config\"]\nconnect = [\"*\"]\nbind = [\"/\"]").ruled_keys(),
             [
                 ("sandbox.profile", Rule::USERS_OWN),
                 ("sandbox.read", Rule::USERS_OWN),
-                ("sandbox.connect", Rule::USERS_OWN)
+                ("sandbox.connect", Rule::USERS_OWN),
+                ("sandbox.bind", Rule::USERS_OWN)
             ]
         );
         for text in [

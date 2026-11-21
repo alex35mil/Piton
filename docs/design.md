@@ -887,11 +887,16 @@ pi or a `mise.local.toml` from mise. A path no process may touch is a `[sandbox]
 Each sandboxed launch gets an ordered list of rules (`launch/sandbox/`), the last matching one deciding, as Seatbelt
 does; `piton sandbox show` prints them and `piton sandbox why` names the one that decides an access:
 
-1. **Base:** everything is readable, nothing is writable, connects are open (pi has to reach its model provider;
-   fetch, MCP, and installs need it too) until #248 and #228 close them.
+1. **Base:** everything is readable, nothing is writable, and no Unix socket can be connected to or created
+   (`(deny network-outbound (subpath "/"))` and `(deny network-bind (subpath "/"))`, first in the network rules). A
+   path filter on a network operation matches only Unix sockets, so TCP stays open (pi has to reach its model
+   provider; fetch, MCP, and installs need it too) until #228 routes it through a proxy. A running Neovim runs
+   commands sent to its socket, Docker's controls the host, and the SSH and gpg agents sign with the user's keys, so
+   every socket opens only through an entry.
 2. **Grants:** writes to the workspace, `<source>/.piton/.local/`, the temp folders and `/dev`, the `presets`,
-   `write`, and `write_file`; and the `connect` socket allows, placed before every deny so no `connect` entry (yolo's
-   `/` included) reopens a credential, a user deny, or the daemon's sockets. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
+   `write`, and `write_file`; DNS (`/var/run/mDNSResponder`); and the `connect` and `bind` socket allows, placed
+   before every deny so no entry (yolo's `connect = ["/"]`, standard's `bind = ["/"]`) reopens a credential, a user
+   deny, or the daemon's sockets. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
    (the Go build cache is linked straight into host builds), so a writable cache would run sandbox-written code on
    the host. Each preset (`mise`, `rust`, `node`, `swift`) grants one toolchain's caches and state as an informed
    opt-in, documented as such. A preset is its name, or a table with its name and its options (`Preset` parses
@@ -913,9 +918,13 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
 3. **Credentials:** nono's deny groups (`deny_credentials`, keychains, browser data, macOS private data, shell
    history and rc files), vendored verbatim in `nono-deny-groups.json` at the `nono` version; `mise run
    cli:nono-policy-check` reports upstream changes, and a test fails when the crate is bumped without re-vendoring.
-   Read, write, exec, and Unix connect are denied; metadata stays visible. `read` (the user's own files, or a
-   profile) lifts one, readable and connectable then, writable with `write`; a `read` covering `~/Library/Keychains`
-   also reopens the keychain Mach services the library always closes.
+   Read, write, exec, and Unix connect and bind are denied; metadata stays visible. `read` (the user's own files, or a
+   profile) lifts one for reading, writable with `write`, never connectable; a `read` covering `~/Library/Keychains`
+   also reopens the keychain Mach services the library always closes. `standard`'s `read` includes every `*.pub`
+   under `~/.ssh`, listed when the launch is resolved, as exact files (ssh with `IdentitiesOnly yes` matches the
+   agent's key through it). After the `read` allows, each `connect` socket entry at or inside a credential path
+   (as written, or at its real path) is added again, for connecting only: Docker Desktop's socket, gpg-agent,
+   1Password's SSH agent open when named, while a broader entry stays beneath the credential denies.
 4. **pi's agent directory:** read-only, except its runtime state (`sessions/`, `auth.json`, `models-store.json`,
    `mcp-auth.json`, `crashes.json`, `mcp.log` and its rotation, their locks, and MCP's per-server token-refresh
    locks: credentials, catalogs, and logs). Its settings, project trust (`trust.json`), MCP servers, extensions,
@@ -933,7 +942,10 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    launch is refused naming the file. A relative value is the workspace's, as pi resolves it. Limit: whether a file
    is writable is judged by this launch's policy, so a session opened in a parent folder can edit that folder's
    `mise.toml` for later launches in projects below it, as with links planted from another workspace.
-5. **The user's `deny`.**
+5. **The user's `deny`**, then the files fnox loads (below), then each socket a `connect` entry names and every folder
+   entry on its way, fixed in place (a literal write deny, as for fnox's files). The macOS SSH agent's socket is under
+   `/private/tmp`, a write root, so without it a session could move the real socket aside and link Neovim's in its
+   place. What's inside a listed folder (`$TMPDIR`) stays writable, so such an entry reaches any socket moved there.
 6. **Configuration:** every level of both chains, and what their entries and pi's agent directories' entries link to
    (a dotfiles repository), is write-denied; protected files (below) too. Every folder on the way to a level, an agent
    directory, or a link target is fixed in place (a literal write deny on the folder, not what's in it, as for the
@@ -961,8 +973,8 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    wherever it is. Only a debug build moves the socket, and the state folder with it (`socket`, `--socket`,
    `PITON_SOCKET`, for tests): a moved socket closes its whole folder, so a release build ignores the key (the daemon
    log and `piton config check` say so) and refuses the flag.
-   With the network open, Seatbelt would otherwise let a sandboxed agent connect to it and act as a client:
-   approve its own protected writes, start host sessions.
+   Without it, a `connect` entry covering the folder (yolo's `/`) would let a sandboxed agent connect to it and act as
+   a client: approve its own protected writes, start host sessions.
 
 **Symlinks.** Seatbelt compares real paths, so each rule also gets its real-path form (`/var` is `/private/var`). A
 deny follows every symlink: it closes what a link points to as well. A grant follows only links no sandboxed session
@@ -978,7 +990,7 @@ through a symlink inside a git checkout that leads out of it; the user's own lin
 
 `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
 
-Known limits: the network and Unix sockets aren't restricted yet, so anything readable can leave (#248, #228); pi's own credentials are readable, except keys behind the
+Known limits: the network isn't restricted yet, so anything readable can leave, and localhost TCP services are reachable (#228); pi's own credentials are readable, except keys behind the
 credential proxy ("Launching pi"); macOS only.
 
 **Protected files** are everything a later pi loads from the workspace that could widen what an agent may do without
@@ -1065,7 +1077,7 @@ when the sandbox blocks something, the user decides.
 the folders on the way to them), the daemon's state and control socket, the user's own `[sandbox] deny`, the files
 fnox loads, and, while fnox is on, the credential denies (the sandbox could run `fnox get`). The configuration in it
 changes only through a write the user approves ("Protected files"); the rest never. `all` is the launch's policy with everything else open: writes
-below every entry of `/` (nono refuses a write grant on `/` itself) and every connect allowed first, then the launch's
+below every entry of `/` (nono refuses a write grant on `/` itself) and every socket connect and bind allowed first, then the launch's
 rules with every liftable deny left out, so the floor still decides last
 (`launch/sandbox/grant.rs`, where each deny's source and target say whether it's floor, matched exhaustively). Git's
 control files and the credential denies (fnox off) aren't floor: `husky install` and Git's keychain sign-in work once
@@ -1133,7 +1145,8 @@ operation, and target once. The session asks one question at a time (protected w
 questions); a process question waits for the slot, is shown as soon as it frees, and is asked again when its dialog
 leaves unanswered with the run it showed in. It's offered as the `[sandbox]` entry that lifts it
 (`grant::lift_for`): `write` for a folder's create or a path that doesn't exist yet, `write_file` for a file,
-`connect` for a socket. An entry is offered only when the launch's configuration, resolved again with it listed in the
+`connect` for a socket it connects to (one in a credential folder too, which that entry opens for connecting), `bind`
+for a socket it creates. An entry is offered only when the launch's configuration, resolved again with it listed in the
 file its scope saves to, allows the refused access. "Everywhere" saves the folder above the path's first component
 that names the source or checkout as pi and Claude Code name per-folder state (the path with `/` made `-`), unless that
 folder is `/`, home, directly in home, or holds a project. The question names each answer's exact entry: Allow in this

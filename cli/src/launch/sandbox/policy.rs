@@ -52,26 +52,44 @@ impl std::fmt::Display for Provenance {
 }
 
 /// A profile's entries, as written: added before the user's own lists. Profiles only add: `strict` adds nothing, and
-/// each profile holds the one before it. The Tasks that close sockets (#248) and apps (#249) and filter the network
-/// (#228) enforce what `connect` here grants.
+/// each profile holds the one before it. The Tasks that close apps (#249) and filter the network (#228) enforce what
+/// `connect` here grants to hosts.
 pub struct ProfileEntries {
-    pub read: &'static [&'static str],
+    pub read: Vec<ReadEntry>,
     pub connect: Vec<Connect>,
+    pub bind: &'static [&'static str],
     pub presets: Vec<Preset>,
+}
+
+/// A profile's `read` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadEntry {
+    /// A path, as written (`~/...`).
+    Path(&'static str),
+    /// Every SSH public key (`*.pub`) under `~/.ssh`, found when the launch is resolved: with `IdentitiesOnly yes`,
+    /// ssh picks the agent's key through the public half beside the configured identity.
+    SshPublicKeys,
 }
 
 pub fn profile_entries(profile: Profile) -> ProfileEntries {
     let entry = |text: &str| Connect::try_from(text.to_string()).expect("a profile's connect entries are valid");
-    // Git over SSH: the user's SSH agent (keys used, never read), and the host names and keys SSH checks.
+    // Git over SSH: the user's SSH agent (keys used, never read), the host names and keys SSH checks, and the public
+    // halves of the keys. Creating sockets anywhere: test servers, IPC, language servers.
     let standard = ProfileEntries {
-        read: &["~/.ssh/config", "~/.ssh/known_hosts"],
+        read: vec![
+            ReadEntry::Path("~/.ssh/config"),
+            ReadEntry::Path("~/.ssh/known_hosts"),
+            ReadEntry::SshPublicKeys,
+        ],
         connect: vec![entry("$SSH_AUTH_SOCK"), entry("*")],
+        bind: &["/"],
         presets: Vec::new(),
     };
     match profile {
         Profile::Strict => ProfileEntries {
-            read: &[],
+            read: Vec::new(),
             connect: Vec::new(),
+            bind: &[],
             presets: Vec::new(),
         },
         Profile::Standard => standard,

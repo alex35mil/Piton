@@ -1,5 +1,5 @@
 //! `agent.sock`: the socket sandboxed pis reach the daemon on, next to the control socket but separate from it. A
-//! sandbox may connect to this one socket (a `unix_socket` grant in its profile) and never to the control socket.
+//! sandbox may connect to this one socket (a built-in allow in every launch's policy) and never to the control socket.
 //!
 //! One request per connection, one JSON line each way, except `run_command`, which streams the command's output as
 //! lines before its last one. A request names its session by the token the daemon gave that pi
