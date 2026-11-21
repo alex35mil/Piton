@@ -47,13 +47,14 @@ The Task list is each Task's title, Kind, labels, and status, in order. Markers,
 
 Run it after `accept_epic_tasks` and on every Epic resume, before any publication of the Epic:
 
-1. Read the Epic's Priority fresh, and every child issue with complete pagination: GitHub sub-issues with their configured Project Status and Priority, or Linear issues in the Epic's Project.
+1. Read the Epic's Priority fresh, and every child issue with complete pagination: GitHub sub-issues in their listed order, with their configured Project Status and Priority, or Linear issues in the Epic's Project.
 2. Call `plan_epic_task_issues`. It reconciles the whole plan against those facts and keeps no saved progress.
 3. Apply its steps in order:
    - Run each `create`, then call `record_epic_task_issue` with that create as `evidence`. The create sends the design as the issue body, and recording trims the section to its fields and summary.
    - For a `tag`, call `record_epic_task_issue` without evidence. A tag links an existing queued child with the same title, such as one created before an interruption.
-   - Run each board repair, cancellation, and close as returned.
+   - Run each board repair, cancellation, close, and reorder as returned.
 4. Repeat from step 1 until it returns `complete`. On `blocked`, stop and report the Task and reason.
+5. On Linear, then call `order_linear_epic_issues`. On failure, report it and rerun it later; it reads fresh positions.
 
 **Rules:**
 
@@ -63,6 +64,7 @@ Run it after `accept_epic_tasks` and on every Epic resume, before any publicatio
 - A tagged Task that hasn't started must be a child of this Epic in Backlog, Todo, or Canceled. A local Task directory on a queued issue is an error.
 - Processing ensures every queued Task's board state itself, whatever Project automations did first: on the Project, Status Todo (Backlog or empty becomes Todo), and the Epic's Priority when the Task has none. A Priority already set on the Task is kept, and a Canceled issue is left alone. To defer a Task, mark it canceled or replan; a manual Backlog move is reverted.
 - A started Task (In Progress or In Review) marked canceled is set to Canceled and closed. Its branch, PR, and local directory stay as they are. A Done Task can't be canceled.
+- Once every Task is settled, the Epic's children are ordered to the plan: its Tasks first, in section order, then canceled Tasks and other children in their current order. GitHub gets reorder steps; Linear uses step 5.
 - An uncertain create needs no separate recovery: the next run's title lookup finds the issue or confirms it's absent.
 - Creating issues never initializes a Task. Task issues stay unassigned until the Task starts.
 

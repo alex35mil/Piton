@@ -16,6 +16,7 @@ allowed-tools:
     - "restore_epic_plan_source"
     - "plan_epic_task_issues"
     - "record_epic_task_issue"
+    - "order_linear_epic_issues"
     - "render_provider_body"
     - "prepare_tracker_publication"
     - "prepare_tracker_publication_update"

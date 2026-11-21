@@ -1,5 +1,13 @@
 # Upgrading
 
+## Epic Task issue processing orders child issues
+
+`plan_epic_task_issues` now takes `children` as `{ provider, issues }`. GitHub issues are listed in `get_sub_issues` order, each with its numeric `issueId`; Linear issues drop `onBoard` and `closed`. Once every Task is settled, GitHub Epics also get `reorder` steps (`sub_issue_write` `reprioritize`) that put the sub-issues in the plan's Task order. If your permission settings prompt for `sub_issue_write`, expect one prompt per reorder.
+
+Linear Epics get a new `order_linear_epic_issues` tool, run after processing is `complete`. It sets each Project issue's Manual order (`sortOrder`) through Linear's GraphQL API, using the credential environment variable the registered Linear MCP server's `Authorization` header names. That variable must hold a Linear API key or OAuth token valid for the GraphQL API.
+
+No `.piton/.local` migration is needed.
+
 ## Kind label coverage follows the tracker
 
 The `kind` label group's `applies_to` is now fixed by the tracker, and `/project-setup` no longer asks about it. A `kind` group with any other `applies_to` fails validation, which stops every workflow command.

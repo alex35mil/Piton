@@ -17,6 +17,7 @@ const workflowOperations = [
     "projects_get",
     "projects_list",
     "projects_write",
+    "sub_issue_write",
     "create_pull_request",
     "pull_request_read",
     "update_pull_request",

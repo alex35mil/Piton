@@ -13,6 +13,7 @@ allowed-tools:
     - "accept_epic_tasks"
     - "plan_epic_task_issues"
     - "record_epic_task_issue"
+    - "order_linear_epic_issues"
     - "inspect_task_design"
     - "record_task_design"
     - "prepare_artifacts"
