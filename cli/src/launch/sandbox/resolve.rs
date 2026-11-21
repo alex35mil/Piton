@@ -58,6 +58,18 @@ pub struct Facts<'a> {
     pub fnox_files: &'a [PathBuf],
 }
 
+/// Why a configuration level is closed, and how it's changed: what `piton sandbox why` prints.
+const CONFIG_LEVEL_DENY: &str = "a configuration level: changed only through a write the user approves (the edit or \
+                                 write tool)";
+
+/// Why pi's agent directory is closed, and how it's changed.
+const AGENT_DIR_DENY: &str = "pi's agent directory: extensions, settings, and packages pi loads; changed only through \
+                              a write the user approves (the edit or write tool)";
+
+/// Why a folder on the way to a configuration level, an agent directory, or a link target can't be renamed or replaced.
+const FIXED_FOLDER_DENY: &str = "a folder on the way to configuration: renaming or replacing it would move what the \
+                                 user approves (what's in it follows the other rules)";
+
 /// Why Git's hooks and configuration are closed, and how to open them: what `piton sandbox why` prints.
 const GIT_CONTROL_DENY: &str = "Git's hooks and configuration: Git on the host runs what they name; the git preset \
                                 opens them (global config.toml or a config.local.toml)";
@@ -76,6 +88,9 @@ pub struct Resolution {
     pub claude_code: Option<ClaudeCode>,
     /// `[sandbox] silence`, expanded: blocks below these paths are only logged.
     pub silence: Vec<Silenced>,
+    /// pi's agent directories the policy closes, as named: the host's and the launch's (the same folder when the
+    /// launch uses the host's). Protected files in them are changed through a write the user approves.
+    pub agent_dirs: [PathBuf; 2],
 }
 
 /// One `silence` entry, expanded, and the file that listed it.
@@ -209,6 +224,7 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         links: built.links,
         profile,
         claude_code,
+        agent_dirs: [built.host_agent, built.agent],
     })
 }
 
@@ -329,7 +345,7 @@ fn build(
         &[Access::Write],
         subpath(&host_agent),
         Source::Piton {
-            what: "pi's agent directory: extensions, settings, and packages host sessions load".into(),
+            what: AGENT_DIR_DENY.into(),
         },
     );
     if canonical_target(&agent) != canonical_target(&host_agent) {
@@ -339,7 +355,7 @@ fn build(
             &[Access::Write],
             subpath(&agent),
             Source::Piton {
-                what: "pi's agent directory: extensions, settings, and packages pi loads".into(),
+                what: AGENT_DIR_DENY.into(),
             },
         );
     }
@@ -361,36 +377,53 @@ fn build(
     // 4b. What fnox loads: each file, and each folder entry on its path (renamed, removed, or replaced, a folder would
     // let the file be changed under another name). Denies follow links when finished, so the real path's are denied
     // too. What's in those folders stays as the other rules decide.
-    let mut fnox_entries: Vec<PathBuf> = Vec::new();
-    for file in facts.fnox_files {
-        let real = canonical_target(file);
-        for path in [file.as_path(), real.as_path()] {
-            for entry in path.ancestors().filter(|a| a.parent().is_some()) {
-                if !fnox_entries.iter().any(|e| e == entry) {
-                    fnox_entries.push(entry.to_path_buf());
-                }
-            }
-        }
-    }
-    for entry in &fnox_entries {
-        rules.push(Effect::Deny, &[Access::Write], literal(entry), Source::FnoxConfig);
+    for entry in crate::agent::fixed_entries(facts.fnox_files) {
+        rules.push(Effect::Deny, &[Access::Write], literal(&entry), Source::FnoxConfig);
     }
 
-    // 5. Configuration and protected files.
+    // 5. Configuration and protected files: what the user edits by hand, changed only through a write they approve
+    // (`agent/protected.rs`, the same definition).
     let config_level = Source::Piton {
-        what: "a configuration level".into(),
+        what: CONFIG_LEVEL_DENY.into(),
     };
     let own_piton = config.source.join(crate::config::PITON_DIR);
     let own_agents = config.checkout.join(crate::config::AGENTS_DIR);
+    let mut areas: Vec<(PathBuf, Source)> = Vec::new();
     for level in &config.levels {
         // The source's `.piton/` is a protected root (below); the workspace's own `.agents/` is agent-editable.
         if *level == own_piton || *level == own_agents {
             continue;
         }
-        rules.push(Effect::Deny, &[Access::Write], subpath(level), config_level.clone());
+        areas.push((level.clone(), config_level.clone()));
     }
-    for target in link_targets(config, &own_agents) {
-        rules.push(Effect::Deny, &[Access::Write], subpath(&target), config_level.clone());
+    let agent_dirs = [host_agent.clone(), agent.clone()];
+    for (link, target) in crate::agent::link_entries(&config.levels, &agent_dirs, &config.source, &config.checkout) {
+        let what = match agent_dirs.iter().any(|d| link.starts_with(d)) {
+            true => AGENT_DIR_DENY,
+            false => CONFIG_LEVEL_DENY,
+        };
+        areas.push((target, Source::Piton { what: what.into() }));
+    }
+    // Every folder on the way to each of them (and to the agent directories), fixed in place, as for what fnox loads: a
+    // folder moved aside and replaced would let what's inside be changed under the same name. The areas' own denies
+    // come after, so each names why it's closed.
+    let roots: Vec<PathBuf> = agent_dirs
+        .iter()
+        .cloned()
+        .chain(areas.iter().map(|(p, _)| p.clone()))
+        .collect();
+    for entry in crate::agent::fixed_entries(&roots) {
+        rules.push(
+            Effect::Deny,
+            &[Access::Write],
+            literal(&entry),
+            Source::Piton {
+                what: FIXED_FOLDER_DENY.into(),
+            },
+        );
+    }
+    for (path, source) in areas {
+        rules.push(Effect::Deny, &[Access::Write], subpath(&path), source);
     }
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     rules.push(
@@ -945,7 +978,7 @@ fn literal(path: &Path) -> Target {
 /// pi's agent directory from `PI_CODING_AGENT_DIR` (with `~`; a relative one from the workspace, pi's working
 /// folder), else `~/.pi/agent`. As named, with no symlink followed: its rules get their real paths like every other
 /// rule.
-fn agent_dir(value: Option<&str>, home: &Path, workspace: &Path) -> PathBuf {
+pub fn agent_dir(value: Option<&str>, home: &Path, workspace: &Path) -> PathBuf {
     match value {
         Some(value) => env_dir(value, home, workspace),
         None => lexical(&home.join(".pi/agent")),
@@ -1012,6 +1045,18 @@ fn closed_reason(dir: &Path, config: &LaunchConfig, facts: &Facts, denied: &[Pat
     None
 }
 
+/// What's never configuration, for any launch in `config`'s workspace: the credential denies and the user's `[sandbox]
+/// deny`, expanded (an entry naming an unset variable is left out: the sandbox refuses that launch anyway). No protected
+/// area outside the checkout reaches them (`agent/protected.rs`).
+pub fn never_configuration(config: &LaunchConfig, home: &Path, base_env: &Env) -> Vec<PathBuf> {
+    policy::nono_denies()
+        .into_iter()
+        .map(|(path, _)| path)
+        .chain(config.sandbox.deny.iter().map(|l| l.value.clone()))
+        .filter_map(|path| expand_grant(&path, home, base_env).ok())
+        .collect()
+}
+
 /// A grant as a literal absolute path: `~` and `$HOME` from the user database, other `$VAR`s (a whole leading
 /// segment, `$NAME` or `${NAME}`) from the daemon's base environment.
 pub(super) fn expand_grant(grant: &str, home: &Path, env: &Env) -> Result<PathBuf, SandboxError> {
@@ -1040,28 +1085,6 @@ pub(super) fn expand_grant(grant: &str, home: &Path, env: &Env) -> Result<PathBu
         });
     }
     Ok(PathBuf::from(expanded))
-}
-
-/// The canonical targets of configuration entries that are symlinks (a global tier linked into a dotfiles
-/// repository): writing through the link writes the target, so the target is closed too. The workspace's own
-/// `.agents/` is agent-editable.
-fn link_targets(config: &LaunchConfig, own_agents: &Path) -> Vec<PathBuf> {
-    let mut targets = Vec::new();
-    for level in config.levels.iter().filter(|level| *level != own_agents) {
-        let Ok(entries) = std::fs::read_dir(level) else {
-            continue;
-        };
-        for path in entries.flatten().map(|entry| entry.path()) {
-            let is_link = path.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink());
-            if is_link
-                && let Ok(target) = std::fs::canonicalize(&path)
-                && !targets.contains(&target)
-            {
-                targets.push(target);
-            }
-        }
-    }
-    targets
 }
 
 #[cfg(test)]
@@ -1518,6 +1541,57 @@ mod tests {
         std::os::unix::fs::symlink(dotfiles.join("config.toml"), &global).unwrap();
         let p = policy_with(&f, &Env::new(), &Env::new()).unwrap();
         assert!(!allowed(&p, &dotfiles.join("config.toml"), Access::Write));
+    }
+
+    /// A dotfiles repository is the workspace, and pi's agent directory and the global tier link into it: the link
+    /// targets are closed, and every folder on the way to them (and to the levels and agent directory) can't be renamed
+    /// or replaced, so a folder moved aside and rebuilt can't change them under the same name. What's beside them stays
+    /// writable; pi's runtime state too.
+    #[test]
+    fn agent_directory_links_are_closed_with_their_folders() {
+        let f = fixture("", "");
+        let agent = f.home.join(".pi/agent");
+        let pi = f.repo.join("home/pi");
+        mkdir(&pi.join("extensions"));
+        std::fs::write(pi.join("settings.json"), "{}").unwrap();
+        link(&pi.join("settings.json"), &agent.join("settings.json"));
+        link(&pi.join("extensions"), &agent.join("extensions"));
+        let piton = f.repo.join("home/piton");
+        mkdir(&piton);
+        std::fs::write(piton.join("config.toml"), "").unwrap();
+        let global = f.home.join(".config/piton/config.toml");
+        std::fs::remove_file(&global).unwrap();
+        link(&piton.join("config.toml"), &global);
+        let p = policy(&f);
+        let denied = |path: &Path| p.decide(path, Access::Write);
+        for closed in [
+            pi.join("settings.json"),
+            pi.join("extensions/evil.ts"),
+            piton.join("config.toml"),
+        ] {
+            assert!(!denied(&closed).allowed, "{}", closed.display());
+        }
+        for folder in [
+            pi.clone(),
+            f.repo.join("home"),
+            piton.clone(),
+            agent.clone(),
+            f.home.join(".pi"),
+        ] {
+            let decision = denied(&folder);
+            assert!(!decision.allowed, "{} can't be renamed", folder.display());
+        }
+        assert_eq!(
+            denied(&pi).source,
+            Source::Piton {
+                what: FIXED_FOLDER_DENY.into()
+            }
+        );
+        assert!(denied(&pi.join("keybindings.json")).allowed, "a sibling");
+        assert!(denied(&f.repo.join("home/README.md")).allowed, "beside the folders");
+        assert!(denied(&f.repo.join("src/x")).allowed, "the rest of the workspace");
+        assert!(denied(&agent.join("sessions/s.jsonl")).allowed, "pi's runtime state");
+        assert!(allowed(&p, &pi.join("settings.json"), Access::Read));
     }
 
     fn link(target: &Path, at: &Path) {

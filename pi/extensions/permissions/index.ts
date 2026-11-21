@@ -349,16 +349,18 @@ export default function (pi: ExtensionAPI) {
  * A shell output that reports a denied write to one of this workspace's protected files. The workspace's protected
  * files are always readable, so "Operation not permitted" on one of them is a denied write; the same message about
  * another checkout's folder is a read the sandbox doesn't grant, and gets no hint. `isProtected` asks the resolver
- * (`piton config protected`, cached) about a path from the message; names that can't be protected aren't asked.
+ * (`piton config protected`, cached) about a path from the message: every absolute path (configuration outside the
+ * checkout, such as `~/.config/piton/config.toml` or pi's agent directory, is protected too) and relative names that
+ * could be the checkout's protected files; other words aren't asked.
  */
 export function deniedProtectedWrite(output: string, isProtected: (file: string) => boolean): boolean {
-    const name = /(^|\/)(\.piton(?!\/\.local)|\.pi)(\/|$)/i
+    const name = /(^|\/)(\.piton(?!\/\.local)|\.pi)(\/|$)|(^|\/)\.?fnox(\.[^/]+)?\.toml$/i
     return output.split("\n").some((line) => {
         if (!/Operation not permitted|unable to unlink/.test(line)) return false
         // The paths a message names: quoted ('x'), or between `: ` separators (`rm: x: Operation not permitted`).
         const quoted = [...line.matchAll(/'([^']+)'/g)].map((match) => match[1]!)
         const fields = line.split(": ").map((field) => field.trim())
-        return [...quoted, ...fields].some((file) => name.test(file) && isProtected(file))
+        return [...quoted, ...fields].some((file) => (file.startsWith("/") || name.test(file)) && isProtected(file))
     })
 }
 

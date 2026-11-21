@@ -179,6 +179,29 @@ pub const AGENT_DIR_WRITES: &[AgentDirWrite] = &[
     AgentDirWrite::Lock("trust.json"),
 ];
 
+/// Whether `relative` (a path inside pi's agent directory, relative to it) is runtime state pi writes itself
+/// ([`AGENT_DIR_WRITES`]), compared without case as the sandbox compares. Everything else there is configuration or
+/// code: a protected file (`agent/protected.rs`).
+pub fn agent_dir_runtime(relative: &std::path::Path) -> bool {
+    let mut parts = relative.components().filter_map(|c| match c {
+        std::path::Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+        std::path::Component::Prefix(_)
+        | std::path::Component::RootDir
+        | std::path::Component::CurDir
+        | std::path::Component::ParentDir => None,
+    });
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let nested = parts.next().is_some();
+    AGENT_DIR_WRITES.iter().any(|write| match write {
+        AgentDirWrite::Folder(name) => first == *name,
+        AgentDirWrite::File(name) => first == *name && !nested,
+        AgentDirWrite::Lock(name) => first == format!("{name}.lock"),
+        AgentDirWrite::NamePrefix(prefix) => first.starts_with(prefix),
+    })
+}
+
 /// What a preset grants, as written (`~/...`): added to the `[sandbox]` lists of the same names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PresetGrants {

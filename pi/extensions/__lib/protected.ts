@@ -1,7 +1,10 @@
 /**
- * Protected files: what an agent may not change without the user's approval (the source's `.piton/` except `.local/`,
- * and `.pi/` at any depth). piton's binary is the one definition (`piton config protected`), shared with the sandbox
- * rules and the daemon's check.
+ * Protected files: every configuration file the user edits by hand, which an agent may not change without the user's
+ * approval. In the checkout: the source's `.piton/` except `.local/`, and `.pi/` and fnox's config files at any depth.
+ * Outside it: Piton's configuration levels (the global tier, `.piton/` and `.agents/` in parent folders), pi's agent
+ * directory (except the runtime state pi writes itself), the files fnox loads, and what their symlinks point to.
+ * piton's binary is the one definition (`piton config protected`, which answers from the session's `PITON_PROTECTED`),
+ * shared with the sandbox rules and the daemon's check.
  *
  * Every pi the daemon launches, sandboxed or on the host, writes them through the daemon (`agent.sock`, with the
  * session's token), which asks the user in every client and writes on approval; in a sandbox the OS also denies every

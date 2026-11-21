@@ -181,18 +181,79 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 Ok(workspace) => workspace,
                 Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
             };
-            let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            let roots = crate::agent::ProtectedRoots {
-                source: canonical(workspace.source()),
-                checkout: canonical(&workspace.checkout),
+            let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+            let protected = match protected_of(
+                &workspace,
+                &Paths::current(),
+                env(crate::agent::PROTECTED_ENV).as_deref(),
+                env("PI_CODING_AGENT_DIR").as_deref(),
+            ) {
+                Ok(protected) => protected,
+                Err(message) => return print_error(ErrorBody::Invalid { message }),
             };
             let target = crate::agent::canonical_target(&workspace.path.join(path));
-            let protected = roots.protected_root(&target).is_some();
+            let protected = protected.check(&target).is_some();
             let output = serde_json::json!({"format": RESOLVE_FORMAT, "path": target, "protected": protected});
             println!("{output}");
             ExitCode::SUCCESS
         }
     }
+}
+
+/// The protected files `piton config protected` answers from: the session's (`PITON_PROTECTED`, set by the daemon), or
+/// outside one, the workspace's.
+fn protected_of(
+    workspace: &crate::project::Workspace,
+    paths: &Paths,
+    session: Option<&str>,
+    agent_dir: Option<&str>,
+) -> Result<crate::agent::Protected, String> {
+    match session {
+        Some(json) => serde_json::from_str(json).map_err(|e| {
+            format!(
+                "{} isn't a description of protected files: {e}",
+                crate::agent::PROTECTED_ENV
+            )
+        }),
+        None => workspace_protected(workspace, paths, agent_dir).map_err(|e| e.to_string()),
+    }
+}
+
+/// The protected files of a pi outside a session the daemon launched: the checkout's, the workspace's configuration
+/// levels, and pi's agent directory (`PI_CODING_AGENT_DIR`, else `~/.pi/agent`). No fnox files: only a launch knows
+/// which fnox uses. The credential denies and the daemon's state are left out, as in a session; the user's `[sandbox]
+/// deny` isn't read (a broken file mustn't stop the answer), so a link to a path only it closes still routes to the
+/// review.
+fn workspace_protected(
+    workspace: &crate::project::Workspace,
+    paths: &Paths,
+    agent_dir: Option<&str>,
+) -> Result<crate::agent::Protected, ConfigError> {
+    let levels = crate::config::launch_levels(workspace, paths)?;
+    let agent = crate::launch::sandbox::agent_dir(agent_dir, &paths.home, &workspace.path);
+    let no_lists = crate::config::LaunchConfig {
+        sandbox: Default::default(),
+        workers: Default::default(),
+        source: workspace.source().to_path_buf(),
+        checkout: workspace.checkout.clone(),
+        levels: levels.clone(),
+    };
+    let mut excluded = crate::launch::sandbox::never_configuration(&no_lists, &paths.home, &Default::default());
+    excluded.extend(
+        crate::config::default_socket(&paths.home)
+            .parent()
+            .map(Path::to_path_buf),
+    );
+    Ok(crate::agent::Protected::new(&crate::agent::ProtectedFacts {
+        source: workspace.source(),
+        checkout: &workspace.checkout,
+        levels: &levels,
+        agent_dirs: &[agent],
+        fnox_files: &[],
+        global: &paths.global,
+        home: &paths.home,
+        excluded: &excluded,
+    }))
 }
 
 fn runtime_from_env() -> Result<Runtime, String> {
@@ -412,5 +473,58 @@ mod tests {
         .unwrap();
         assert_eq!(error["error"]["kind"], "invalid");
         assert_eq!(error["error"]["message"], "m");
+    }
+
+    /// `piton config protected` answers from the session's description when the daemon set it (so pi routes a fnox
+    /// file it alone knows), and from the workspace outside a session: its levels (even with a broken file in one) and
+    /// pi's agent directory.
+    #[test]
+    fn protected_answers_from_the_session_or_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = home.join("repo");
+        for d in [home.join(".config/piton"), repo.join(".piton"), home.join("agent")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(home.join(".config/piton/config.toml"), "not toml [").unwrap();
+        let paths = Paths {
+            home: home.clone(),
+            global: home.join(".config/piton"),
+        };
+        let workspace = Workspace {
+            path: repo.clone(),
+            checkout: repo.clone(),
+            relation: Relation::Source,
+        };
+        let check = |session: Option<&str>, agent: Option<&str>, path: &Path| {
+            protected_of(&workspace, &paths, session, agent)
+                .unwrap()
+                .check(path)
+                .is_some()
+        };
+        let global = home.join(".config/piton/config.toml");
+        assert!(check(None, None, &global));
+        assert!(check(None, None, &home.join(".pi/agent/settings.json")));
+        assert!(!check(None, None, &home.join("agent/settings.json")));
+        assert!(check(None, Some("~/agent"), &home.join("agent/settings.json")));
+        assert!(!check(None, None, &home.join(".pi/agent/auth.json")));
+        assert!(check(None, None, &repo.join(".piton/config.toml")));
+        assert!(!check(None, None, &repo.join("src/main.rs")));
+
+        let fnox = home.join(".config/fnox/config.toml");
+        let session = crate::agent::Protected::new(&crate::agent::ProtectedFacts {
+            source: &repo,
+            checkout: &repo,
+            levels: &[],
+            agent_dirs: &[],
+            fnox_files: std::slice::from_ref(&fnox),
+            global: &home.join(".config/piton"),
+            home: &home,
+            excluded: &[],
+        });
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(check(Some(&json), None, &fnox));
+        assert!(!check(Some(&json), None, &global), "the session's description decides");
+        assert!(protected_of(&workspace, &paths, Some("{"), None).is_err());
     }
 }

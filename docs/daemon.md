@@ -212,7 +212,8 @@ placeholder = "sk-ant-oat01-placeholder"   # claude checks the token's shape
   `.pi/`. Every other file fnox loads for a launch (`fnox config-files`: the global config, imports) is read-only in
   that launch's sandbox, at its real path through any symlink, and the folders on its path can't be renamed or
   replaced. A global config linked into a dotfiles repository is closed in sessions in that repository, which still
-  start. No approval opens these files.
+  start. An agent proposes changes to these files too (written at the real path once you approve), but no command
+  approval opens them, and their folders are never writable.
 - **What happens when something's wrong.** fnox enabled but not installed: no session starts. A broken fnox config:
   the launch is refused with fnox's error. A secret fnox can't read (1Password unreachable, a wrong token, a missing
   item): the session starts, and requests that need that secret are refused. The apps show a warning after the
@@ -274,12 +275,22 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
   (sessions, logins, model catalogs, MCP auth and logs, and the locks pi takes even to read its settings and project
   trust). Not user caches: host tools reuse what's in them without checking, so a writable cache would let a
   sandboxed agent run code on the host. Not pi's settings, project trust, MCP servers, extensions, managed
-  binaries, or packages, which host sessions load: changing a setting, trusting a project, adding an MCP server, or
-  installing or updating a pi package from a sandboxed session fails, so do those in a host session. A session folder
-  moved out of the agent directory (`sessionDir`, `PI_CODING_AGENT_SESSION_DIR`) needs `write`.
-- **Always closed:** protected files (`.piton/`, `.pi/`, except the lock pi takes to read `.pi/settings.json`) and
-  every configuration level, the daemon's state folder (except `logs/` for reading and `agent.sock`), and the
-  daemon's control socket.
+  binaries, or packages, which host sessions load: pi changing a setting, trusting a project, adding an MCP server,
+  or installing or updating a pi package from a sandboxed session fails, so do those in a host session. The agent
+  can propose a change to those files with its edit or write tool (below). A session folder moved out of the agent
+  directory (`sessionDir`, `PI_CODING_AGENT_SESSION_DIR`) needs `write`.
+- **Always closed:** protected files (`.piton/`, `.pi/`, except the lock pi takes to read `.pi/settings.json`), every
+  configuration level, pi's agent directory except its runtime state, the files fnox loads, what their symlinks point
+  to (a dotfiles repository), and the folders on the way to each, so none can be moved aside and replaced. Also the
+  daemon's state folder (except `logs/` for reading and `agent.sock`), and the daemon's control socket.
+- **Proposed changes:** every configuration file you edit by hand (the protected files above, outside the checkout
+  too: the global tier, `.piton/` and `.agents/` in parent folders, pi's agent directory, fnox's files, and a linked
+  file at its real path) can be changed by the agent with its `edit` or `write` tool, which sends the change to the
+  daemon. You get the diff in pi.nvim or the apps, and the daemon writes it only if you approve. The prompt says when
+  the file can loosen the sandbox (the global `config.toml`, a `config.local.toml`), runs code in every session (pi's
+  extensions, packages, settings, and trust; MCP server lists; `config.host.toml`), or decides where secrets go
+  (fnox). No command approval opens these files, and the daemon's state, its control socket, and credentials are
+  never proposable. A level folder that doesn't exist yet isn't proposable: create it first.
 - **Git:** hooks and configuration (`.git/hooks/`, `.git/config`, `.git/config.worktree`, `.git/commondir`, in any
   repository of the checkout), and replacing the checkout's `.git`, since Git on the host runs what they name. Commits,
   branches, fetches, pushes, worktrees, and updating initialized submodules work. What writes a repository's

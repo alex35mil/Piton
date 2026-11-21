@@ -70,6 +70,13 @@ expect_history=$(needs "$HOME/.zsh_history" denied)
 expect_database=$(needs "$state/piton.db" denied)
 expect_control=$(needs "$state/piton.sock" denied)
 expect_agent=$(needs "$state/agent.sock" ok)
+# pi's settings linked into a dotfiles repository: the real file is closed too (a session there proposes changes).
+settings_target=$(test -L "$agent_dir/settings.json" && python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$agent_dir/settings.json" || true)
+expect_settings_target=$(needs "${settings_target:-/nonexistent}" denied)
+# And the folder holding it can't be moved aside and replaced. The attempt moves it to a name beside it and back, so
+# if the sandbox let it through nothing is lost; the host restores it below if the move back didn't happen.
+settings_folder=$(test -n "$settings_target" && dirname "$settings_target" || true)
+settings_moved="${settings_folder}.$probe"
 
 # Each attempt: expectation (ok | denied), a description, and a shell command run in the sandbox from the checkout.
 cat > "$scratch/attempts.sh" <<'EOF'
@@ -145,6 +152,8 @@ attempt denied "write the home folder"                  "touch $HOME/$PROBE"
 attempt denied "write a user cache"                     "mkdir $HOME/Library/Caches/$PROBE"
 attempt denied "write pi's extensions"                  "mkdir $AGENT_DIR/extensions/$PROBE"
 attempt denied "write pi's settings"                    ": >> $AGENT_DIR/settings.json"
+attempt "$EXPECT_SETTINGS_TARGET" "write pi's settings at their linked real path" ": >> '$SETTINGS_TARGET'"
+attempt "$EXPECT_SETTINGS_TARGET" "rename the folder holding pi's linked settings" "mv '$SETTINGS_FOLDER' '$SETTINGS_MOVED' && mv '$SETTINGS_MOVED' '$SETTINGS_FOLDER'"
 attempt ok     "write pi's sessions"                    "mkdir -p $AGENT_DIR/sessions/$PROBE && rmdir $AGENT_DIR/sessions/$PROBE"
 attempt denied "write pi's project trust"               ": >> $AGENT_DIR/trust.json"
 attempt denied "write pi's MCP servers"                 ": >> $AGENT_DIR/mcp.json"
@@ -173,10 +182,16 @@ status=0
 EXPECT_SSH_KEY="$expect_ssh_key" SSH_KEY="$ssh_key" EXPECT_KEYCHAIN="$expect_keychain" KEYCHAIN="$keychain" \
 EXPECT_HISTORY="$expect_history" EXPECT_DATABASE="$expect_database" EXPECT_CONTROL="$expect_control" \
 EXPECT_AGENT="$expect_agent" CONNECT="$connect" \
+EXPECT_SETTINGS_TARGET="$expect_settings_target" SETTINGS_TARGET="$settings_target" \
+SETTINGS_FOLDER="$settings_folder" SETTINGS_MOVED="$settings_moved" \
 OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" STATE_OTHER_CASE="$state_other_case" CONFIG_HOME="$config_home" PROBE="$probe" ERR="$scratch/err" \
     PITON_SANDBOX_POLICY="$policy" "$piton" sandbox-exec -- sh "$scratch/attempts.sh" </dev/null \
     >"$scratch/out" 2>&1 || status=$?
 cat "$scratch/out"
+# A move the sandbox let through and didn't undo: put the folder back.
+if [ -n "$settings_folder" ] && [ -e "$settings_moved" ] && [ ! -e "$settings_folder" ]; then
+    mv "$settings_moved" "$settings_folder"
+fi
 if [ "$status" -ne 0 ]; then
     echo "FAIL  the sandbox didn't start (piton sandbox-exec exited $status); nothing was tested" >&2
     exit 1

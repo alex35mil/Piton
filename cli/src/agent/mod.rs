@@ -19,7 +19,10 @@ mod write;
 pub use self::{
     command::{Matched, analyze, grant_for},
     git::GitControl,
-    protected::{ProtectedRoots, canonical_target, lexical},
+    protected::{
+        Controls, PROTECTED_ENV, Protected, ProtectedFacts, ProtectedRoots, canonical_target, fixed_entries, lexical,
+        link_entries,
+    },
     run::{Approved, PiShell, RunDecision, RunEnd, RunEvent, RunRequest, RunSpec, run},
     socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, random_hex, serve},
     write::{

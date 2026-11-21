@@ -122,7 +122,9 @@ fn explain(source: &Source) -> String {
         ),
         Source::Piton { what } => format!("Piton: {what}"),
         Source::FnoxConfig => {
-            "a file fnox loads, or a folder on its path: which secrets go where (never writable)".into()
+            "a file fnox loads, or a folder on its path: which secrets go where; the file changes only \
+                               through a write the user approves (the edit or write tool), its folders never"
+                .into()
         }
         Source::AgentDir => "pi's runtime state in its agent directory".into(),
         Source::Preset { preset, from } => format!("the {preset} preset, {from}"),

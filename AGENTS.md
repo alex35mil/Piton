@@ -33,7 +33,8 @@ Piton: the user's setup for running pi coding agents on macOS.
 - `apps/Piton.xcodeproj` and `apps/*/Info.plist` are generated from `apps/project.yml` by XcodeGen. Never edit or
   commit them; Info.plist keys go in the target's `info.properties`.
 - Piton must not change how pi works: the daemon runs `pi --mode rpc` as the user would and never touches pi's
-  settings, agent directory, session files, or extensions.
+  settings, agent directory, session files, or extensions, except to write a change to a protected file (pi's agent
+  directory included) that the user approved as a diff.
 - Domain modeling: sum types matched exhaustively, no wildcard arms over domain enums (enforced by clippy lints in
   `cli/Cargo.toml`), typed errors.
 - Installing or launching (`cli:install`, running an app) and device-log collection (`logs:install`,
