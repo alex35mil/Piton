@@ -56,6 +56,8 @@ pub struct Commands {
 pub struct PendingQuestion {
     pub id: String,
     pub stage: Stage,
+    /// The first dialog's record, shown again after the option that decides nothing.
+    pub dialog: Value,
     /// The request, as the agent sent it.
     pub request: RunRequest,
     /// The tag the call's sandbox gets.
@@ -79,7 +81,7 @@ pub struct ProcessQuestion {
     pub id: String,
     pub process: String,
     pub refusal: String,
-    pub lift: crate::launch::sandbox::grant::Lift,
+    pub offer: crate::launch::sandbox::grant::Offer,
 }
 
 impl ProcessBlocks {
@@ -98,7 +100,8 @@ impl ProcessBlocks {
         self.waiting.push_back(question);
     }
 
-    /// The question showing lost its dialog without an answer (the run it showed in ended): it's asked again, first.
+    /// The question showing is shown again, first: its dialog left unanswered (the run it showed in ended), or the user
+    /// chose the option that decides nothing.
     pub fn requeue_unanswered(&mut self) {
         if let Some(question) = self.asking.take() {
             self.waiting.push_front(question);
@@ -121,12 +124,26 @@ impl Commands {
         scope: PersistScope,
         lift: &crate::launch::sandbox::grant::Lift,
     ) -> Result<PathBuf, String> {
+        let (key, value) = lift.entry();
+        self.append(scope, key, &value)
+    }
+
+    /// Saves `path` in the chosen file's `[sandbox] silence`: blocks below it are only logged from then on.
+    pub fn persist_silence(&self, scope: PersistScope, path: &Path) -> Result<PathBuf, String> {
+        self.append(scope, "silence", &path.display().to_string())
+    }
+
+    fn append(&self, scope: PersistScope, key: &str, value: &str) -> Result<PathBuf, String> {
         let file = self.file(scope);
         let path = file.path(&self.paths).map_err(|e| e.to_string())?;
-        let (key, value) = lift.entry();
-        file.append_to_list(&self.paths, &format!("sandbox.{key}"), &value)
+        file.append_to_list(&self.paths, &format!("sandbox.{key}"), value)
             .map_err(|e| e.to_string())?;
         Ok(path)
+    }
+
+    /// The file `path` would be checked as listed in when saved in `scope`: what an offer's entry is resolved with.
+    pub fn scope_file(&self, scope: PersistScope) -> Option<PathBuf> {
+        self.file(scope).path(&self.paths).ok()
     }
 
     fn file(&self, scope: PersistScope) -> ConfigFile {
@@ -470,6 +487,8 @@ impl Commands {
 
 /// What the user's answer to a dialog leads to.
 pub enum Next {
+    /// No answer yet (the first option, which decides nothing): show the question again.
+    AskAgain,
     /// Ask the pattern dialog.
     AskPattern(PersistScope),
     /// Run at `all` (after persisting, when `persist` says so).
@@ -483,6 +502,7 @@ pub enum Next {
 pub fn answer(stage: Stage, command: &str, answer: &Map<String, Value>) -> Next {
     match stage {
         Stage::Choice => match block::read_answer(answer) {
+            Answer::AskAgain => Next::AskAgain,
             Answer::Once => Next::Run { persist: None },
             Answer::Deny => Next::Deny,
             Answer::Persist(scope) => match CommandPattern::new(command) {
@@ -536,8 +556,18 @@ mod tests {
             policies: CommandPolicies {
                 launch: policy(),
                 all,
-                credentials: crate::launch::sandbox::grant::Credentials::Liftable,
                 entries: grants.iter().map(|g| (g.clone(), Ok(policy()))).collect(),
+                resolver: crate::launch::sandbox::grant::Resolver::new(
+                    crate::config::LaunchConfig {
+                        sandbox: Default::default(),
+                        workers: Default::default(),
+                        source: dir.to_path_buf(),
+                        checkout: dir.to_path_buf(),
+                        levels: Vec::new(),
+                    },
+                    |_| Ok(policy()),
+                ),
+                silence: Vec::new(),
             },
             env: [("FROM".to_string(), "launch".to_string())].into_iter().collect(),
             shell: PiShell {
@@ -716,7 +746,10 @@ mod tests {
             id: id.into(),
             process: "node".into(),
             refusal: "file-write-create /h/x".into(),
-            lift: crate::launch::sandbox::grant::Lift::WriteFile("/h/x".into()),
+            offer: crate::launch::sandbox::grant::Offer {
+                project: crate::launch::sandbox::grant::Lift::WriteFile("/h/x".into()),
+                everywhere: crate::launch::sandbox::grant::Lift::WriteFile("/h/x".into()),
+            },
         };
         blocks.queue(question("a"));
         blocks.queue(question("b"));
@@ -751,14 +784,16 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert!(matches!(a(Stage::Choice, &labels[0]), Next::Run { persist: None }));
-        assert!(matches!(a(Stage::Choice, &labels[1]), Next::Deny));
+        // The first option decides nothing: the question is asked again.
+        assert!(matches!(a(Stage::Choice, &labels[0]), Next::AskAgain));
+        assert!(matches!(a(Stage::Choice, &labels[1]), Next::Run { persist: None }));
+        assert!(matches!(a(Stage::Choice, &labels[2]), Next::Deny));
         assert!(matches!(
-            a(Stage::Choice, &labels[2]),
+            a(Stage::Choice, &labels[3]),
             Next::Run { persist: Some((PersistScope::Project, ref p)) } if p.pattern() == "husky install"
         ));
         assert!(matches!(
-            a(Stage::Choice, &labels[5]),
+            a(Stage::Choice, &labels[6]),
             Next::AskPattern(PersistScope::Global)
         ));
         assert!(matches!(

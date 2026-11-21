@@ -54,7 +54,13 @@ pub struct Facts<'a> {
     /// The temp and device folders every launch may write: [`policy::WRITE_ROOTS`] (tests pass none, since their
     /// folders are temp folders).
     pub write_roots: &'a [&'a str],
+    /// The files fnox loads for this launch (`fnox config-files`), when its credential proxy applies: closed to writes.
+    pub fnox_files: &'a [PathBuf],
 }
+
+/// Why Git's hooks and configuration are closed, and how to open them: what `piton sandbox why` prints.
+const GIT_CONTROL_DENY: &str = "Git's hooks and configuration: Git on the host runs what they name; the git preset \
+                                opens them (global config.toml or a config.local.toml)";
 
 /// The most symlinks one path's resolution follows, as the kernel's limit; past it, the rest is kept as written.
 const MAX_LINKS: usize = 40;
@@ -68,6 +74,20 @@ pub struct Resolution {
     pub profile: ProfileChoice,
     /// The `pi-claude-code` preset, when it's on: what became of its config folder, and how `claude` signs in.
     pub claude_code: Option<ClaudeCode>,
+    /// `[sandbox] silence`, expanded: blocks below these paths are only logged.
+    pub silence: Vec<Silenced>,
+}
+
+/// One `silence` entry, expanded, and the file that listed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Silenced {
+    pub path: PathBuf,
+    pub file: PathBuf,
+}
+
+/// The entry that silences `path` (canonical, absolute), if one does.
+pub fn silenced<'a>(silence: &'a [Silenced], path: &Path) -> Option<&'a Silenced> {
+    silence.iter().find(|s| path.starts_with(&s.path))
 }
 
 /// The `pi-claude-code` preset of a launch.
@@ -172,7 +192,19 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         name: config.sandbox.profile(),
         set_in: config.sandbox.profile.as_ref().map(|p| p.file.clone()),
     };
+    let silence = config
+        .sandbox
+        .silence
+        .iter()
+        .map(|l| {
+            Ok(Silenced {
+                path: canonical_target(&expand_grant(&l.value, facts.home, facts.base_env)?),
+                file: l.file.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, SandboxError>>()?;
     Ok(Resolution {
+        silence,
         policy: built.policy,
         links: built.links,
         profile,
@@ -326,6 +358,24 @@ fn build(
         rules.push(Effect::Deny, &all, subpath(path), source.clone());
     }
 
+    // 4b. What fnox loads: each file, and each folder entry on its path (renamed, removed, or replaced, a folder would
+    // let the file be changed under another name). Denies follow links when finished, so the real path's are denied
+    // too. What's in those folders stays as the other rules decide.
+    let mut fnox_entries: Vec<PathBuf> = Vec::new();
+    for file in facts.fnox_files {
+        let real = canonical_target(file);
+        for path in [file.as_path(), real.as_path()] {
+            for entry in path.ancestors().filter(|a| a.parent().is_some()) {
+                if !fnox_entries.iter().any(|e| e == entry) {
+                    fnox_entries.push(entry.to_path_buf());
+                }
+            }
+        }
+    }
+    for entry in &fnox_entries {
+        rules.push(Effect::Deny, &[Access::Write], literal(entry), Source::FnoxConfig);
+    }
+
     // 5. Configuration and protected files.
     let config_level = Source::Piton {
         what: "a configuration level".into(),
@@ -363,7 +413,7 @@ fn build(
                 control: GitControl::of(&[&canonical(&config.checkout), &canonical(&config.source)]),
             },
             Source::Piton {
-                what: "Git's hooks and configuration: Git on the host runs what they name".into(),
+                what: GIT_CONTROL_DENY.into(),
             },
         );
     }
@@ -1074,11 +1124,22 @@ mod tests {
     }
 
     fn resolve_env(f: &Fixture, workspace: &Path, base: &Env, launch: &SandboxEnv) -> Result<Resolution, SandboxError> {
+        resolve_full(f, &launch_config(f), workspace, base, launch, &[])
+    }
+
+    fn resolve_full(
+        f: &Fixture,
+        config: &LaunchConfig,
+        workspace: &Path,
+        base: &Env,
+        launch: &SandboxEnv,
+        fnox_files: &[PathBuf],
+    ) -> Result<Resolution, SandboxError> {
         let control = f.state.join("piton.sock");
         let agent = f.state.join("agent.sock");
         let logs = f.state.join("logs");
         resolve(
-            &launch_config(f),
+            config,
             &Facts {
                 home: &f.home,
                 base_env: base,
@@ -1089,6 +1150,7 @@ mod tests {
                 agent_socket: &agent,
                 logs: &logs,
                 write_roots: &[],
+                fnox_files,
             },
         )
     }
@@ -1320,6 +1382,7 @@ mod tests {
             | Source::BuiltIn { .. }
             | Source::NonoGroup { .. }
             | Source::Piton { .. }
+            | Source::FnoxConfig
             | Source::AgentDir => false,
         }
     }
@@ -1601,11 +1664,11 @@ mod tests {
         ] {
             assert!(!allowed(&p, &f.repo.join(denied), Access::Write), "{denied}");
         }
-        assert_eq!(
-            p.decide(&f.repo.join(".git/config"), Access::Write).source,
-            Source::Piton {
-                what: "Git's hooks and configuration: Git on the host runs what they name".into()
-            }
+        // `piton sandbox why` names the opt-in.
+        let source = p.decide(&f.repo.join(".git/config"), Access::Write).source;
+        assert!(
+            matches!(&source, Source::Piton { what } if what.contains("git preset")),
+            "{source:?}"
         );
         for open in [
             ".git/index",
@@ -1747,8 +1810,88 @@ mod tests {
         assert!(allowed(&r.policy, &sub.join("agent/auth.json"), Access::Write));
     }
 
-    /// A launch behind fnox: the built-in policy passes its checks; a sandbox that can read the keychain or change a
-    /// fnox file doesn't (`launch/fnox.rs`).
+    /// The process question's entries, checked against the real resolution: one that lifts is offered; one a later deny
+    /// beats (Git's control files, the agent directory) isn't, and the deny that decides is named. An entry is resolved
+    /// as listed in the file its scope saves to.
+    #[test]
+    fn entries_are_offered_only_when_the_resolution_lets_them_through() {
+        use super::super::grant::{DeniedBy, Lift, NoLift, Refused, Scope, lift_for};
+        let f = fixture("", "");
+        let config = launch_config(&f);
+        let launch = policy(&f);
+        let file = f.home.join(".config/piton/config.toml");
+        let widened = |lift: &Lift, _: Scope| {
+            let config = super::super::grant::widened_config(&config, &lift.lists(), &file);
+            resolve_full(&f, &config, &f.repo, &Env::new(), &SandboxEnv::daemon(&Env::new()), &[])
+                .map(|r| r.policy)
+                .map_err(|e| e.to_string())
+        };
+        let lift = |op: &str, target: &Path| {
+            let target = target.to_string_lossy();
+            let refused = Refused {
+                operation: op,
+                target: &target,
+            };
+            lift_for(&launch, refused, &[&f.repo], &f.home, widened)
+        };
+        let cache = f.home.join("Library/Caches/tool");
+        assert_eq!(
+            lift("file-write-create", &cache).map(|o| o.project),
+            Ok(Lift::Write(cache.clone()))
+        );
+        assert_eq!(
+            lift("file-write-unlink", &f.repo.join(".git/config")),
+            Err(NoLift::Decided(DeniedBy::GitControl))
+        );
+        assert_eq!(
+            lift("file-read-data", &f.home.join(".ssh/keys/id_ed25519")),
+            Err(NoLift::Decided(DeniedBy::Credential(Access::Read)))
+        );
+        assert_eq!(
+            lift("file-write-create", &f.home.join(".config/piton/x.toml")),
+            Err(NoLift::Decided(DeniedBy::Floor))
+        );
+    }
+
+    /// What fnox loads is closed in the policy, not refused: each file at its real path, and each folder on the way, so
+    /// none can be renamed or replaced to change the file under another name. What's beside them stays writable.
+    #[test]
+    fn fnox_files_are_closed_with_their_folders() {
+        let f = fixture("", "");
+        // A dotfiles repo is the workspace; fnox's global config links into it.
+        let real = f.repo.join("fnox/config.toml");
+        mkdir(real.parent().unwrap());
+        std::fs::write(&real, "").unwrap();
+        let link = f.home.join(".config/fnox/config.toml");
+        mkdir(link.parent().unwrap());
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let r = resolve_full(
+            &f,
+            &launch_config(&f),
+            &f.repo,
+            &Env::new(),
+            &SandboxEnv::daemon(&Env::new()),
+            std::slice::from_ref(&link),
+        )
+        .unwrap();
+        let p = &r.policy;
+        assert!(!allowed(p, &real, Access::Write), "the real file");
+        assert!(
+            !allowed(p, &f.repo.join("fnox"), Access::Write),
+            "its folder can't be renamed"
+        );
+        assert!(!allowed(p, &link, Access::Write), "the link itself");
+        assert!(allowed(p, &f.repo.join("fnox/other.toml"), Access::Write), "a sibling");
+        assert!(
+            allowed(p, &f.repo.join("src/x"), Access::Write),
+            "the rest of the workspace"
+        );
+        assert_eq!(p.decide(&real, Access::Write).source, Source::FnoxConfig);
+        assert!(allowed(p, &real, Access::Read));
+    }
+
+    /// A launch behind fnox: the built-in policy passes its checks; a sandbox that can read the keychain doesn't
+    /// (`launch/fnox.rs`).
     #[test]
     fn fnox_checks_against_resolved_policies() {
         use crate::{
@@ -1768,12 +1911,6 @@ mod tests {
         let global = f.home.join(".config/fnox/config.toml");
         let built_in = policy(&f);
         assert!(proxy(vec![global.clone()]).check_sandbox(&built_in, &f.home).is_ok());
-        // An import of an ordinary workspace file.
-        let imported = f.repo.join("config/secrets.toml");
-        assert!(matches!(
-            proxy(vec![global.clone(), imported]).check_sandbox(&built_in, &f.home),
-            Err(FnoxError::WritableConfig { .. })
-        ));
         // The workspace's own fnox file is protected.
         assert!(
             proxy(vec![f.repo.join("fnox.toml")])

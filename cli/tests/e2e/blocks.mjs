@@ -116,9 +116,15 @@ const tests = {
         const command = `touch ${target}; touch .pi/x 2>&1 || echo floor-held`;
         const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && /outside the sandbox/.test(r.title));
         const done = a.bash(`rerun needs home|${command}`);
-        const req = await dialog;
-        assert.match(req.title, /needs home/);
-        a.send({ type: "extension_ui_response", id: req.id, value: req.options[0] });
+        const first = await dialog;
+        assert.match(first.title, /needs home/);
+        // The first option decides nothing: the same question comes back.
+        assert.equal(first.options[0], "Choose an answer below");
+        const again = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && r.id !== first.id);
+        a.send({ type: "extension_ui_response", id: first.id, value: first.options[0] });
+        const req = await again;
+        assert.equal(req.title, first.title);
+        a.send({ type: "extension_ui_response", id: req.id, value: req.options.find((o) => o.startsWith("Allow once")) });
         const result = await done;
         assert.ok(existsSync(target), "allowed once: it ran outside the sandbox");
         assert.match(result, /floor-held/, "a protected file stays closed");
@@ -168,15 +174,17 @@ const tests = {
         );
         a.send({ type: "prompt", message: `write ${target}` });
         const req = await offered;
-        assert.ok(req.title.includes(`write_file = [\"${target}\"]`), req.title);
-        assert.ok(req.options.includes("Deny"));
+        // A file that doesn't exist yet may be a folder's create: offered as `write` on it.
+        assert.ok(req.title.includes(`= [\"${target}\"]`), req.title);
+        assert.equal(req.options[0], "Choose an answer below");
+        assert.ok(req.options.includes("Not now"));
         // The run ends before an answer: the question is asked again, not lost.
         await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
         const again = await a.waitNew(
             (r) => r.type === "extension_ui_request" && r.method === "select" && r.title === req.title && r.id !== req.id,
             15000,
         );
-        a.send({ type: "extension_ui_response", id: again.id, value: "Deny" });
+        a.send({ type: "extension_ui_response", id: again.id, value: "Not now" });
 
         // A second block queued behind a command question is shown once that question is answered.
         const second = `${ctx.outside}-process2`;
@@ -192,8 +200,47 @@ const tests = {
         const next = a.waitNew((r) => r.type === "extension_ui_request" && (r.title ?? "").includes(second), 30000);
         a.send({ type: "extension_ui_response", id: command.id, value: "Deny" });
         const shown = await next;
-        a.send({ type: "extension_ui_response", id: shown.id, value: "Deny" });
+        a.send({ type: "extension_ui_response", id: shown.id, value: "Not now" });
         await a.close();
+    },
+
+    async "git's control files are reported, not asked; deny everywhere silences a path"(ctx) {
+        const a = attach(ctx);
+        // pi's own process writes the workspace's .git/config: no entry lifts it, so a notice, never a question.
+        const notice = a.waitNew(
+            (r) => r.type === "extension_ui_request" && r.method === "notify" && /Git's hooks and configuration/.test(r.message ?? ""),
+            30000,
+        );
+        a.send({ type: "prompt", message: `write ${join(ctx.ws, ".git/config")}` });
+        const shown = await notice;
+        assert.match(shown.message, /git preset/);
+        await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
+        assert.ok(
+            !a.records.some((r) => r.type === "extension_ui_request" && r.method === "select" && (r.title ?? "").includes(".git/config")),
+            "no question",
+        );
+
+        // Deny everywhere: saved as `silence`, so a new session doesn't ask.
+        const target = `${ctx.outside}-silenced`;
+        const offered = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && (r.title ?? "").includes(target), 30000);
+        a.send({ type: "prompt", message: `write ${target}` });
+        const req = await offered;
+        a.send({ type: "extension_ui_response", id: req.id, value: "Deny everywhere" });
+        await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
+        const saved = readFileSync(join(ctx.config, "config.toml"), "utf8");
+        assert.match(saved, /silence = \[/);
+        assert.ok(saved.includes(target), saved);
+        await a.close();
+
+        const b = attach(ctx);
+        b.send({ type: "prompt", message: `write ${target}` });
+        await b.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
+        await sleep(2000);
+        assert.ok(
+            !b.records.some((r) => r.type === "extension_ui_request" && (r.title ?? r.message ?? "").includes(target)),
+            "a silenced path is only logged",
+        );
+        await b.close();
     },
 };
 
@@ -217,7 +264,7 @@ for (const [name, test] of Object.entries(tests)) {
     } finally {
         daemon.kill("SIGTERM");
         await daemon.exited;
-        for (const suffix of ["-plain", "-rerun", "-rerun2", "-persist", "-process", "-process2"]) {
+        for (const suffix of ["-plain", "-rerun", "-rerun2", "-persist", "-process", "-process2", "-silenced"]) {
             rmSync(`${ctx.outside}${suffix}`, { force: true });
         }
         rmSync(ctx.dir, { recursive: true, force: true });

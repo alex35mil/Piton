@@ -157,12 +157,15 @@ the real secrets into the requests its rules allow. Before that:
   variables, removed credentials). `FNOX_*` in pi's environment come only from the base.
 - `fnox proxy rules` validates the config without resolving secrets; any failure other than "no `[proxy]`" refuses
   the launch with fnox's message.
-- For a sandboxed launch (`prepare_sandbox`), `fnox config-files` lists what fnox loads; a file the launch's policy
-  lets the agent write (an import, a config under an `allow`) refuses the launch. So does a policy that can read
+- For a sandboxed launch (`prepare_sandbox`), the proxy is prepared first, and `fnox config-files` lists what fnox
+  loads. The policy write-denies each listed file and each folder entry on its path, both as listed and at the real
+  path (`Source::FnoxConfig`, floor), so an agent can neither edit one nor swap a folder above it, even when the global
+  config links into the workspace. The launch is refused only by a policy that can read
   `~/Library/Keychains` or reopens the keychain services: fnox runs inside the sandbox too, and could read its
   provider credentials from the keychain without a prompt. Project fnox files are protected files ("Agent access").
 - The daemon's Git on a source checkout (`SourceGit`, for worker updates) is resolved through the same
-  `prepare_sandbox`, so it's refused where launches are, and hooks never run in a sandbox that can read the keychain.
+  `prepare_sandbox`, so fnox's files are closed to it too, it's refused where launches are, and hooks never run in a
+  sandbox that can read the keychain.
   That Git doesn't run behind the proxy: it authenticates as an agent's Git does without fnox.
 
 fnox starts the command even when a secret can't be resolved, and refuses only the requests that need it. The
@@ -1026,9 +1029,10 @@ When the sandbox blocks something a sandboxed agent needs, the user is asked, an
 when the sandbox blocks something, the user decides.
 
 **The floor** is what no approval lifts: protected files, every configuration level and pi's agent directory, the
-daemon's state and control socket, the user's own `[sandbox] deny`, and, while fnox is on, the credential denies (the
-sandbox could run `fnox get`). `all` is the launch's policy with everything else open: every write and connect allowed
-first, then the launch's rules with every liftable deny left out, so the floor still decides last
+daemon's state and control socket, the user's own `[sandbox] deny`, the files fnox loads, and, while fnox is on, the
+credential denies (the sandbox could run `fnox get`). `all` is the launch's policy with everything else open: writes
+below every entry of `/` (nono refuses a write grant on `/` itself) and every connect allowed first, then the launch's
+rules with every liftable deny left out, so the floor still decides last
 (`launch/sandbox/grant.rs`, where each deny's source and target say whether it's floor, matched exhaustively). Git's
 control files and the credential denies (fnox off) aren't floor: `husky install` and Git's keychain sign-in work once
 approved.
@@ -1071,7 +1075,9 @@ the launch's resolved again with the grant's lists added, so it never reaches th
 **The block question.** The agent asks for a rerun with `outside_sandbox: true` (and a `reason`) after a command
 failed in the sandbox. The daemon asks through pi's dialog record (`select`), inserted like the protected-write
 dialog, so the apps and pi.nvim show it with their dialog UI; only a client answers. It names the command, the
-agent's reason, and the refusals the kernel recorded for the call's last run. Options: allow once (the whole command
+agent's reason, and the refusals the kernel recorded for the call's last run. The first option, "Choose an answer
+below", decides nothing and shows the question again (clients highlight the first option, and pi's `select` has no
+unselected state), so Enter alone never answers. Options: allow once (the whole command
 runs again, at `all`), deny, allow this command or an edited pattern (an `input` prefilled with the command and
 subcommand plus ` *`), in this project (its source checkout's `.piton/config.local.toml`) or everywhere (the global
 `config.toml`). Persisting appends one `[[sandbox.commands]]` entry with `grant = "all"`; new sessions use it. One
@@ -1091,10 +1097,19 @@ when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fa
 forgotten since (its background job): a blocked process, every one brought to the user, in order, and each process,
 operation, and target once. The session asks one question at a time (protected writes, block questions, process
 questions); a process question waits for the slot, is shown as soon as it frees, and is asked again when its dialog
-leaves unanswered with the run it showed in. It's offered as the narrowest `[sandbox]`
-entry that lifts it (`write_file`, `read`, `connect`, or `read` of `~/Library/Keychains` for the keychain's services),
-saved in this project or everywhere, with a session restart (stopped and resumed from its file). Refusals by the floor
-or the user's `deny`, and operations no entry lifts, are logged and shown as a notice, never offered. macOS reports
+leaves unanswered with the run it showed in. It's offered as the `[sandbox]` entry that lifts it
+(`grant::lift_for`): `write` for a folder's create or a path that doesn't exist yet, `write_file` for a file,
+`connect` for a socket. An entry is offered only when the launch's configuration, resolved again with it listed in the
+file its scope saves to, allows the refused access. "Everywhere" saves the folder above the path's first component
+that names the source or checkout as pi and Claude Code name per-folder state (the path with `/` made `-`), unless that
+folder is `/`, home, directly in home, or holds a project. The question names each answer's exact entry: Allow in this
+project or everywhere (saved, then a session restart, stopped and resumed from its file), Deny in this project or
+everywhere (saved in `[sandbox] silence`: blocks below that path are only logged, in any level, since it changes
+nothing in the sandbox), or Not now (a dismissal too). A process's credential read (nono's deny groups, the keychain's
+services) and write to Git's control files are never asked about: the deciding deny (`grant::DeniedBy`) makes them a
+warning notice, once per process and path, naming the `read` entry or the `git` preset. Refusals by the floor, the
+user's `deny`, fnox's files, and operations no entry lifts are notices too. Notices go to the session view and, as a
+`notify` record, to attached pi.nvim clients. macOS reports
 only a process's first refusal and folds repeats; refusals inside commands that still succeeded aren't surfaced.
 
 Every request and its outcome is logged in the daemon log, never a command's output.

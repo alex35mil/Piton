@@ -600,6 +600,35 @@ impl Startup {
 /// The id of the records the daemon sends about how pi started in pi's `extension_ui_request` format.
 const STARTUP_UI_ID: &str = "piton:startup";
 
+/// The warning for a process's blocked credential access: what it was kept from, and for a read, the `read` entry that
+/// would lift it. A write or connect has no entry the user could add (a credential stays closed to them).
+fn credential_notice(process: &str, target: &str, access: launch::sandbox::Access) -> String {
+    use launch::sandbox::Access;
+    let path = match std::path::Path::new(target).is_absolute() {
+        true => target,
+        // The keychain's services: no path to name.
+        false => "~/Library/Keychains",
+    };
+    match access {
+        Access::Read => format!(
+            "The sandbox kept {process} from reading {target} (a credential). If it needs it, add `read = \
+             [\"{path}\"]` to [sandbox] in your global config.toml or a config.local.toml."
+        ),
+        Access::Write => format!("The sandbox kept {process} from writing {target} (a credential; never writable)."),
+        Access::Connect => {
+            format!("The sandbox kept {process} from connecting to {target} (a credential; never opened).")
+        }
+    }
+}
+
+/// Where an entry saved from the block question goes, in the sandbox's terms.
+fn grant_scope(scope: crate::agent::block::PersistScope) -> launch::sandbox::grant::Scope {
+    match scope {
+        crate::agent::block::PersistScope::Project => launch::sandbox::grant::Scope::Project,
+        crate::agent::block::PersistScope::Global => launch::sandbox::grant::Scope::Everywhere,
+    }
+}
+
 /// The warning notification for an attached client (pi.nvim), when the startup notice has something.
 fn startup_notify(startup: &Startup) -> Option<Arc<str>> {
     let message = startup.notice()?;
@@ -1269,6 +1298,7 @@ impl SessionTask {
                 self.question = Some(commands::PendingQuestion {
                     id,
                     stage: commands::Stage::Choice,
+                    dialog: record.clone(),
                     request,
                     tag,
                     reply,
@@ -1285,6 +1315,16 @@ impl SessionTask {
         let Some(pending) = self.question.take() else { return };
         let key = lock(&self.shared).key;
         let decision = match commands::answer(pending.stage, &pending.request.command, answer) {
+            commands::Next::AskAgain => {
+                // The same question, as a new dialog every client shows.
+                self.next_internal += 1;
+                let id = format!("piton:block:{}", self.next_internal);
+                let mut record = pending.dialog.clone();
+                record["id"] = Value::String(id.clone());
+                self.question = Some(commands::PendingQuestion { id, ..pending });
+                self.on_pi_line(record.to_string());
+                return;
+            }
             commands::Next::AskPattern(scope) => {
                 self.next_internal += 1;
                 let id = format!("piton:block:{}", self.next_internal);
@@ -1357,9 +1397,9 @@ impl SessionTask {
     }
 
     /// A refusal the kernel recorded for this session: kept for the bash call it belongs to, or, for a process that
-    /// isn't one, offered to the user as the entry that lifts it.
+    /// isn't one, offered to the user as the entry that lifts it, or reported when no entry the question saves would.
     fn on_refusal(&mut self, refusal: crate::daemon::Refusal) {
-        use crate::launch::sandbox::grant::{self, Credentials, NoLift};
+        use crate::launch::sandbox::grant::{self, DeniedBy, NoLift, Refused, Scope};
         let summary = refusal.summary();
         // A call's sandbox: kept for that call, shown when it's asked to run again. A typed command: the user saw it fail
         // and it's never rerun. pi's own sandbox, or a call's background job outliving it: a blocked process, asked about.
@@ -1379,36 +1419,89 @@ impl SessionTask {
         {
             return;
         }
-        let credentials: Credentials = commands.policies.credentials;
-        match grant::lift_for(
+        let target = std::path::Path::new(&refusal.target);
+        if let Some(silenced) = crate::launch::sandbox::silenced(&commands.policies.silence, target) {
+            crate::log!(
+                "session {key}: {} was blocked: {summary} (silenced by {})",
+                refusal.process,
+                silenced.path.display()
+            );
+            return;
+        }
+        let projects = [commands.source.as_path(), commands.checkout.as_path()];
+        let widened = |lift: &grant::Lift, scope: Scope| {
+            let file = commands
+                .scope_file(match scope {
+                    Scope::Project => crate::agent::block::PersistScope::Project,
+                    Scope::Everywhere => crate::agent::block::PersistScope::Global,
+                })
+                .ok_or_else(|| "no file for that scope".to_string())?;
+            commands.policies.resolver.with(&lift.lists(), &file)
+        };
+        let refused = Refused {
+            operation: &refusal.operation,
+            target: &refusal.target,
+        };
+        let decided = grant::lift_for(
             &commands.policies.launch,
-            &refusal.operation,
-            &refusal.target,
-            credentials,
-        ) {
-            Ok(lift) => {
-                crate::log!("session {key}: {} was blocked: {summary}", refusal.process);
+            refused,
+            &projects,
+            &commands.paths.home,
+            widened,
+        );
+        let process = &refusal.process;
+        let notice = match decided {
+            Ok(offer) => {
+                crate::log!("session {key}: {process} was blocked: {summary}");
                 self.next_internal += 1;
                 self.process.queue(commands::ProcessQuestion {
                     id: format!("piton:process:{}", self.next_internal),
-                    process: refusal.process.clone(),
+                    process: process.clone(),
                     refusal: summary,
-                    lift,
+                    offer,
                 });
                 self.ask_next_process();
+                return;
             }
-            Err(why) => {
-                let reason = match why {
-                    NoLift::Floor => "never lifted",
-                    NoLift::Unsupported => "no [sandbox] entry lifts it",
-                };
-                crate::log!("session {key}: {} was blocked: {summary} ({reason})", refusal.process);
-                let changes = self.view.add_notice(format!(
-                    "The sandbox blocked {}: {summary} ({reason}).",
-                    refusal.process
-                ));
-                self.broadcast(changes);
+            Err(NoLift::Decided(DeniedBy::Credential(access))) => credential_notice(process, &refusal.target, access),
+            Err(NoLift::Decided(DeniedBy::GitControl)) => format!(
+                "The sandbox kept {process} from writing {} (Git's hooks and configuration). Git carries on without \
+                 it; the git preset opens these files.",
+                refusal.target
+            ),
+            Err(NoLift::Decided(DeniedBy::UserDeny)) => {
+                format!("The sandbox blocked {process}: {summary} (your [sandbox] deny).")
             }
+            Err(NoLift::Decided(DeniedBy::FnoxConfig)) => {
+                format!("The sandbox blocked {process}: {summary} (a file fnox loads; never writable).")
+            }
+            Err(NoLift::Decided(DeniedBy::Floor)) => {
+                format!("The sandbox blocked {process}: {summary} (never lifted).")
+            }
+            Err(NoLift::Unsupported) => {
+                format!("The sandbox blocked {process}: {summary} (no [sandbox] entry lifts it).")
+            }
+        };
+        crate::log!("session {key}: {notice}");
+        self.show_notice(notice);
+    }
+
+    /// A warning in the session view (the apps) and as a notification to attached clients (pi.nvim).
+    fn show_notice(&mut self, text: String) {
+        let changes = self.view.add_notice(text.clone());
+        self.broadcast(changes);
+        self.next_internal += 1;
+        let record: Arc<str> = json!({
+            "type": "extension_ui_request",
+            "id": format!("piton:notice:{}", self.next_internal),
+            "method": "notify",
+            "notifyType": "warning",
+            "message": text,
+        })
+        .to_string()
+        .into();
+        for tx in self.clients.values() {
+            let _ = tx.send(Frame::Record(record.clone()));
         }
     }
 
@@ -1444,8 +1537,13 @@ impl SessionTask {
         if let Some(asking) = &mut self.process.asking {
             asking.id = id.clone();
         }
-        let (key, value) = next.lift.entry();
-        let record = crate::agent::block::process_dialog(&id, &next.process, &next.refusal, (key, &value));
+        let project = next.offer.project.entry();
+        let everywhere = next.offer.everywhere.entry();
+        let offer = crate::agent::block::ProcessOffer {
+            project: (project.0, &project.1),
+            everywhere: (everywhere.0, &everywhere.1),
+        };
+        let record = crate::agent::block::process_dialog(&id, &next.process, &next.refusal, &offer);
         self.on_pi_line(record.to_string());
     }
 
@@ -1457,15 +1555,48 @@ impl SessionTask {
         };
         let key = lock(&self.shared).key;
         match crate::agent::block::read_process_answer(answer) {
-            ProcessAnswer::Deny => {
-                crate::log!("session {key}: the user left {} blocked", question.process);
+            ProcessAnswer::AskAgain => {
+                self.process.asking = Some(question);
+                self.process.requeue_unanswered();
+                self.ask_next_process();
+            }
+            ProcessAnswer::NotNow => {
+                crate::log!("session {key}: the user left {} blocked for now", question.process);
+                self.ask_next_process();
+            }
+            ProcessAnswer::Silence(scope) => {
+                let Some(commands) = &mut self.commands else { return };
+                let path = question.offer.at(grant_scope(scope)).path().to_path_buf();
+                let message = match commands.persist_silence(scope, &path) {
+                    Ok(file) => {
+                        commands.policies.silence.push(crate::launch::sandbox::Silenced {
+                            path: path.clone(),
+                            file: file.clone(),
+                        });
+                        crate::log!(
+                            "session {key}: the user denied {}: saved `silence = [\"{}\"]` in {}",
+                            question.process,
+                            path.display(),
+                            file.display()
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        crate::log!("session {key}: couldn't save the silence entry: {e}");
+                        Some(format!("Couldn't save the sandbox entry: {e}"))
+                    }
+                };
+                if let Some(message) = message {
+                    self.show_notice(message);
+                }
                 self.ask_next_process();
             }
             ProcessAnswer::Persist(scope) => {
                 let Some(commands) = &self.commands else { return };
-                match commands.persist_lift(scope, &question.lift) {
+                let lift = question.offer.at(grant_scope(scope));
+                match commands.persist_lift(scope, lift) {
                     Ok(path) => {
-                        let (entry, value) = question.lift.entry();
+                        let (entry, value) = lift.entry();
                         crate::log!(
                             "session {key}: saved `{entry} = [\"{value}\"]` in {}; restarting",
                             path.display()
@@ -1474,8 +1605,7 @@ impl SessionTask {
                     }
                     Err(e) => {
                         crate::log!("session {key}: couldn't save the entry: {e}");
-                        let changes = self.view.add_notice(format!("Couldn't save the sandbox entry: {e}"));
-                        self.broadcast(changes);
+                        self.show_notice(format!("Couldn't save the sandbox entry: {e}"));
                         self.ask_next_process();
                     }
                 }
@@ -1769,6 +1899,21 @@ fn command_type(command: &Map<String, Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A credential read names the `read` entry that lifts it; a write doesn't suggest one (it wouldn't lift a write).
+    #[test]
+    fn credential_notices_match_the_refused_access() {
+        use launch::sandbox::Access;
+        let read = credential_notice("ssh", "/h/.ssh/keys/id_ed25519", Access::Read);
+        assert!(
+            read.contains("reading") && read.contains("read = [\"/h/.ssh/keys/id_ed25519\"]"),
+            "{read}"
+        );
+        let write = credential_notice("ssh", "/h/.ssh/known_hosts", Access::Write);
+        assert!(write.contains("writing") && !write.contains("read ="), "{write}");
+        let keychain = credential_notice("claude", "com.apple.SecurityServer", Access::Read);
+        assert!(keychain.contains("read = [\"~/Library/Keychains\"]"), "{keychain}");
+    }
 
     /// The startup notice holds the launch's warnings, then the secrets fnox couldn't read; nothing when both are empty.
     #[test]

@@ -19,7 +19,7 @@ pub use self::rules::{Effect, Rule, Target};
 pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
     policy::{Provenance, Source, WRITE_ROOTS, nono_version},
-    resolve::{ClaudeCodeFolder, Facts, Resolution, resolve},
+    resolve::{ClaudeCodeFolder, Facts, Resolution, Silenced, resolve, silenced},
     rules::{Access, Policy, TAG_PREFIX},
 };
 

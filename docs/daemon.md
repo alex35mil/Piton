@@ -209,8 +209,10 @@ placeholder = "sk-ant-oat01-placeholder"   # claude checks the token's shape
   the old value.
 - **Project fnox files are protected.** `fnox.toml`, `.fnox.toml`, `.config/fnox.toml`, their `.local` and profile
   forms (`fnox.<profile>.toml`), at any depth in the checkout: an agent proposes changes and you approve each, as for
-  `.pi/`. A sandboxed launch is refused when fnox would load any other file the sandbox lets the agent change (an
-  `import` of a workspace file, a config under an `allow` path), naming it.
+  `.pi/`. Every other file fnox loads for a launch (`fnox config-files`: the global config, imports) is read-only in
+  that launch's sandbox, at its real path through any symlink, and the folders on its path can't be renamed or
+  replaced. A global config linked into a dotfiles repository is closed in sessions in that repository, which still
+  start. No approval opens these files.
 - **What happens when something's wrong.** fnox enabled but not installed: no session starts. A broken fnox config:
   the launch is refused with fnox's error. A secret fnox can't read (1Password unreachable, a wrong token, a missing
   item): the session starts, and requests that need that secret are refused. The apps show a warning after the
@@ -322,6 +324,7 @@ presets = []          # "mise", "rust", "node", "swift": toolchain caches and st
                       # "git": agents may write Git's hooks and configuration (see below);
                       # "pi-claude-code": what pi's Claude Code needs (see below)
 deny = []             # paths closed like the credentials: no read, write, or connect
+silence = []          # paths whose blocks stay blocked without a question or a notice ("Deny" saves here)
 ```
 
 `connect` entries, by what you want to reach:
@@ -424,7 +427,8 @@ sandboxed session can write.
 
 In a sandboxed session, the daemon runs every bash command and `!` command, each in its own sandbox with the same rules
 as pi's. When a command fails because the sandbox blocked it, the agent can ask to run it again outside the sandbox,
-and you're asked in the apps or pi.nvim:
+and you're asked in the apps or pi.nvim. The first option, **Choose an answer below**, decides nothing: it shows the
+question again, so Enter alone never answers.
 
 - **Allow once:** it runs again with everything open except the floor: protected files, configuration, pi's agent
   directory, Piton's state, your `deny`, and credentials while fnox is on. The whole command runs again, so its side
@@ -452,9 +456,30 @@ compound command must match the same entry; a command that writes a file with `>
 rules still decide first whether it runs at all.
 
 When something other than a command is blocked (an MCP server, an extension, pi), you're asked once per process and
-path whether to add the entry that lifts it (`write_file`, `read`, or `connect`) in this project or everywhere, which
-restarts the session. Every blocked process is brought to you, one question at a time. What the floor or your `deny`
-blocks, and what no entry can lift, is shown as a notice instead.
+path, one question at a time. The question names the exact entry each answer saves:
+
+- **Allow in this project / everywhere, and restart:** adds the entry that lifts it: `write` for a folder it creates
+  (so what it writes inside isn't blocked again), `write_file` for a file, `connect` for a socket. "Everywhere" saves
+  the folder above a path's per-project part (Claude Code's `~/Library/Caches/claude-cli-nodejs/<project>` saves
+  `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block.
+- **Deny in this project / everywhere:** adds the path to `silence`: it stays blocked, and isn't asked about again.
+  `piton sandbox why <path>` says when a path is silenced.
+- **Not now** (or dismissing it): it stays blocked; a new session asks again.
+
+Some blocks are never asked about, only shown as a warning in the session, once per process and path:
+
+- **A credential read** (`~/.ssh`, `~/.aws`, the keychain, and the rest of the built-in list). These are nearly always
+  probes a program recovers from, and one click would expose the credential for good. The warning names the `read`
+  entry to add by hand if a program really needs it. ssh, for example, opens each private key to read its public half
+  before signing through your SSH agent, so every SSH Git command shows one. To keep ssh from opening private keys at
+  all, point `IdentityFile` at the `.pub` file in `~/.ssh/config`, with `IdentitiesOnly yes`; ssh then signs through
+  the agent.
+- **Git's hooks and configuration** (`.git/hooks/`, `.git/config`). Git warns and carries on without the write
+  (`git branch -D` drops the branch's section from `.git/config`; `git push -u` sets the upstream). The `git` preset
+  opens them.
+- What the floor or your `deny` blocks, and what no entry can lift.
+
+A command the agent runs keeps the rerun question for every block, credentials and Git's files included.
 
 Known limits:
 
