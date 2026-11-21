@@ -37,6 +37,10 @@ pub struct SandboxTable {
     /// Paths denied like the built-in credential list: no read, write, or connect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// Paths whose blocks stay blocked without asking or a notice: "Deny" saved from the block question. Changes
+    /// nothing in the sandbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub silence: Vec<String>,
     /// Per-command grants: a bash call that matches runs through the daemon with the launch's sandbox widened by the
     /// grant (`[[sandbox.commands]]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -468,6 +472,7 @@ impl TableValue for SandboxTable {
             ("write_file", &self.write_file),
             ("read", &self.read),
             ("deny", &self.deny),
+            ("silence", &self.silence),
         ] {
             if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
                 return Err(format!(
@@ -521,6 +526,7 @@ impl Merge for SandboxTable {
             }
         }
         union(&mut self.deny, n.deny);
+        union(&mut self.silence, n.silence);
         union(&mut self.commands, n.commands);
     }
 }
@@ -544,6 +550,7 @@ pub struct SandboxSettings {
     pub connect: Vec<Listed<Connect>>,
     pub presets: Vec<Listed<Preset>>,
     pub deny: Vec<Listed<String>>,
+    pub silence: Vec<Listed<String>>,
     /// Per-command grants, farthest file first; the first that matches a call decides.
     pub commands: Vec<Listed<CommandGrant>>,
 }
@@ -559,6 +566,7 @@ impl SandboxSettings {
             connect,
             presets,
             deny,
+            silence,
             commands,
         } = table;
         if let Some(profile) = profile {
@@ -588,6 +596,7 @@ impl SandboxSettings {
             }
         }
         add_listed(&mut self.deny, deny, file);
+        add_listed(&mut self.silence, silence, file);
         add_listed(&mut self.commands, commands, file);
     }
 
@@ -890,9 +899,23 @@ mod tests {
             "write = [\"/a\"]",
             "write_file = [\"/a\"]",
             "deny = [\"/a\"]",
+            // Changes nothing in the sandbox: any level, a project's committed `config.toml` included.
+            "silence = [\"~/Library/Caches/x\"]",
         ] {
             assert!(table(text).ruled_keys().is_empty(), "{text}");
         }
+    }
+
+    /// `silence` adds across levels like every list, and each entry keeps the file that listed it.
+    #[test]
+    fn silence_lists_add() {
+        let mut base = table("silence = [\"/a\"]");
+        base.merge(table("silence = [\"/a\", \"/b\"]"));
+        assert_eq!(base.silence, ["/a", "/b"]);
+        let mut s = SandboxSettings::default();
+        s.add(table("silence = [\"/a\"]"), Path::new("/r/.piton/config.toml"));
+        assert_eq!(s.silence[0].file, Path::new("/r/.piton/config.toml"));
+        assert!(table("silence = [\"relative\"]").check().is_err());
     }
 
     #[test]

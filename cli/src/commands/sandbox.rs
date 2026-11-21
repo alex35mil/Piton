@@ -16,7 +16,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     let workspace = match &action {
         SandboxAction::Show { workspace } | SandboxAction::Why { workspace, .. } => workspace.clone(),
     };
-    let (policy, profile) = match policy(config, workspace).await {
+    let (policy, profile, silence) = match policy(config, workspace).await {
         Ok((resolution, warnings)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
@@ -24,7 +24,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             for warning in &warnings {
                 eprintln!("piton: warning: {warning}");
             }
-            (resolution.policy, resolution.profile)
+            (resolution.policy, resolution.profile, resolution.silence)
         }
         Err(message) => {
             eprintln!("piton: {message}");
@@ -63,6 +63,9 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             let outcome = if decision.allowed { "allowed" } else { "denied" };
             println!("{outcome}: {verb} {}", target.display());
             println!("  because: {}", explain(&decision.source));
+            if let Some(line) = silenced_line(&silence, &target, decision.allowed) {
+                println!("{line}");
+            }
             if decision.allowed {
                 ExitCode::SUCCESS
             } else {
@@ -95,6 +98,20 @@ async fn policy(
         .map_err(|e| e.to_string())
 }
 
+/// The line saying a block here is only logged, when a `silence` entry covers `target` and it's denied.
+fn silenced_line(silence: &[launch::sandbox::Silenced], target: &std::path::Path, allowed: bool) -> Option<String> {
+    match allowed {
+        true => None,
+        false => launch::sandbox::silenced(silence, target).map(|s| {
+            format!(
+                "  silenced: {} (sandbox.silence, listed in {}): a block here is only logged",
+                s.path.display(),
+                s.file.display()
+            )
+        }),
+    }
+}
+
 fn explain(source: &Source) -> String {
     match source {
         Source::Workspace => "the workspace is writable".into(),
@@ -104,8 +121,37 @@ fn explain(source: &Source) -> String {
              config.local.toml"
         ),
         Source::Piton { what } => format!("Piton: {what}"),
+        Source::FnoxConfig => {
+            "a file fnox loads, or a folder on its path: which secrets go where (never writable)".into()
+        }
         Source::AgentDir => "pi's runtime state in its agent directory".into(),
         Source::Preset { preset, from } => format!("the {preset} preset, {from}"),
         Source::Config { key, from } => format!("{key}, {from}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    /// A denied path under a `silence` entry says so, with the file that listed it; an allowed one doesn't.
+    #[test]
+    fn why_names_a_silenced_path() {
+        let silence = [launch::sandbox::Silenced {
+            path: "/h/Library/Caches/tool".into(),
+            file: "/h/.config/piton/config.toml".into(),
+        }];
+        let line = silenced_line(&silence, Path::new("/h/Library/Caches/tool/x"), false).unwrap();
+        assert!(
+            line.contains("silenced") && line.contains("/h/.config/piton/config.toml"),
+            "{line}"
+        );
+        assert_eq!(
+            silenced_line(&silence, Path::new("/h/Library/Caches/tool/x"), true),
+            None
+        );
+        assert_eq!(silenced_line(&silence, Path::new("/h/other"), false), None);
     }
 }

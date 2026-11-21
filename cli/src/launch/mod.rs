@@ -270,8 +270,9 @@ async fn host_env(
 
 /// A sandboxed launch's environment and policy. The environment tools run inside the sandbox, under the launch's
 /// policy with the host's agent directory (none of their values yet); the launch's policy is then resolved from their
-/// environment, which accepts a widening value only from a file the agent can't write. A credential proxy is refused
-/// when the policy lets the sandbox change what fnox loads or read the keychain.
+/// environment, which accepts a widening value only from a file the agent can't write. When a credential proxy applies,
+/// every file fnox loads is closed in the policy (and in the environment tools' sandbox), and the launch is refused when
+/// the policy can read the keychain.
 pub async fn prepare_sandbox(
     config: &DaemonConfig,
     all_tools: &crate::tools::Tools,
@@ -280,7 +281,16 @@ pub async fn prepare_sandbox(
     workspace: &Path,
 ) -> Result<Sandboxed, LaunchError> {
     let tools = env::enabled(all_tools)?;
-    let bootstrap = sandbox_policy(config, resolved, base, &env::SandboxEnv::daemon(base), workspace)?;
+    // fnox's checks run with the base environment only, so the proxy is known before any policy.
+    let proxy = match all_tools.fnox.optional()? {
+        Some(program) => fnox::prepare(program, base, workspace).await?,
+        None => None,
+    };
+    let fnox_files: &[PathBuf] = proxy.as_ref().map_or(&[], |p| p.files.as_slice());
+    let sandbox_policy = |resolved: &LaunchConfig, env: &env::SandboxEnv| {
+        sandbox_policy(config, resolved, base, env, workspace, fnox_files)
+    };
+    let bootstrap = sandbox_policy(resolved, &env::SandboxEnv::daemon(base))?;
     let launch_env = match tools.is_empty() {
         true => env::SandboxEnv::daemon(base),
         false => {
@@ -295,22 +305,27 @@ pub async fn prepare_sandbox(
             .await?
         }
     };
-    let resolution = sandbox_policy(config, resolved, base, &launch_env, workspace)?;
-    let widened = |c: &LaunchConfig| {
-        sandbox_policy(config, c, base, &launch_env, workspace)
-            .map(|r| r.policy)
-            .map_err(|e| e.to_string())
+    let resolution = sandbox_policy(resolved, &launch_env)?;
+    let resolver = {
+        let (config, base, launch_env) = (config.clone(), base.clone(), launch_env.clone());
+        let (workspace, fnox_files) = (workspace.to_path_buf(), fnox_files.to_vec());
+        sandbox::grant::Resolver::new(resolved.clone(), move |c: &LaunchConfig| {
+            self::sandbox_policy(&config, c, &base, &launch_env, &workspace, &fnox_files)
+                .map(|r| r.policy)
+                .map_err(|e| e.to_string())
+        })
     };
     let mut env = with_piton_vars(config, launch_env.clone().into_env(), LaunchMode::Sandbox);
-    let proxy = proxy_for(all_tools, base, workspace, &mut env).await?;
     if let Some(proxy) = &proxy {
+        fnox::strip_workspace_variables(&mut env, base);
         proxy.check_sandbox(&resolution.policy, &config.paths.home)?;
     }
     let credentials = match &proxy {
         Some(_) => sandbox::grant::Credentials::Floor,
         None => sandbox::grant::Credentials::Liftable,
     };
-    let commands = sandbox::grant::command_policies(resolved, &resolution.policy, credentials, widened);
+    let commands =
+        sandbox::grant::command_policies(&resolution.policy, credentials, resolver, resolution.silence.clone());
     let warnings = launch_warnings(&resolution, &env, proxy.as_ref());
     Ok(Sandboxed {
         env,
@@ -392,6 +407,7 @@ fn sandbox_policy(
     base: &Env,
     env: &env::SandboxEnv,
     workspace: &Path,
+    fnox_files: &[PathBuf],
 ) -> Result<sandbox::Resolution, LaunchError> {
     let state = config.state_dir();
     let agent_socket = config.agent_socket();
@@ -408,6 +424,7 @@ fn sandbox_policy(
             agent_socket: &agent_socket,
             logs: &logs,
             write_roots: sandbox::WRITE_ROOTS,
+            fnox_files,
         },
     )?)
 }
@@ -562,6 +579,7 @@ mod tests {
                 set_in: None,
             },
             claude_code,
+            silence: Vec::new(),
         };
         let preset = |folder, login| resolution(Some(ClaudeCode { folder, login }));
         let granted = ClaudeCodeFolder::Granted("/h/.config/pi/claude".into());

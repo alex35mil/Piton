@@ -5,8 +5,10 @@
 //! - fnox finds its own config files (the global one, the workspace and its parents). A workspace uses the proxy when
 //!   one of them has a `[proxy]` table; otherwise its launches run without it, as if fnox were off.
 //! - `fnox proxy rules` validates the config without resolving secrets: a broken config refuses the launch.
-//! - A sandboxed launch is refused when the sandbox could change a file fnox loads, or read the keychain (where the
-//!   credentials of fnox's secret sources live): an agent could redirect secrets or run `fnox get` itself.
+//! - A sandboxed launch closes every file fnox loads (`fnox config-files`) to writes, at its real path, with each folder
+//!   on that path fixed in place (`launch/sandbox/resolve.rs`): an agent that changed one could redirect secrets.
+//! - A sandboxed launch is refused when the sandbox could read the keychain (where the credentials of fnox's secret
+//!   sources live): an agent could run `fnox get` itself.
 //! - A secret fnox can't resolve doesn't stop the launch (fnox starts pi anyway and refuses the requests that need it):
 //!   [`StartupLog`] reads fnox's warnings into the session's notice.
 //!
@@ -59,15 +61,9 @@ impl Proxy {
         Ok(env)
     }
 
-    /// Refuses a sandboxed launch whose sandbox could change what fnox loads or read the keychain.
+    /// Refuses a sandboxed launch whose sandbox could read the keychain. The files fnox loads are closed by the policy
+    /// itself, so this never refuses one.
     pub fn check_sandbox(&self, policy: &Policy, home: &Path) -> Result<(), FnoxError> {
-        if let Some(file) = self
-            .files
-            .iter()
-            .find(|f| policy.decide(&canonical_target(f), Access::Write).allowed)
-        {
-            return Err(FnoxError::WritableConfig { file: file.clone() });
-        }
         let keychains = canonical_target(&home.join("Library/Keychains"));
         let read = policy.decide(&keychains, Access::Read);
         if policy.keychain || read.allowed {
@@ -79,6 +75,7 @@ impl Proxy {
                 | Source::BuiltIn { .. }
                 | Source::NonoGroup { .. }
                 | Source::Piton { .. }
+                | Source::FnoxConfig
                 | Source::AgentDir => KeychainOpener::Read { from: None },
             };
             return Err(FnoxError::Keychain { opened_by });
@@ -123,11 +120,6 @@ pub enum FnoxError {
     Spawn(std::io::Error),
     #[error("fnox's configuration for {workspace} is invalid: {message}")]
     Config { workspace: PathBuf, message: String },
-    #[error(
-        "fnox loads {file}, which this sandbox lets the agent change (and so which secrets go where); keep it out of the \
-         workspace and the sandbox's [sandbox] write paths"
-    )]
-    WritableConfig { file: PathBuf },
     #[error("the sandbox can read your keychain, where fnox's secret-source credentials live, because of {opened_by}")]
     Keychain { opened_by: KeychainOpener },
 }
@@ -441,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_sandbox_that_can_change_fnox_config_or_read_the_keychain() {
+    fn refuses_a_sandbox_that_can_read_the_keychain() {
         let proxy = Proxy {
             program: Program {
                 program: "fnox".into(),
@@ -463,11 +455,9 @@ mod tests {
         };
         let ok = policy(vec![allow(Access::Write, "/w/src"), closed_keychain.clone()], false);
         assert!(proxy.check_sandbox(&ok, home).is_ok());
+        // A writable fnox file isn't refused: the launch's policy closes it (`launch/sandbox/resolve.rs`).
         let writable = policy(vec![allow(Access::Write, "/w"), closed_keychain.clone()], false);
-        assert!(matches!(
-            proxy.check_sandbox(&writable, home),
-            Err(FnoxError::WritableConfig { file }) if file == Path::new("/w/shared/secrets.toml")
-        ));
+        assert!(proxy.check_sandbox(&writable, home).is_ok());
         let exposed = policy(
             vec![closed_keychain.clone(), allow(Access::Read, "/h/Library/Keychains")],
             false,

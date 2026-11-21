@@ -31,6 +31,8 @@ impl PersistScope {
 /// The user's answer to the first dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
+    /// [`CHOOSE_BELOW`]: no answer yet; the question is shown again.
+    AskAgain,
     Once,
     Deny,
     /// Persist the exact command.
@@ -39,10 +41,15 @@ pub enum Answer {
     Pattern(PersistScope),
 }
 
+/// The first option of every block question, which clients highlight: choosing it shows the question again, so Enter
+/// alone never decides.
+pub const CHOOSE_BELOW: &str = "Choose an answer below";
+
 /// The options, in order, each with its answer.
-fn options() -> [(String, Answer); 6] {
+fn options() -> [(String, Answer); 7] {
     use PersistScope::{Global, Project};
     [
+        (CHOOSE_BELOW.to_string(), Answer::AskAgain),
         ("Allow once (the whole command runs again)".to_string(), Answer::Once),
         ("Deny".to_string(), Answer::Deny),
         (
@@ -118,17 +125,45 @@ pub fn pattern_dialog(id: &str, command: &str, scope: PersistScope) -> Value {
     })
 }
 
-/// The question for a process that isn't a bash call (an MCP server, an extension, pi): the refusal, and the entry
-/// that lifts it, persisted with a session restart.
-pub fn process_dialog(id: &str, process: &str, refusal: &str, entry: (&str, &str)) -> Value {
-    let (key, value) = entry;
+/// What a process question offers in each scope: the `[sandbox]` key and the path it saves.
+pub struct ProcessOffer<'a> {
+    pub project: (&'a str, &'a str),
+    pub everywhere: (&'a str, &'a str),
+}
+
+/// The question for a process that isn't a bash call (an MCP server, an extension, pi): the refusal, and per answer
+/// the exact entry it saves. Allow adds a `[sandbox]` entry and restarts; Deny adds a `silence` entry, so the block is
+/// only logged from then on.
+pub fn process_dialog(id: &str, process: &str, refusal: &str, offer: &ProcessOffer) -> Value {
+    let entry = |(key, value): (&str, &str)| format!("`{key} = [\"{value}\"]`");
+    let silence = |(_, value): (&str, &str)| format!("`silence = [\"{value}\"]`");
+    let scopes = [
+        (PersistScope::Project, offer.project),
+        (PersistScope::Global, offer.everywhere),
+    ];
+    let mut lines = Vec::new();
+    for (scope, at) in scopes {
+        lines.push(format!(
+            "- Allow {}: {}, and this session restarts",
+            scope.label(),
+            entry(at)
+        ));
+    }
+    for (scope, at) in scopes {
+        lines.push(format!(
+            "- Deny {}: {}; it stays blocked without asking",
+            scope.label(),
+            silence(at)
+        ));
+    }
     json!({
         "type": "extension_ui_request",
         "id": id,
         "method": "select",
         "title": format!(
-            "The sandbox blocked {process}: {refusal}\n\nAllowing adds `{key} = [\"{value}\"]` to [sandbox] and restarts \
-             this session (the conversation continues; a running turn is stopped)."
+            "The sandbox blocked {process}: {refusal}\n\nEach answer saves to [sandbox] (a restart keeps the conversation \
+             but stops a running turn):\n{}",
+            lines.join("\n")
         ),
         "options": process_options().map(|(label, _)| label),
     })
@@ -137,14 +172,20 @@ pub fn process_dialog(id: &str, process: &str, refusal: &str, entry: (&str, &str
 /// The answer to a process question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessAnswer {
-    Deny,
+    /// [`CHOOSE_BELOW`]: no answer yet; the question is shown again.
+    AskAgain,
+    /// Save the entry that lifts it, and restart.
     Persist(PersistScope),
+    /// Save a `silence` entry: it stays blocked, and isn't asked about again.
+    Silence(PersistScope),
+    /// Leave it blocked for now: asked again in a new session.
+    NotNow,
 }
 
-fn process_options() -> [(String, ProcessAnswer); 3] {
+fn process_options() -> [(String, ProcessAnswer); 6] {
     use PersistScope::{Global, Project};
     [
-        ("Deny".to_string(), ProcessAnswer::Deny),
+        (CHOOSE_BELOW.to_string(), ProcessAnswer::AskAgain),
         (
             format!("Allow {} and restart", Project.label()),
             ProcessAnswer::Persist(Project),
@@ -153,16 +194,19 @@ fn process_options() -> [(String, ProcessAnswer); 3] {
             format!("Allow {} and restart", Global.label()),
             ProcessAnswer::Persist(Global),
         ),
+        (format!("Deny {}", Project.label()), ProcessAnswer::Silence(Project)),
+        (format!("Deny {}", Global.label()), ProcessAnswer::Silence(Global)),
+        ("Not now".to_string(), ProcessAnswer::NotNow),
     ]
 }
 
-/// A client's answer to a process question; anything else denies.
+/// A client's answer to a process question; a dismissal or an unknown value is "Not now".
 pub fn read_process_answer(answer: &serde_json::Map<String, Value>) -> ProcessAnswer {
     let value = answer.get("value").and_then(Value::as_str);
     process_options()
         .into_iter()
         .find(|(label, _)| Some(label.as_str()) == value)
-        .map_or(ProcessAnswer::Deny, |(_, answer)| answer)
+        .map_or(ProcessAnswer::NotNow, |(_, answer)| answer)
 }
 
 /// A client's answer to the first dialog: an option's label; anything else (a dismissal, an unknown value) denies.
@@ -244,6 +288,7 @@ mod tests {
         assert_eq!(
             answers,
             [
+                Answer::AskAgain,
                 Answer::Once,
                 Answer::Deny,
                 Answer::Persist(PersistScope::Project),
@@ -261,12 +306,26 @@ mod tests {
         assert_eq!(pattern("git push *").unwrap().pattern(), "git push *");
         assert!(pattern("  ").is_none());
 
-        let process = process_dialog("p", "node", "file-write-create /h/x", ("write_file", "/h/x"));
-        let title = process["title"].as_str().unwrap();
-        assert!(
-            title.contains("node") && title.contains("write_file = [\"/h/x\"]"),
-            "{title}"
+        let process = process_dialog(
+            "p",
+            "claude",
+            "file-write-create /h/c/-w-p",
+            &ProcessOffer {
+                project: ("write", "/h/c/-w-p"),
+                everywhere: ("write", "/h/c"),
+            },
         );
+        let title = process["title"].as_str().unwrap();
+        assert!(title.contains("claude"), "{title}");
+        // Each answer names the exact entry it saves.
+        for saved in [
+            "in this project: `write = [\"/h/c/-w-p\"]`",
+            "everywhere: `write = [\"/h/c\"]`",
+            "in this project: `silence = [\"/h/c/-w-p\"]`",
+            "everywhere: `silence = [\"/h/c\"]`",
+        ] {
+            assert!(title.contains(saved), "{saved} in {title}");
+        }
         let answers: Vec<ProcessAnswer> = process["options"]
             .as_array()
             .unwrap()
@@ -276,10 +335,27 @@ mod tests {
         assert_eq!(
             answers,
             [
-                ProcessAnswer::Deny,
+                ProcessAnswer::AskAgain,
                 ProcessAnswer::Persist(PersistScope::Project),
-                ProcessAnswer::Persist(PersistScope::Global)
+                ProcessAnswer::Persist(PersistScope::Global),
+                ProcessAnswer::Silence(PersistScope::Project),
+                ProcessAnswer::Silence(PersistScope::Global),
+                ProcessAnswer::NotNow,
             ]
         );
+        let dismissed = read_process_answer(json!({"cancelled": true}).as_object().unwrap());
+        assert_eq!(dismissed, ProcessAnswer::NotNow);
+    }
+
+    /// The option clients highlight first decides nothing: Enter alone never answers.
+    #[test]
+    fn the_first_option_decides_nothing() {
+        let first = |d: Value| d["options"][0].as_str().unwrap().to_string();
+        assert_eq!(first(dialog("x", &Question::default())), CHOOSE_BELOW);
+        let offer = ProcessOffer {
+            project: ("write", "/x"),
+            everywhere: ("write", "/x"),
+        };
+        assert_eq!(first(process_dialog("p", "n", "r", &offer)), CHOOSE_BELOW);
     }
 }

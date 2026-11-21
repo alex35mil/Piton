@@ -166,6 +166,7 @@ pub static CATALOG: &[Entry] = &[
     project("sandbox.read", TextList, empty),
     project("sandbox.connect", TextList, empty),
     project("sandbox.deny", TextList, empty),
+    project("sandbox.silence", TextList, empty),
     project("workers.skip", TextList, empty),
 ];
 

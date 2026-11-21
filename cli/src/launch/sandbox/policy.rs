@@ -23,6 +23,9 @@ pub enum Source {
     NonoGroup { group: String },
     /// Piton's own deny: the daemon's state folder or control socket.
     Piton { what: String },
+    /// A file fnox loads for this launch (`fnox config-files`), or a folder on its path: which secrets go where. Never
+    /// writable, and never lifted.
+    FnoxConfig,
     /// pi's runtime state in its agent directory.
     AgentDir,
     /// A preset, and where it was listed.
