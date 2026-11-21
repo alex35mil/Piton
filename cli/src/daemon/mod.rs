@@ -141,6 +141,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         tools.describe()
     );
 
+    // Socket folders of sessions that ended without their hook running (a crash, a kill).
+    launch::claude_sockets::sweep(base_env.get("TMPDIR").map(Path::new), &config.state_dir());
     let host_id = crate::state::State::open(&config.state_db())?.host_id()?;
     crate::log!("state: {} (host {host_id})", config.state_db().display());
     let app_settings = crate::apps::SettingsSnapshot::new(&config.paths, &tools);
@@ -421,7 +423,7 @@ impl Daemon {
         launch_config: crate::config::LaunchConfig,
     ) -> Result<SessionHandle, LaunchError> {
         let config = self.config();
-        let (mode, mut env, mut policy, proxy, mut commands, warnings, agent_dirs) = match prepared {
+        let (mode, mut env, mut policy, proxy, mut commands, warnings, agent_dirs, sockets) = match prepared {
             launch::Prepared::Host { env, proxy } => {
                 // pi's agent directories as the sandbox would name them: the host's (the daemon's environment) and
                 // this launch's (its environment).
@@ -435,16 +437,31 @@ impl Daemon {
                     )
                 };
                 let agent_dirs = [named(&self.base_env), named(&env)];
-                (LaunchMode::Host, env, None, proxy, None, Vec::new(), agent_dirs)
+                (LaunchMode::Host, env, None, proxy, None, Vec::new(), agent_dirs, None)
             }
             launch::Prepared::Sandbox(sandboxed) => {
                 let launch::Sandboxed {
-                    env,
+                    mut env,
                     resolution,
                     proxy,
                     commands,
                     warnings,
+                    sockets,
                 } = *sandboxed;
+                // The preset's socket folder of this session's own. Without it, `claude` uses the shared folder as
+                // before (its probes meet the block question).
+                let sockets = sockets.filter(|folder| match launch::claude_sockets::create(folder) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        crate::log!(
+                            "sandbox in {}: can't create {}: {e}",
+                            workspace.path.display(),
+                            folder.display()
+                        );
+                        env.remove(launch::claude_sockets::VAR);
+                        false
+                    }
+                });
                 for link in &resolution.links {
                     crate::log!("sandbox in {}: {link}", workspace.path.display());
                 }
@@ -459,6 +476,7 @@ impl Daemon {
                     Some(commands),
                     warnings,
                     resolution.agent_dirs,
+                    sockets,
                 )
             }
         };
@@ -508,6 +526,9 @@ impl Daemon {
         let restarting = Arc::downgrade(self);
         let hooks = Hooks {
             ended: Box::new(move |key| {
+                if let Some(folder) = &sockets {
+                    launch::claude_sockets::remove(folder);
+                }
                 if let Some(daemon) = weak.upgrade() {
                     daemon.agent_tokens.forget(key);
                     lock(&daemon.sessions).remove(&key);

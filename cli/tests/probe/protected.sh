@@ -34,7 +34,8 @@ cleanup_real() {
     rmdir "$agent_dir/TRUST.JSON.LOCK" 2>/dev/null || true
 }
 listener=
-trap 'test -z "$listener" || kill "$listener" 2>/dev/null; cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
+# The listener is waited for after it's killed, so the shell doesn't report its end ("Terminated: 15").
+trap 'test -z "$listener" || { kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null; }; cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
 mkdir "$linked"
 ln -s "$linked" "$src/cache"
 marker="# piton protected-file probe
@@ -85,7 +86,25 @@ expect_bind=$(policy_says --bind "$src/probe.sock")
 expect_ssh_agent=$(needs "${SSH_AUTH_SOCK:-/nonexistent}" "$(policy_says --connect "${SSH_AUTH_SOCK:-/nonexistent}")")
 ssh_pub=$(ls "$HOME"/.ssh/*.pub "$HOME"/.ssh/*/*.pub 2>/dev/null | head -n 1 || true)
 expect_ssh_pub=$(needs "${ssh_pub:-/nonexistent}" "$(policy_says "${ssh_pub:-/nonexistent}")")
-ssh_key=$(ls "$HOME"/.ssh/id_* 2>/dev/null | rg -v '\.pub$' | head -n 1 || true)
+# A private key anywhere under ~/.ssh (keys often live in a subfolder), read on the host: the first file, four levels
+# deep at most, whose first line is a PEM or OpenSSH private-key header.
+ssh_key=$(python3 -I -c '
+import os, sys
+root = os.path.expanduser("~/.ssh")
+for dirpath, dirs, files in os.walk(root):
+    if dirpath[len(root):].count(os.sep) >= 4:
+        dirs[:] = []
+    for name in sorted(files):
+        path = os.path.join(dirpath, name)
+        try:
+            with open(path, "rb") as f:
+                first = f.readline(200)
+        except OSError:
+            continue
+        if first.startswith(b"-----BEGIN") and b"PRIVATE KEY" in first:
+            print(path)
+            sys.exit(0)
+' 2>/dev/null || true)
 keychain="$HOME/Library/Keychains/login.keychain-db"
 expect_ssh_key=$(needs "${ssh_key:-/nonexistent}" denied)
 expect_keychain=$(needs "$keychain" "$(policy_says "$keychain")")
@@ -166,7 +185,7 @@ attempt "$EXPECT_SSH_KEY" "read an SSH key"              "cat '$SSH_KEY'"
 attempt "$EXPECT_KEYCHAIN" "read the login keychain"     "cat $KEYCHAIN"
 attempt "$EXPECT_HISTORY" "read shell history"           "cat $HOME/.zsh_history"
 # Other case: APFS is case-insensitive, and so is Seatbelt's matching there; denies and the allows inside them hold.
-attempt "$EXPECT_SSH_KEY" "read an SSH key in another case" 'cat "$HOME/.SSH/$(basename "$SSH_KEY")"'
+attempt "$EXPECT_SSH_KEY" "read an SSH key in another case" 'cat "$HOME/.SSH/${SSH_KEY#"$HOME/.ssh/"}"'
 attempt "$EXPECT_HISTORY" "read shell history in another case" "cat $HOME/.ZSH_HISTORY"
 # Writes outside the workspace.
 attempt ok     "write temp"                             'mktemp'

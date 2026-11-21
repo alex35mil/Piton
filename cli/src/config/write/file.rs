@@ -126,8 +126,8 @@ impl ConfigFile {
     }
 
     /// Adds `value` to the list at `key` (`sandbox.write_file`) in this file, keeping its entries; nothing when it's
-    /// already there.
-    pub fn append_to_list(&self, paths: &Paths, key: &str, value: &str) -> Result<(), EditError> {
+    /// already there. A value is a string (a path) or a table (a `silence` entry).
+    pub fn append_to_list(&self, paths: &Paths, key: &str, value: &serde_json::Value) -> Result<(), EditError> {
         let path = self.path(paths)?;
         let current = match std::fs::read_to_string(&path) {
             Ok(text) => text,
@@ -155,10 +155,10 @@ impl ConfigFile {
             }
             None => Vec::new(),
         };
-        if list.iter().any(|v| v.as_str() == Some(value)) {
+        if list.contains(value) {
             return Ok(());
         }
-        list.push(serde_json::Value::String(value.to_string()));
+        list.push(value.clone());
         self.write(
             paths,
             &[KeyChange {
@@ -281,12 +281,24 @@ mod tests {
         assert!(local.contains("[[sandbox.commands]]"), "{local}");
 
         // A process block's entry: added to the list once, keeping what's there.
-        global.append_to_list(&paths, "sandbox.write_file", "/h/x").unwrap();
-        global.append_to_list(&paths, "sandbox.write_file", "/h/x").unwrap();
-        global.append_to_list(&paths, "sandbox.write", "/b").unwrap();
-        let parsed: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let text = |s: &str| serde_json::json!(s);
+        global
+            .append_to_list(&paths, "sandbox.write_file", &text("/h/x"))
+            .unwrap();
+        global
+            .append_to_list(&paths, "sandbox.write_file", &text("/h/x"))
+            .unwrap();
+        global.append_to_list(&paths, "sandbox.write", &text("/b")).unwrap();
+        // A silence entry is a table: added once too, and read back as the configuration reads it.
+        let silence = serde_json::json!({ "process": "git", "target": "/p/**/.git/config" });
+        global.append_to_list(&paths, "sandbox.silence", &silence).unwrap();
+        global.append_to_list(&paths, "sandbox.silence", &silence).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Table = toml::from_str(&written).unwrap();
         assert_eq!(parsed["sandbox"]["write_file"].as_array().unwrap().len(), 1);
         assert_eq!(parsed["sandbox"]["write"].as_array().unwrap().len(), 2, "/a and /b");
         assert_eq!(parsed["sandbox"]["commands"].as_array().unwrap().len(), 2, "kept");
+        let table: crate::config::SandboxTable = parsed["sandbox"].clone().try_into().unwrap();
+        assert_eq!(table.silence.len(), 1, "{written}");
     }
 }

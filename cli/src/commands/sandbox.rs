@@ -37,6 +37,10 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                 "nono_deny_groups": launch::sandbox::nono_version(),
                 "profile": profile,
                 "policy": policy,
+                "silence": silence
+                    .iter()
+                    .map(|s| serde_json::json!({ "entry": s.entry(), "source": s.source.to_string() }))
+                    .collect::<Vec<_>>(),
             });
             println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
             ExitCode::SUCCESS
@@ -59,7 +63,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             let outcome = if decision.allowed { "allowed" } else { "denied" };
             println!("{outcome}: {verb} {}", target.display());
             println!("  because: {}", explain(&decision.source));
-            if let Some(line) = silenced_line(&silence, &target, decision.allowed) {
+            for line in silenced_lines(&silence, &target, decision.allowed) {
                 println!("{line}");
             }
             if decision.allowed {
@@ -88,23 +92,48 @@ async fn policy(
         false => std::env::vars().collect(),
     };
     let tools = crate::tools::Tools::resolve(config, &base);
-    launch::prepare_sandbox(config, &tools, &resolved, &base, &workspace.path)
-        .await
-        .map(|sandboxed| (sandboxed.resolution, sandboxed.warnings))
-        .map_err(|e| e.to_string())
+    // `show` and `why` describe a session's policy without starting one: no socket folder of its own, so a user's
+    // `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR` is shown as it is, and Piton's own folder isn't.
+    launch::prepare_sandbox(
+        config,
+        &tools,
+        &resolved,
+        &base,
+        &workspace.path,
+        launch::ClaudeSockets::None,
+    )
+    .await
+    .map(|sandboxed| (sandboxed.resolution, sandboxed.warnings))
+    .map_err(|e| e.to_string())
 }
 
-/// The line saying a block here is only logged, when a `silence` entry covers `target` and it's denied.
-fn silenced_line(silence: &[launch::sandbox::Silenced], target: &std::path::Path, allowed: bool) -> Option<String> {
+/// The lines saying a block here is only logged, one per `silence` entry that covers `target` when it's denied: for
+/// every process, or the one the entry names.
+fn silenced_lines(silence: &[launch::sandbox::Silenced], target: &std::path::Path, allowed: bool) -> Vec<String> {
     match allowed {
-        true => None,
-        false => launch::sandbox::silenced(silence, target).map(|s| {
-            format!(
-                "  silenced: {} (sandbox.silence, listed in {}): a block here is only logged",
-                s.path.display(),
-                s.file.display()
-            )
-        }),
+        true => Vec::new(),
+        false => silence
+            .iter()
+            .filter(|s| {
+                let any = s.process.as_deref().unwrap_or_default();
+                let probe = launch::sandbox::Silenced {
+                    process: None,
+                    ..(*s).clone()
+                };
+                probe.matches(any, "file-read-data", &target.to_string_lossy())
+            })
+            .map(|s| {
+                let whose = match &s.process {
+                    Some(process) => format!("by {process}"),
+                    None => "by any process".to_string(),
+                };
+                format!(
+                    "  silenced {whose}: {} ({}): a block here is only logged",
+                    s.entry().inline(),
+                    s.source
+                )
+            })
+            .collect(),
     }
 }
 
@@ -137,19 +166,27 @@ mod tests {
     /// A denied path under a `silence` entry says so, with the file that listed it; an allowed one doesn't.
     #[test]
     fn why_names_a_silenced_path() {
-        let silence = [launch::sandbox::Silenced {
-            path: "/h/Library/Caches/tool".into(),
-            file: "/h/.config/piton/config.toml".into(),
-        }];
-        let line = silenced_line(&silence, Path::new("/h/Library/Caches/tool/x"), false).unwrap();
+        use launch::sandbox::{SilenceSource, Silenced, Silent};
+        let silence = [
+            Silenced {
+                target: Silent::Path("/h/Library/Caches/tool".into()),
+                process: None,
+                source: SilenceSource::File("/h/.config/piton/config.toml".into()),
+            },
+            Silenced {
+                target: Silent::Path("/h/Library/Caches/*".into()),
+                process: Some("git".into()),
+                source: SilenceSource::File("/h/.config/piton/config.toml".into()),
+            },
+        ];
+        let lines = silenced_lines(&silence, Path::new("/h/Library/Caches/tool/x"), false);
+        assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(
-            line.contains("silenced") && line.contains("/h/.config/piton/config.toml"),
-            "{line}"
+            lines[0].contains("any process") && lines[0].contains("/h/.config/piton/config.toml"),
+            "{lines:?}"
         );
-        assert_eq!(
-            silenced_line(&silence, Path::new("/h/Library/Caches/tool/x"), true),
-            None
-        );
-        assert_eq!(silenced_line(&silence, Path::new("/h/other"), false), None);
+        assert!(lines[1].contains("by git"), "{lines:?}");
+        assert!(silenced_lines(&silence, Path::new("/h/Library/Caches/tool/x"), true).is_empty());
+        assert!(silenced_lines(&silence, Path::new("/h/other"), false).is_empty());
     }
 }

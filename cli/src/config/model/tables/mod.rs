@@ -15,7 +15,7 @@ pub use self::{
     permissions::{PermissionSettings, PermissionsTable},
     sandbox::{
         AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, Connect, Grant, GrantLists, Listed,
-        NetworkTarget, Preset, Profile, SandboxSettings, SandboxTable,
+        NetworkTarget, Preset, Profile, SandboxSettings, SandboxTable, Silence, SilenceTarget,
     },
     web_search::WebSearchTable,
     workers::WorkersTable,

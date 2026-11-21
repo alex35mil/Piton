@@ -41,14 +41,86 @@ pub struct SandboxTable {
     /// Paths denied like the built-in credential list: no read, write, or connect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    /// Paths whose blocks stay blocked without asking or a notice: "Deny" saved from the block question. Changes
-    /// nothing in the sandbox.
+    /// Blocks of processes that stay blocked without asking or a notice, each described by what its notice showed:
+    /// "Deny" saved from the block question, or an entry a notice names. Changes nothing in the sandbox.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub silence: Vec<String>,
+    pub silence: Vec<Silence>,
     /// Per-command grants: a bash call that matches runs through the daemon with the launch's sandbox widened by the
     /// grant (`[[sandbox.commands]]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<CommandGrant>,
+}
+
+/// One `silence` entry: `{ target = "...", process = "..." }`. It matches what a notice shows (the process and its
+/// target), never why the block happened.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Silence {
+    pub target: SilenceTarget,
+    /// Only blocks of processes with this name (`git`, `claude`). Unset: every process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+}
+
+/// What a `silence` entry's `target` names.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum SilenceTarget {
+    /// `/...`, `~/...`, or `$VAR/...`: the path and everything below it. A `*` segment matches one folder entry, a
+    /// `**` segment any number of them.
+    Path(String),
+    /// A Mach service (`com.apple.SecurityServer`): a reverse-DNS name, matched exactly against a lookup of it.
+    Service(String),
+}
+
+impl TryFrom<String> for SilenceTarget {
+    type Error = String;
+
+    fn try_from(target: String) -> Result<Self, String> {
+        if is_grant_path(&target) {
+            return Ok(SilenceTarget::Path(target));
+        }
+        let service = !target.is_empty()
+            && target.contains('.')
+            && target.split('.').all(|label| {
+                !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            });
+        match service {
+            true => Ok(SilenceTarget::Service(target)),
+            false => Err(format!(
+                "silence target {target:?}: a path (absolute, or starting with `~/` or `$`; `*` and `**` segments \
+                 match folders) or a Mach service name (`com.apple.SecurityServer`)"
+            )),
+        }
+    }
+}
+
+impl From<SilenceTarget> for String {
+    fn from(target: SilenceTarget) -> String {
+        match target {
+            SilenceTarget::Path(path) | SilenceTarget::Service(path) => path,
+        }
+    }
+}
+
+impl Silence {
+    /// The entry as a TOML inline table, as a notice names it and the block question saves it.
+    pub fn inline(&self) -> String {
+        let target = String::from(self.target.clone());
+        match &self.process {
+            Some(process) => format!(
+                "{{ process = {}, target = {} }}",
+                toml_string(process),
+                toml_string(&target)
+            ),
+            None => format!("{{ target = {} }}", toml_string(&target)),
+        }
+    }
+}
+
+/// A TOML basic string.
+fn toml_string(text: &str) -> String {
+    toml::Value::String(text.to_string()).to_string()
 }
 
 /// `[[sandbox.commands]]`: what a matching command gets.
@@ -480,7 +552,6 @@ impl TableValue for SandboxTable {
             ("read", &self.read),
             ("bind", &self.bind),
             ("deny", &self.deny),
-            ("silence", &self.silence),
         ] {
             if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
                 return Err(format!(
@@ -561,7 +632,7 @@ pub struct SandboxSettings {
     pub bind: Vec<Listed<String>>,
     pub presets: Vec<Listed<Preset>>,
     pub deny: Vec<Listed<String>>,
-    pub silence: Vec<Listed<String>>,
+    pub silence: Vec<Listed<Silence>>,
     /// Per-command grants, farthest file first; the first that matches a call decides.
     pub commands: Vec<Listed<CommandGrant>>,
 }
@@ -930,7 +1001,7 @@ mod tests {
             "write_file = [\"/a\"]",
             "deny = [\"/a\"]",
             // Changes nothing in the sandbox: any level, a project's committed `config.toml` included.
-            "silence = [\"~/Library/Caches/x\"]",
+            "silence = [{ target = \"~/Library/Caches/x\" }]",
         ] {
             assert!(table(text).ruled_keys().is_empty(), "{text}");
         }
@@ -939,13 +1010,52 @@ mod tests {
     /// `silence` adds across levels like every list, and each entry keeps the file that listed it.
     #[test]
     fn silence_lists_add() {
-        let mut base = table("silence = [\"/a\"]");
-        base.merge(table("silence = [\"/a\", \"/b\"]"));
-        assert_eq!(base.silence, ["/a", "/b"]);
+        let path = |p: &str| Silence {
+            target: SilenceTarget::Path(p.into()),
+            process: None,
+        };
+        let mut base = table("silence = [{ target = \"/a\" }]");
+        base.merge(table("silence = [{ target = \"/a\" }, { target = \"/b\" }]"));
+        assert_eq!(base.silence, [path("/a"), path("/b")]);
         let mut s = SandboxSettings::default();
-        s.add(table("silence = [\"/a\"]"), Path::new("/r/.piton/config.toml"));
+        s.add(
+            table("silence = [{ target = \"/a\" }]"),
+            Path::new("/r/.piton/config.toml"),
+        );
         assert_eq!(s.silence[0].file, Path::new("/r/.piton/config.toml"));
-        assert!(table("silence = [\"relative\"]").check().is_err());
+    }
+
+    /// An entry is always a table naming a path or a Mach service, and optionally a process; anything else is refused
+    /// when the file is read, so an entry can't silently match nothing.
+    #[test]
+    fn silence_entries_are_tables_of_target_and_process() {
+        let parse = |text: &str| toml::from_str::<SandboxTable>(text).map(|t| t.silence);
+        assert_eq!(
+            parse("silence = [{ process = \"git\", target = \"~/p/**/.git/config\" }]").unwrap(),
+            [Silence {
+                target: SilenceTarget::Path("~/p/**/.git/config".into()),
+                process: Some("git".into()),
+            }]
+        );
+        assert_eq!(
+            parse("silence = [{ target = \"com.apple.SecurityServer\" }]").unwrap()[0].target,
+            SilenceTarget::Service("com.apple.SecurityServer".into())
+        );
+        for bad in [
+            "silence = [\"/a\"]",
+            "silence = [{ target = \"relative/x\" }]",
+            "silence = [{ target = \"**/.git/config\" }]",
+            "silence = [{ target = \"/a\", why = \"x\" }]",
+            "silence = [{ process = \"git\" }]",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        // The inline form a notice names parses back to the same entry.
+        let entry = Silence {
+            target: SilenceTarget::Path("/p/**/.git/config".into()),
+            process: Some("git".into()),
+        };
+        assert_eq!(parse(&format!("silence = [{}]", entry.inline())).unwrap(), [entry]);
     }
 
     #[test]

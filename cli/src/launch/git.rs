@@ -3,7 +3,7 @@
 use std::{path::Path, process::Command};
 
 use super::{
-    Env, LaunchError, helper, prepare_sandbox, resolve_config, resolve_program,
+    ClaudeSockets, Env, LaunchError, helper, prepare_sandbox, resolve_config, resolve_program,
     sandbox::{Containment, Policy, contained, containment},
 };
 use crate::{
@@ -36,7 +36,7 @@ impl SourceGit {
         let resolved = resolve_config(config, &workspace)?;
         // A credential proxy that applies here is checked against this sandbox too (no keychain, no writable fnox
         // files), so the user's hooks don't run where launches are refused. Git itself doesn't run behind the proxy.
-        let sandboxed = prepare_sandbox(config, tools, &resolved, base, source).await?;
+        let sandboxed = prepare_sandbox(config, tools, &resolved, base, source, ClaudeSockets::None).await?;
         Ok(Self {
             env: sandboxed.env,
             policy: sandboxed.resolution.policy,

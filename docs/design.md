@@ -914,7 +914,12 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    extension's relay, and with `login = "keychain"` a `read` of `~/Library/Keychains`. A folder it won't open, or a
    token login with no `CLAUDE_CODE_OAUTH_TOKEN` in pi's environment or fnox's rules, starts the session with a
    warning (`LaunchWarning`) instead of refusing it; resolution builds the policy without the folder first and judges
-   the setting file against that.
+   the setting file against that. It also opens `claude`'s socket folder for writing and `bind`, never `connect`
+   (`ClaudeCodeSockets`): the user's `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR`, judged the same way and never temp,
+   a write root, home, or a folder directly in home (else a warning), or a session's own folder that
+   `launch/claude_sockets.rs` picks, the daemon creates at launch and sets as `CLAUDE_CODE_TMPDIR`, and removes when
+   the session ends. Its silence entries cover `claude`'s probes there and, with the token login, the keychain
+   lookups of `claude` and `security`.
 3. **Credentials:** nono's deny groups (`deny_credentials`, keychains, browser data, macOS private data, shell
    history and rc files), vendored verbatim in `nono-deny-groups.json` at the `nono` version; `mise run
    cli:nono-policy-check` reports upstream changes, and a test fails when the crate is bumped without re-vendoring.
@@ -1151,12 +1156,18 @@ file its scope saves to, allows the refused access. "Everywhere" saves the folde
 that names the source or checkout as pi and Claude Code name per-folder state (the path with `/` made `-`), unless that
 folder is `/`, home, directly in home, or holds a project. The question names each answer's exact entry: Allow in this
 project or everywhere (saved, then a session restart, stopped and resumed from its file), Deny in this project or
-everywhere (saved in `[sandbox] silence`: blocks below that path are only logged, in any level, since it changes
-nothing in the sandbox), or Not now (a dismissal too). A process's credential read (nono's deny groups, the keychain's
-services) and write to Git's control files are never asked about: the deciding deny (`grant::DeniedBy`) makes them a
-warning notice, once per process and path, naming the `read` entry or the `git` preset. Refusals by the floor, the
-user's `deny`, fnox's files, and operations no entry lifts are notices too. Notices go to the session view and, as a
-`notify` record, to attached pi.nvim clients. macOS reports
+everywhere (saved in `[sandbox] silence` as `{ target = "<path>" }`: blocks there are only logged, in any level, since
+it changes nothing in the sandbox), or Not now (a dismissal too). A path with the refusing process's pid as a whole
+number in a component is never offered as that path: the folder above it is, when it isn't under a temp folder, the
+home folder or directly in it, and lifts the block; otherwise `NoLift::PerProcess` makes it a notice. A process's
+credential read (nono's deny groups), keychain block (`DeniedBy::Keychain`: `Readable` with fnox off,
+`ClosedForFnox` with it on, matched exhaustively), and write to Git's control files are never asked about: the
+deciding deny (`grant::DeniedBy`) makes them a warning notice (`session/notice.rs`), once per process and path.
+Refusals by the floor, the user's `deny`, fnox's files, and operations no entry lifts are notices too. Every notice
+whose target is a path or a Mach service ends with the `silence` entry that quiets it. A `silence` entry matches what
+the notice showed (the target: a path with `*`/`**` segments, or a Mach service; and optionally the process name),
+never the reason; presets add entries of the same shape (`SilenceSource::Preset`). Notices go to the session view
+and, as a `notify` record, to attached pi.nvim clients. macOS reports
 only a process's first refusal and folds repeats; refusals inside commands that still succeeded aren't surfaced.
 
 Every request and its outcome is logged in the daemon log, never a command's output.

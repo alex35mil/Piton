@@ -136,7 +136,13 @@ pub struct ProcessOffer<'a> {
 /// only logged from then on.
 pub fn process_dialog(id: &str, process: &str, refusal: &str, offer: &ProcessOffer) -> Value {
     let entry = |(key, value): (&str, &str)| format!("`{key} = [\"{value}\"]`");
-    let silence = |(_, value): (&str, &str)| format!("`silence = [\"{value}\"]`");
+    let silence = |(_, value): (&str, &str)| {
+        let entry = crate::config::Silence {
+            target: crate::config::SilenceTarget::Path(value.to_string()),
+            process: None,
+        };
+        format!("`silence = [{}]`", entry.inline())
+    };
     let scopes = [
         (PersistScope::Project, offer.project),
         (PersistScope::Global, offer.everywhere),
@@ -321,8 +327,8 @@ mod tests {
         for saved in [
             "in this project: `write = [\"/h/c/-w-p\"]`",
             "everywhere: `write = [\"/h/c\"]`",
-            "in this project: `silence = [\"/h/c/-w-p\"]`",
-            "everywhere: `silence = [\"/h/c\"]`",
+            "in this project: `silence = [{ target = \"/h/c/-w-p\" }]`",
+            "everywhere: `silence = [{ target = \"/h/c\" }]`",
         ] {
             assert!(title.contains(saved), "{saved} in {title}");
         }

@@ -3,6 +3,7 @@
 
 mod commands;
 mod info;
+mod notice;
 mod prompts;
 mod replay;
 mod view;
@@ -601,29 +602,20 @@ impl Startup {
 /// The id of the records the daemon sends about how pi started in pi's `extension_ui_request` format.
 const STARTUP_UI_ID: &str = "piton:startup";
 
-/// The warning for a process's blocked credential access: what it was kept from, and for a read, the `read` entry that
-/// would lift it. A write or a socket created there has no entry the user could add (a credential stays closed to them);
-/// a connect there is offered its `connect` entry instead, so it reaches this only when that entry wouldn't lift it.
-fn credential_notice(process: &str, target: &str, access: launch::sandbox::Access) -> String {
-    use launch::sandbox::Access;
-    let path = match std::path::Path::new(target).is_absolute() {
-        true => target,
-        // The keychain's services: no path to name.
-        false => "~/Library/Keychains",
-    };
-    match access {
-        Access::Read => format!(
-            "The sandbox kept {process} from reading {target} (a credential). If it needs it, add `read = \
-             [\"{path}\"]` to [sandbox] in your global config.toml or a config.local.toml."
-        ),
-        Access::Write => format!("The sandbox kept {process} from writing {target} (a credential; never writable)."),
-        Access::Connect => {
-            format!("The sandbox kept {process} from connecting to {target} (a credential).")
-        }
-        Access::Bind => {
-            format!("The sandbox kept {process} from creating a socket at {target} (a credential; never writable).")
-        }
+/// The folders where host processes create sockets and files of their own: the temp roots and pi's `$TMPDIR`, as
+/// written and real. No folder at or below them is offered from the block question.
+fn shared_folders(env: &launch::Env) -> Vec<std::path::PathBuf> {
+    let mut folders: Vec<std::path::PathBuf> = launch::sandbox::WRITE_ROOTS
+        .iter()
+        .map(std::path::PathBuf::from)
+        .chain(["/tmp", "/var/folders"].map(std::path::PathBuf::from))
+        .collect();
+    if let Some(tmp) = env.get("TMPDIR").filter(|t| !t.is_empty()) {
+        let tmp = std::path::PathBuf::from(tmp);
+        folders.push(crate::agent::canonical_target(&tmp));
+        folders.push(tmp);
     }
+    folders
 }
 
 /// Where an entry saved from the block question goes, in the sandbox's terms.
@@ -1404,7 +1396,7 @@ impl SessionTask {
     /// A refusal the kernel recorded for this session: kept for the bash call it belongs to, or, for a process that
     /// isn't one, offered to the user as the entry that lifts it, or reported when no entry the question saves would.
     fn on_refusal(&mut self, refusal: crate::daemon::Refusal) {
-        use crate::launch::sandbox::grant::{self, DeniedBy, NoLift, Refused, Scope};
+        use crate::launch::sandbox::grant::{self, Refused, Scope};
         let summary = refusal.summary();
         // A call's sandbox: kept for that call, shown when it's asked to run again. A typed command: the user saw it fail
         // and it's never rerun. pi's own sandbox, or a call's background job outliving it: a blocked process, asked about.
@@ -1424,16 +1416,22 @@ impl SessionTask {
         {
             return;
         }
-        let target = std::path::Path::new(&refusal.target);
-        if let Some(silenced) = crate::launch::sandbox::silenced(&commands.policies.silence, target) {
+        if let Some(silenced) = crate::launch::sandbox::silenced(
+            &commands.policies.silence,
+            &refusal.process,
+            &refusal.operation,
+            &refusal.target,
+        ) {
             crate::log!(
-                "session {key}: {} was blocked: {summary} (silenced by {})",
+                "session {key}: {} was blocked: {summary} (silenced by {}, {})",
                 refusal.process,
-                silenced.path.display()
+                silenced.entry().inline(),
+                silenced.source
             );
             return;
         }
         let projects = [commands.source.as_path(), commands.checkout.as_path()];
+        let shared = shared_folders(&commands.env);
         let widened = |lift: &grant::Lift, scope: Scope| {
             let file = commands
                 .scope_file(match scope {
@@ -1446,14 +1444,15 @@ impl SessionTask {
         let refused = Refused {
             operation: &refusal.operation,
             target: &refusal.target,
+            pid: refusal.pid,
         };
-        let decided = grant::lift_for(
-            &commands.policies.launch,
-            refused,
-            &projects,
-            &commands.paths.home,
-            widened,
-        );
+        let bounds = grant::Bounds {
+            projects: &projects,
+            home: &commands.paths.home,
+            shared: &shared,
+            credentials: commands.policies.credentials,
+        };
+        let decided = grant::lift_for(&commands.policies.launch, refused, &bounds, widened);
         let process = &refusal.process;
         let notice = match decided {
             Ok(offer) => {
@@ -1468,27 +1467,20 @@ impl SessionTask {
                 self.ask_next_process();
                 return;
             }
-            Err(NoLift::Decided(DeniedBy::Credential(access))) => credential_notice(process, &refusal.target, access),
-            Err(NoLift::Decided(DeniedBy::GitControl)) => format!(
-                "The sandbox kept {process} from writing {} (Git's hooks and configuration). Git carries on without \
-                 it; the git preset opens these files.",
-                refusal.target
+            Err(why) => notice::notice(
+                &notice::Blocked {
+                    process,
+                    operation: &refusal.operation,
+                    target: &refusal.target,
+                    summary: &summary,
+                },
+                &why,
+                &notice::Context {
+                    home: &commands.paths.home,
+                    checkout: &commands.checkout,
+                    claude: notice::ClaudeSignIn::of(commands.policies.claude_login),
+                },
             ),
-            Err(NoLift::Decided(DeniedBy::UserDeny)) => {
-                format!("The sandbox blocked {process}: {summary} (your [sandbox] deny).")
-            }
-            Err(NoLift::Decided(DeniedBy::FnoxConfig)) => {
-                format!(
-                    "The sandbox blocked {process}: {summary} (a file fnox loads; changed only through a write you \
-                     approve)."
-                )
-            }
-            Err(NoLift::Decided(DeniedBy::Floor)) => {
-                format!("The sandbox blocked {process}: {summary} (never lifted).")
-            }
-            Err(NoLift::Unsupported) => {
-                format!("The sandbox blocked {process}: {summary} (no [sandbox] entry lifts it).")
-            }
         };
         crate::log!("session {key}: {notice}");
         self.show_notice(notice);
@@ -1575,16 +1567,21 @@ impl SessionTask {
             ProcessAnswer::Silence(scope) => {
                 let Some(commands) = &mut self.commands else { return };
                 let path = question.offer.at(grant_scope(scope)).path().to_path_buf();
-                let message = match commands.persist_silence(scope, &path) {
+                let entry = crate::config::Silence {
+                    target: crate::config::SilenceTarget::Path(path.display().to_string()),
+                    process: None,
+                };
+                let message = match commands.persist_silence(scope, &entry) {
                     Ok(file) => {
                         commands.policies.silence.push(crate::launch::sandbox::Silenced {
-                            path: path.clone(),
-                            file: file.clone(),
+                            target: crate::launch::sandbox::Silent::Path(path.clone()),
+                            process: None,
+                            source: crate::launch::sandbox::SilenceSource::File(file.clone()),
                         });
                         crate::log!(
-                            "session {key}: the user denied {}: saved `silence = [\"{}\"]` in {}",
+                            "session {key}: the user denied {}: saved `silence = [{}]` in {}",
                             question.process,
-                            path.display(),
+                            entry.inline(),
                             file.display()
                         );
                         None
@@ -1908,19 +1905,14 @@ fn command_type(command: &Map<String, Value>) -> String {
 mod tests {
     use super::*;
 
-    /// A credential read names the `read` entry that lifts it; a write doesn't suggest one (it wouldn't lift a write).
+    /// Temp is shared with host processes, as written and real; pi's own `$TMPDIR` too.
     #[test]
-    fn credential_notices_match_the_refused_access() {
-        use launch::sandbox::Access;
-        let read = credential_notice("ssh", "/h/.ssh/keys/id_ed25519", Access::Read);
-        assert!(
-            read.contains("reading") && read.contains("read = [\"/h/.ssh/keys/id_ed25519\"]"),
-            "{read}"
-        );
-        let write = credential_notice("ssh", "/h/.ssh/known_hosts", Access::Write);
-        assert!(write.contains("writing") && !write.contains("read ="), "{write}");
-        let keychain = credential_notice("claude", "com.apple.SecurityServer", Access::Read);
-        assert!(keychain.contains("read = [\"~/Library/Keychains\"]"), "{keychain}");
+    fn shared_folders_hold_temp() {
+        let env: launch::Env = [("TMPDIR".to_string(), "/var/folders/x/T/".to_string())].into();
+        let shared = shared_folders(&env);
+        for folder in ["/private/tmp", "/tmp", "/private/var/folders", "/var/folders/x/T/"] {
+            assert!(shared.contains(&std::path::PathBuf::from(folder)), "{folder}");
+        }
     }
 
     /// The startup notice holds the launch's warnings, then the secrets fnox couldn't read; nothing when both are empty.
@@ -1928,7 +1920,7 @@ mod tests {
     fn the_startup_notice_holds_launch_warnings_and_fnox_secrets() {
         assert_eq!(Startup::default().notice(), None);
         let mut startup = Startup {
-            warnings: vec![launch::LaunchWarning::ClaudeCodeNoToken],
+            warnings: vec![launch::LaunchWarning::NoClaudeToken],
             fnox: Some(launch::fnox::StartupLog::default()),
             announced: false,
         };
