@@ -3,7 +3,7 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
-use super::SandboxAction;
+use super::{SandboxAction, WhyAccess};
 use crate::{
     config::DaemonConfig,
     launch::{
@@ -41,17 +41,12 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
             ExitCode::SUCCESS
         }
-        SandboxAction::Why {
-            path, write, connect, ..
-        } => {
-            let access = match (write, connect) {
-                (false, false) => Access::Read,
-                (true, false) => Access::Write,
-                (false, true) => Access::Connect,
-                (true, true) => {
-                    eprintln!("piton: --write or --connect, not both");
-                    return ExitCode::from(1);
-                }
+        SandboxAction::Why { path, access, .. } => {
+            let access = match access {
+                None => Access::Read,
+                Some(WhyAccess::Write) => Access::Write,
+                Some(WhyAccess::Connect) => Access::Connect,
+                Some(WhyAccess::Bind) => Access::Bind,
             };
             let target = crate::agent::canonical_target(&std::path::absolute(&path).unwrap_or(path));
             let decision = policy.decide(&target, access);
@@ -59,6 +54,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                 Access::Read => "read",
                 Access::Write => "write",
                 Access::Connect => "connect to",
+                Access::Bind => "create a socket at",
             };
             let outcome = if decision.allowed { "allowed" } else { "denied" };
             println!("{outcome}: {verb} {}", target.display());

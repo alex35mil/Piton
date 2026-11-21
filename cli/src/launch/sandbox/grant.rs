@@ -97,6 +97,7 @@ pub fn widened_config(config: &LaunchConfig, lists: &GrantLists, file: &Path) ->
             write_file: lists.write_file.clone(),
             read: lists.read.clone(),
             connect: lists.connect.clone(),
+            bind: lists.bind.clone(),
             presets: lists.presets.clone(),
             ..crate::config::SandboxTable::default()
         },
@@ -147,7 +148,7 @@ pub enum Credentials {
 
 /// The launch's `policy` with everything lifted except the floor: what `grant = "all"` and \"Allow once\" run with.
 ///
-/// Every write and connect is allowed first, then the launch's rules follow with every liftable deny left out, so each
+/// Every write, connect, and bind is allowed first, then the launch's rules follow with every liftable deny left out, so each
 /// floor deny (and the allows that reopen part of it, such as the daemon's logs and `agent.sock`) still decides last.
 ///
 /// Writes open below each entry of the root ([`root_entries`]), never `/` itself: nono refuses a platform rule that
@@ -174,7 +175,7 @@ fn all_below(policy: &Policy, credentials: Credentials, roots: &[PathBuf]) -> Po
     // nono validates file rules only: a socket allow on `/` is accepted (yolo's `connect = ["/"]` emits it too).
     rules.push(Rule {
         effect: Effect::Allow,
-        access: vec![Access::Connect],
+        access: vec![Access::Connect, Access::Bind],
         target: Target::Subpath { path: "/".into() },
         source: source(),
     });
@@ -248,6 +249,8 @@ pub enum Lift {
     WriteFile(PathBuf),
     /// `connect = [path]`: a Unix socket.
     Connect(PathBuf),
+    /// `bind = [path]`: where a Unix socket is created.
+    Bind(PathBuf),
 }
 
 impl Lift {
@@ -257,13 +260,14 @@ impl Lift {
             Lift::Write(path) => ("write", path.display().to_string()),
             Lift::WriteFile(path) => ("write_file", path.display().to_string()),
             Lift::Connect(path) => ("connect", path.display().to_string()),
+            Lift::Bind(path) => ("bind", path.display().to_string()),
         }
     }
 
     /// The path the entry names.
     pub fn path(&self) -> &Path {
         match self {
-            Lift::Write(path) | Lift::WriteFile(path) | Lift::Connect(path) => path,
+            Lift::Write(path) | Lift::WriteFile(path) | Lift::Connect(path) | Lift::Bind(path) => path,
         }
     }
 
@@ -276,6 +280,7 @@ impl Lift {
             Lift::Connect(path) => lists
                 .connect
                 .push(crate::config::Connect::Socket(path.display().to_string())),
+            Lift::Bind(path) => lists.bind.push(path.display().to_string()),
         }
         lists
     }
@@ -394,11 +399,23 @@ pub fn lift_for(
         }
         op if op.starts_with("file-write") && absolute => (Access::Write, Lift::WriteFile(target.to_path_buf())),
         "network-outbound" if absolute => (Access::Connect, Lift::Connect(target.to_path_buf())),
+        "network-bind" if absolute => (Access::Bind, Lift::Bind(target.to_path_buf())),
         _ => return Err(NoLift::Unsupported),
     };
-    // A deny rule decides it: every user entry comes before the denies, so none would beat it.
+    // A deny rule decides it: every user entry comes before the denies, so none would beat it. Except a connect inside
+    // a credential folder, which a `connect` entry naming it opens: the widened check below decides that one.
     if let Some(denied) = denied_by(policy, target, access) {
-        return Err(NoLift::Decided(denied));
+        match (access, &denied) {
+            (Access::Connect, DeniedBy::Credential(_)) => {}
+            (
+                Access::Read | Access::Write | Access::Connect | Access::Bind,
+                DeniedBy::Credential(_)
+                | DeniedBy::GitControl
+                | DeniedBy::UserDeny
+                | DeniedBy::FnoxConfig
+                | DeniedBy::Floor,
+            ) => return Err(NoLift::Decided(denied)),
+        }
     }
     let lifts = |lift: &Lift, scope: Scope| -> Result<(), NoLift> {
         let policy = widened(lift, scope).map_err(|_| NoLift::Unsupported)?;
@@ -473,7 +490,7 @@ mod tests {
 
     /// A launch policy with one rule of each kind the floor decides about.
     fn launch() -> Policy {
-        let all = [Access::Read, Access::Write, Access::Connect];
+        let all = [Access::Read, Access::Write, Access::Connect, Access::Bind];
         Policy {
             rules: vec![
                 Rule {
@@ -550,6 +567,7 @@ mod tests {
         );
         assert!(allowed("/w/.git/config", Access::Write));
         assert!(allowed("/tmp/sock", Access::Connect));
+        assert!(allowed("/w/test.sock", Access::Bind), "creating sockets");
         assert!(widened.keychain);
         // The floor.
         assert!(!allowed("/w/.pi/settings.json", Access::Write), "a protected file");
@@ -646,12 +664,14 @@ mod tests {
     }
 
     /// The launch with `lift` added where `resolve` puts the user's grants: after the first rule (the workspace),
-    /// before every deny. The resolution itself is tested in `resolve.rs`.
+    /// before every deny; a connect also after the credential denies, as `resolve` adds one inside a credential folder.
+    /// The resolution itself is tested in `resolve.rs`.
     fn with_lift(launch: &Policy, lift: &Lift) -> Policy {
         let (access, target) = match lift {
             Lift::Write(p) => (Access::Write, Target::Subpath { path: p.clone() }),
             Lift::WriteFile(p) => (Access::Write, Target::Literal { path: p.clone() }),
             Lift::Connect(p) => (Access::Connect, Target::Subpath { path: p.clone() }),
+            Lift::Bind(p) => (Access::Bind, Target::Subpath { path: p.clone() }),
         };
         let mut policy = launch.clone();
         policy.rules.insert(
@@ -659,10 +679,29 @@ mod tests {
             Rule {
                 effect: Effect::Allow,
                 access: vec![access],
-                target,
+                target: target.clone(),
                 source: Source::Workspace,
             },
         );
+        match lift {
+            Lift::Connect(_) => {
+                let after_credentials = policy
+                    .rules
+                    .iter()
+                    .rposition(|r| matches!(r.source, Source::NonoGroup { .. }))
+                    .map_or(policy.rules.len(), |i| i + 1);
+                policy.rules.insert(
+                    after_credentials,
+                    Rule {
+                        effect: Effect::Allow,
+                        access: vec![Access::Connect],
+                        target,
+                        source: Source::Workspace,
+                    },
+                );
+            }
+            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) => {}
+        }
         policy
     }
 
@@ -699,6 +738,29 @@ mod tests {
         assert_eq!(
             lift("network-outbound", "/tmp/x.sock"),
             Ok(only(Lift::Connect("/tmp/x.sock".into())))
+        );
+        assert_eq!(
+            lift("network-bind", "/w/x.sock"),
+            Ok(only(Lift::Bind("/w/x.sock".into())))
+        );
+        // A socket in a credential folder: its `connect` entry opens it (for connecting only), so it's offered.
+        assert_eq!(
+            lift("network-outbound", "/h/.ssh/agent.sock"),
+            Ok(only(Lift::Connect("/h/.ssh/agent.sock".into())))
+        );
+        // Creating one there isn't: nothing lifts it.
+        assert_eq!(
+            lift("network-bind", "/h/.ssh/agent.sock"),
+            decided(DeniedBy::Credential(Access::Bind))
+        );
+        // The user's deny and the daemon's state still decide a connect.
+        assert_eq!(
+            lift("network-outbound", "/h/secret/s.sock"),
+            decided(DeniedBy::UserDeny)
+        );
+        assert_eq!(
+            lift("network-outbound", "/h/.local/state/piton/piton.sock"),
+            decided(DeniedBy::Floor)
         );
         // Git's control files, after every user entry: reported, with the `git` preset.
         assert_eq!(

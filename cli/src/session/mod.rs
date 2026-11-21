@@ -602,7 +602,8 @@ impl Startup {
 const STARTUP_UI_ID: &str = "piton:startup";
 
 /// The warning for a process's blocked credential access: what it was kept from, and for a read, the `read` entry that
-/// would lift it. A write or connect has no entry the user could add (a credential stays closed to them).
+/// would lift it. A write or a socket created there has no entry the user could add (a credential stays closed to them);
+/// a connect there is offered its `connect` entry instead, so it reaches this only when that entry wouldn't lift it.
 fn credential_notice(process: &str, target: &str, access: launch::sandbox::Access) -> String {
     use launch::sandbox::Access;
     let path = match std::path::Path::new(target).is_absolute() {
@@ -617,7 +618,10 @@ fn credential_notice(process: &str, target: &str, access: launch::sandbox::Acces
         ),
         Access::Write => format!("The sandbox kept {process} from writing {target} (a credential; never writable)."),
         Access::Connect => {
-            format!("The sandbox kept {process} from connecting to {target} (a credential; never opened).")
+            format!("The sandbox kept {process} from connecting to {target} (a credential).")
+        }
+        Access::Bind => {
+            format!("The sandbox kept {process} from creating a socket at {target} (a credential; never writable).")
         }
     }
 }

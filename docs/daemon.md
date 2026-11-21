@@ -300,9 +300,10 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
   `.git` file or symlink in a subfolder pointing at a repository it built elsewhere, whose settings Git uses when run
   in that folder; check a folder an agent created before running Git there. Hooks still run in the sandbox; only
   writing these files is closed. The `git` preset (below) lifts it.
-- **Network and Unix sockets:** open for now. Closing sockets except `agent.sock` and DNS
-  ([#248](https://github.com/alex35mil/Piton/issues/248)) and the network except through Piton's proxy
-  ([#228](https://github.com/alex35mil/Piton/issues/228)) make the base strict; `connect` entries (below) then say what
+- **Unix sockets:** closed, except DNS (`mDNSResponder`) and `agent.sock`: no process may connect to a socket (a
+  running Neovim, Docker, the SSH and gpg agents) or create one, unless a `connect` or `bind` entry (below) opens it.
+- **Network:** TCP is open for now, localhost included. Closing it except through Piton's proxy
+  ([#228](https://github.com/alex35mil/Piton/issues/228)) makes the base strict; `connect` entries then say what
   opens.
 
 The profiles, each holding the one before it:
@@ -310,13 +311,15 @@ The profiles, each holding the one before it:
 ```toml
 # strict: nothing
 
-# standard (the default): Git over SSH through your SSH agent (keys used, never read), and the network
-read = ["~/.ssh/config", "~/.ssh/known_hosts"]
+# standard (the default): Git over SSH through your SSH agent (keys used, never read), the network, and creating
+# sockets anywhere (test servers, IPC)
+read = ["~/.ssh/config", "~/.ssh/known_hosts"]   # and every public key (*.pub) under ~/.ssh, found at launch
 connect = ["$SSH_AUTH_SOCK", "*"]
+bind = ["/"]
 
 # yolo: standard, plus
 presets = ["git"]
-connect = ["/"]   # every Unix socket
+connect = ["/"]   # every Unix socket, except the ones in credential folders (below)
 ```
 
 A profile entry whose variable isn't set (no `$SSH_AUTH_SOCK`) is left out. Toolchain presets are in no profile: host
@@ -329,12 +332,13 @@ builds reuse what the sandbox writes there, so turn on the ones you build with.
 profile = "standard"  # strict | standard | yolo; the nearest file that sets it wins
 write = []            # writable folders: each folder and everything below it
 write_file = []       # writable files: exactly each path
-read = []             # lift a built-in credential deny for a path (readable then; writable with write)
+read = []             # lift a built-in credential deny for reading a path (writable with write; never connectable)
 connect = []          # sockets, ports, and hosts (below)
+bind = []             # where processes may create Unix sockets: each path and everything below it
 presets = []          # "mise", "rust", "node", "swift": toolchain caches and state;
                       # "git": agents may write Git's hooks and configuration (see below);
                       # "pi-claude-code": what pi's Claude Code needs (see below)
-deny = []             # paths closed like the credentials: no read, write, or connect
+deny = []             # paths closed like the credentials: no read, write, connect, or bind
 silence = []          # paths whose blocks stay blocked without a question or a notice ("Deny" saves here)
 ```
 
@@ -349,12 +353,42 @@ silence = []          # paths whose blocks stay blocked without a question or a 
 | `*` | any host, any port |
 | `github.com`, `github.com:22`, `*.npmjs.org`, `10.0.0.5` | a named host or address, any port or one |
 
-Sockets and ports are enforced by the sandbox, named hosts by a proxy Piton runs; until sockets and the network
-close ([#248](https://github.com/alex35mil/Piton/issues/248), [#228](https://github.com/alex35mil/Piton/issues/228)),
-they're open whatever `connect` says. A `connect` entry never reopens a credential or your `deny`: only `read` lifts a
-credential deny.
+Sockets and ports are enforced by the sandbox, named hosts by a proxy Piton runs. Until the network closes
+([#228](https://github.com/alex35mil/Piton/issues/228)), every host and port is reachable whatever `connect` says;
+sockets are enforced now. No `connect` entry reopens your `deny` or the daemon's state and control socket.
 
-The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `commands` (below), and the `git`
+Sockets inside a credential folder (`~/.ssh`, `~/.gnupg`, `~/.docker`, 1Password's folders, and the rest of the
+built-in list) open only when an entry names a path at or inside that folder, and then only for connecting: nothing
+there becomes readable. A broader entry (yolo's `/`, `~`) leaves them closed. For example:
+
+```toml
+connect = [
+  "~/.docker/run/docker.sock",       # Docker Desktop
+  "~/.gnupg/S.gpg-agent",            # gpg-agent: signing commits
+  "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock",  # 1Password's SSH agent
+]
+```
+
+standard's `$SSH_AUTH_SOCK` opens 1Password's agent the same way when it points there.
+
+A socket a `connect` entry names, and each folder on its way, can't be written, renamed, or replaced by the sandbox, so
+no other socket can be moved there (the macOS SSH agent's socket is under `/private/tmp`, which the sandbox writes).
+An entry naming a folder the sandbox writes (`$TMPDIR`) still reaches every socket in it, Neovim's and any moved or
+linked there: list the socket itself when you can.
+
+Every Docker socket (Docker Desktop's, OrbStack's `~/.orbstack/run/docker.sock`, `/var/run/docker.sock`) gives whoever
+connects control of this Mac: listing one lets the agent run anything as you.
+
+Sockets a command creates and connects to itself in temp (this repository's e2e tests start a daemon there) are
+blocked too: the command meets the question below, or takes a per-command grant:
+
+```toml
+[[sandbox.commands]]
+match = "bash(mise run cli:test*)"
+grant = { connect = ["$TMPDIR"] }
+```
+
+The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `bind`, `commands` (below), and the `git`
 and `pi-claude-code` presets are accepted in the global `config.toml` or any `config.local.toml`, never in a project's `config.toml`, which
 travels with the repository: a repository can't open the sandbox for whoever clones it. `write`, `write_file`,
 toolchain presets, and `deny` may be set anywhere.
@@ -370,6 +404,14 @@ nearer file's options win one by one. The apps show a preset list with options r
 preset lets the sandbox write what the host runs or trusts (installed tools,
 `~/.cargo/bin`, rustup's toolchains, mise's trusted configs). The `mise` preset writes mise's cache and its install
 bookkeeping; `mise install` itself is asked about when the sandbox blocks it (below), or granted per command.
+
+Git over SSH in `standard`: ssh reads `~/.ssh/config`, `known_hosts`, and the public keys, and asks your SSH agent to
+sign, never reading a private key. Every key loaded in the agent works for every host, not just the Git host. To
+narrow it, give Git a separate agent holding only that host's keys (`IdentityAgent` in `~/.ssh/config`, then that socket
+in `connect` instead), or use a deploy key per repository. With `IdentitiesOnly yes`, ssh picks the agent's key through
+the public key beside the configured `IdentityFile` (`<file>.pub`). The first-run failures: a key not loaded in the
+agent (run `ssh-add` on the host; the key file stays unreadable), and a host missing from `known_hosts` (connect once
+from a terminal). `strict` opens none of this: list the agent's socket in `connect` and the files in `read`.
 
 A recommended global configuration for a developer Mac (the `standard` profile covers Git over SSH):
 
@@ -418,8 +460,8 @@ and when the token login finds no `CLAUDE_CODE_OAUTH_TOKEN` in pi's environment 
 writes to a folder the preset didn't open are blocked and asked about like any other. `piton sandbox show` prints the
 same warnings.
 
-`piton sandbox why PATH [--write | --connect] [--workspace DIR]` says whether a sandboxed pi there may read, write, or
-connect to PATH, and which rule decides: built in, or an entry from a profile or the file that lists it.
+`piton sandbox why PATH [--write | --connect | --bind] [--workspace DIR]` says whether a sandboxed pi there may read,
+write, connect to, or create a socket at PATH, and which rule decides: built in, or an entry from a profile or the file that lists it.
 `piton sandbox show` prints the profile (and the file that chose it), every rule with where it came from, and the
 network destinations `connect` grants.
 
@@ -459,7 +501,7 @@ grant = "all"                               # everything except the floor (what 
 
 [[sandbox.commands]]
 match = "bash(git push *)"
-grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed by hand: write, write_file, read, connect, presets
+grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed by hand: write, write_file, read, connect, bind, presets
 ```
 
 A matching command runs with its grant from the start, matched as `[permissions]` rules match (every part of a
@@ -470,7 +512,8 @@ When something other than a command is blocked (an MCP server, an extension, pi)
 path, one question at a time. The question names the exact entry each answer saves:
 
 - **Allow in this project / everywhere, and restart:** adds the entry that lifts it: `write` for a folder it creates
-  (so what it writes inside isn't blocked again), `write_file` for a file, `connect` for a socket. "Everywhere" saves
+  (so what it writes inside isn't blocked again), `write_file` for a file, `connect` for a socket it connects to
+  (in a credential folder too, for that socket only), `bind` for a socket it creates. "Everywhere" saves
   the folder above a path's per-project part (Claude Code's `~/Library/Caches/claude-cli-nodejs/<project>` saves
   `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block.
 - **Deny in this project / everywhere:** adds the path to `silence`: it stays blocked, and isn't asked about again.
@@ -495,8 +538,8 @@ A command the agent runs keeps the rerun question for every block, credentials a
 Known limits:
 
 - Commands the daemon runs don't go through fnox's credential proxy.
-- The network and Unix sockets aren't restricted yet: anything the agent can read can leave the machine
-  ([#248](https://github.com/alex35mil/Piton/issues/248), [#228](https://github.com/alex35mil/Piton/issues/228)).
+- The network isn't restricted yet: anything the agent can read can leave the machine, and services listening on
+  localhost TCP are reachable ([#228](https://github.com/alex35mil/Piton/issues/228)).
 - pi's own credentials (its `auth.json`, provider keys in its environment) are readable: the whole pi process is
   sandboxed, and pi needs them. Keys in its environment can be placeholders instead, with the credential proxy
   (above).

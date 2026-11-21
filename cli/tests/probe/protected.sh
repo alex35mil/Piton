@@ -33,13 +33,30 @@ cleanup_real() {
     rmdir "$HOME/Library/Caches/$probe" "$agent_dir/extensions/$probe" 2>/dev/null || true
     rmdir "$agent_dir/TRUST.JSON.LOCK" 2>/dev/null || true
 }
-trap 'cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
+listener=
+trap 'test -z "$listener" || kill "$listener" 2>/dev/null; cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
 mkdir "$linked"
 ln -s "$linked" "$src/cache"
 marker="# piton protected-file probe
 [sandbox]
 write = [\"$src/cache\"]"
 printf '%s\n' "$marker" > "$src/.piton/config.toml"
+# Unix sockets the host listens on, in the scratch folder (temp, which the sandbox writes): one no entry names, and one
+# the checkout's own config.local.toml lists, which must stay in place.
+mkdir -p "$scratch/host" "$scratch/listed"
+host_sock="$scratch/host/listen.sock"
+listed_sock="$scratch/listed/ok.sock"
+printf '[sandbox]\nconnect = ["%s"]\n' "$listed_sock" > "$src/.piton/config.local.toml"
+python3 -I -c '
+import signal, socket, sys, threading
+def serve(path):
+    s = socket.socket(socket.AF_UNIX); s.bind(path); s.listen(16)
+    while True: s.accept()[0].close()
+for path in sys.argv[1:]: threading.Thread(target=serve, args=(path,), daemon=True).start()
+signal.pause()
+' "$host_sock" "$listed_sock" > /dev/null 2>&1 &
+listener=$!
+while [ ! -S "$host_sock" ] || [ ! -S "$listed_sock" ]; do sleep 0.1; done
 echo 'skill' > "$src/.agents/skills/s/SKILL.md"
 echo 'a' > "$src/src/a.rs"
 
@@ -60,8 +77,14 @@ echo 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])
 # expectation, or the policy's own decision for paths the user's configuration may lift with `read`.
 needs() { if [ -e "$1" ] || [ -S "$1" ]; then echo "$2"; else echo skip; fi; }
 policy_says() {
-    if "$piton" sandbox why --workspace "$src" "$1" >/dev/null 2>&1; then echo ok; else echo denied; fi
+    if "$piton" sandbox why --workspace "$src" "$@" >/dev/null 2>&1; then echo ok; else echo denied; fi
 }
+bind="$scratch/bind.py"
+echo 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' > "$bind"
+expect_bind=$(policy_says --bind "$src/probe.sock")
+expect_ssh_agent=$(needs "${SSH_AUTH_SOCK:-/nonexistent}" "$(policy_says --connect "${SSH_AUTH_SOCK:-/nonexistent}")")
+ssh_pub=$(ls "$HOME"/.ssh/*.pub "$HOME"/.ssh/*/*.pub 2>/dev/null | head -n 1 || true)
+expect_ssh_pub=$(needs "${ssh_pub:-/nonexistent}" "$(policy_says "${ssh_pub:-/nonexistent}")")
 ssh_key=$(ls "$HOME"/.ssh/id_* 2>/dev/null | rg -v '\.pub$' | head -n 1 || true)
 keychain="$HOME/Library/Keychains/login.keychain-db"
 expect_ssh_key=$(needs "${ssh_key:-/nonexistent}" denied)
@@ -175,13 +198,27 @@ attempt "$EXPECT_AGENT" "connect to the agent socket in another case" "python3 -
 attempt "$EXPECT_CONTROL" "connect to the control socket" "python3 -I $CONNECT $STATE/piton.sock"
 attempt "$EXPECT_CONTROL" "connect to it through a symlink" "ln -s $STATE/piton.sock ctl.sock && python3 -I $CONNECT ctl.sock"
 attempt "$EXPECT_AGENT" "connect to the agent socket"    "python3 -I $CONNECT $STATE/agent.sock"
+# Unix sockets: closed unless an entry names them. TCP and DNS stay open (#228 owns the network).
+attempt ok     "look up a host name (DNS)"             "python3 -I -c 'import socket; socket.getaddrinfo(\"github.com\", 443)'"
+attempt ok     "connect over TCP"                      "python3 -I -c 'import socket; socket.create_connection((\"github.com\", 443), 10).close()'"
+attempt ok     "listen on TCP localhost"               "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); s.listen()'"
+attempt denied "connect to a host process's socket"    "python3 -I $CONNECT $HOST_SOCK"
+attempt denied "connect to it through a hard link"     "ln $HOST_SOCK hl.sock && python3 -I $CONNECT hl.sock"
+attempt ok     "connect to a socket an entry names"    "python3 -I $CONNECT $LISTED_SOCK"
+attempt denied "move another socket onto a named one"  "mv $LISTED_SOCK $OUTSIDE/moved.sock || true; ln -f $HOST_SOCK $LISTED_SOCK"
+attempt denied "rename a named socket's folder"        "mv $(dirname $LISTED_SOCK) $OUTSIDE/moved-folder"
+attempt "$EXPECT_BIND" "create a socket in the workspace" "python3 -I $BIND probe.sock"
+attempt "$EXPECT_SSH_AGENT" "list the SSH agent's keys" "ssh-add -l"
+attempt "$EXPECT_SSH_PUB" "read an SSH public key"    "cat '$SSH_PUB'"
 EOF
 
 cd "$src"
 status=0
 EXPECT_SSH_KEY="$expect_ssh_key" SSH_KEY="$ssh_key" EXPECT_KEYCHAIN="$expect_keychain" KEYCHAIN="$keychain" \
 EXPECT_HISTORY="$expect_history" EXPECT_DATABASE="$expect_database" EXPECT_CONTROL="$expect_control" \
-EXPECT_AGENT="$expect_agent" CONNECT="$connect" \
+EXPECT_AGENT="$expect_agent" CONNECT="$connect" BIND="$bind" EXPECT_BIND="$expect_bind" \
+HOST_SOCK="$host_sock" LISTED_SOCK="$listed_sock" EXPECT_SSH_AGENT="$expect_ssh_agent" \
+EXPECT_SSH_PUB="$expect_ssh_pub" SSH_PUB="$ssh_pub" \
 EXPECT_SETTINGS_TARGET="$expect_settings_target" SETTINGS_TARGET="$settings_target" \
 SETTINGS_FOLDER="$settings_folder" SETTINGS_MOVED="$settings_moved" \
 OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" STATE_OTHER_CASE="$state_other_case" CONFIG_HOME="$config_home" PROBE="$probe" ERR="$scratch/err" \
@@ -198,4 +235,6 @@ if [ "$status" -ne 0 ]; then
 fi
 # The integrity of the protected file itself, checked from outside the sandbox.
 if [ "$(cat "$src/.piton/config.toml")" = "$marker" ]; then echo "pass  ok      protected file unchanged"; else echo "FAIL  changed protected file changed"; fi
+# The named socket, checked from outside the sandbox: still the host's listener, still in its folder.
+if [ -S "$listed_sock" ] && python3 -I "$connect" "$listed_sock" 2>/dev/null; then echo "pass  ok      named socket in place"; else echo "FAIL  moved   named socket moved"; fi
 ! rg -q '^FAIL' "$scratch/out"

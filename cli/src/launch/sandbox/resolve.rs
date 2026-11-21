@@ -2,11 +2,13 @@
 //! facts (workspace, agent directory, the daemon's state folder), as an ordered list of literal rules.
 //!
 //! Order, the last matching rule deciding:
-//! 1. grants: writes to the workspace, the source's `.piton/.local`, temp, presets, `write`, `write_file`; and
-//!    `connect` sockets, before every deny so none of them reopens one;
-//! 2. nono's credential denies; then `read`, which lifts them (and reopens writes granted inside a read path);
+//! 1. grants: writes to the workspace, the source's `.piton/.local`, temp, presets, `write`, `write_file`; DNS; and
+//!    `connect` and `bind` sockets, before every deny so none of them reopens one (the base closes every socket);
+//! 2. nono's credential denies; then `read`, which lifts them for reading (and reopens writes granted inside a read
+//!    path); then `connect` socket entries at or inside a credential folder, for connecting only;
 //! 3. the host agent directory is read-only; the launch's agent directory's runtime state is writable;
-//! 4. the user's `deny`;
+//! 4. the user's `deny`; the files fnox loads; each socket a `connect` entry names, and the folders on its way, kept
+//!    in place;
 //! 5. every configuration level, and what its entries link to, is read-only; protected files are read-only; so are
 //!    Git's hooks and configuration in the launch's checkouts;
 //! 6. the daemon's state folder is closed (reads, writes, connects) except its logs and the agent socket, and its
@@ -73,6 +75,13 @@ const FIXED_FOLDER_DENY: &str = "a folder on the way to configuration: renaming 
 /// Why Git's hooks and configuration are closed, and how to open them: what `piton sandbox why` prints.
 const GIT_CONTROL_DENY: &str = "Git's hooks and configuration: Git on the host runs what they name; the git preset \
                                 opens them (global config.toml or a config.local.toml)";
+
+/// Why a socket a `connect` entry names, or a folder on its way, can't be written.
+const SOCKET_PATH_DENY: &str = "a socket a connect entry names, or a folder on its way: kept in place so no other \
+                                socket can be moved there";
+
+/// The socket macOS resolves names through.
+const DNS_SOCKET: &str = "/var/run/mDNSResponder";
 
 /// The most symlinks one path's resolution follows, as the kernel's limit; past it, the rest is kept as written.
 const MAX_LINKS: usize = 40;
@@ -290,27 +299,47 @@ fn build(
     for (path, source) in &grants.write_file {
         rules.push(Effect::Allow, &[Access::Write], literal(path), source.clone());
     }
-    // Sockets, before every deny: a `connect` entry (yolo's `/` too) never reopens a credential, a user deny, or the
-    // daemon's sockets. Only `read` lifts a credential deny.
+    // Sockets, before every deny: a `connect` or `bind` entry (yolo's `/` too) never reopens a credential, a user
+    // deny, or the daemon's sockets. A connect entry inside a credential folder gets a second slot below.
+    rules.push(
+        Effect::Allow,
+        &[Access::Connect],
+        literal(Path::new(DNS_SOCKET)),
+        Source::BuiltIn { what: "DNS".into() },
+    );
     for (path, source) in &grants.sockets {
         rules.push(Effect::Allow, &[Access::Connect], subpath(path), source.clone());
     }
+    for (path, source) in &grants.bind {
+        rules.push(Effect::Allow, &[Access::Bind], subpath(path), source.clone());
+    }
 
-    // 2. Credentials, and what `read` lifts of them.
-    let all = [Access::Read, Access::Write, Access::Connect];
+    // 2. Credentials, what `read` lifts of them (reading only), and the sockets named inside them.
+    let all = [Access::Read, Access::Write, Access::Connect, Access::Bind];
     let mut denied = Vec::new();
+    let mut credentials = Vec::new();
     for (path, source) in policy::nono_denies() {
         let path = expand(&path)?;
         rules.push(Effect::Deny, &all, subpath(&path), source);
-        denied.push(path);
+        denied.push(path.clone());
+        credentials.push(path);
     }
     for (path, source) in &grants.read {
-        rules.push(
-            Effect::Allow,
-            &[Access::Read, Access::Connect],
-            subpath(path),
-            source.clone(),
-        );
+        rules.push(Effect::Allow, &[Access::Read], subpath(path), source.clone());
+    }
+    // A `connect` entry at or inside a credential folder (Docker Desktop's socket, gpg-agent, 1Password's SSH agent)
+    // opens just that path, for connecting: nothing there becomes readable. A broader entry (`/`, `~`) stays below the
+    // credential denies.
+    let inside = |path: &Path| {
+        let real = canonical_target(path);
+        credentials.iter().any(|c| {
+            let root = subpath(c);
+            let real_root = subpath(&canonical_target(c));
+            root.covers(path) || real_root.covers(&real)
+        })
+    };
+    for (path, source) in grants.sockets.iter().filter(|(p, _)| inside(p)) {
+        rules.push(Effect::Allow, &[Access::Connect], subpath(path), source.clone());
     }
     let lifted = |p: &Path| grants.read.iter().any(|(r, _)| p.starts_with(r));
     for (path, source) in grants.write.iter().filter(|(p, _)| lifted(p)) {
@@ -379,6 +408,26 @@ fn build(
     // too. What's in those folders stays as the other rules decide.
     for entry in crate::agent::fixed_entries(facts.fnox_files) {
         rules.push(Effect::Deny, &[Access::Write], literal(&entry), Source::FnoxConfig);
+    }
+
+    // 4c. Each socket a `connect` entry names, and each folder entry on its way, kept in place: otherwise a session
+    // could move the real socket aside and another one (Neovim's) in its place. `$SSH_AUTH_SOCK` lives in `/private/tmp`,
+    // which every launch writes. What's in a listed folder stays as the other rules decide.
+    let named: Vec<PathBuf> = grants
+        .sockets
+        .iter()
+        .map(|(p, _)| p.clone())
+        .filter(|p| p.parent().is_some())
+        .collect();
+    for entry in crate::agent::fixed_entries(&named) {
+        rules.push(
+            Effect::Deny,
+            &[Access::Write],
+            literal(&entry),
+            Source::Piton {
+                what: SOCKET_PATH_DENY.into(),
+            },
+        );
     }
 
     // 5. Configuration and protected files: what the user edits by hand, changed only through a write they approve
@@ -572,6 +621,7 @@ struct Grants {
     write_file: Vec<(PathBuf, Source)>,
     read: Vec<(PathBuf, Source)>,
     sockets: Vec<(PathBuf, Source)>,
+    bind: Vec<(PathBuf, Source)>,
     network: Vec<NetworkGrant>,
     presets: Vec<(Preset, Provenance)>,
     deny: Vec<(PathBuf, Source)>,
@@ -640,12 +690,24 @@ impl Grants {
         write.extend(user("write", &settings.write)?);
         write_file.extend(user("write_file", &settings.write_file)?);
 
-        for grant in entries.read {
-            if let Some(path) = from_profile_entry(grant)? {
+        for entry in entries.read {
+            let paths = match entry {
+                policy::ReadEntry::Path(grant) => from_profile_entry(grant)?.into_iter().collect(),
+                policy::ReadEntry::SshPublicKeys => ssh_public_keys(&facts.home.join(".ssh")),
+            };
+            for path in paths {
                 read.push((path, source("read", from_profile.clone())));
             }
         }
         read.extend(user("read", &settings.read)?);
+
+        let mut bind = Vec::new();
+        for grant in entries.bind {
+            if let Some(path) = from_profile_entry(grant)? {
+                bind.push((path, source("bind", from_profile.clone())));
+            }
+        }
+        bind.extend(user("bind", &settings.bind)?);
 
         let mut sockets = Vec::new();
         let mut network = Vec::new();
@@ -684,12 +746,35 @@ impl Grants {
             write_file,
             read,
             sockets,
+            bind,
             network,
             presets,
             deny: user("deny", &settings.deny)?,
             claude_code,
         })
     }
+}
+
+/// Every regular file whose name ends in `.pub` in `folder` and its subfolders (a few levels, symlinks not followed):
+/// SSH's public keys. Read when the launch is resolved; the sandbox can't write there, so it can't add one.
+fn ssh_public_keys(folder: &Path) -> Vec<PathBuf> {
+    const DEPTH: usize = 4;
+    let mut keys = Vec::new();
+    let mut pending = vec![(folder.to_path_buf(), 0)];
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else { continue };
+            let path = entry.path();
+            if kind.is_dir() && depth + 1 < DEPTH {
+                pending.push((path, depth + 1));
+            } else if kind.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pub")) {
+                keys.push(path);
+            }
+        }
+    }
+    keys.sort();
+    keys
 }
 
 /// Why a widening value isn't accepted: who set it, and the checkout it leads out of.
@@ -1266,8 +1351,25 @@ mod tests {
         assert!(allowed(&p, &f.state.join("agent.sock"), Access::Connect));
         assert!(allowed(&p, &f.state.join("logs/daemon/current.log"), Access::Read));
         assert!(!allowed(&p, &f.state.join("logs/daemon/current.log"), Access::Write));
-        // Every other socket and host: the network is open.
-        assert!(allowed(&p, Path::new("/private/tmp/ssh-agent.sock"), Access::Connect));
+        // Unix sockets: closed but DNS (standard, the default, binds anywhere and has no SSH agent here).
+        assert!(!allowed(&p, Path::new("/private/tmp/ssh-agent.sock"), Access::Connect));
+        assert!(!allowed(
+            &p,
+            Path::new("/private/var/folders/x/T/nvim.u/0/nvim.1.0"),
+            Access::Connect
+        ));
+        assert!(allowed(&p, Path::new("/var/run/mDNSResponder"), Access::Connect));
+        assert!(allowed(
+            &p,
+            Path::new("/private/var/run/mDNSResponder"),
+            Access::Connect
+        ));
+        assert!(allowed(&p, &f.repo.join("test.sock"), Access::Bind));
+        assert!(
+            !allowed(&p, &f.state.join("x.sock"), Access::Bind),
+            "the daemon's state"
+        );
+        assert!(!allowed(&p, &h.join(".ssh/agent.sock"), Access::Bind), "a credential");
         assert!(!p.keychain);
     }
 
@@ -1348,13 +1450,30 @@ mod tests {
             r.policy.rules.iter().filter(|rule| from_profile(&rule.source)).count() + r.policy.network.len()
         };
 
-        let (f, strict) = resolve("[sandbox]\nprofile = \"strict\"\n");
+        let ssh_keys = |f: &Fixture| {
+            std::fs::create_dir_all(f.home.join(".ssh/keys")).unwrap();
+            for name in ["keys/id_ed25519", "keys/id_ed25519.pub", "id_rsa.pub"] {
+                std::fs::write(f.home.join(".ssh").join(name), "k").unwrap();
+            }
+        };
+        let (f, _) = resolve("[sandbox]\nprofile = \"strict\"\n");
+        ssh_keys(&f);
+        let strict = resolve_in(&f, &f.repo, &agent, &Env::new()).unwrap();
         assert_eq!(profile_rules(&strict), 0, "strict adds nothing");
         assert_eq!(strict.profile.name, Profile::Strict);
         assert_eq!(strict.profile.set_in, Some(f.home.join(".config/piton/config.toml")));
-        assert!(!allowed(&strict.policy, &f.home.join(".ssh/config"), Access::Read));
+        let p = &strict.policy;
+        assert!(!allowed(p, &f.home.join(".ssh/config"), Access::Read));
+        assert!(!allowed(p, &f.home.join(".ssh/id_rsa.pub"), Access::Read));
+        assert!(!allowed(p, Path::new("/private/tmp/agent.sock"), Access::Connect));
+        assert!(
+            !allowed(p, &f.repo.join("test.sock"), Access::Bind),
+            "strict binds nowhere"
+        );
 
-        let (f, standard) = resolve("");
+        let (f, _) = resolve("");
+        ssh_keys(&f);
+        let standard = resolve_in(&f, &f.repo, &agent, &Env::new()).unwrap();
         assert_eq!(standard.profile.name, Profile::Standard);
         assert_eq!(standard.profile.set_in, None, "the default");
         let p = &standard.policy;
@@ -1364,6 +1483,18 @@ mod tests {
             !allowed(p, &f.home.join(".ssh/id_ed25519"), Access::Read),
             "keys stay closed"
         );
+        // Public keys, nested ones too, as exact paths; their private halves stay closed.
+        assert!(allowed(p, &f.home.join(".ssh/id_rsa.pub"), Access::Read));
+        assert!(allowed(p, &f.home.join(".ssh/keys/id_ed25519.pub"), Access::Read));
+        assert!(!allowed(p, &f.home.join(".ssh/keys/id_ed25519"), Access::Read));
+        assert!(
+            !allowed(p, &f.home.join(".ssh/keys/other.pub"), Access::Read),
+            "found at launch"
+        );
+        assert!(allowed(p, Path::new("/private/tmp/agent.sock"), Access::Connect));
+        assert!(allowed(p, &f.repo.join("test.sock"), Access::Bind));
+        assert!(allowed(p, Path::new("/private/tmp/x.sock"), Access::Bind));
+        assert!(!allowed(p, Path::new("/private/tmp/x.sock"), Access::Connect));
         assert_eq!(
             p.decide(&f.home.join(".ssh/config"), Access::Read).source,
             Source::Config {
@@ -1396,6 +1527,31 @@ mod tests {
                 .iter()
                 .any(|r| r.target == subpath(Path::new("/")) && r.access == [Access::Connect])
         );
+        assert!(
+            allowed(p, Path::new("/private/tmp/x.sock"), Access::Connect),
+            "every socket"
+        );
+        assert!(allowed(p, &f.repo.join("test.sock"), Access::Bind));
+    }
+
+    /// `standard`'s `$SSH_AUTH_SOCK` pointing at an agent inside a credential folder (1Password's) opens that socket for
+    /// connecting: nothing else there.
+    #[test]
+    fn an_ssh_agent_in_a_credential_folder_connects() {
+        let f = fixture("", "");
+        let folder = f.home.join("Library/Group Containers/2BUA8C4S2C.com.1password/t");
+        let agent = folder.join("agent.sock");
+        let r = resolve_in(
+            &f,
+            &f.repo,
+            &env(&[("SSH_AUTH_SOCK", agent.to_str().unwrap())]),
+            &Env::new(),
+        )
+        .unwrap();
+        assert!(allowed(&r.policy, &agent, Access::Connect));
+        assert!(!allowed(&r.policy, &agent, Access::Read));
+        assert!(!allowed(&r.policy, &folder.join("other.sock"), Access::Connect));
+        assert!(!allowed(&r.policy, &folder.join("data.sqlite"), Access::Read));
     }
 
     fn from_profile(source: &Source) -> bool {
@@ -1410,24 +1566,84 @@ mod tests {
         }
     }
 
-    /// A `connect` entry, yolo's `/` included, never reopens a credential deny, the user's `deny`, or the daemon's
-    /// sockets: it sits before every deny. Only `read` lifts a credential deny.
+    /// A broad `connect` entry (yolo's `/`) never reopens a credential folder, and no entry reopens the user's `deny`
+    /// or the daemon's sockets. An entry at or inside a credential folder opens just that path, for connecting.
     #[test]
     fn connect_never_reopens_a_deny() {
         let f = fixture(
-            "[sandbox]\nprofile = \"yolo\"\nconnect = [\"~/.gnupg\", \"~/secret\"]\ndeny = [\"~/secret\"]\n",
+            "[sandbox]\nprofile = \"yolo\"\nconnect = [\"~/secret\"]\ndeny = [\"~/secret\"]\n",
             "",
         );
         let p = policy(&f);
         assert!(allowed(&p, Path::new("/private/tmp/any.sock"), Access::Connect));
         for closed in [
             f.home.join(".gnupg/S.gpg-agent"),
+            f.home.join(".docker/run/docker.sock"),
             f.home.join("secret/s.sock"),
             f.state.join("piton.sock"),
         ] {
             assert!(!allowed(&p, &closed, Access::Connect), "{}", closed.display());
         }
         assert!(allowed(&p, &f.state.join("agent.sock"), Access::Connect));
+
+        // Named: just that socket opens, for connecting; the folder's files and other sockets stay closed.
+        let g = fixture(
+            "[sandbox]\nprofile = \"yolo\"\nconnect = [\"~/.docker/run/docker.sock\", \"~/.gnupg/S.gpg-agent\", \
+             \"~/secret/s.sock\"]\ndeny = [\"~/secret\"]\n",
+            "",
+        );
+        let p = policy(&g);
+        let docker = g.home.join(".docker/run/docker.sock");
+        assert!(allowed(&p, &docker, Access::Connect));
+        assert!(allowed(&p, &g.home.join(".gnupg/S.gpg-agent"), Access::Connect));
+        assert!(!allowed(&p, &docker, Access::Read));
+        assert!(!allowed(&p, &docker, Access::Bind));
+        assert!(!allowed(&p, &g.home.join(".docker/config.json"), Access::Read));
+        assert!(!allowed(&p, &g.home.join(".docker/run/other.sock"), Access::Connect));
+        assert!(!allowed(&p, &g.home.join(".gnupg/S.gpg-agent.ssh"), Access::Connect));
+        assert!(
+            !allowed(&p, &g.home.join("secret/s.sock"), Access::Connect),
+            "the user's deny"
+        );
+        assert_eq!(
+            p.decide(&docker, Access::Connect).source,
+            Source::Config {
+                key: "sandbox.connect".into(),
+                from: Provenance::File {
+                    path: g.home.join(".config/piton/config.toml")
+                },
+            }
+        );
+
+        // `read` reads only: a socket it covers stays closed.
+        let h = fixture("[sandbox]\nread = [\"~/.gnupg/S.gpg-agent\"]\n", "");
+        let p = policy(&h);
+        assert!(allowed(&p, &h.home.join(".gnupg/S.gpg-agent"), Access::Read));
+        assert!(!allowed(&p, &h.home.join(".gnupg/S.gpg-agent"), Access::Connect));
+    }
+
+    /// A socket a `connect` entry names, and every folder on its way, can't be written, renamed, or replaced: otherwise
+    /// a session could move the real `$SSH_AUTH_SOCK` (under temp, which it writes) aside and link another socket in its
+    /// place. A sibling in its folder stays writable.
+    #[test]
+    fn a_named_socket_stays_in_place() {
+        let tmp = "/private/tmp/piton-test-launchd";
+        let f = fixture(&format!("[sandbox]\nwrite = [\"{tmp}\"]\n"), "");
+        let launchd = Path::new(tmp).join("com.apple.launchd.x");
+        let agent = launchd.join("Listeners");
+        let r = resolve_in(
+            &f,
+            &f.repo,
+            &env(&[("SSH_AUTH_SOCK", agent.to_str().unwrap())]),
+            &Env::new(),
+        )
+        .unwrap();
+        let p = &r.policy;
+        assert!(allowed(p, &launchd.join("other"), Access::Write));
+        assert!(allowed(p, &agent, Access::Connect));
+        for fixed in [&agent, &launchd, &Path::new(tmp).to_path_buf()] {
+            assert!(!allowed(p, fixed, Access::Write), "{}", fixed.display());
+        }
     }
 
     /// A profile's entry whose variable isn't set is left out; the user's own refuses the launch.

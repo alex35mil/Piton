@@ -113,8 +113,9 @@ pub enum SourceGit<'a> {
 pub enum UpdateError {
     #[error(
         "can't fetch {checkout} inside the sandbox: {stderr}. Sandboxed Git authenticates the way an agent's does: over \
-         SSH, through the SSH agent and `~/.ssh/config` and `~/.ssh/known_hosts`, which the standard profile \
-         grants; over HTTPS through the keychain, `~/Library/Keychains` in [sandbox] read"
+         SSH, through the SSH agent (`connect = [\"$SSH_AUTH_SOCK\"]`), with `~/.ssh/config`, `~/.ssh/known_hosts`, and \
+         the public keys readable, which the standard profile grants; over HTTPS through the keychain, \
+         `~/Library/Keychains` in [sandbox] read"
     )]
     Fetch { checkout: PathBuf, stderr: String },
     #[error("origin has no branch {branch} for {checkout}")]
@@ -717,6 +718,10 @@ pub mod tests {
         let failed = plan(&runner, &source, "main", Requested::Ask, PullRule::Ask).unwrap_err();
         assert!(matches!(failed, UpdateError::Fetch { .. }));
         assert!(failed.to_string().contains("~/.ssh/known_hosts"), "{failed}");
+        assert!(
+            failed.to_string().contains("connect = [\"$SSH_AUTH_SOCK\"]"),
+            "names the connect entry: {failed}"
+        );
     }
 
     #[test]

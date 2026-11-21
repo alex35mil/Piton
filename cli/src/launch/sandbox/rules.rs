@@ -2,7 +2,8 @@
 //! `piton sandbox show` prints, and what `piton sandbox why` evaluates. Seatbelt applies the last matching rule, and so
 //! does [`Policy::decide`], so the explanation is the rule that decided.
 //!
-//! The base, applied first: everything is readable, the network is open, nothing is writable.
+//! The base, applied first: everything is readable, nothing is writable, and no Unix socket can be connected to or
+//! created. TCP stays as nono leaves it (open; #228 routes it through a proxy).
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,8 @@ pub enum Access {
     Write,
     /// Connect to a Unix socket.
     Connect,
+    /// Create a Unix socket (`bind`): listen on it.
+    Bind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,7 +96,7 @@ pub struct Policy {
     /// Keychain Mach services allowed: a `read` entry covers the user's keychains.
     pub keychain: bool,
     /// The network destinations `connect` grants, in order: carried for `piton sandbox show` and the network filter
-    /// (#228). They decide nothing yet: the network is open.
+    /// (#228). They decide nothing yet: TCP is open.
     #[serde(default)]
     pub network: Vec<NetworkGrant>,
     /// The launch's tag: every deny rule carries it as its message, so the kernel's record of a refusal names the
@@ -130,9 +133,15 @@ impl Policy {
                 },
             },
             Access::Connect => Decision {
-                allowed: true,
+                allowed: false,
                 source: Source::BuiltIn {
-                    what: "the network is open".into(),
+                    what: CLOSED_SOCKETS.into(),
+                },
+            },
+            Access::Bind => Decision {
+                allowed: false,
+                source: Source::BuiltIn {
+                    what: CLOSED_BIND.into(),
                 },
             },
             Access::Write => Decision {
@@ -241,6 +250,9 @@ impl Policy {
                     (Effect::Allow, Access::Connect) => {
                         out.push(format!("(allow network-outbound {})", filter(path, true)?));
                     }
+                    (Effect::Allow, Access::Bind) => {
+                        out.push(format!("(allow network-bind {})", filter(path, true)?));
+                    }
                     (Effect::Deny, Access::Read) => {
                         // A denied file can still be listed and stat'ed, as nono's deny groups do.
                         out.push(format!("(allow file-read-metadata {})", filter(path, false)?));
@@ -252,6 +264,9 @@ impl Policy {
                     (Effect::Deny, Access::Connect) => {
                         out.push(format!("(deny network-outbound {})", filter(path, true)?));
                     }
+                    (Effect::Deny, Access::Bind) => {
+                        out.push(format!("(deny network-bind {})", filter(path, true)?));
+                    }
                 }
             }
         }
@@ -260,13 +275,29 @@ impl Policy {
                 out.push(format!("(allow mach-lookup (global-name \"{service}\"))"));
             }
         }
-        // Network rules after the rest, keeping their own order.
+        // Network rules after the rest, keeping their own order, after the base's socket denies: a path filter on a
+        // network operation matches Unix sockets only, so TCP stays as the library leaves it.
         let (network, other): (Vec<String>, Vec<String>) = out
             .into_iter()
             .partition(|rule| rule.starts_with("(allow network") || rule.starts_with("(deny network"));
-        Ok(other.into_iter().chain(network).collect())
+        let base = SOCKET_BASE.iter().map(|rule| rule.to_string());
+        Ok(other.into_iter().chain(base).chain(network).collect())
     }
 }
+
+/// The base's Unix socket rules: no socket can be connected to or created. Every socket rule of the policy follows.
+const SOCKET_BASE: [&str; 2] = [
+    r#"(deny network-outbound (subpath "/"))"#,
+    r#"(deny network-bind (subpath "/"))"#,
+];
+
+/// Why a socket connect is denied when no rule decides: what `piton sandbox why` prints.
+const CLOSED_SOCKETS: &str = "Unix sockets are closed: a `connect` entry opens one (global config.toml or a \
+                              config.local.toml)";
+
+/// Why creating a socket is denied when no rule decides.
+const CLOSED_BIND: &str = "creating Unix sockets is closed: a `bind` entry opens a path (global config.toml or a \
+                           config.local.toml)";
 
 /// The Mach services that broker keychain access, which the library always denies. Reopened only when the user exposes
 /// their keychains (nono's CLI does the same).
@@ -338,7 +369,9 @@ mod tests {
         assert!(d("/w/src/main.rs", Access::Write).allowed);
         assert_eq!(d("/w/src/main.rs", Access::Write).source, Source::Workspace);
         assert!(!d("/elsewhere", Access::Write).allowed);
-        assert!(d("/any.sock", Access::Connect).allowed);
+        // Unix sockets are closed in the base.
+        assert!(!d("/any.sock", Access::Connect).allowed);
+        assert!(!d("/w/new.sock", Access::Bind).allowed);
     }
 
     /// Seatbelt compares without case on APFS, so the explanation does too: a deny holds and an allow inside it applies
@@ -403,6 +436,7 @@ mod tests {
                     },
                     source: Source::AgentDir,
                 },
+                rule(Effect::Allow, &[Access::Bind], "/w", "bind"),
             ],
             keychain: true,
             network: Vec::new(),
@@ -417,13 +451,19 @@ mod tests {
         assert!(rules.contains(&r#"(allow file-write* (prefix "/a/lock-"))"#.to_string()));
         let first_network = rules.iter().position(|r| r.contains("network")).unwrap();
         assert!(rules[..first_network].iter().all(|r| !r.contains("network")));
+        // The base's socket denies first, then the policy's socket rules in order.
         assert_eq!(
             &rules[first_network..],
             [
+                r#"(deny network-outbound (subpath "/"))"#,
+                r#"(deny network-bind (subpath "/"))"#,
                 r#"(deny network-outbound (subpath "/s/\"q\""))"#,
-                r#"(allow network-outbound (path "/s/agent.sock"))"#
+                r#"(allow network-outbound (path "/s/agent.sock"))"#,
+                r#"(allow network-bind (subpath "/w"))"#,
             ]
         );
+        assert!(policy.decide(Path::new("/w/x.sock"), Access::Bind).allowed);
+        assert!(!policy.decide(Path::new("/w/x.sock"), Access::Connect).allowed);
         assert!(rules.iter().any(|r| r.contains("com.apple.secd")));
         assert!(
             Policy {
@@ -461,5 +501,10 @@ mod tests {
         assert!(tagged.contains(&r#"(allow file-write* (prefix "/a/lock-"))"#.to_string()));
         let first_network = tagged.iter().position(|r| r.contains("network")).unwrap();
         assert!(tagged[first_network..].iter().all(|r| r.contains("network")));
+        // The base's socket denies carry the tag, so a blocked socket reaches the block question.
+        assert_eq!(
+            tagged[first_network],
+            format!(r#"(deny network-outbound (subpath "/") {message})"#)
+        );
     }
 }

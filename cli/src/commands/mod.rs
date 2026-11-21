@@ -257,18 +257,28 @@ enum SandboxAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
-    /// Whether a sandboxed pi in the workspace may read, write, or connect to PATH, and which rule decides.
+    /// Whether a sandboxed pi in the workspace may read, write, connect to, or create a socket at PATH, and which rule
+    /// decides.
     Why {
         path: PathBuf,
-        /// Check writing (default: reading).
-        #[usage(long)]
-        write: bool,
-        /// Check connecting to a Unix socket.
-        #[usage(long)]
-        connect: bool,
+        /// The access checked: one of the flags, or reading when none is given.
+        #[usage(arg_group)]
+        access: Option<WhyAccess>,
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
+}
+
+/// The access `piton sandbox why` checks besides reading: one at most.
+#[derive(usage_rs::ArgGroup)]
+#[usage(name = "access")]
+pub enum WhyAccess {
+    /// Check writing (default: reading).
+    Write,
+    /// Check connecting to a Unix socket.
+    Connect,
+    /// Check creating a Unix socket.
+    Bind,
 }
 
 #[derive(Subcommands)]
@@ -563,6 +573,39 @@ fn service(action: &ServiceAction, config: Option<&Path>) -> ExitCode {
         Err(e) => {
             eprintln!("piton: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn why(flags: &[&str]) -> Result<Option<WhyAccess>, String> {
+        let argv: Vec<&std::ffi::OsStr> = ["piton", "sandbox", "why"]
+            .iter()
+            .chain(flags)
+            .chain(&["/x"])
+            .map(std::ffi::OsStr::new)
+            .collect();
+        let Cmd::Sandbox {
+            action: SandboxAction::Why { access, .. },
+        } = Cli::try_parse_from(&argv).map_err(|e| format!("{e:?}"))?.command
+        else {
+            return Err("not sandbox why".into());
+        };
+        Ok(access)
+    }
+
+    /// `sandbox why` checks one access: reading by default, or the one flag given; two are refused by the parser.
+    #[test]
+    fn sandbox_why_takes_one_access() {
+        assert!(matches!(why(&[]), Ok(None)));
+        assert!(matches!(why(&["--write"]), Ok(Some(WhyAccess::Write))));
+        assert!(matches!(why(&["--connect"]), Ok(Some(WhyAccess::Connect))));
+        assert!(matches!(why(&["--bind"]), Ok(Some(WhyAccess::Bind))));
+        for pair in [["--write", "--bind"], ["--connect", "--write"], ["--bind", "--connect"]] {
+            assert!(why(&pair).is_err(), "{pair:?}");
         }
     }
 }
