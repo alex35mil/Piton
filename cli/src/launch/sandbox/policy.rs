@@ -229,6 +229,15 @@ pub struct PresetGrants {
     pub connect: Vec<Connect>,
 }
 
+/// The Mach services that broker keychain access (the library denies them).
+pub const KEYCHAIN_TARGETS: [&str; 5] = [
+    "com.apple.SecurityServer",
+    "com.apple.securityd",
+    "com.apple.security.keychaind",
+    "com.apple.secd",
+    "com.apple.security.agent",
+];
+
 /// The keychains: what `login = "keychain"` reads (which reopens the keychain's services).
 pub const KEYCHAINS: &str = "~/Library/Keychains";
 

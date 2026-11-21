@@ -1,5 +1,6 @@
 //! Building pi's environment and command line for a launch.
 
+pub mod claude_sockets;
 pub mod env;
 pub mod fnox;
 pub mod git;
@@ -133,6 +134,9 @@ pub struct Sandboxed {
     pub commands: sandbox::grant::CommandPolicies,
     /// What the session starts with a warning about.
     pub warnings: Vec<LaunchWarning>,
+    /// The `pi-claude-code` preset's socket folder of the session's own, set as `CLAUDE_CODE_TMPDIR`: created when the
+    /// session launches, removed when it ends.
+    pub sockets: Option<PathBuf>,
 }
 
 /// Something a sandboxed session starts despite, and tells the user about.
@@ -141,7 +145,14 @@ pub enum LaunchWarning {
     /// The `pi-claude-code` preset couldn't open the config folder `PI_CLAUDE_CODE_CONFIG_DIR` names.
     ClaudeCodeFolder(sandbox::ClaudeCodeFolder),
     /// The `pi-claude-code` preset signs in with a token, and pi's environment has none.
-    ClaudeCodeNoToken,
+    NoClaudeToken,
+    /// The `pi-claude-code` preset doesn't open the socket folder the user's `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR`
+    /// names.
+    ClaudeCodeSockets {
+        var: &'static str,
+        path: PathBuf,
+        reason: String,
+    },
 }
 
 /// The variable `claude setup-token`'s token goes in.
@@ -180,11 +191,18 @@ impl std::fmt::Display for LaunchWarning {
                 ),
                 ClaudeCodeFolder::Granted(path) => write!(f, "The pi-claude-code preset opens {}.", path.display()),
             },
-            LaunchWarning::ClaudeCodeNoToken => write!(
+            LaunchWarning::NoClaudeToken => write!(
                 f,
                 "The pi-claude-code preset signs claude in with a token, but {CLAUDE_CODE_TOKEN} isn't in pi's \
                  environment or among fnox's proxy rules: pi's claude-code models won't sign in. Put the token from \
                  `claude setup-token` behind fnox (or in your environment), or set `login = \"keychain\"`."
+            ),
+            LaunchWarning::ClaudeCodeSockets { var, path, reason } => write!(
+                f,
+                "The pi-claude-code preset doesn't open {} ({var}) for claude's sockets: {reason}. claude's startup \
+                 probe there meets the sandbox; unset {var} for pi (Piton then gives claude a folder of its own), or \
+                 point it at a private folder of its own.",
+                path.display()
             ),
         }
     }
@@ -212,10 +230,20 @@ fn launch_warnings(resolution: &sandbox::Resolution, env: &Env, proxy: Option<&f
             let in_env = env.get(CLAUDE_CODE_TOKEN).is_some_and(|v| !v.trim().is_empty());
             let from_proxy = proxy.is_some_and(|p| p.variables.iter().any(|v| v == CLAUDE_CODE_TOKEN));
             if !in_env && !from_proxy {
-                warnings.push(LaunchWarning::ClaudeCodeNoToken);
+                warnings.push(LaunchWarning::NoClaudeToken);
             }
         }
         ClaudeLogin::Keychain => {}
+    }
+    match &claude_code.sockets {
+        Some(sandbox::ClaudeCodeSockets::Refused { var, path, reason }) => {
+            warnings.push(LaunchWarning::ClaudeCodeSockets {
+                var,
+                path: path.clone(),
+                reason: reason.clone(),
+            })
+        }
+        Some(sandbox::ClaudeCodeSockets::Own(_) | sandbox::ClaudeCodeSockets::Users { .. }) | None => {}
     }
     warnings
 }
@@ -236,7 +264,7 @@ pub async fn prepare(
             Prepared::Host { env, proxy }
         }
         LaunchMode::Sandbox => Prepared::Sandbox(Box::new(
-            prepare_sandbox(config, tools, resolved, base, workspace).await?,
+            prepare_sandbox(config, tools, resolved, base, workspace, ClaudeSockets::Session).await?,
         )),
     })
 }
@@ -279,16 +307,23 @@ pub async fn prepare_sandbox(
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
+    sockets: ClaudeSockets,
 ) -> Result<Sandboxed, LaunchError> {
     let tools = env::enabled(all_tools)?;
+    // Picked once, so every resolution of this launch (the command grants' too) names the same folder.
+    let own_sockets = match sockets {
+        ClaudeSockets::Session => claude_sockets::pick(base.get("TMPDIR").map(Path::new), &config.state_dir()),
+        ClaudeSockets::None => None,
+    };
     // fnox's checks run with the base environment only, so the proxy is known before any policy.
     let proxy = match all_tools.fnox.optional()? {
         Some(program) => fnox::prepare(program, base, workspace).await?,
         None => None,
     };
     let fnox_files: &[PathBuf] = proxy.as_ref().map_or(&[], |p| p.files.as_slice());
+    let own = own_sockets.as_deref();
     let sandbox_policy = |resolved: &LaunchConfig, env: &env::SandboxEnv| {
-        sandbox_policy(config, resolved, base, env, workspace, fnox_files)
+        sandbox_policy(config, resolved, base, env, workspace, fnox_files, own)
     };
     let bootstrap = sandbox_policy(resolved, &env::SandboxEnv::daemon(base))?;
     let launch_env = match tools.is_empty() {
@@ -308,9 +343,9 @@ pub async fn prepare_sandbox(
     let resolution = sandbox_policy(resolved, &launch_env)?;
     let resolver = {
         let (config, base, launch_env) = (config.clone(), base.clone(), launch_env.clone());
-        let (workspace, fnox_files) = (workspace.to_path_buf(), fnox_files.to_vec());
+        let (workspace, fnox_files, own) = (workspace.to_path_buf(), fnox_files.to_vec(), own_sockets.clone());
         sandbox::grant::Resolver::new(resolved.clone(), move |c: &LaunchConfig| {
-            self::sandbox_policy(&config, c, &base, &launch_env, &workspace, &fnox_files)
+            self::sandbox_policy(&config, c, &base, &launch_env, &workspace, &fnox_files, own.as_deref())
                 .map(|r| r.policy)
                 .map_err(|e| e.to_string())
         })
@@ -324,16 +359,46 @@ pub async fn prepare_sandbox(
         Some(_) => sandbox::grant::Credentials::Floor,
         None => sandbox::grant::Credentials::Liftable,
     };
-    let commands =
-        sandbox::grant::command_policies(&resolution.policy, credentials, resolver, resolution.silence.clone());
+    let claude_login = resolution.claude_code.as_ref().map(|c| c.login);
+    let commands = sandbox::grant::command_policies(
+        &resolution.policy,
+        credentials,
+        resolver,
+        resolution.silence.clone(),
+        claude_login,
+    );
     let warnings = launch_warnings(&resolution, &env, proxy.as_ref());
+    let sockets = with_claude_sockets(&mut env, &resolution);
     Ok(Sandboxed {
         env,
         resolution,
         proxy,
         commands,
         warnings,
+        sockets,
     })
+}
+
+/// Sets the session's own socket folder as `CLAUDE_CODE_TMPDIR` in pi's `env` when the policy opened one, and returns
+/// it. Set after the workspace's environment, like Piton's own variables: the policy opened this folder, so pi's
+/// `claude` must use it, whatever the workspace set. A folder the user named is left as they set it.
+fn with_claude_sockets(env: &mut Env, resolution: &sandbox::Resolution) -> Option<PathBuf> {
+    match resolution.claude_code.as_ref().and_then(|c| c.sockets.as_ref()) {
+        Some(sandbox::ClaudeCodeSockets::Own(folder)) => {
+            env.insert(claude_sockets::VAR.into(), folder.to_string_lossy().into_owned());
+            Some(folder.clone())
+        }
+        Some(sandbox::ClaudeCodeSockets::Users { .. } | sandbox::ClaudeCodeSockets::Refused { .. }) | None => None,
+    }
+}
+
+/// Whether a sandboxed launch gets a socket folder of its own for the `pi-claude-code` preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeSockets {
+    /// A session: the daemon creates the folder at launch and removes it when the session ends.
+    Session,
+    /// Not a session (`piton sandbox show`, the git sandbox): nothing to create or remove.
+    None,
 }
 
 /// What Piton decides, set last so a repository's environment can't override it: the runtime (which permissions
@@ -408,6 +473,7 @@ fn sandbox_policy(
     env: &env::SandboxEnv,
     workspace: &Path,
     fnox_files: &[PathBuf],
+    claude_sockets: Option<&Path>,
 ) -> Result<sandbox::Resolution, LaunchError> {
     let state = config.state_dir();
     let agent_socket = config.agent_socket();
@@ -425,6 +491,7 @@ fn sandbox_policy(
             logs: &logs,
             write_roots: sandbox::WRITE_ROOTS,
             fnox_files,
+            claude_sockets,
         },
     )?)
 }
@@ -559,14 +626,9 @@ mod tests {
         ));
     }
 
-    /// The `pi-claude-code` preset's warnings: its folder when it isn't opened, and its token login with no token in pi's
-    /// environment or among fnox's rules. Nothing without the preset.
-    #[test]
-    fn the_claude_code_preset_warns_instead_of_refusing() {
-        use sandbox::{ClaudeCode, ClaudeCodeFolder};
-
-        use crate::config::ClaudeLogin;
-        let resolution = |claude_code: Option<ClaudeCode>| sandbox::Resolution {
+    /// A launch's resolution with only the `pi-claude-code` preset's outcome set.
+    fn resolution(claude_code: Option<sandbox::ClaudeCode>) -> sandbox::Resolution {
+        sandbox::Resolution {
             policy: sandbox::Policy {
                 rules: Vec::new(),
                 keychain: false,
@@ -581,8 +643,54 @@ mod tests {
             },
             claude_code,
             silence: Vec::new(),
+        }
+    }
+
+    /// The session's own socket folder is what pi's `claude` uses: set as `CLAUDE_CODE_TMPDIR`, over the workspace's
+    /// value. A folder the user named, or none, leaves pi's environment as it is.
+    #[test]
+    fn the_session_s_socket_folder_is_set_for_claude() {
+        use sandbox::{ClaudeCode, ClaudeCodeSockets};
+        let with = |sockets| {
+            resolution(Some(ClaudeCode {
+                folder: granted_folder(),
+                login: crate::config::ClaudeLogin::Token,
+                sockets,
+            }))
         };
-        let preset = |folder, login| resolution(Some(ClaudeCode { folder, login }));
+        let from_workspace: Env = [(claude_sockets::VAR.to_string(), "/w/tmp".to_string())].into();
+
+        let mut env = from_workspace.clone();
+        let own = PathBuf::from("/t/piton-cc-x");
+        let set = with_claude_sockets(&mut env, &with(Some(ClaudeCodeSockets::Own(own.clone()))));
+        assert_eq!(set, Some(own));
+        assert_eq!(env[claude_sockets::VAR], "/t/piton-cc-x");
+
+        let users = ClaudeCodeSockets::Users {
+            var: "CLAUDE_CODE_TMPDIR",
+            path: "/w/tmp".into(),
+        };
+        for r in [with(Some(users)), with(None), resolution(None)] {
+            let mut env = from_workspace.clone();
+            assert_eq!(with_claude_sockets(&mut env, &r), None);
+            assert_eq!(env, from_workspace);
+        }
+    }
+
+    /// The `pi-claude-code` preset's warnings: its folder when it isn't opened, and its token login with no token in pi's
+    /// environment or among fnox's rules. Nothing without the preset.
+    #[test]
+    fn the_claude_code_preset_warns_instead_of_refusing() {
+        use sandbox::{ClaudeCode, ClaudeCodeFolder};
+
+        use crate::config::ClaudeLogin;
+        let preset = |folder, login| {
+            resolution(Some(ClaudeCode {
+                folder,
+                login,
+                sockets: None,
+            }))
+        };
         let granted = ClaudeCodeFolder::Granted("/h/.config/pi/claude".into());
         let token: Env = [(CLAUDE_CODE_TOKEN.to_string(), "sk-ant-oat01-x".to_string())].into();
         let proxy = |variables: Vec<String>| fnox::Proxy {
@@ -613,7 +721,7 @@ mod tests {
                 &Env::new(),
                 Some(&proxy(vec![]))
             ),
-            [LaunchWarning::ClaudeCodeNoToken]
+            [LaunchWarning::NoClaudeToken]
         );
         assert!(launch_warnings(&preset(granted, ClaudeLogin::Keychain), &Env::new(), None).is_empty());
         let unset = launch_warnings(
@@ -631,10 +739,41 @@ mod tests {
             both,
             [
                 LaunchWarning::ClaudeCodeFolder(interactive),
-                LaunchWarning::ClaudeCodeNoToken
+                LaunchWarning::NoClaudeToken
             ]
         );
         assert!(both[0].to_string().contains("interactive Claude Code"));
+
+        // A socket folder the user names that the preset doesn't open: a warning naming the variable.
+        let refused = resolution(Some(ClaudeCode {
+            folder: granted_folder(),
+            login: ClaudeLogin::Keychain,
+            sockets: Some(sandbox::ClaudeCodeSockets::Refused {
+                var: "CLAUDE_CODE_TMPDIR",
+                path: "/private/tmp".into(),
+                reason: "it's /private/tmp".into(),
+            }),
+        }));
+        let warned = launch_warnings(&refused, &Env::new(), None);
+        assert!(
+            matches!(
+                warned.as_slice(),
+                [LaunchWarning::ClaudeCodeSockets {
+                    var: "CLAUDE_CODE_TMPDIR",
+                    ..
+                }]
+            ),
+            "{warned:?}"
+        );
+        assert!(
+            warned[0].to_string().contains("unset CLAUDE_CODE_TMPDIR"),
+            "{}",
+            warned[0]
+        );
+    }
+
+    fn granted_folder() -> sandbox::ClaudeCodeFolder {
+        sandbox::ClaudeCodeFolder::Granted("/h/.config/pi/claude".into())
     }
 
     #[test]

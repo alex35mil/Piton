@@ -18,7 +18,7 @@ mod write;
 
 pub use self::{
     command::{Matched, analyze, grant_for},
-    git::GitControl,
+    git::{GitControl, GitControlEntry},
     protected::{
         Controls, PROTECTED_ENV, Protected, ProtectedFacts, ProtectedRoots, canonical_target, fixed_entries, lexical,
         link_entries,

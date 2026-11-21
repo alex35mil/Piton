@@ -58,6 +58,10 @@ pub struct Facts<'a> {
     pub write_roots: &'a [&'a str],
     /// The files fnox loads for this launch (`fnox config-files`), when its credential proxy applies: closed to writes.
     pub fnox_files: &'a [PathBuf],
+    /// The session's own folder for the `pi-claude-code` preset's sockets, when the launch gives it one (a session's
+    /// launch; not `piton sandbox show`). Used only when the user sets neither `XDG_RUNTIME_DIR` nor
+    /// `CLAUDE_CODE_TMPDIR`.
+    pub claude_sockets: Option<&'a Path>,
 }
 
 /// Why a configuration level is closed, and how it's changed: what `piton sandbox why` prints.
@@ -95,23 +99,100 @@ pub struct Resolution {
     pub profile: ProfileChoice,
     /// The `pi-claude-code` preset, when it's on: what became of its config folder, and how `claude` signs in.
     pub claude_code: Option<ClaudeCode>,
-    /// `[sandbox] silence`, expanded: blocks below these paths are only logged.
+    /// `[sandbox] silence` and the presets' entries, expanded: the blocks they match are only logged.
     pub silence: Vec<Silenced>,
     /// pi's agent directories the policy closes, as named: the host's and the launch's (the same folder when the
     /// launch uses the host's). Protected files in them are changed through a write the user approves.
     pub agent_dirs: [PathBuf; 2],
 }
 
-/// One `silence` entry, expanded, and the file that listed it.
+/// One `silence` entry, expanded, and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Silenced {
-    pub path: PathBuf,
-    pub file: PathBuf,
+    pub target: Silent,
+    /// Only blocks of processes with this name.
+    pub process: Option<String>,
+    pub source: SilenceSource,
 }
 
-/// The entry that silences `path` (canonical, absolute), if one does.
-pub fn silenced<'a>(silence: &'a [Silenced], path: &Path) -> Option<&'a Silenced> {
-    silence.iter().find(|s| path.starts_with(&s.path))
+/// What a silence entry matches, expanded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Silent {
+    /// A path and everything below it, absolute and canonical; `*` and `**` components are wildcards.
+    Path(PathBuf),
+    /// A Mach service, by name.
+    Service(String),
+}
+
+/// Where a silence entry came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SilenceSource {
+    /// The user's `[sandbox] silence`, in this file.
+    File(PathBuf),
+    /// A preset's expected blocks.
+    Preset(&'static str),
+}
+
+impl std::fmt::Display for SilenceSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SilenceSource::File(path) => write!(f, "sandbox.silence, listed in {}", path.display()),
+            SilenceSource::Preset(preset) => write!(f, "the {preset} preset"),
+        }
+    }
+}
+
+impl Silenced {
+    /// Whether this entry matches a block: `process` refused `operation` on `target`, as the kernel names them.
+    pub fn matches(&self, process: &str, operation: &str, target: &str) -> bool {
+        if self.process.as_deref().is_some_and(|p| p != process) {
+            return false;
+        }
+        match &self.target {
+            Silent::Service(name) => operation == "mach-lookup" && target == name,
+            Silent::Path(pattern) => {
+                let path = Path::new(target);
+                operation != "mach-lookup" && path.is_absolute() && below_pattern(path, pattern)
+            }
+        }
+    }
+
+    /// The entry as written in `[sandbox] silence`.
+    pub fn entry(&self) -> crate::config::Silence {
+        crate::config::Silence {
+            target: match &self.target {
+                Silent::Path(path) => crate::config::SilenceTarget::Path(path.display().to_string()),
+                Silent::Service(name) => crate::config::SilenceTarget::Service(name.clone()),
+            },
+            process: self.process.clone(),
+        }
+    }
+}
+
+/// Whether `path` is at or below `pattern`, comparing component by component: `*` matches one component, `**` any
+/// number of them (none included).
+fn below_pattern(path: &Path, pattern: &Path) -> bool {
+    fn walk(path: &[Component], pattern: &[Component]) -> bool {
+        let Some((first, rest)) = pattern.split_first() else {
+            // The pattern is used up: the path is at or below it.
+            return true;
+        };
+        match first.as_os_str().to_str() {
+            Some("**") => (0..=path.len()).any(|skip| walk(&path[skip..], rest)),
+            Some("*") => path.split_first().is_some_and(|(_, tail)| walk(tail, rest)),
+            Some(_) | None => path
+                .split_first()
+                .is_some_and(|(head, tail)| head == first && walk(tail, rest)),
+        }
+    }
+    let path: Vec<Component> = path.components().collect();
+    let pattern: Vec<Component> = pattern.components().collect();
+    walk(&path, &pattern)
+}
+
+/// The entry that silences a block of `process`, refused `operation` on `target` (as the kernel names it), if one does.
+pub fn silenced<'a>(silence: &'a [Silenced], process: &str, operation: &str, target: &str) -> Option<&'a Silenced> {
+    silence.iter().find(|s| s.matches(process, operation, target))
 }
 
 /// The `pi-claude-code` preset of a launch.
@@ -119,6 +200,9 @@ pub fn silenced<'a>(silence: &'a [Silenced], path: &Path) -> Option<&'a Silenced
 pub struct ClaudeCode {
     pub folder: ClaudeCodeFolder,
     pub login: ClaudeLogin,
+    /// `None` when the launch has no folder of its own to give it (`piton sandbox show`, the git sandbox): `claude`'s
+    /// probes in the shared folder are then blocked as before.
+    pub sockets: Option<ClaudeCodeSockets>,
 }
 
 /// The config folder `PI_CLAUDE_CODE_CONFIG_DIR` names, as the `pi-claude-code` preset found it. Only `Granted` is
@@ -140,6 +224,35 @@ pub enum ClaudeCodeFolder {
         set_by: String,
         checkout: PathBuf,
     },
+}
+
+/// Where the preset's `claude` puts its messaging socket (`<folder>/cc-socks/<pid>.sock`): a folder of its own, so its
+/// startup probe of a stale socket with its pid never reaches another process's. The folder is open for writing and
+/// creating sockets, never for connecting: the agent can create entries there too, and a connect grant would reach
+/// any host socket hard-linked into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeCodeSockets {
+    /// The session's own folder, which the daemon creates, sets as `CLAUDE_CODE_TMPDIR`, and removes when the session
+    /// ends.
+    Own(PathBuf),
+    /// The user's `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR`, as `claude` reads them (the first wins).
+    Users { var: &'static str, path: PathBuf },
+    /// The user's value, not opened: the session starts with a warning, and `claude`'s probes there are blocked.
+    Refused {
+        var: &'static str,
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+impl ClaudeCodeSockets {
+    /// The folder the policy opens, if any.
+    fn opened(&self) -> Option<&Path> {
+        match self {
+            ClaudeCodeSockets::Own(path) | ClaudeCodeSockets::Users { path, .. } => Some(path),
+            ClaudeCodeSockets::Refused { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -183,24 +296,32 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
     let claude_code = grants.claude_code.as_ref().map(|(options, _)| ClaudeCode {
         folder: claude_code_folder(config, facts, &unopened),
         login: options.login(),
+        sockets: claude_code_sockets(config, facts, &unopened),
     });
-    let granted = match (claude_code.as_ref().map(|c| &c.folder), grants.claude_code.as_ref()) {
-        (Some(ClaudeCodeFolder::Granted(folder)), Some((_, from))) => Some((folder, from)),
-        (
-            Some(
+    let opened = match (&claude_code, grants.claude_code.as_ref()) {
+        (Some(claude_code), Some((_, from))) => {
+            let folder = match &claude_code.folder {
+                ClaudeCodeFolder::Granted(folder) => Some(folder),
                 ClaudeCodeFolder::Unset
                 | ClaudeCodeFolder::Interactive { .. }
                 | ClaudeCodeFolder::Closed { .. }
-                | ClaudeCodeFolder::AgentWritable { .. },
-            )
-            | None,
-            _,
-        )
-        | (Some(ClaudeCodeFolder::Granted(_)), None) => None,
+                | ClaudeCodeFolder::AgentWritable { .. } => None,
+            };
+            let sockets = claude_code.sockets.as_ref().and_then(ClaudeCodeSockets::opened);
+            Some(ClaudeOpened { folder, sockets, from })
+        }
+        (Some(_), None) | (None, _) => None,
     };
-    let built = match granted {
-        Some(folder) => build(config, facts, &grants, Some(folder))?,
-        None => unopened,
+    let built = match opened {
+        Some(opened @ ClaudeOpened { folder: Some(_), .. }) | Some(opened @ ClaudeOpened { sockets: Some(_), .. }) => {
+            build(config, facts, &grants, Some(opened))?
+        }
+        Some(ClaudeOpened {
+            folder: None,
+            sockets: None,
+            ..
+        })
+        | None => unopened,
     };
     if let Some((value, origin)) = facts.launch_env.widening(Widening::AgentDir)
         && let Some(refusal) = widening_refusal(&built.agent, origin, &built.policy, config, None)
@@ -216,17 +337,27 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         name: config.sandbox.profile(),
         set_in: config.sandbox.profile.as_ref().map(|p| p.file.clone()),
     };
-    let silence = config
+    let mut silence = config
         .sandbox
         .silence
         .iter()
         .map(|l| {
+            let target = match &l.value.target {
+                crate::config::SilenceTarget::Path(path) => {
+                    Silent::Path(canonical_pattern(&expand_grant(path, facts.home, facts.base_env)?))
+                }
+                crate::config::SilenceTarget::Service(name) => Silent::Service(name.clone()),
+            };
             Ok(Silenced {
-                path: canonical_target(&expand_grant(&l.value, facts.home, facts.base_env)?),
-                file: l.file.clone(),
+                target,
+                process: l.value.process.clone(),
+                source: SilenceSource::File(l.file.clone()),
             })
         })
         .collect::<Result<Vec<_>, SandboxError>>()?;
+    if let Some(claude_code) = &claude_code {
+        silence.extend(claude_code_silence(claude_code));
+    }
     Ok(Resolution {
         silence,
         policy: built.policy,
@@ -235,6 +366,126 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         claude_code,
         agent_dirs: [built.host_agent, built.agent],
     })
+}
+
+/// A silence pattern's real-path form: the components before the first wildcard canonicalized, as Seatbelt reports
+/// real paths; the rest as written.
+fn canonical_pattern(path: &Path) -> PathBuf {
+    let components: Vec<Component> = path.components().collect();
+    let wild = components
+        .iter()
+        .position(|c| matches!(c.as_os_str().to_str(), Some("*" | "**")))
+        .unwrap_or(components.len());
+    let literal: PathBuf = components[..wild].iter().collect();
+    components[wild..]
+        .iter()
+        .fold(canonical_target(&literal), |path, c| path.join(c))
+}
+
+/// The blocks the `pi-claude-code` preset expects, only logged. With the token login, `claude` looks for a stored login
+/// in the keychain at every start, itself and through `security`, and signs in with the token when it finds none. In
+/// its socket folder, `claude` probes a stale socket that has its pid (the extension kills it, so none is cleaned up)
+/// and takes the name over when the probe fails.
+fn claude_code_silence(claude_code: &ClaudeCode) -> Vec<Silenced> {
+    let preset = |target, process: &str| Silenced {
+        target,
+        process: Some(process.to_string()),
+        source: SilenceSource::Preset(CLAUDE_CODE_PRESET),
+    };
+    let mut silence: Vec<Silenced> = match claude_code.login {
+        ClaudeLogin::Token => ["claude", "security"]
+            .into_iter()
+            .flat_map(|process| {
+                policy::KEYCHAIN_TARGETS
+                    .iter()
+                    .map(move |service| preset(Silent::Service((*service).to_string()), process))
+            })
+            .collect(),
+        // The keychain is open to it: nothing is blocked.
+        ClaudeLogin::Keychain => Vec::new(),
+    };
+    if let Some(folder) = claude_code.sockets.as_ref().and_then(ClaudeCodeSockets::opened) {
+        silence.push(preset(
+            Silent::Path(canonical_target(&folder.join(CLAUDE_SOCKETS))),
+            "claude",
+        ));
+    }
+    silence
+}
+
+/// The folder `claude` puts its sockets in, inside its socket folder.
+const CLAUDE_SOCKETS: &str = "cc-socks";
+
+/// The longest socket path `claude` uses at its first choice; past it, it falls back to the shared
+/// `/tmp/cc-socks-<uid>`.
+const CLAUDE_SOCKET_MAX: usize = 103;
+
+/// The longest socket name `claude` puts there: `<pid>.sock`, with macOS's largest pid.
+const CLAUDE_SOCKET_NAME: &str = "99999.sock";
+
+/// The `pi-claude-code` preset's socket folder: the user's `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR`, accepted like
+/// `PI_CLAUDE_CODE_CONFIG_DIR`, else the session's own (`None` when the launch has none to give).
+fn claude_code_sockets(config: &LaunchConfig, facts: &Facts, unopened: &Built) -> Option<ClaudeCodeSockets> {
+    let users = [Widening::XdgRuntime, Widening::ClaudeCodeTmp]
+        .into_iter()
+        .find_map(|w| facts.launch_env.widening(w).map(|(value, origin)| (w, value, origin)));
+    let Some((widening, value, origin)) = users else {
+        return facts
+            .claude_sockets
+            .map(|own| ClaudeCodeSockets::Own(own.to_path_buf()));
+    };
+    let var = widening.var();
+    let path = env_dir(value, facts.home, facts.workspace);
+    let real = canonical_target(&path);
+    let home = canonical_target(facts.home);
+    let tmp = facts
+        .base_env
+        .get("TMPDIR")
+        .filter(|t| !t.is_empty())
+        .map(|t| canonical_target(Path::new(t)));
+    let shared = policy::WRITE_ROOTS
+        .iter()
+        .map(|r| canonical_target(Path::new(r)))
+        .chain(tmp)
+        .find(|s| *s == real || s.starts_with(&real));
+    let socket = real.join(CLAUDE_SOCKETS).join(CLAUDE_SOCKET_NAME);
+    let reason = if real.parent().is_none() || real == home || real.parent() == Some(home.as_path()) {
+        Some("it's the root, the home folder, or a folder directly in it".to_string())
+    } else if let Some(shared) = shared {
+        Some(format!(
+            "it's {} or contains it, where other processes keep their sockets",
+            shared.display()
+        ))
+    } else if socket.as_os_str().len() > CLAUDE_SOCKET_MAX {
+        Some(format!(
+            "claude's socket there would be longer than {CLAUDE_SOCKET_MAX} bytes, so it would use the shared \
+             /tmp/cc-socks-<uid> instead"
+        ))
+    } else {
+        closed_reason(&real, config, facts, &unopened.denied).or_else(|| {
+            widening_refusal(&path, origin, &unopened.policy, config, Some(&path)).map(|r| {
+                format!(
+                    "it was set by {}, which a sandboxed session can write, and it leads out of the checkout {}",
+                    r.set_by,
+                    r.checkout.display()
+                )
+            })
+        })
+    };
+    Some(match reason {
+        Some(reason) => ClaudeCodeSockets::Refused { var, path, reason },
+        None => ClaudeCodeSockets::Users { var, path },
+    })
+}
+
+/// What the `pi-claude-code` preset opens, and where it came from.
+#[derive(Clone, Copy)]
+struct ClaudeOpened<'a> {
+    /// Its config folder, when it's granted.
+    folder: Option<&'a PathBuf>,
+    /// Its socket folder, when it's opened.
+    sockets: Option<&'a Path>,
+    from: &'a Provenance,
 }
 
 /// One build of a launch's policy, and what the checks after it need.
@@ -248,12 +499,12 @@ struct Built {
     agent: PathBuf,
 }
 
-/// The policy, with the `pi-claude-code` preset's config folder writable when it's given.
+/// The policy, with the `pi-claude-code` preset's config and socket folders open when they're given.
 fn build(
     config: &LaunchConfig,
     facts: &Facts,
     grants: &Grants,
-    claude_code: Option<(&PathBuf, &Provenance)>,
+    claude_code: Option<ClaudeOpened>,
 ) -> Result<Built, SandboxError> {
     let expand = |grant: &str| expand_grant(grant, facts.home, facts.base_env);
     let mut rules = Rules::default();
@@ -284,14 +535,24 @@ fn build(
             },
         );
     }
-    if let Some((folder, from)) = claude_code {
-        let source = Source::Preset {
-            preset: CLAUDE_CODE_PRESET.into(),
-            from: from.clone(),
-        };
+    let claude_source = claude_code.map(|c| Source::Preset {
+        preset: CLAUDE_CODE_PRESET.into(),
+        from: c.from.clone(),
+    });
+    if let (Some(folder), Some(source)) = (claude_code.and_then(|c| c.folder), &claude_source) {
         rules.push(Effect::Allow, &[Access::Write], subpath(folder), source.clone());
         // `claude` locks the folder itself with `proper-lockfile`: an empty `<folder>.lock` folder beside it.
-        rules.push(Effect::Allow, &[Access::Write], subpath(&lock_of(folder)), source);
+        rules.push(
+            Effect::Allow,
+            &[Access::Write],
+            subpath(&lock_of(folder)),
+            source.clone(),
+        );
+    }
+    let claude_sockets = claude_code.and_then(|c| c.sockets);
+    if let (Some(sockets), Some(source)) = (claude_sockets, &claude_source) {
+        // Its temp files and sockets; connecting stays closed (see `ClaudeCodeSockets`).
+        rules.push(Effect::Allow, &[Access::Write], subpath(sockets), source.clone());
     }
     for (path, source) in &grants.write {
         rules.push(Effect::Allow, &[Access::Write], subpath(path), source.clone());
@@ -312,6 +573,9 @@ fn build(
     }
     for (path, source) in &grants.bind {
         rules.push(Effect::Allow, &[Access::Bind], subpath(path), source.clone());
+    }
+    if let (Some(sockets), Some(source)) = (claude_sockets, &claude_source) {
+        rules.push(Effect::Allow, &[Access::Bind], subpath(sockets), source.clone());
     }
 
     // 2. Credentials, what `read` lifts of them (reading only), and the sockets named inside them.
@@ -562,7 +826,7 @@ const CLAUDE_CODE_PRESET: &str = "pi-claude-code";
 /// interactive Claude Code's folder or one that would open what the sandbox closes. `unopened` is the launch's policy
 /// without it.
 fn claude_code_folder(config: &LaunchConfig, facts: &Facts, unopened: &Built) -> ClaudeCodeFolder {
-    let Some((value, origin)) = facts.launch_env.widening(Widening::ClaudeCodeConfigDir) else {
+    let Some((value, origin)) = facts.launch_env.widening(Widening::ClaudeCodeConfig) else {
         return ClaudeCodeFolder::Unset;
     };
     let path = env_dir(value, facts.home, facts.workspace);
@@ -1243,6 +1507,18 @@ mod tests {
         launch: &SandboxEnv,
         fnox_files: &[PathBuf],
     ) -> Result<Resolution, SandboxError> {
+        resolve_with_sockets(f, config, workspace, base, launch, fnox_files, None)
+    }
+
+    fn resolve_with_sockets(
+        f: &Fixture,
+        config: &LaunchConfig,
+        workspace: &Path,
+        base: &Env,
+        launch: &SandboxEnv,
+        fnox_files: &[PathBuf],
+        claude_sockets: Option<&Path>,
+    ) -> Result<Resolution, SandboxError> {
         let control = f.state.join("piton.sock");
         let agent = f.state.join("agent.sock");
         let logs = f.state.join("logs");
@@ -1259,6 +1535,7 @@ mod tests {
                 logs: &logs,
                 write_roots: &[],
                 fnox_files,
+                claude_sockets,
             },
         )
     }
@@ -2105,7 +2382,7 @@ mod tests {
     /// as listed in the file its scope saves to.
     #[test]
     fn entries_are_offered_only_when_the_resolution_lets_them_through() {
-        use super::super::grant::{DeniedBy, Lift, NoLift, Refused, Scope, lift_for};
+        use super::super::grant::{Bounds, Credentials, DeniedBy, Lift, NoLift, Refused, Scope, lift_for};
         let f = fixture("", "");
         let config = launch_config(&f);
         let launch = policy(&f);
@@ -2121,8 +2398,16 @@ mod tests {
             let refused = Refused {
                 operation: op,
                 target: &target,
+                pid: 4242,
             };
-            lift_for(&launch, refused, &[&f.repo], &f.home, widened)
+            let projects = [f.repo.as_path()];
+            let bounds = Bounds {
+                projects: &projects,
+                home: &f.home,
+                shared: &[],
+                credentials: Credentials::Liftable,
+            };
+            lift_for(&launch, refused, &bounds, widened)
         };
         let cache = f.home.join("Library/Caches/tool");
         assert_eq!(
@@ -2242,7 +2527,7 @@ mod tests {
     const CLAUDE_PRESET: &str = "[sandbox]\npresets = [\"pi-claude-code\"]\n";
 
     fn claude_from(value: &str, origin: Origin) -> SandboxEnv {
-        SandboxEnv::for_tests(&[(Widening::ClaudeCodeConfigDir.var(), value, origin)])
+        SandboxEnv::for_tests(&[(Widening::ClaudeCodeConfig.var(), value, origin)])
     }
 
     fn claude_folder(r: &Resolution) -> &ClaudeCodeFolder {
@@ -2296,6 +2581,112 @@ mod tests {
         ));
     }
 
+    /// The preset's socket folder: the session's own when the user sets neither variable; the user's when it's a private
+    /// folder of its own, from a file the agent can't write; otherwise refused with a warning. Opened for writing and
+    /// creating sockets, never connecting; `claude`'s own probes there are silenced.
+    #[test]
+    fn the_claude_code_preset_gives_claude_a_socket_folder_of_its_own() {
+        let f = fixture(CLAUDE_PRESET, "");
+        let config = launch_config(&f);
+        let own = f.home.join("t/piton-cc-x");
+        let run = |env: &SandboxEnv, own: Option<&Path>| {
+            resolve_with_sockets(&f, &config, &f.repo, &Env::new(), env, &[], own).unwrap()
+        };
+        let sockets = |r: &Resolution| r.claude_code.as_ref().unwrap().sockets.clone();
+        let r = run(&SandboxEnv::daemon(&Env::new()), Some(&own));
+        assert_eq!(sockets(&r), Some(ClaudeCodeSockets::Own(own.clone())));
+        let socket = own.join("cc-socks/4242.sock");
+        assert!(allowed(&r.policy, &socket, Access::Bind));
+        assert!(allowed(&r.policy, &own.join("claude-501/x"), Access::Write));
+        assert!(!allowed(&r.policy, &socket, Access::Connect), "never connecting");
+        let probe = socket.to_string_lossy();
+        assert!(silenced(&r.silence, "claude", "network-outbound", &probe).is_some());
+        assert!(silenced(&r.silence, "node", "network-outbound", &probe).is_none());
+        assert!(silenced(&r.silence, "claude", "network-outbound", "/private/tmp/cc-socks/1.sock").is_none());
+        // No folder to give (`piton sandbox show`): nothing opened.
+        assert_eq!(sockets(&run(&SandboxEnv::daemon(&Env::new()), None)), None);
+
+        // The user's own, from the daemon's environment: used, and wins over Piton's.
+        let users = f.home.join("run/claude");
+        let from = |var: Widening, value: &str, origin: Origin| SandboxEnv::for_tests(&[(var.var(), value, origin)]);
+        let r = run(
+            &from(Widening::ClaudeCodeTmp, "~/run/claude", Origin::Daemon),
+            Some(&own),
+        );
+        assert_eq!(
+            sockets(&r),
+            Some(ClaudeCodeSockets::Users {
+                var: "CLAUDE_CODE_TMPDIR",
+                path: users.clone()
+            })
+        );
+        assert!(allowed(&r.policy, &users.join("cc-socks/1.sock"), Access::Bind));
+        assert!(!allowed(&r.policy, &own.join("x"), Access::Write));
+        // `XDG_RUNTIME_DIR` first, as claude reads it.
+        let both = SandboxEnv::for_tests(&[
+            ("XDG_RUNTIME_DIR", "~/run/xdg", Origin::Daemon),
+            ("CLAUDE_CODE_TMPDIR", "~/run/claude", Origin::Daemon),
+        ]);
+        assert!(matches!(
+            sockets(&run(&both, Some(&own))),
+            Some(ClaudeCodeSockets::Users {
+                var: "XDG_RUNTIME_DIR",
+                ..
+            })
+        ));
+
+        // Refused: a shared folder, the home folder, a path too long for the socket, a file the agent can write.
+        let refused = |env: &SandboxEnv| match sockets(&run(env, Some(&own))) {
+            Some(ClaudeCodeSockets::Refused { reason, .. }) => reason,
+            other => panic!("not refused: {other:?}"),
+        };
+        assert!(refused(&from(Widening::ClaudeCodeTmp, "/private/tmp", Origin::Daemon)).contains("other processes"));
+        assert!(refused(&from(Widening::ClaudeCodeTmp, "~", Origin::Daemon)).contains("home folder"));
+        let deep = format!("~/run/{}", "d".repeat(100));
+        assert!(refused(&from(Widening::ClaudeCodeTmp, &deep, Origin::Daemon)).contains("103 bytes"));
+        let workspace_file = Origin::Tool {
+            tool: crate::launch::env::EnvTool::Mise,
+            source: crate::launch::env::ToolSource::File(f.repo.join("mise.toml")),
+        };
+        assert!(refused(&from(Widening::ClaudeCodeTmp, "~/run/claude", workspace_file)).contains("leads out"));
+    }
+
+    /// The token login expects `claude`'s keychain lookups, its own and through `security`: they're silenced, and no
+    /// one else's is. The keychain login has none to silence. The user's entries match by target and process.
+    #[test]
+    fn silence_entries_match_target_and_process() {
+        let user = "[sandbox]\npresets = [\"pi-claude-code\"]\nsilence = [\
+                    { process = \"git\", target = \"~/p/**/.git/config\" }, { target = \"~/Library/Caches/tool\" }]\n";
+        let f = fixture(user, "");
+        let r = resolve_env(&f, &f.repo, &Env::new(), &SandboxEnv::daemon(&Env::new())).unwrap();
+        let hit = |process: &str, operation: &str, target: &str| silenced(&r.silence, process, operation, target);
+        for process in ["claude", "security"] {
+            let entry = hit(process, "mach-lookup", "com.apple.SecurityServer").expect(process);
+            assert_eq!(entry.source, SilenceSource::Preset("pi-claude-code"));
+        }
+        assert!(hit("node", "mach-lookup", "com.apple.SecurityServer").is_none());
+        assert!(hit("claude", "mach-lookup", "com.apple.diagnosticd").is_none());
+        let home = f.home.to_string_lossy();
+        for worker in ["p/Piton/.git/config", "p/Piton--1-x/.git/config", "p/a/b/.git/config"] {
+            assert!(
+                hit("git", "file-write-create", &format!("{home}/{worker}")).is_some(),
+                "{worker}"
+            );
+        }
+        assert!(hit("git", "file-write-create", &format!("{home}/p/Piton/.git/config.bak")).is_none());
+        assert!(hit("node", "file-write-create", &format!("{home}/p/Piton/.git/config")).is_none());
+        assert!(hit("any", "file-write-create", &format!("{home}/Library/Caches/tool/x")).is_some());
+        // A path entry never matches a service lookup of the same text.
+        assert!(hit("any", "mach-lookup", &format!("{home}/Library/Caches/tool")).is_none());
+
+        let keychain = fixture(
+            "[sandbox]\npresets = [{ name = \"pi-claude-code\", login = \"keychain\" }]\n",
+            "",
+        );
+        let r = resolve_env(&keychain, &keychain.repo, &Env::new(), &SandboxEnv::daemon(&Env::new())).unwrap();
+        assert!(silenced(&r.silence, "security", "mach-lookup", "com.apple.SecurityServer").is_none());
+    }
+
     /// `login = "keychain"` reads the keychain (which reopens its services); its files stay unwritable.
     #[test]
     fn the_keychain_login_reads_the_keychain() {
@@ -2327,7 +2718,7 @@ mod tests {
         ));
         let interactive = env(&[("CLAUDE_CONFIG_DIR", "~/.config/claude")]);
         let same = SandboxEnv::for_tests(&[
-            (Widening::ClaudeCodeConfigDir.var(), "~/.config/claude", Origin::Daemon),
+            (Widening::ClaudeCodeConfig.var(), "~/.config/claude", Origin::Daemon),
             ("CLAUDE_CONFIG_DIR", "~/.config/claude", Origin::Daemon),
         ]);
         assert!(matches!(

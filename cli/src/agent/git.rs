@@ -92,6 +92,56 @@ impl GitControl {
     }
 }
 
+/// Which of Git's control entries a refused write named: what the block cost, and the silence entry for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitControlEntry {
+    /// `config`: an upstream setting, a remote, a deleted branch's section.
+    Config,
+    /// `config.worktree`.
+    ConfigWorktree,
+    /// `commondir`.
+    Commondir,
+    /// `hooks/` or what's in it.
+    Hooks,
+    /// The checkout's `.git` itself, renamed, removed, or replaced.
+    GitDir,
+}
+
+impl GitControlEntry {
+    /// The entry a path Git's control rule refused names, read from its last components (any case): `.git` itself,
+    /// `<git dir>/hooks/...`, or `<git dir>/config` and the other control files. The git directory is a `.git`
+    /// folder or a shared one, so only the names after it are read. `None` for a path that names none of them.
+    pub fn of(path: &Path) -> Option<Self> {
+        let names: Vec<String> = path.iter().map(|n| n.to_string_lossy().to_lowercase()).collect();
+        if names.last().is_some_and(|n| n == DOT_GIT) {
+            return Some(Self::GitDir);
+        }
+        // `hooks` as a direct child of a `.git` folder (a shared git directory is one too), with anything below it; a
+        // checkout folder named `hooks` isn't.
+        let in_hooks = names.windows(2).any(|pair| pair[0] == DOT_GIT && pair[1] == HOOKS);
+        if in_hooks {
+            return Some(Self::Hooks);
+        }
+        match names.last().map(String::as_str) {
+            Some("config") => Some(Self::Config),
+            Some("config.worktree") => Some(Self::ConfigWorktree),
+            Some("commondir") => Some(Self::Commondir),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Its name inside a git directory, as a silence pattern ends: `config`, `hooks`, ...
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::ConfigWorktree => "config.worktree",
+            Self::Commondir => "commondir",
+            Self::Hooks => HOOKS,
+            Self::GitDir => DOT_GIT,
+        }
+    }
+}
+
 /// Inside `checkout`: its own `.git` entry, or a control entry of any `.git` folder below it.
 fn covers_in_checkout(checkout: &Path, path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(checkout) else {
@@ -176,6 +226,27 @@ mod tests {
             checkouts: vec!["/u/p/repo".into()],
             common_dirs: vec!["/u/p/main/.git".into()],
         }
+    }
+
+    /// A refused path names the entry it is, so the notice says what Git skipped.
+    #[test]
+    fn names_the_entry_a_refused_path_is() {
+        let of = |p: &str| GitControlEntry::of(Path::new(p));
+        assert_eq!(of("/u/p/repo/.git/config"), Some(GitControlEntry::Config));
+        assert_eq!(of("/u/p/repo/.GIT/CONFIG"), Some(GitControlEntry::Config));
+        assert_eq!(
+            of("/u/p/repo/.git/config.worktree"),
+            Some(GitControlEntry::ConfigWorktree)
+        );
+        assert_eq!(of("/u/p/repo/.git/commondir"), Some(GitControlEntry::Commondir));
+        assert_eq!(of("/u/p/repo/.git/hooks/pre-commit"), Some(GitControlEntry::Hooks));
+        assert_eq!(of("/u/p/repo/.git/hooks"), Some(GitControlEntry::Hooks));
+        assert_eq!(of("/u/p/main/.git/hooks/x"), Some(GitControlEntry::Hooks));
+        assert_eq!(of("/u/p/repo/.git"), Some(GitControlEntry::GitDir));
+        // A checkout named `hooks`: its `.git/config` is still the configuration.
+        assert_eq!(of("/u/p/hooks/.git/config"), Some(GitControlEntry::Config));
+        assert_eq!(of("/u/hooks/repo/.git/hooks/x"), Some(GitControlEntry::Hooks));
+        assert_eq!(of("/u/p/repo/src/a.rs"), None);
     }
 
     #[test]

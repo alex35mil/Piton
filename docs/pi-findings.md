@@ -265,6 +265,23 @@ Verified with claude 2.1.309, pi 1.5.2, and pi-claude-code at `d5b5e04` (#311):
   `CLAUDE_CONFIG_DIR` is set: each folder has its own login.
 - The extension's relay listens on `127.0.0.1` at a random port and reaches Anthropic from pi's process.
 
+Read from the `claude` 2.1.309 binary (#331):
+
+- Every `claude` serves a messaging socket at `($XDG_RUNTIME_DIR || $CLAUDE_CODE_TMPDIR || /tmp)/cc-socks/<pid>.sock`,
+  falling back to `/tmp/cc-socks-<uid>/<pid>.sock` above 103 bytes. Each folder on the way must be private or sticky,
+  owned by the user or root. Before binding it tries `listen`; on `EADDRINUSE` it connects for 250 ms to see whether a
+  live session owns the file, unlinks it if not, and binds again. It removes its socket when it exits normally.
+- The extension ends every `claude` with SIGKILL (`killProcessTree`), so none removes its socket:
+  `/private/tmp/cc-socks` held about 29,850 files on the user's Mac, none of a live process
+  ([pi-claude-code#50](https://github.com/earendil-works/pi-claude-code/issues/50)).
+- `CLAUDE_CODE_TMPDIR` also moves Claude Code's per-user temp root (`<dir>/claude-<uid>`: task output, prompts,
+  plugin staging), plugin zips, ssh-config and git-bundle temp files. Its children's `$TMPDIR` is
+  `<dir>/claude-<uid>` only when that's at most 44 bytes, else `/tmp/claude-<uid>`.
+- At startup it reads a stored login from the keychain (`security find-generic-password -a <account> -w -s
+  <service>`, run by `claude`) even with `CLAUDE_CODE_OAUTH_TOKEN` set; no setting turns that off. With the keychain
+  closed, both `claude` and `security` are refused `mach-lookup com.apple.SecurityServer`, and `claude` signs in with
+  the token.
+
 ## Not yet verified
 
 - Automatic compaction during a run (between turns) and its interaction with replay.

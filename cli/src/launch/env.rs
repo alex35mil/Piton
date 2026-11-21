@@ -138,14 +138,21 @@ pub enum Widening {
     /// pi's agent directory, whose runtime state the sandbox may write.
     AgentDir,
     /// The pi-claude-code extension's Claude Code config folder, which the `pi-claude-code` preset makes writable.
-    ClaudeCodeConfigDir,
+    ClaudeCodeConfig,
+    /// Where `claude` puts its sockets first (`<dir>/cc-socks/<pid>.sock`); the preset opens it when the user sets it.
+    XdgRuntime,
+    /// Claude Code's temp root, where `claude` puts its sockets when `XDG_RUNTIME_DIR` isn't set; the preset opens it
+    /// when the user sets it, else sets it to a folder of the session's own.
+    ClaudeCodeTmp,
 }
 
 impl Widening {
     pub fn var(self) -> &'static str {
         match self {
             Self::AgentDir => "PI_CODING_AGENT_DIR",
-            Self::ClaudeCodeConfigDir => "PI_CLAUDE_CODE_CONFIG_DIR",
+            Self::ClaudeCodeConfig => "PI_CLAUDE_CODE_CONFIG_DIR",
+            Self::XdgRuntime => "XDG_RUNTIME_DIR",
+            Self::ClaudeCodeTmp => "CLAUDE_CODE_TMPDIR",
         }
     }
 }

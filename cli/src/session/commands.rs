@@ -125,15 +125,16 @@ impl Commands {
         lift: &crate::launch::sandbox::grant::Lift,
     ) -> Result<PathBuf, String> {
         let (key, value) = lift.entry();
-        self.append(scope, key, &value)
+        self.append(scope, key, &serde_json::Value::String(value))
     }
 
-    /// Saves `path` in the chosen file's `[sandbox] silence`: blocks below it are only logged from then on.
-    pub fn persist_silence(&self, scope: PersistScope, path: &Path) -> Result<PathBuf, String> {
-        self.append(scope, "silence", &path.display().to_string())
+    /// Saves `entry` in the chosen file's `[sandbox] silence`: blocks it matches are only logged from then on.
+    pub fn persist_silence(&self, scope: PersistScope, entry: &crate::config::Silence) -> Result<PathBuf, String> {
+        let value = serde_json::to_value(entry).map_err(|e| e.to_string())?;
+        self.append(scope, "silence", &value)
     }
 
-    fn append(&self, scope: PersistScope, key: &str, value: &str) -> Result<PathBuf, String> {
+    fn append(&self, scope: PersistScope, key: &str, value: &serde_json::Value) -> Result<PathBuf, String> {
         let file = self.file(scope);
         let path = file.path(&self.paths).map_err(|e| e.to_string())?;
         file.append_to_list(&self.paths, &format!("sandbox.{key}"), value)
@@ -568,6 +569,8 @@ mod tests {
                     |_| Ok(policy()),
                 ),
                 silence: Vec::new(),
+                credentials: crate::launch::sandbox::grant::Credentials::Liftable,
+                claude_login: None,
             },
             env: [("FROM".to_string(), "launch".to_string())].into_iter().collect(),
             shell: PiShell {

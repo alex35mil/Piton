@@ -167,7 +167,7 @@ pub static CATALOG: &[Entry] = &[
     project("sandbox.connect", TextList, empty),
     project("sandbox.bind", TextList, empty),
     project("sandbox.deny", TextList, empty),
-    project("sandbox.silence", TextList, empty),
+    // Not `sandbox.silence`: its entries are tables (`{ target, process }`), edited in the file; a notice names each.
     project("workers.skip", TextList, empty),
 ];
 

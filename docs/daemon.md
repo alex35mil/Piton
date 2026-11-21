@@ -339,8 +339,27 @@ presets = []          # "mise", "rust", "node", "swift": toolchain caches and st
                       # "git": agents may write Git's hooks and configuration (see below);
                       # "pi-claude-code": what pi's Claude Code needs (see below)
 deny = []             # paths closed like the credentials: no read, write, connect, or bind
-silence = []          # paths whose blocks stay blocked without a question or a notice ("Deny" saves here)
+silence = []          # blocks that stay blocked without a question or a notice (below; "Deny" saves here)
 ```
+
+`silence` entries describe what a question or notice showed: the blocked process and its target, never why it was
+blocked. Each is a table:
+
+```toml
+silence = [
+  { target = "~/Library/Caches/tool" },                     # this path and everything below it, any process
+  { process = "git", target = "~/Projects/**/.git/config" }, # git, that file in any checkout below ~/Projects
+  { process = "ssh", target = "~/.ssh/keys" },              # ssh's reads of anything in that folder
+  { process = "claude", target = "com.apple.SecurityServer" }, # a Mach service, by name
+]
+```
+
+- `target` is a path (absolute, or starting with `~/` or `$VAR/`; a `*` segment matches one folder entry, `**` any
+  number of them) or a Mach service name. Anything else is a configuration error.
+- `process` is optional and matches the blocked process's name exactly.
+- A plain string entry (the earlier form) is an error: write `{ target = "..." }`.
+- Every notice ends with the entry that quiets it; presets add their own (`piton sandbox show` lists them all with
+  their source). The apps' settings don't list `silence`: edit it in the file.
 
 `connect` entries, by what you want to reach:
 
@@ -448,6 +467,23 @@ port on this Mac (`localhost:*`; the extension's relay listens on a random one, 
 process). The folder is read like pi's agent directory: from your shell's environment, a file the agent can't write,
 or, when the workspace's own `mise.toml` sets it, only inside the checkout.
 
+It also gives pi's `claude` a socket folder of its own. Every `claude` serves a messaging socket at
+`<folder>/cc-socks/<pid>.sock` (`<folder>` is `$XDG_RUNTIME_DIR`, else `$CLAUDE_CODE_TMPDIR`, else `/tmp`) and first
+probes a stale one with its pid. The extension ends `claude` with SIGKILL, which leaves every socket behind
+([pi-claude-code#50](https://github.com/earendil-works/pi-claude-code/issues/50)), so the shared `/tmp/cc-socks` fills
+up and the probe meets the sandbox. When you set neither variable, each session gets a fresh private folder
+(`$TMPDIR/piton-cc-<daemon>-<random>`, or under `/private/tmp` when `$TMPDIR` is too deep for the socket path), set
+as `CLAUDE_CODE_TMPDIR` in pi's environment and removed when the session ends; the daemon removes its own leftovers
+when it starts. When you set one, that folder is used, accepted like `PI_CLAUDE_CODE_CONFIG_DIR` and never `/tmp`,
+`$TMPDIR`, a write root, your home folder, or a folder directly in it; otherwise the session starts with a warning.
+The folder is open for writing and creating sockets, never for connecting (the agent can create entries there too,
+so a connect grant would reach any socket hard-linked in); `claude`'s probes of its own stale sockets there are
+silenced.
+
+With the token login, the preset also silences `claude`'s startup lookup of a stored login in the keychain (its own,
+and the `security` it runs): `claude` signs in with the token. A keychain lookup by `security` from anything else in
+the session is silenced too, since the blocked process can't be told apart; the tool reports its own error.
+
 `login = "keychain"` (`presets = [{ name = "pi-claude-code", login = "keychain" }]`) signs in with a
 `claude auth login` saved in the keychain instead: the sandbox can then read the keychain. Run `claude auth login`
 with `CLAUDE_CONFIG_DIR` set to the same folder; each folder has its own keychain entry. Refused while fnox applies,
@@ -462,7 +498,8 @@ same warnings.
 
 `piton sandbox why PATH [--write | --connect | --bind] [--workspace DIR]` says whether a sandboxed pi there may read,
 write, connect to, or create a socket at PATH, and which rule decides: built in, or an entry from a profile or the file that lists it.
-`piton sandbox show` prints the profile (and the file that chose it), every rule with where it came from, and the
+`piton sandbox show` prints the profile (and the file that chose it), the `silence` entries with their source (yours
+and the presets'), every rule with where it came from, and the
 network destinations `connect` grants.
 
 A grant doesn't follow a symlink a sandboxed agent could have made: the path itself, or a link inside the project's
@@ -516,21 +553,32 @@ path, one question at a time. The question names the exact entry each answer sav
   (in a credential folder too, for that socket only), `bind` for a socket it creates. "Everywhere" saves
   the folder above a path's per-project part (Claude Code's `~/Library/Caches/claude-cli-nodejs/<project>` saves
   `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block.
-- **Deny in this project / everywhere:** adds the path to `silence`: it stays blocked, and isn't asked about again.
-  `piton sandbox why <path>` says when a path is silenced.
+- **Deny in this project / everywhere:** adds `{ target = "<path>" }` to `silence`: it stays blocked, and isn't asked
+  about again. `piton sandbox why <path>` says when a path is silenced.
+
+A path named after the blocked process itself (its pid is a whole number in a component: Claude Code's
+`cc-socks/64421.sock`, Neovim's `nvim.64421.0`) is never offered as that path, since the entry would never match
+again. The question offers the folder above it when that folder isn't temp (`/tmp`, `$TMPDIR`, and what's below them,
+where other processes keep their sockets), the home folder or a folder directly in it, and listing it lifts the block;
+otherwise it's a notice naming that folder.
 - **Not now** (or dismissing it): it stays blocked; a new session asks again.
 
-Some blocks are never asked about, only shown as a warning in the session, once per process and path:
+Some blocks are never asked about, only shown as a warning in the session, once per process and path. Each warning
+ends with the `silence` entry that quiets it (for that process; the folder, or every checkout beside this one for
+Git's files), so you can quiet the ones you consider noise one at a time:
 
-- **A credential read** (`~/.ssh`, `~/.aws`, the keychain, and the rest of the built-in list). These are nearly always
-  probes a program recovers from, and one click would expose the credential for good. The warning names the `read`
-  entry to add by hand if a program really needs it. ssh, for example, opens each private key to read its public half
-  before signing through your SSH agent, so every SSH Git command shows one. To keep ssh from opening private keys at
-  all, point `IdentityFile` at the `.pub` file in `~/.ssh/config`, with `IdentitiesOnly yes`; ssh then signs through
-  the agent.
-- **Git's hooks and configuration** (`.git/hooks/`, `.git/config`). Git warns and carries on without the write
-  (`git branch -D` drops the branch's section from `.git/config`; `git push -u` sets the upstream). The `git` preset
-  opens them.
+- **A credential read** (`~/.ssh`, `~/.aws`, and the rest of the built-in list). These are nearly always probes a
+  program recovers from. `read` would lift one, but it exposes the credential to every sandboxed process, so the
+  warning names it only as a last resort for a program that fails without it. ssh, for example, opens each private
+  key to read its public half before signing through your SSH agent, so every SSH Git command shows one. To keep ssh
+  from opening private keys at all, point `IdentityFile` at the `.pub` file in `~/.ssh/config`, with
+  `IdentitiesOnly yes`; ssh then signs through the agent (which must hold the key: `ssh-add -l`).
+- **The keychain** (its services, and `~/Library/Keychains`). With fnox off, the warning names
+  `read = ["~/Library/Keychains"]`. With fnox on it says the keychain stays closed: the credentials of fnox's secret
+  sources live there, and a sandbox that can read it isn't started. For `claude`, it names the `pi-claude-code`
+  preset with a setup token.
+- **Git's hooks and configuration** (`.git/hooks/`, `.git/config`): what Git skipped (`git push -u` sets an
+  upstream; `git branch -D` drops a branch's section; a hook isn't installed). Git carries on.
 - What the floor or your `deny` blocks, and what no entry can lift.
 
 A command the agent runs keeps the rerun question for every block, credentials and Git's files included.

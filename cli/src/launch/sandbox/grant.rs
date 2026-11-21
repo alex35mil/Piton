@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    policy::Source,
+    policy::{self, Source},
     rules::{Access, Effect, Policy, Rule, Target},
 };
 use crate::config::{AllGrant, CommandGrant, Grant, GrantLists, LaunchConfig, Listed};
@@ -28,8 +28,13 @@ pub struct CommandPolicies {
     pub entries: Vec<(Listed<CommandGrant>, Result<Policy, String>)>,
     /// The launch's resolution with a widened configuration: what a process block's entry is checked against.
     pub resolver: Resolver,
-    /// `[sandbox] silence`: blocks of processes below these paths are only logged.
+    /// `[sandbox] silence` and the presets' entries: the blocks of processes they match are only logged.
     pub silence: Vec<super::Silenced>,
+    /// Whether the credential denies are floor (fnox on): what a keychain block says.
+    pub credentials: Credentials,
+    /// How the `pi-claude-code` preset signs `claude` in, when the preset is on: what a keychain block of `claude`
+    /// suggests.
+    pub claude_login: Option<crate::config::ClaudeLogin>,
 }
 
 /// Resolves a launch's configuration again, with the launch's own facts (its environment, its fnox files): the policy
@@ -113,6 +118,7 @@ pub fn command_policies(
     credentials: Credentials,
     resolver: Resolver,
     silence: Vec<super::Silenced>,
+    claude_login: Option<crate::config::ClaudeLogin>,
 ) -> CommandPolicies {
     let widened = all(policy, credentials);
     let entries = resolver
@@ -134,6 +140,8 @@ pub fn command_policies(
         entries,
         resolver,
         silence,
+        credentials,
+        claude_login,
     }
 }
 
@@ -318,14 +326,31 @@ pub enum NoLift {
     /// An operation no `[sandbox]` entry lifts (process-exec of a denied file, a Mach service other than the keychain's,
     /// a target that isn't a path).
     Unsupported,
+    /// The path names the refusing process itself (its pid is a component's whole number: `64421.sock`,
+    /// `nvim.64421.0`), so an entry for it would never match again, and the folder above it isn't one to open from a
+    /// question (temp, the home folder, the root) or opening it wouldn't lift the block. `folder` is what a hand-written
+    /// entry would have to name.
+    PerProcess { folder: PathBuf },
+}
+
+/// A keychain block: a lookup of its services, or a read of a keychain file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeychainBlock {
+    /// fnox is off: `read = ["~/Library/Keychains"]` lifts it.
+    Readable,
+    /// fnox is on: the credentials of its secret sources live there, so a launch whose sandbox can read the keychain
+    /// is refused, and no entry lifts it.
+    ClosedForFnox,
 }
 
 /// The deny that decides a refusal no entry lifts. Each is reported differently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeniedBy {
-    /// A credential (nono's deny groups) or the keychain, and the access refused: `read` lifts a read (written by hand);
-    /// nothing the question saves lifts a write or a connect.
+    /// A credential (nono's deny groups) other than the keychain, and the access refused: `read` lifts a read (written
+    /// by hand); nothing the question saves lifts a write or a connect.
     Credential(Access),
+    /// The keychain.
+    Keychain(KeychainBlock),
     /// Git's hooks and configuration: the `git` preset opens them.
     GitControl,
     /// The user's own `deny`.
@@ -367,27 +392,83 @@ fn denied_by(policy: &Policy, path: &Path, access: Access) -> Option<DeniedBy> {
 pub struct Refused<'a> {
     pub operation: &'a str,
     pub target: &'a str,
+    /// The refusing process's pid.
+    pub pid: i32,
+}
+
+/// What an offer is bounded by, fixed for a launch.
+#[derive(Debug, Clone, Copy)]
+pub struct Bounds<'a> {
+    /// The folders a per-project path component may name (the source and the checkout).
+    pub projects: &'a [&'a Path],
+    /// How far "everywhere" may reach.
+    pub home: &'a Path,
+    /// Folders where host processes create sockets and files of their own (temp): no folder at or below them is offered.
+    pub shared: &'a [PathBuf],
+    /// Whether the credential denies are floor (fnox on).
+    pub credentials: Credentials,
+}
+
+/// The keychain folders nono denies, below `home` or the system's.
+fn keychain_path(path: &Path, home: &Path) -> bool {
+    path.starts_with(home.join("Library/Keychains")) || path.starts_with("/Library/Keychains")
+}
+
+/// The keychain block, by whether fnox is on.
+fn keychain(credentials: Credentials) -> NoLift {
+    NoLift::Decided(DeniedBy::Keychain(match credentials {
+        Credentials::Liftable => KeychainBlock::Readable,
+        Credentials::Floor => KeychainBlock::ClosedForFnox,
+    }))
+}
+
+/// The part of `target` up to its first component that is the process's own: one with `pid` as a whole digit run.
+/// Pids below 100 belong to the system's own processes at boot, never a session's: too short to tell from other
+/// numbers in a name.
+fn per_process(target: &Path, pid: i32) -> Option<&Path> {
+    if pid < 100 {
+        return None;
+    }
+    let pid = pid.to_string();
+    let own = |name: &std::ffi::OsStr| {
+        name.to_string_lossy()
+            .split(|c: char| !c.is_ascii_digit())
+            .any(|run| run == pid)
+    };
+    // Ancestors run from the target up: the last match is the outermost component.
+    target.ancestors().filter(|a| a.file_name().is_some_and(own)).last()
+}
+
+/// Whether `folder` may be offered from a question: not the root, the home folder or a folder directly in it, nor at
+/// or below a shared folder.
+fn safe_folder(folder: &Path, bounds: &Bounds) -> bool {
+    folder.parent().is_some()
+        && folder != bounds.home
+        && folder.parent() != Some(bounds.home)
+        && !bounds.shared.iter().any(|s| folder.starts_with(s))
 }
 
 /// The offer for a refusal under the launch's `policy`, or why there's none.
 ///
 /// `widened` resolves the launch's configuration again with one entry added in a scope: the policy a restart would
 /// get. An entry is offered only when that policy allows the refused access, so an entry a later deny beats never is.
-/// `projects` are the folders a per-project path component may name (the source and the checkout); `home` bounds
-/// how far "everywhere" may reach.
+/// A path naming the refusing process itself is offered as its folder, when that is safe and lifts it, else
+/// [`NoLift::PerProcess`].
 pub fn lift_for(
     policy: &Policy,
     refused: Refused,
-    projects: &[&Path],
-    home: &Path,
+    bounds: &Bounds,
     widened: impl Fn(&Lift, Scope) -> Result<Policy, String>,
 ) -> Result<Offer, NoLift> {
     let target = Path::new(refused.target);
     let absolute = target.is_absolute();
     let operation = refused.operation;
     let (access, project) = match operation {
-        "mach-lookup" if KEYCHAIN_TARGETS.contains(&refused.target) => {
-            return Err(NoLift::Decided(DeniedBy::Credential(Access::Read)));
+        "mach-lookup" if policy::KEYCHAIN_TARGETS.contains(&refused.target) => {
+            return Err(keychain(bounds.credentials));
+        }
+        op if op.starts_with("file-read") && absolute && keychain_path(target, bounds.home) => {
+            return Err(keychain(bounds.credentials));
         }
         op if op.starts_with("file-read") && absolute => {
             return Err(NoLift::Decided(
@@ -410,6 +491,7 @@ pub fn lift_for(
             (
                 Access::Read | Access::Write | Access::Connect | Access::Bind,
                 DeniedBy::Credential(_)
+                | DeniedBy::Keychain(_)
                 | DeniedBy::GitControl
                 | DeniedBy::UserDeny
                 | DeniedBy::FnoxConfig
@@ -417,6 +499,28 @@ pub fn lift_for(
             ) => return Err(NoLift::Decided(denied)),
         }
     }
+    let project = match per_process(target, refused.pid) {
+        None => project,
+        Some(own) => {
+            let folder = own.parent().unwrap_or(own).to_path_buf();
+            let lift = match &project {
+                Lift::Connect(_) => Lift::Connect(folder.clone()),
+                Lift::Bind(_) => Lift::Bind(folder.clone()),
+                Lift::Write(_) | Lift::WriteFile(_) => Lift::Write(folder.clone()),
+            };
+            let offered = safe_folder(&folder, bounds)
+                && [Scope::Project, Scope::Everywhere]
+                    .iter()
+                    .all(|scope| widened(&lift, *scope).is_ok_and(|p| p.decide(target, access).allowed));
+            return match offered {
+                true => Ok(Offer {
+                    project: lift.clone(),
+                    everywhere: lift,
+                }),
+                false => Err(NoLift::PerProcess { folder }),
+            };
+        }
+    };
     let lifts = |lift: &Lift, scope: Scope| -> Result<(), NoLift> {
         let policy = widened(lift, scope).map_err(|_| NoLift::Unsupported)?;
         match policy.decide(target, access).allowed {
@@ -427,7 +531,7 @@ pub fn lift_for(
         }
     };
     lifts(&project, Scope::Project)?;
-    let everywhere = match everywhere_folder(target, projects, home) {
+    let everywhere = match everywhere_folder(target, bounds.projects, bounds.home) {
         Some(folder) => {
             let lift = Lift::Write(folder);
             match lifts(&lift, Scope::Everywhere) {
@@ -457,15 +561,6 @@ fn everywhere_folder(target: &Path, projects: &[&Path], home: &Path) -> Option<P
         || projects.iter().any(|p| p.starts_with(parent));
     (!too_broad).then(|| parent.to_path_buf())
 }
-
-/// The Mach services that broker keychain access (the library denies them).
-const KEYCHAIN_TARGETS: [&str; 5] = [
-    "com.apple.SecurityServer",
-    "com.apple.securityd",
-    "com.apple.security.keychaind",
-    "com.apple.secd",
-    "com.apple.security.agent",
-];
 
 #[cfg(test)]
 mod tests {
@@ -705,11 +800,36 @@ mod tests {
         policy
     }
 
+    /// The temp folders a test's bounds name as shared.
+    fn shared() -> Vec<PathBuf> {
+        ["/private/tmp", "/tmp", "/private/var/folders", "/var/folders"]
+            .map(PathBuf::from)
+            .to_vec()
+    }
+
+    fn lift_with(
+        launch: &Policy,
+        refused: Refused,
+        projects: &[&Path],
+        credentials: Credentials,
+    ) -> Result<Offer, NoLift> {
+        let shared = shared();
+        let bounds = Bounds {
+            projects,
+            home: Path::new("/h"),
+            shared: &shared,
+            credentials,
+        };
+        lift_for(launch, refused, &bounds, |lift, _| Ok(with_lift(launch, lift)))
+    }
+
     fn lift_in(launch: &Policy, op: &str, target: &str, projects: &[&Path]) -> Result<Offer, NoLift> {
-        let refused = Refused { operation: op, target };
-        lift_for(launch, refused, projects, Path::new("/h"), |lift, _| {
-            Ok(with_lift(launch, lift))
-        })
+        let refused = Refused {
+            operation: op,
+            target,
+            pid: 4242,
+        };
+        lift_with(launch, refused, projects, Credentials::Liftable)
     }
 
     fn only(lift: Lift) -> Offer {
@@ -740,6 +860,11 @@ mod tests {
             Ok(only(Lift::Connect("/tmp/x.sock".into())))
         );
         assert_eq!(
+            lift("network-outbound", "/h/run/x-1.sock"),
+            Ok(only(Lift::Connect("/h/run/x-1.sock".into()))),
+            "another number isn't the process's own"
+        );
+        assert_eq!(
             lift("network-bind", "/w/x.sock"),
             Ok(only(Lift::Bind("/w/x.sock".into())))
         );
@@ -767,14 +892,19 @@ mod tests {
             lift("file-write-unlink", "/w/.git/config"),
             decided(DeniedBy::GitControl)
         );
-        // Credentials, the keychain included: never offered, fnox or not.
+        // Credentials: never offered, fnox or not.
         assert_eq!(
             lift("file-read-data", "/h/.ssh/id_ed25519"),
             decided(DeniedBy::Credential(Access::Read))
         );
+        // The keychain is its own case: readable with fnox off.
         assert_eq!(
             lift("mach-lookup", "com.apple.SecurityServer"),
-            decided(DeniedBy::Credential(Access::Read))
+            decided(DeniedBy::Keychain(KeychainBlock::Readable))
+        );
+        assert_eq!(
+            lift("file-read-data", "/h/Library/Keychains/login.keychain-db"),
+            decided(DeniedBy::Keychain(KeychainBlock::Readable))
         );
         // ssh appending to known_hosts: a write, which `read` wouldn't lift.
         assert_eq!(
@@ -798,16 +928,84 @@ mod tests {
         let refused = Refused {
             operation: "file-write-create",
             target: "/h/.cache/x",
+            pid: 4242,
+        };
+        let shared = shared();
+        let bounds = Bounds {
+            projects: &[],
+            home: Path::new("/h"),
+            shared: &shared,
+            credentials: Credentials::Liftable,
         };
         let unchanged = |_: &Lift, _| Ok(launch.clone());
         assert_eq!(
-            lift_for(&launch, refused, &[], Path::new("/h"), unchanged),
+            lift_for(&launch, refused, &bounds, unchanged),
             Err(NoLift::Decided(DeniedBy::Floor))
         );
         let unresolvable = |_: &Lift, _| Err("$X isn't set".to_string());
         assert_eq!(
-            lift_for(&launch, refused, &[], Path::new("/h"), unresolvable),
+            lift_for(&launch, refused, &bounds, unresolvable),
             Err(NoLift::Unsupported)
+        );
+    }
+
+    /// With fnox on, a keychain block says it stays closed for fnox: no entry, whatever the access.
+    #[test]
+    fn the_keychain_stays_closed_behind_fnox() {
+        let launch = launch();
+        for (operation, target) in [
+            ("mach-lookup", "com.apple.SecurityServer"),
+            ("mach-lookup", "com.apple.secd"),
+            ("file-read-data", "/h/Library/Keychains/login.keychain-db"),
+        ] {
+            let refused = Refused {
+                operation,
+                target,
+                pid: 4242,
+            };
+            assert_eq!(
+                lift_with(&launch, refused, &[], Credentials::Floor),
+                Err(NoLift::Decided(DeniedBy::Keychain(KeychainBlock::ClosedForFnox))),
+                "{target}"
+            );
+        }
+    }
+
+    /// A path named after the refusing process is offered as its folder when that is safe and lifts it; under temp,
+    /// the home folder, or the root it never is.
+    #[test]
+    fn a_process_s_own_name_is_never_offered() {
+        let launch = launch();
+        let lift =
+            |operation, target, pid| lift_with(&launch, Refused { operation, target, pid }, &[], Credentials::Liftable);
+        let per_process = |folder: &str| Err(NoLift::PerProcess { folder: folder.into() });
+        // Claude Code's sockets: `/tmp/cc-socks` reaches every interactive Claude Code on the host.
+        assert_eq!(
+            lift("network-outbound", "/private/tmp/cc-socks/64421.sock", 64421),
+            per_process("/private/tmp/cc-socks")
+        );
+        assert_eq!(
+            lift("network-outbound", "/var/folders/x/T/nvim.Alex/a1/nvim.64421.0", 64421),
+            per_process("/var/folders/x/T/nvim.Alex/a1")
+        );
+        // A folder of the process's own, deeper: the folder above the outermost own component.
+        assert_eq!(
+            lift("file-write-create", "/h/.cache/tool/64421/x.lock", 64421),
+            Ok(only(Lift::Write("/h/.cache/tool".into())))
+        );
+        assert_eq!(
+            lift("network-outbound", "/h/run/app/64421.sock", 64421),
+            Ok(only(Lift::Connect("/h/run/app".into())))
+        );
+        // Directly in the home folder's folders: too broad.
+        assert_eq!(
+            lift("network-outbound", "/h/run/64421.sock", 64421),
+            per_process("/h/run")
+        );
+        // Another pid's name is a plain path.
+        assert_eq!(
+            lift("network-outbound", "/h/run/app/64421.sock", 777),
+            Ok(only(Lift::Connect("/h/run/app/64421.sock".into())))
         );
     }
 
