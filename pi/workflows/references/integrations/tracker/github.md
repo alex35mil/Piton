@@ -44,7 +44,7 @@ Follow [initialize from the tracker object](../shared.md#initialize-from-the-tra
 
 **Board setup** (after initialization, for new and adopted work):
 
-1. Add the issue to the configured Project unless that's already proven, and record the add evidence with `record_resource_ids`. Follow the [Project item ID rule](#project-item-ids).
+1. Add a new issue to the configured Project, and record the add evidence with `record_resource_ids`. Follow the [Project item ID rule](#project-item-ids). Skip this for adopted work: its item is already in the Project, and initialization recorded its ID from `object`.
 2. Set In Progress, Priority, and, when Phase is configured, Planning in the Phase field, with Project writes addressed by the issue, not by item ID. Combine supported issue-field writes.
 3. For adopted work and a started Task, call registered `get_me` once, then run one `issue_write` update that sets its login as the only assignee. A new issue already has it.
 4. Reuse labels and parent assignment proven at creation. For adopted work and a started Task, read the issue's labels and call `prepare_label_mutation` with only the groups whose values you derived ([labels](../shared.md#labels)). For a Task's parent, call `prepare_tracker_mutation` with `hierarchy` only when a correction is needed.
