@@ -18,7 +18,12 @@ import { initializeEntity } from "../workflows/extensions/init/entity.ts"
 import { restoreEpic, restoreEpicPlanSource } from "../workflows/extensions/init/restore.ts"
 import { renderProviderBody, restoreProviderSource } from "../workflows/extensions/integrations/projection.ts"
 import {
-    type EpicChildIssue,
+    childMoves,
+    type EpicTaskIssueStep,
+    type GitHubEpicChild,
+    type LinearEpicChild,
+    orderLinearEpicIssues,
+    planChildOrder,
     planEpicTaskIssues,
     recordEpicTaskIssue,
 } from "../workflows/extensions/integrations/epic-task-issues.ts"
@@ -110,8 +115,10 @@ const section = (title: string, marker?: string, extra = "") =>
     `### ${marker ? `[${marker}] ` : ""}${title}\n\n**Kind:** \`feature\`\n${extra}**Summary:** ${title} summary.\n` +
     (marker ? "" : `\n${title} outcome.\n`)
 const plan = (...sections: string[]) => `# Epic\n\n## Overview\n\nPlan.\n\n## Tasks\n\n${sections.join("\n")}`
-const child = (marker: string, title: string, facts: Partial<EpicChildIssue> = {}): EpicChildIssue => ({
+// A queued GitHub sub-issue; its numeric issue ID is derived from the number.
+const child = (marker: string, title: string, facts: Partial<GitHubEpicChild> = {}): GitHubEpicChild => ({
     marker,
+    issueId: 1000 + Number(marker.slice(1)),
     title,
     onBoard: true,
     closed: false,
@@ -119,6 +126,15 @@ const child = (marker: string, title: string, facts: Partial<EpicChildIssue> = {
     priority: "High",
     ...facts,
 })
+const linearChild = (marker: string, title: string, facts: Partial<LinearEpicChild> = {}): LinearEpicChild => ({
+    marker,
+    title,
+    status: "Todo",
+    priority: "High",
+    ...facts,
+})
+const github = (...issues: GitHubEpicChild[]) => ({ provider: "github" as const, issues })
+const linear = (...issues: LinearEpicChild[]) => ({ provider: "linear" as const, issues })
 
 describe("Epic Task format", () => {
     it("parses a tagged Task's summary and an untagged Task's multi-paragraph design as one Task each", () => {
@@ -233,7 +249,11 @@ describe("Epic Task issue processing", () => {
         const { root, directory, epicPath, write } = repo("github")
         try {
             write(plan(section("Parser"), section("CLI")))
-            const first = planEpicTaskIssues(root, { entityDir: directory, epicPriority: "High", children: [] }, tools)
+            const first = planEpicTaskIssues(
+                root,
+                { entityDir: directory, epicPriority: "High", children: github() },
+                tools,
+            )
             assert.equal(first.state, "steps-needed")
             const steps = first.state === "steps-needed" ? first.steps : []
             assert.deepEqual(
@@ -287,7 +307,7 @@ describe("Epic Task issue processing", () => {
                 {
                     entityDir: directory,
                     epicPriority: "High",
-                    children: [child("#11", "Parser"), child("#12", "CLI")],
+                    children: github(child("#11", "Parser"), child("#12", "CLI")),
                 },
                 tools,
             )
@@ -295,7 +315,11 @@ describe("Epic Task issue processing", () => {
             recordEpicTaskIssue(root, { entityDir: directory, title: "CLI", marker: "#12" }, tools)
             const done = planEpicTaskIssues(
                 root,
-                { entityDir: directory, epicPriority: "High", children: [child("#11", "Parser"), child("#12", "CLI")] },
+                {
+                    entityDir: directory,
+                    epicPriority: "High",
+                    children: github(child("#11", "Parser"), child("#12", "CLI")),
+                },
                 tools,
             )
             assert.deepEqual(done, { state: "complete" })
@@ -311,7 +335,7 @@ describe("Epic Task issue processing", () => {
             write(plan(section("Parser core", "#11"), section("Parser")))
             const result = planEpicTaskIssues(
                 root,
-                { entityDir: directory, epicPriority: "High", children: [child("#11", "Parser")] },
+                { entityDir: directory, epicPriority: "High", children: github(child("#11", "Parser")) },
                 tools,
             )
             assert.equal(result.state === "steps-needed" && result.steps[0].effect, "create")
@@ -320,7 +344,7 @@ describe("Epic Task issue processing", () => {
                 {
                     entityDir: directory,
                     epicPriority: "High",
-                    children: [child("#11", "Parser"), child("#20", "Parser"), child("#21", "Parser")],
+                    children: github(child("#11", "Parser"), child("#20", "Parser"), child("#21", "Parser")),
                 },
                 tools,
             )
@@ -340,7 +364,9 @@ describe("Epic Task issue processing", () => {
                 {
                     entityDir: directory,
                     epicPriority: "High",
-                    children: [{ marker: "#11", title: "Parser", onBoard: false, closed: false }],
+                    children: github(
+                        child("#11", "Parser", { onBoard: false, status: undefined, priority: undefined }),
+                    ),
                 },
                 tools,
             )
@@ -357,7 +383,7 @@ describe("Epic Task issue processing", () => {
                 {
                     entityDir: directory,
                     epicPriority: "High",
-                    children: [{ marker: "#11", title: "Parser", onBoard: true, closed: false, status: "Backlog" }],
+                    children: github(child("#11", "Parser", { status: "Backlog", priority: undefined })),
                 },
                 tools,
             )
@@ -376,7 +402,7 @@ describe("Epic Task issue processing", () => {
                 {
                     entityDir: directory,
                     epicPriority: "High",
-                    children: [child("#11", "Parser", { status: "Todo", priority: "Low" })],
+                    children: github(child("#11", "Parser", { status: "Todo", priority: "Low" })),
                 },
                 tools,
             )
@@ -387,7 +413,7 @@ describe("Epic Task issue processing", () => {
                 {
                     entityDir: directory,
                     epicPriority: "High",
-                    children: [{ marker: "#11", title: "Parser", onBoard: true, closed: true, status: "Canceled" }],
+                    children: github(child("#11", "Parser", { closed: true, status: "Canceled", priority: undefined })),
                 },
                 tools,
             )
@@ -400,7 +426,7 @@ describe("Epic Task issue processing", () => {
                 {
                     entityDir: directory,
                     epicPriority: "High",
-                    children: [child("#11", "Parser"), child("#13", "CLI", { status: "In Progress" })],
+                    children: github(child("#11", "Parser"), child("#13", "CLI", { status: "In Progress" })),
                 },
                 tools,
             )
@@ -410,7 +436,7 @@ describe("Epic Task issue processing", () => {
             assert.deepEqual(started.state === "blocked" ? started.steps : undefined, [])
             const missing = planEpicTaskIssues(
                 root,
-                { entityDir: directory, epicPriority: "High", children: [] },
+                { entityDir: directory, epicPriority: "High", children: github() },
                 tools,
             )
             assert.match(missing.state === "blocked" ? missing.reason : "", /#11 is not a child issue/)
@@ -423,10 +449,10 @@ describe("Epic Task issue processing", () => {
         const { root, directory, write } = repo("github")
         try {
             write(plan(section("Dropped", "#14", "**Status:** `canceled`\n")))
-            const run = (facts: Partial<EpicChildIssue>) =>
+            const run = (facts: Partial<GitHubEpicChild>) =>
                 planEpicTaskIssues(
                     root,
-                    { entityDir: directory, epicPriority: "High", children: [child("#14", "Dropped", facts)] },
+                    { entityDir: directory, epicPriority: "High", children: github(child("#14", "Dropped", facts)) },
                     tools,
                 )
             const queued = run({ status: "Todo" })
@@ -458,13 +484,13 @@ describe("Epic Task issue processing", () => {
         const { root, directory, write } = repo("linear")
         try {
             write(plan(section("Parser", "ENG-4")))
-            const run = (facts: Partial<EpicChildIssue>) =>
+            const run = (facts: Partial<LinearEpicChild>) =>
                 planEpicTaskIssues(
                     root,
                     {
                         entityDir: directory,
                         epicPriority: "High",
-                        children: [{ ...child("ENG-4", "Parser"), ...facts }],
+                        children: linear(linearChild("ENG-4", "Parser", facts)),
                     },
                     tools,
                 )
@@ -499,11 +525,8 @@ describe("Epic Task issue processing", () => {
             const { root, directory, write } = repo(provider, { groups })
             try {
                 write(plan(section("Parser", undefined, "**Labels:** `area=fe`\n")))
-                const result = planEpicTaskIssues(
-                    root,
-                    { entityDir: directory, epicPriority: "High", children: [] },
-                    tools,
-                )
+                const children = provider === "github" ? github() : linear()
+                const result = planEpicTaskIssues(root, { entityDir: directory, epicPriority: "High", children }, tools)
                 const create =
                     result.state === "steps-needed" && result.steps[0].effect === "create" ? result.steps[0] : undefined
                 assert.deepEqual(create?.mutation.arguments.labels, ["Area: FE", "Kind: Feature"], provider)
@@ -511,7 +534,7 @@ describe("Epic Task issue processing", () => {
                 write(plan(section("Parser")))
                 const blocked = planEpicTaskIssues(
                     root,
-                    { entityDir: directory, epicPriority: "High", children: [] },
+                    { entityDir: directory, epicPriority: "High", children },
                     tools,
                 )
                 assert.equal(blocked.state, "blocked", `${provider}: a required group needs a value`)
@@ -528,7 +551,7 @@ describe("Epic Task issue processing", () => {
             write(plan(section("Parser"), section("Dropped", "ENG-3", "**Status:** `canceled`\n")))
             const result = planEpicTaskIssues(
                 root,
-                { entityDir: directory, epicPriority: "High", children: [child("ENG-3", "Dropped")] },
+                { entityDir: directory, epicPriority: "High", children: linear(linearChild("ENG-3", "Dropped")) },
                 tools,
             )
             assert.equal(result.state, "steps-needed")
@@ -565,6 +588,187 @@ describe("Epic Task issue processing", () => {
         }
     })
 
+    it("orders GitHub sub-issues to match the plan once every Task is settled", () => {
+        const { root, directory, write } = repo("github")
+        // Applies reorder steps to a sub-issue list as GitHub's reprioritize does.
+        const apply = (issues: GitHubEpicChild[], steps: readonly EpicTaskIssueStep[]) => {
+            const order = [...issues]
+            for (const step of steps) {
+                if (step.effect !== "reorder") throw new Error(`unexpected ${step.effect} step`)
+                const args = step.mutation.arguments
+                const moved = order.splice(
+                    order.findIndex((issue) => issue.issueId === args.sub_issue_id),
+                    1,
+                )[0]
+                const anchor = order.findIndex((issue) => issue.issueId === (args.before_id ?? args.after_id))
+                order.splice(args.before_id === undefined ? anchor + 1 : anchor, 0, moved)
+            }
+            return order
+        }
+        try {
+            // The issue's example: four existing issues linked first, then six created after them,
+            // while the plan lists the six new Tasks first.
+            const fresh = ["A", "B", "C", "D", "E", "F"].map((title, index) => child(`#${21 + index}`, title))
+            const existing = ["W", "X", "Y", "Z"].map((title, index) => child(`#${11 + index}`, title))
+            write(plan(...[...fresh, ...existing].map((issue) => section(issue.title, issue.marker))))
+            const run = (issues: GitHubEpicChild[]) =>
+                planEpicTaskIssues(
+                    root,
+                    { entityDir: directory, epicPriority: "High", children: github(...issues) },
+                    tools,
+                )
+            const linked = [...existing, ...fresh]
+            const result = run(linked)
+            assert.equal(result.state, "steps-needed")
+            const steps = result.state === "steps-needed" ? result.steps : []
+            assert.ok(steps.every((step) => step.effect === "reorder"))
+            assert.deepEqual(steps[0].effect === "reorder" && steps[0].mutation, {
+                tool: "mcp__github__sub_issue_write",
+                arguments: {
+                    method: "reprioritize",
+                    ...repository,
+                    issue_number: 10,
+                    sub_issue_id: 1021,
+                    before_id: 1011,
+                },
+            })
+            const ordered = apply(linked, steps)
+            assert.deepEqual(
+                ordered.map((issue) => issue.title),
+                ["A", "B", "C", "D", "E", "F", "W", "X", "Y", "Z"],
+            )
+            assert.deepEqual(run(ordered), { state: "complete" })
+
+            // While a Task still needs its issue, ordering waits for the run that settles it.
+            write(plan(section("New"), ...[...fresh, ...existing].map((issue) => section(issue.title, issue.marker))))
+            const pending = run(linked)
+            assert.deepEqual(pending.state === "steps-needed" ? pending.steps.map((step) => step.effect) : [], [
+                "create",
+            ])
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it("puts canceled Tasks and children outside the plan after the plan's Tasks, in their current order", () => {
+        assert.deepEqual(
+            planChildOrder(
+                parseEpicTasks(
+                    plan(section("A", "#3"), section("Dropped", "#1", "**Status:** `canceled`\n"), section("B", "#2")),
+                ),
+                ["#9", "#1", "#2", "#8", "#3"],
+            ),
+            ["#3", "#2", "#9", "#1", "#8"],
+        )
+        assert.deepEqual(childMoves(["#1", "#2", "#3"], ["#1", "#2", "#3"]), [])
+        assert.deepEqual(childMoves(["#2", "#1", "#3"], ["#1", "#2", "#3"]), [{ marker: "#1", before: "#2" }])
+        assert.deepEqual(childMoves(["#1", "#3", "#2"], ["#1", "#2", "#3"]), [{ marker: "#2", after: "#1" }])
+    })
+
+    it("returns no Linear reorder steps, and rejects children from the other tracker", () => {
+        const { root, directory, write } = repo("linear")
+        try {
+            write(plan(section("A", "ENG-2"), section("B", "ENG-1")))
+            const run = (children: ReturnType<typeof linear> | ReturnType<typeof github>) =>
+                planEpicTaskIssues(root, { entityDir: directory, epicPriority: "High", children }, tools)
+            assert.deepEqual(run(linear(linearChild("ENG-1", "B"), linearChild("ENG-2", "A"))), { state: "complete" })
+            assert.throws(() => run(github()), /children are github issues, but the tracker is linear/)
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+    })
+
+    it("orders a Linear Epic's Project issues through sortOrder with the registered server's credential", async () => {
+        const { root, directory, write } = repo("linear")
+        fs.writeFileSync(
+            path.join(root, ".piton/mcp.json"),
+            JSON.stringify({
+                mcpServers: {
+                    linear: { url: "https://mcp.linear.app/mcp", headers: { Authorization: "Bearer ${ORDER_KEY}" } },
+                },
+            }),
+        )
+        // A fake Linear GraphQL API over one Project's issues, paged two at a time.
+        const issues = new Map<string, number>()
+        const writes: Array<{ id: string; sortOrder: number }> = []
+        const authorizations = new Set<string>()
+        const options = {
+            projectTrusted: true,
+            env: { ORDER_KEY: "linear-key" } as NodeJS.ProcessEnv,
+            fetch: (async (_url: string, init: RequestInit) => {
+                authorizations.add((init.headers as Record<string, string>).Authorization)
+                const { query, variables } = JSON.parse(String(init.body))
+                if (query.includes("issueUpdate")) {
+                    writes.push(variables)
+                    issues.set(variables.id, variables.sortOrder)
+                    return Response.json({ data: { issueUpdate: { success: true } } })
+                }
+                assert.equal(variables.id, "project-uuid")
+                const all = [...issues.keys()]
+                const start = variables.after ? Number(variables.after) : 0
+                const nodes = all.slice(start, start + 2).map((id) => ({
+                    id,
+                    identifier: id.replace("uuid-", ""),
+                    sortOrder: issues.get(id),
+                }))
+                const hasNextPage = start + 2 < all.length
+                return Response.json({
+                    data: {
+                        project: {
+                            issues: {
+                                nodes,
+                                pageInfo: { hasNextPage, endCursor: hasNextPage ? String(start + 2) : null },
+                            },
+                        },
+                    },
+                })
+            }) as unknown as typeof fetch,
+        }
+        const order = () => orderLinearEpicIssues(root, { entityDir: directory }, tools, options)
+        const sorted = () =>
+            [...issues.entries()].sort((left, right) => left[1] - right[1]).map(([id]) => id.replace("uuid-", ""))
+        try {
+            // The plan's first Task sits last, and its second sits behind an issue outside the plan.
+            write(
+                plan(
+                    section("A", "ENG-3"),
+                    section("B", "ENG-1"),
+                    section("Dropped", "ENG-4", "**Status:** `canceled`\n"),
+                ),
+            )
+            for (const [marker, position] of [
+                ["ENG-4", 1],
+                ["ENG-9", 2],
+                ["ENG-1", 3],
+                ["ENG-3", 4],
+            ] as const)
+                issues.set(`uuid-${marker}`, position)
+            assert.deepEqual(await order(), { state: "ordered", moved: ["ENG-3", "ENG-1"] })
+            // ENG-3 moved to the front, below the first position; ENG-1 between ENG-3 and ENG-4.
+            assert.deepEqual(writes, [
+                { id: "uuid-ENG-3", sortOrder: 0 },
+                { id: "uuid-ENG-1", sortOrder: 0.5 },
+            ])
+            assert.deepEqual(sorted(), ["ENG-3", "ENG-1", "ENG-4", "ENG-9"])
+            assert.deepEqual([...authorizations], ["linear-key"])
+            writes.length = 0
+            assert.deepEqual(await order(), { state: "unchanged" })
+            assert.deepEqual(writes, [])
+        } finally {
+            fs.rmSync(root, { recursive: true, force: true })
+        }
+        const other = repo("github")
+        try {
+            other.write(plan(section("A", "#1")))
+            await assert.rejects(
+                orderLinearEpicIssues(other.root, { entityDir: other.directory }, tools, options),
+                /orders only Linear Epics/,
+            )
+        } finally {
+            fs.rmSync(other.root, { recursive: true, force: true })
+        }
+    })
+
     it("accepts only a reviewed Task list, and processes issues only for the accepted one", () => {
         const { root, directory, epicPath } = repo("github")
         const epicDir = path.join(root, directory)
@@ -583,7 +787,7 @@ describe("Epic Task issue processing", () => {
             fs.writeFileSync(path.join(roundDir, "candidate.md"), candidate)
         }
         const processIssues = () =>
-            planEpicTaskIssues(root, { entityDir: directory, epicPriority: "High", children: [] }, tools)
+            planEpicTaskIssues(root, { entityDir: directory, epicPriority: "High", children: github() }, tools)
         try {
             fs.writeFileSync(epicPath, reviewed)
             assert.throws(() => acceptEpicTasks(epicDir), /no plan review has run/)
@@ -616,7 +820,7 @@ describe("Epic Task issue processing", () => {
             assert.equal(
                 planEpicTaskIssues(
                     root,
-                    { entityDir: directory, epicPriority: "High", children: [child("#11", "Parser")] },
+                    { entityDir: directory, epicPriority: "High", children: github(child("#11", "Parser")) },
                     tools,
                 ).state,
                 "steps-needed",
@@ -796,10 +1000,10 @@ describe("Epic routing and restore", () => {
             ])
 
             // A restored clone has no Task directories; started Tasks come from the tracker.
-            const children = [
+            const children = github(
                 child("#11", "Parser", { status: "In Progress" }),
                 child("#12", "CLI", { status: "Done" }),
-            ]
+            )
             // Tagging drops CLI's design, as record_epic_task_issue does.
             const tagged = `${source.slice(0, source.indexOf("### CLI"))}### [#12] CLI\n\n**Kind:** \`chore\`\n**Summary:** Wire it.\n`
             fs.writeFileSync(path.join(root, restored.directory, "epic.md"), tagged)

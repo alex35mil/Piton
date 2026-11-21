@@ -64,6 +64,9 @@ import { registerTrackerPublication } from "./tracker-publication.js"
 import { registerWorkflowContext } from "./workflow-context.js"
 import { inspectTaskDesign, recordTaskDesign, TaskDesignSchema, TaskDesignValidator } from "./task-design.js"
 import {
+    orderLinearEpicIssues,
+    OrderLinearEpicIssuesSchema,
+    OrderLinearEpicIssuesValidator,
     planEpicTaskIssues,
     PlanEpicTaskIssuesSchema,
     PlanEpicTaskIssuesValidator,
@@ -271,7 +274,7 @@ export default function (pi: ExtensionAPI): void {
         name: "plan_epic_task_issues",
         label: "plan_epic_task_issues",
         description:
-            "Reconcile an Epic's accepted Tasks with fresh child-issue facts. Returns the next native creates, tags, board repairs, and cancellations in plan order, `complete`, or `blocked` with the failing Task. Keeps no saved progress; rerun after applying steps. Never calls providers.",
+            "Reconcile an Epic's accepted Tasks with fresh child-issue facts. Returns the next native creates, tags, board repairs, and cancellations in plan order, then, once every Task is settled, GitHub sub-issue reorders to the plan's Task order (Linear: order_linear_epic_issues); `complete`, or `blocked` with the failing Task. Keeps no saved progress; rerun after applying steps. Never calls providers.",
         parameters: PlanEpicTaskIssuesSchema,
         async execute(_id, params, _signal, _onUpdate, ctx) {
             const input = parse(PlanEpicTaskIssuesValidator, params)
@@ -289,6 +292,21 @@ export default function (pi: ExtensionAPI): void {
         async execute(_id, params, _signal, _onUpdate, ctx) {
             const input = parse(RecordEpicTaskIssueValidator, params)
             const result = recordEpicTaskIssue(ctx.cwd, input, tools)
+            return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
+
+    toolsApi.registerTool({
+        name: "order_linear_epic_issues",
+        label: "order_linear_epic_issues",
+        description:
+            "Put a Linear Epic's Project issues in the plan's Task order (Manual ordering), after plan_epic_task_issues returns `complete`. Linear's MCP tools can't order issues, so this reads and sets each issue's sortOrder through Linear's GraphQL API with the registered Linear MCP server's credential. Returns `unchanged` or `ordered` with the moved markers; rerun after a failure. Linear only.",
+        parameters: OrderLinearEpicIssuesSchema,
+        async execute(_id, params, _signal, _onUpdate, ctx) {
+            const input = parse(OrderLinearEpicIssuesValidator, params)
+            const result = await orderLinearEpicIssues(ctx.cwd, input, tools, {
+                projectTrusted: ctx.isProjectTrusted(),
+            })
             return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
         },
     })
