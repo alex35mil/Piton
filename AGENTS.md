@@ -40,6 +40,8 @@ Piton: the user's setup for running pi coding agents on macOS.
 - Installing or launching (`cli:install`, running an app) and device-log collection (`logs:install`,
   `piton logging collect`) are host-only; in a sandboxed worker, build and test. Agents read the dedicated
   `~/.local/state/piton/logs/` directory, never its parent or the daemon socket.
-- Host steps for the user: say which steps end live sessions (the agent's own included), keep to one daemon restart
-  as the last step, and say which branch the host checkout must be on.
+- Host steps for the user: list them in the final message with each step's exact commands or edits, never a pointer
+  to notes. For configuration, read the user's files first and say what changes on this machine, or that nothing
+  does. Say which steps end live sessions (the agent's own included), keep to one daemon restart as the last step,
+  and say which branch the host checkout must be on.
 - When a change alters documented behavior, update the docs in the same change.
