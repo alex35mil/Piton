@@ -1,3 +1,4 @@
 {"type":"reply","id":"r1","ok":true,"data":{}}
 {"type":"reply","id":2,"ok":true,"data":{"session":{"key":7,"id":"01a1-session","file":"/Users/me/.config/pi/agent/sessions/--app--/s.jsonl","workspace":"/Users/me/Projects/app--fix-login","checkout":{"kind":"worker","source":"/Users/me/Projects/app","name":"fix-login"},"mode":"sandbox","status":"working","clients":2,"pid":4242,"title":"run it"}}}
 {"type":"reply","id":"r3","ok":false,"error":"no live session 9"}
+{"type":"reply","id":"r4","ok":false,"error":"that question was already answered or expired"}

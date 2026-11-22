@@ -299,7 +299,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::{AllGrant, CommandPattern, Grant};
+    use crate::config::{AllGrant, CommandPattern, CommandRuntime, Grant};
 
     /// The fixture shared with the pi package's tests.
     #[derive(serde::Deserialize)]
@@ -374,7 +374,7 @@ mod tests {
         Listed {
             value: CommandGrant {
                 pattern: CommandPattern::new(pattern).unwrap(),
-                grant: Grant::All(AllGrant::All),
+                runtime: CommandRuntime::Sandbox(Grant::All(AllGrant::All)),
             },
             file: PathBuf::from("/g/config.toml"),
         }

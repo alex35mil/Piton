@@ -2,8 +2,9 @@
  * Bash in a sandboxed session piton's daemon launched. A sandboxed process can't start one with another sandbox, so
  * the daemon, outside any, runs every bash call and `!` command, each in its own sandbox tagged with the call: the
  * session's rules, or more when the user granted them (`[[sandbox.commands]]`) or approved a rerun the agent asked for
- * after the sandbox blocked it (`outside_sandbox: true`), never past the floor. The tag lets the daemon tell which
- * call the kernel refused; refusals in pi's own sandbox (MCP servers, extensions) are the session's.
+ * after the sandbox blocked it (`outside_sandbox: true`), never past the floor; or, when the user chose it, on the
+ * host with no sandbox. The tag lets the daemon tell which call the kernel refused; refusals in pi's own sandbox (MCP
+ * servers, extensions) are the session's.
  *
  * The tool is pi's own bash definition, with pi's `shellPath`, `shellCommandPrefix`, rendering, truncation, and
  * session environment; only where a command runs changes. The daemon decides what a request gets: it matches grants
@@ -26,6 +27,7 @@ import { agentChannel } from "../__lib/protected.js"
 
 /** What the daemon answers a run request with, line by line. */
 export type RunLine =
+    | { type: "ran"; runtime: RanRuntime; by: RanBy }
     | { type: "output"; data: string }
     | { type: "exit"; code: number }
     | { type: "timed_out" }
@@ -42,6 +44,38 @@ export interface RunRequest {
     env: Record<string, string>
     reason?: string
     rerun: boolean
+}
+
+/** Where a widened or host run ran: a widened sandbox, or the host with no sandbox. */
+export type RanRuntime = "sandbox" | "host"
+/** What made it run there: a saved `[[sandbox.commands]]` entry, or the user's answer. */
+export type RanBy = "grant" | "approval"
+
+/** Where a call ran, when the daemon said it wasn't the session's own sandbox. */
+export interface Ran {
+    runtime: RanRuntime
+    by: RanBy
+}
+
+/** The line the tool's result gets for a run outside the session's own sandbox. */
+export function ranLine(ran: Ran): string {
+    const where = ((): string => {
+        switch (ran.runtime) {
+            case "sandbox":
+                return "Ran in a widened sandbox (everything open but protected files and configuration)"
+            case "host":
+                return "Ran on the host with no sandbox"
+        }
+    })()
+    const why = ((): string => {
+        switch (ran.by) {
+            case "grant":
+                return "by a saved per-command entry"
+            case "approval":
+                return "approved by the user"
+        }
+    })()
+    return `${where}, ${why}.`
 }
 
 /** pi's shell settings for `cwd`: what it passes its built-in bash tool (the daemon reads the same files). */
@@ -61,15 +95,17 @@ export function piShellEnv(env: NodeJS.ProcessEnv = process.env): Record<string,
 }
 
 /**
- * Sends a run request and streams the daemon's answer: output chunks to `onData`. Resolves with the exit code. Rejects
- * with the daemon's reason when it didn't run (denied, unanswered, refused), with `timeout:<s>` when it timed out (pi's
- * own timeout message), and `aborted` when `signal` stops it (the daemon kills it).
+ * Sends a run request and streams the daemon's answer: output chunks to `onData`, and where it ran (when not the
+ * session's own sandbox) to `onRan`. Resolves with the exit code. Rejects with the daemon's reason when it didn't run
+ * (denied, unanswered, refused), with `timeout:<s>` when it timed out (pi's own timeout message), and `aborted` when
+ * `signal` stops it (the daemon kills it).
  */
 export function requestRun(
     channel: { socket: string; token: string },
     request: RunRequest,
     onData: (data: Buffer) => void,
     signal?: AbortSignal,
+    onRan?: (ran: Ran) => void,
 ): Promise<{ exitCode: number }> {
     return new Promise((resolve, reject) => {
         const sock = net.connect(channel.socket)
@@ -94,6 +130,8 @@ export function requestRun(
                 return finish(() => reject(new Error("piton's daemon sent an unreadable answer")))
             }
             switch (parsed.type) {
+                case "ran":
+                    return onRan?.({ runtime: parsed.runtime, by: parsed.by })
                 case "output":
                     return onData(Buffer.from(parsed.data, "base64"))
                 case "exit":
@@ -125,7 +163,8 @@ export function requestRun(
 
 const OUTSIDE_SANDBOX_DESCRIPTION =
     "Only after this exact command failed because the sandbox blocked it (Operation not permitted, a refused " +
-    "keychain or socket): run it again outside the sandbox. The user is asked first; the whole command runs again."
+    "keychain or socket): run it again outside the sandbox. The user is asked first, and may run it again in a " +
+    "widened sandbox or on the host with no sandbox; the whole command runs again."
 
 /** Strips pi's `shellCommandPrefix` from a command pi prefixed: the daemon applies it itself. */
 export function unprefixed(resolved: string, prefix: string | undefined): string {
@@ -150,6 +189,7 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
         async execute(toolCallId, params, signal, onUpdate, ctx) {
             const { command, timeout, outside_sandbox: outside, reason } = params
             const { commandPrefix } = piShellSettings(ctx.cwd)
+            let ran: Ran | undefined
             const operations: BashOperations = {
                 async exec(_resolved, cwd, options) {
                     // The agent's command: the daemon applies pi's prefix and shell itself, from pi's settings files.
@@ -162,11 +202,23 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
                         reason,
                         rerun: outside === true,
                     }
-                    return requestRun(channel, request, options.onData, options.signal)
+                    return requestRun(channel, request, options.onData, options.signal, (r) => {
+                        ran = r
+                    })
                 },
             }
             const tool = createBashToolDefinition(ctx.cwd, { operations, commandPrefix })
-            return tool.execute(toolCallId, { command, timeout }, signal, onUpdate, ctx)
+            const result = await tool.execute(toolCallId, { command, timeout }, signal, onUpdate, ctx)
+            if (!ran) return result
+            const structured = result.structuredContent
+            const where = { runtime: ran.runtime, by: ran.by }
+            return {
+                ...result,
+                content: [...result.content, { type: "text" as const, text: ranLine(ran) }],
+                ...(structured && typeof structured === "object" && !Array.isArray(structured)
+                    ? { structuredContent: { ...structured, ran: where } }
+                    : {}),
+            }
         },
     })
     let typed = 0

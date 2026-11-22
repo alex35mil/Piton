@@ -157,6 +157,13 @@ impl Widening {
     }
 }
 
+/// Variables of pi's environment set by one file the agent could write (`None`: a tool named no file).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WritableVars {
+    pub source: Option<PathBuf>,
+    pub names: Vec<String>,
+}
+
 /// pi's environment for a sandboxed launch, each value with its [`Origin`]. Built only here: from the daemon's base
 /// environment, or by [`sandboxed`], which runs the tools inside the launch's sandbox.
 #[derive(Debug, Clone)]
@@ -186,6 +193,37 @@ impl SandboxEnv {
     /// A value that decides no grant, as pi gets it: a variable the policy only checks a widening value against.
     pub fn value(&self, name: &str) -> Option<&str> {
         self.vars.get(name).map(|(value, _)| value.as_str())
+    }
+
+    /// The variables a file `writable` says the agent could write set, grouped by that file, in name order: what a host
+    /// run gets that the agent may have chosen. A value whose tool named no file counts as writable, as for widening
+    /// values; the daemon's base environment never does.
+    pub fn agent_writable(&self, writable: impl Fn(&Path) -> bool) -> Vec<WritableVars> {
+        let mut groups: Vec<WritableVars> = Vec::new();
+        for (name, (_, origin)) in &self.vars {
+            let source = match origin {
+                Origin::Daemon => continue,
+                Origin::Tool {
+                    source: ToolSource::File(path),
+                    ..
+                } => match writable(path) {
+                    true => Some(path.clone()),
+                    false => continue,
+                },
+                Origin::Tool {
+                    source: ToolSource::Unknown,
+                    ..
+                } => None,
+            };
+            match groups.iter_mut().find(|g| g.source == source) {
+                Some(group) => group.names.push(name.clone()),
+                None => groups.push(WritableVars {
+                    source,
+                    names: vec![name.clone()],
+                }),
+            }
+        }
+        groups
     }
 
     /// The plain environment pi is started with.
@@ -459,6 +497,38 @@ mod tests {
         env.vars.insert("PI_CODING_AGENT_DIR".into(), (String::new(), origin));
         assert_eq!(env.widening(Widening::AgentDir), None, "empty is unset");
         assert_eq!(env.into_env()["PI_CODING_AGENT_DIR"], "");
+    }
+
+    /// What a host run gets that the agent may have chosen: values from a file the launch's sandbox can write, and
+    /// values whose tool named no file; never the daemon's own or a value from a file the agent can't write.
+    #[test]
+    fn agent_writable_variables_are_grouped_by_their_file() {
+        let tool = |source| Origin::Tool {
+            tool: EnvTool::Mise,
+            source,
+        };
+        let workspace = || ToolSource::File("/w/mise.toml".into());
+        let env = SandboxEnv::for_tests(&[
+            ("HOME", "/h", Origin::Daemon),
+            ("BASH_ENV", "./x.sh", tool(workspace())),
+            ("RUST_LOG", "debug", tool(workspace())),
+            ("SHARED", "1", tool(ToolSource::File("/p/mise.toml".into()))),
+            ("PATH", "/m/bin:/usr/bin", tool(ToolSource::Unknown)),
+        ]);
+        let groups = env.agent_writable(|path| path.starts_with("/w"));
+        assert_eq!(
+            groups,
+            [
+                WritableVars {
+                    source: Some("/w/mise.toml".into()),
+                    names: vec!["BASH_ENV".into(), "RUST_LOG".into()],
+                },
+                WritableVars {
+                    source: None,
+                    names: vec!["PATH".into()],
+                },
+            ]
+        );
     }
 
     #[test]

@@ -200,6 +200,10 @@ public actor Connection {
         try await send(.sessionAnswer(session, requestID: dialog, answer: answer))
     }
 
+    public func decide(_ session: SessionKey, question: String, _ decision: Decision) async throws {
+        try await send(.sessionDecide(session, question: question, decision: decision))
+    }
+
     public func stop(_ session: SessionKey) async throws {
         try await send(.sessionStop(session))
     }

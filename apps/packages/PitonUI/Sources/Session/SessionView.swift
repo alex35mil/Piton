@@ -51,6 +51,14 @@ public struct SessionView: View {
         }
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 8) {
+                ForEach(model?.state?.questions ?? []) { question in
+                    switch question.kind {
+                    case .command:
+                        CommandQuestionCard(question: question) { decision in
+                            Task { await store.decide(session, question: question.id, decision) }
+                        }
+                    }
+                }
                 ForEach(model?.state?.dialogs ?? []) { dialog in
                     DialogCard(dialog: dialog) { answer in
                         Task { await store.answer(session, dialog: dialog.id, with: answer) }

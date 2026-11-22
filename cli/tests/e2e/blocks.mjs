@@ -18,6 +18,8 @@ const piton = join(root, "target/debug/piton");
 const ext = join(root, "tests/fixtures/faux-extension.ts");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nested = process.env.PITON_RUNTIME === "sandbox";
+// The block question's title in either runtime.
+const QUESTION = /^Run (again in the sandbox|on the host, with no sandbox)\?/;
 
 function setup() {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-blocks-")));
@@ -114,7 +116,7 @@ const tests = {
         const target = `${ctx.outside}-rerun`;
         // The floor: a protected file stays closed even at `all`.
         const command = `touch ${target}; touch .pi/x 2>&1 || echo floor-held`;
-        const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && /outside the sandbox/.test(r.title));
+        const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && QUESTION.test(r.title));
         const done = a.bash(`rerun needs home|${command}`);
         const first = await dialog;
         assert.match(first.title, /needs home/);
@@ -124,24 +126,46 @@ const tests = {
         a.send({ type: "extension_ui_response", id: first.id, value: first.options[0] });
         const req = await again;
         assert.equal(req.title, first.title);
-        a.send({ type: "extension_ui_response", id: req.id, value: req.options.find((o) => o.startsWith("Allow once")) });
+        a.send({ type: "extension_ui_response", id: req.id, value: req.options.find((o) => o.startsWith("Allow once in the sandbox")) });
         const result = await done;
         assert.ok(existsSync(target), "allowed once: it ran outside the sandbox");
         assert.match(result, /floor-held/, "a protected file stays closed");
+        assert.match(result, /widened sandbox/, "the result says where it ran");
+        await a.close();
+    },
+
+    async "the switch asks again on the host; a host run passes the floor and starts a sandbox of its own"(ctx) {
+        const a = attach(ctx);
+        const target = join(ctx.ws, ".pi", "host-wrote");
+        // Only a host run writes a protected file, and only a host run can start a sandbox (they don't nest).
+        const command = `mkdir -p .pi && touch ${target} && ${piton} sandbox-exec -- /usr/bin/true && echo nested-ok`;
+        const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && QUESTION.test(r.title ?? ""));
+        const done = a.bash(`rerun host tools|${command}`);
+        const sandboxed = await dialog;
+        assert.match(sandboxed.title, /^Run again in the sandbox\?/);
+        const switched = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && r.id !== sandboxed.id);
+        a.send({ type: "extension_ui_response", id: sandboxed.id, value: sandboxed.options.find((o) => o.startsWith("Switch to running on the host")) });
+        const host = await switched;
+        assert.match(host.title, /^Run on the host, with no sandbox\?/);
+        a.send({ type: "extension_ui_response", id: host.id, value: host.options.find((o) => o.startsWith("Run once on the host")) });
+        const result = await done;
+        assert.ok(existsSync(target), "on the host: no floor");
+        assert.match(result, /nested-ok/, "no sandbox around it");
+        assert.match(result, /on the host/, "the result says where it ran");
         await a.close();
     },
 
     async "denying leaves it unrun; persisting saves a grant that later calls use"(ctx) {
         const a = attach(ctx);
         const target = `${ctx.outside}-persist`;
-        let dialog = a.waitNew((r) => r.type === "extension_ui_request" && /outside the sandbox/.test(r.title ?? ""));
+        let dialog = a.waitNew((r) => r.type === "extension_ui_request" && QUESTION.test(r.title ?? ""));
         let done = a.bash(`rerun x|touch ${target}`);
         let req = await dialog;
         a.send({ type: "extension_ui_response", id: req.id, value: "Deny" });
         assert.match(await done, /denied/);
         assert.ok(!existsSync(target));
 
-        dialog = a.waitNew((r) => r.type === "extension_ui_request" && /outside the sandbox/.test(r.title ?? ""));
+        dialog = a.waitNew((r) => r.type === "extension_ui_request" && QUESTION.test(r.title ?? ""));
         done = a.bash(`rerun x|touch ${target}`);
         req = await dialog;
         const everywhere = req.options.find((o) => o.startsWith("Allow this command everywhere"));
@@ -151,6 +175,7 @@ const tests = {
         const saved = readFileSync(join(ctx.config, "config.toml"), "utf8");
         assert.match(saved, /\[\[sandbox\.commands\]\]/);
         assert.ok(saved.includes(`bash(touch ${target})`), saved);
+        assert.match(saved, /runtime = "sandbox"/);
         rmSync(target);
         await a.close();
 
@@ -159,7 +184,7 @@ const tests = {
         const result = await b.bash(`bash touch ${target}`);
         assert.doesNotMatch(result, /Operation not permitted/);
         assert.ok(existsSync(target), "the grant ran it outside the sandbox");
-        assert.ok(!b.records.some((r) => r.type === "extension_ui_request" && /outside the sandbox/.test(r.title ?? "")));
+        assert.ok(!b.records.some((r) => r.type === "extension_ui_request" && QUESTION.test(r.title ?? "")));
         await b.close();
     },
 
@@ -188,7 +213,7 @@ const tests = {
 
         // A second block queued behind a command question is shown once that question is answered.
         const second = `${ctx.outside}-process2`;
-        const blocked = a.waitNew((r) => r.type === "extension_ui_request" && /outside the sandbox/.test(r.title ?? ""));
+        const blocked = a.waitNew((r) => r.type === "extension_ui_request" && QUESTION.test(r.title ?? ""));
         a.send({ type: "prompt", message: `rerun x|touch ${ctx.outside}-rerun2` });
         const command = await blocked;
         a.send({ type: "prompt", message: `write ${second}`, streamingBehavior: "followUp" });

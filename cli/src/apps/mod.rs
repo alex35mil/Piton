@@ -281,6 +281,11 @@ fn handle(
             request_id,
             answer,
         } => view_command(find(session), watcher, ViewCommand::Answer { request_id, answer }),
+        ViewRequest::SessionDecide {
+            session,
+            question,
+            answer,
+        } => view_command(find(session), watcher, ViewCommand::Decide { question, answer }),
     }
 }
 

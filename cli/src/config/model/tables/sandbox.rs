@@ -49,8 +49,8 @@ pub struct SandboxTable {
     /// "Deny" saved from the block question, or an entry a notice names. Changes nothing in the sandbox.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub silence: Vec<Silence>,
-    /// Per-command grants: a bash call that matches runs through the daemon with the launch's sandbox widened by the
-    /// grant (`[[sandbox.commands]]`).
+    /// Per-command entries: a bash call that matches runs through the daemon on the host, or in the launch's sandbox
+    /// widened by the grant (`[[sandbox.commands]]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<CommandGrant>,
 }
@@ -212,14 +212,88 @@ impl From<ServiceEntry> for String {
     }
 }
 
-/// `[[sandbox.commands]]`: what a matching command gets.
+/// `[[sandbox.commands]]`: where a matching command runs, and with what.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "CommandEntry", into = "CommandEntry")]
 pub struct CommandGrant {
     /// A `bash(...)` permission rule, matched by the daemon as the permissions extension matches it.
-    #[serde(rename = "match")]
     pub pattern: CommandPattern,
-    pub grant: Grant,
+    pub runtime: CommandRuntime,
+}
+
+/// Where a per-command entry's command runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandRuntime {
+    /// `runtime = "host"`: no sandbox, the user's full access.
+    Host,
+    /// `runtime = "sandbox"` with its `grant`: the launch's sandbox widened by it, never past the floor.
+    Sandbox(Grant),
+}
+
+/// A `[[sandbox.commands]]` entry as written: `match`, a required `runtime`, and `grant` for a sandbox entry only.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CommandEntry {
+    #[serde(rename = "match")]
+    pattern: CommandPattern,
+    #[serde(default)]
+    runtime: Option<RuntimeName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<Grant>,
+}
+
+/// The words `runtime` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeName {
+    Host,
+    Sandbox,
+}
+
+impl TryFrom<CommandEntry> for CommandGrant {
+    type Error = String;
+
+    fn try_from(entry: CommandEntry) -> Result<Self, String> {
+        let rule = String::from(entry.pattern.clone());
+        let runtime = match (entry.runtime, entry.grant) {
+            (None, _) => {
+                return Err(format!(
+                    "sandbox.commands {rule}: `runtime` is required: \"sandbox\" (with `grant`) or \"host\""
+                ));
+            }
+            (Some(RuntimeName::Host), None) => CommandRuntime::Host,
+            (Some(RuntimeName::Host), Some(_)) => {
+                return Err(format!(
+                    "sandbox.commands {rule}: `grant` is for `runtime = \"sandbox\"`; a host command runs with no \
+                     sandbox"
+                ));
+            }
+            (Some(RuntimeName::Sandbox), Some(grant)) => CommandRuntime::Sandbox(grant),
+            (Some(RuntimeName::Sandbox), None) => {
+                return Err(format!(
+                    "sandbox.commands {rule}: `runtime = \"sandbox\"` needs `grant`: \"all\" or a table of grant lists"
+                ));
+            }
+        };
+        Ok(Self {
+            pattern: entry.pattern,
+            runtime,
+        })
+    }
+}
+
+impl From<CommandGrant> for CommandEntry {
+    fn from(grant: CommandGrant) -> Self {
+        let (runtime, grant_value) = match grant.runtime {
+            CommandRuntime::Host => (RuntimeName::Host, None),
+            CommandRuntime::Sandbox(g) => (RuntimeName::Sandbox, Some(g)),
+        };
+        Self {
+            pattern: grant.pattern,
+            runtime: Some(runtime),
+            grant: grant_value,
+        }
+    }
 }
 
 /// The command pattern of a `bash(...)` rule: `bash(git push *)` is `git push *`.
@@ -265,7 +339,7 @@ impl From<CommandPattern> for String {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Grant {
-    /// `"all"`: everything except the floor. What "Allow and persist" saves.
+    /// `"all"`: everything except the floor. What persisting a sandbox answer saves.
     All(AllGrant),
     /// The `[sandbox]` grant lists, added as the user's own lists are.
     Lists(GrantLists),
@@ -668,9 +742,9 @@ impl TableValue for SandboxTable {
             }
         }
         for command in &self.commands {
-            match &command.grant {
-                Grant::All(AllGrant::All) => {}
-                Grant::Lists(lists) => lists
+            match &command.runtime {
+                CommandRuntime::Host | CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => {}
+                CommandRuntime::Sandbox(Grant::Lists(lists)) => lists
                     .check()
                     .map_err(|why| format!("sandbox.commands {}: {why}", String::from(command.pattern.clone())))?,
             }
@@ -1061,56 +1135,93 @@ mod tests {
         }
     }
 
-    /// `[[sandbox.commands]]`: a `bash(...)` rule and `all` or the grant lists.
+    /// `[[sandbox.commands]]`: a `bash(...)` rule, a required `runtime`, and for a sandbox entry `all` or the grant
+    /// lists.
     #[test]
     fn command_grants_parse() {
         let parsed = table(
-            "[[commands]]\nmatch = \"bash(husky install *)\"\ngrant = \"all\"\n\n[[commands]]\nmatch = \"bash(git push \
-             *)\"\ngrant = { connect = [\"$SSH_AUTH_SOCK\"], write = [\"~/x\"] }\n",
+            "[[commands]]\nmatch = \"bash(husky install *)\"\nruntime = \"sandbox\"\ngrant = \"all\"\n\n[[commands]]\nmatch \
+             = \"bash(git push *)\"\nruntime = \"sandbox\"\ngrant = { connect = [\"$SSH_AUTH_SOCK\"], write = [\"~/x\"] \
+             }\n\n[[commands]]\nmatch = \"bash(log show *)\"\nruntime = \"host\"\n",
         );
         assert_eq!(parsed.commands[0].pattern.pattern(), "husky install *");
-        assert_eq!(parsed.commands[0].grant, Grant::All(AllGrant::All));
         assert_eq!(
-            parsed.commands[1].grant,
-            Grant::Lists(GrantLists {
+            parsed.commands[0].runtime,
+            CommandRuntime::Sandbox(Grant::All(AllGrant::All))
+        );
+        assert_eq!(
+            parsed.commands[1].runtime,
+            CommandRuntime::Sandbox(Grant::Lists(GrantLists {
                 connect: vec![Connect::Socket("$SSH_AUTH_SOCK".into())],
                 write: vec!["~/x".into()],
                 ..GrantLists::default()
-            })
+            }))
         );
+        assert_eq!(parsed.commands[2].runtime, CommandRuntime::Host);
         assert!(parsed.check().is_ok());
         // Written back as given.
-        let value = toml::Value::try_from(parsed).unwrap();
+        let value = toml::Value::try_from(parsed.clone()).unwrap();
         assert_eq!(value["commands"][0]["match"].as_str(), Some("bash(husky install *)"));
+        assert_eq!(value["commands"][0]["runtime"].as_str(), Some("sandbox"));
         assert_eq!(value["commands"][0]["grant"].as_str(), Some("all"));
-        for bad in [
-            "[[commands]]\nmatch = \"git push *\"\ngrant = \"all\"",
-            "[[commands]]\nmatch = \"read(*)\"\ngrant = \"all\"",
-            "[[commands]]\nmatch = \"bash()\"\ngrant = \"all\"",
-            "[[commands]]\nmatch = \"bash(x)\"\ngrant = \"everything\"",
-            "[[commands]]\nmatch = \"bash(x)\"\ngrant = { deny = [\"/a\"] }",
-            "[[commands]]\nmatch = \"bash(x)\"",
-            "[[commands]]\nmatch = \"bash(x)\"\ngrant = \"all\"\nask = true",
+        assert_eq!(value["commands"][2]["runtime"].as_str(), Some("host"));
+        assert!(value["commands"][2].get("grant").is_none());
+        let text = toml::to_string(&parsed).unwrap();
+        assert_eq!(toml::from_str::<SandboxTable>(&text).unwrap(), parsed, "round trip");
+        for (bad, says) in [
+            ("[[commands]]\nmatch = \"git push *\"\nruntime = \"host\"", "bash(...)"),
+            ("[[commands]]\nmatch = \"read(*)\"\nruntime = \"host\"", "bash(...)"),
+            (
+                "[[commands]]\nmatch = \"bash()\"\nruntime = \"host\"",
+                "one non-empty line",
+            ),
+            (
+                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = \"everything\"",
+                "",
+            ),
+            (
+                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { deny = [\"/a\"] }",
+                "",
+            ),
+            ("[[commands]]\nmatch = \"bash(x)\"", "`runtime` is required"),
+            (
+                "[[commands]]\nmatch = \"bash(x)\"\ngrant = \"all\"",
+                "`runtime` is required",
+            ),
+            (
+                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"",
+                "needs `grant`",
+            ),
+            (
+                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\"\ngrant = \"all\"",
+                "`grant` is for",
+            ),
+            ("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"vm\"", ""),
+            (
+                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = \"all\"\nask = true",
+                "",
+            ),
         ] {
-            assert!(toml::from_str::<SandboxTable>(bad).is_err(), "{bad}");
+            let err = toml::from_str::<SandboxTable>(bad).expect_err(bad).to_string();
+            assert!(err.contains(says), "{bad}: {err}");
         }
         assert!(
-            table("[[commands]]\nmatch = \"bash(x)\"\ngrant = { write = [\"rel\"] }")
+            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { write = [\"rel\"] }")
                 .check()
                 .is_err()
         );
         // `bind` in a grant: paths, checked like `write`.
-        let bind = table("[[commands]]\nmatch = \"bash(x)\"\ngrant = { bind = [\"$TMPDIR\"] }");
+        let bind = table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { bind = [\"$TMPDIR\"] }");
         assert_eq!(
-            bind.commands[0].grant,
-            Grant::Lists(GrantLists {
+            bind.commands[0].runtime,
+            CommandRuntime::Sandbox(Grant::Lists(GrantLists {
                 bind: vec!["$TMPDIR".into()],
                 ..GrantLists::default()
-            })
+            }))
         );
         assert!(bind.check().is_ok());
         assert!(
-            table("[[commands]]\nmatch = \"bash(x)\"\ngrant = { bind = [\"rel\"] }")
+            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { bind = [\"rel\"] }")
                 .check()
                 .is_err()
         );
@@ -1122,7 +1233,7 @@ mod tests {
     #[test]
     fn loosening_keys_are_the_users_own() {
         assert_eq!(
-            table("[[commands]]\nmatch = \"bash(x)\"\ngrant = \"all\"").ruled_keys(),
+            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\"").ruled_keys(),
             [("sandbox.commands", Rule::USERS_OWN)]
         );
         assert_eq!(

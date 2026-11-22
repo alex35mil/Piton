@@ -90,6 +90,8 @@ enum Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Response {
     ProtectedWrite(super::write::WriteOutcome),
+    /// Where a widened or host run runs, before its output: the agent's result says so.
+    Ran(super::Ran),
     /// A chunk of the running command's output, base64.
     Output {
         data: String,
@@ -223,10 +225,15 @@ async fn run_command(
             return;
         }
     };
+    if let Some(ran) = approved.runtime.ran()
+        && !send(write, &Response::Ran(ran)).await
+    {
+        return;
+    }
     let (events, mut output) = tokio::sync::mpsc::unbounded_channel();
     let spec = super::RunSpec {
         helper: &helper,
-        policy: &approved.policy,
+        runtime: &approved.runtime,
         shell: &approved.shell,
         command: &approved.command,
         cwd: &approved.cwd,

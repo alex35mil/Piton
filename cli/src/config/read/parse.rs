@@ -313,7 +313,8 @@ mod tests {
             "[sandbox]\nconnect = [\"*\"]\n",
             "[sandbox]\nprofile = \"yolo\"\n",
             "[sandbox]\npresets = [\"git\"]\n",
-            "[[sandbox.commands]]\nmatch = \"bash(husky install *)\"\ngrant = \"all\"\n",
+            "[[sandbox.commands]]\nmatch = \"bash(husky install *)\"\nruntime = \"sandbox\"\ngrant = \"all\"\n",
+            "[[sandbox.commands]]\nmatch = \"bash(log show *)\"\nruntime = \"host\"\n",
         ] {
             for level in [Parent, Repository] {
                 assert!(

@@ -14,7 +14,9 @@ use super::{
     policy::{self, Source},
     rules::{Access, Apps, Effect, Policy, Rule, Services, Target},
 };
-use crate::config::{AllGrant, CommandGrant, Grant, GrantLists, LaunchConfig, Listed, ServiceEntry, ServiceName};
+use crate::config::{
+    AllGrant, CommandGrant, CommandRuntime, Grant, GrantLists, LaunchConfig, Listed, ServiceEntry, ServiceName,
+};
 
 /// The policies a session's approved commands run with, resolved at launch: `all`, and each `[[sandbox.commands]]`
 /// entry's.
@@ -22,11 +24,10 @@ use crate::config::{AllGrant, CommandGrant, Grant, GrantLists, LaunchConfig, Lis
 pub struct CommandPolicies {
     /// The launch's own policy: what a process block is judged against.
     pub launch: Policy,
-    /// Everything except the floor: "Allow once" and `grant = "all"`.
+    /// Everything except the floor: "Allow once" in the sandbox and `grant = "all"`.
     pub all: Policy,
-    /// Each entry in matching order, with its policy, or why it couldn't be resolved (a narrowed grant naming a `$VAR`
-    /// that isn't set).
-    pub entries: Vec<(Listed<CommandGrant>, Result<Policy, String>)>,
+    /// Each entry in matching order, with where it runs.
+    pub entries: Vec<(Listed<CommandGrant>, EntryRuntime)>,
     /// The launch's resolution with a widened configuration: what a process block's entry is checked against.
     pub resolver: Resolver,
     /// `[sandbox] silence` and the presets' entries: the blocks of processes they match are only logged.
@@ -36,6 +37,9 @@ pub struct CommandPolicies {
     /// How the `pi-claude-code` preset signs `claude` in, when the preset is on: what a keychain block of `claude`
     /// suggests.
     pub claude_login: Option<crate::config::ClaudeLogin>,
+    /// The variables of the launch's environment a file the agent could write set: what the block question shows on
+    /// its host side.
+    pub writable_vars: Vec<crate::launch::env::WritableVars>,
 }
 
 /// Resolves a launch's configuration again, with the launch's own facts (its environment, its fnox files): the policy
@@ -77,20 +81,31 @@ impl CommandPolicies {
     pub fn set_tag(&mut self, tag: &str) {
         self.launch.tag = tag.to_string();
         self.all.tag = tag.to_string();
-        for (_, policy) in &mut self.entries {
-            if let Ok(policy) = policy {
-                policy.tag = tag.to_string();
+        for (_, runtime) in &mut self.entries {
+            match runtime {
+                EntryRuntime::Sandbox(Ok(policy)) => policy.tag = tag.to_string(),
+                EntryRuntime::Sandbox(Err(_)) | EntryRuntime::Host => {}
             }
         }
     }
 
-    /// The policy for a matched entry.
-    pub fn of(&self, entry: &Listed<CommandGrant>) -> Result<&Policy, String> {
+    /// Where a matched entry runs.
+    pub fn of(&self, entry: &Listed<CommandGrant>) -> Result<&EntryRuntime, String> {
         self.entries.iter().find(|(e, _)| e == entry).map_or_else(
             || Err("the grant changed since the session started; restart the session".into()),
-            |(_, policy)| policy.as_ref().map_err(Clone::clone),
+            |(_, runtime)| Ok(runtime),
         )
     }
+}
+
+/// Where a `[[sandbox.commands]]` entry's command runs, resolved at launch.
+#[derive(Debug, Clone)]
+pub enum EntryRuntime {
+    /// `runtime = "host"`.
+    Host,
+    /// `runtime = "sandbox"`: its policy, or why it couldn't be resolved (a narrowed grant naming a `$VAR` that isn't
+    /// set).
+    Sandbox(Result<Policy, String>),
 }
 
 /// The configuration a narrowed grant resolves with: the launch's, with the grant's lists added as if the file that
@@ -121,6 +136,7 @@ pub fn command_policies(
     resolver: Resolver,
     silence: Vec<super::Silenced>,
     claude_login: Option<crate::config::ClaudeLogin>,
+    writable_vars: Vec<crate::launch::env::WritableVars>,
 ) -> CommandPolicies {
     let widened = all(policy, credentials);
     let entries = resolver
@@ -129,11 +145,14 @@ pub fn command_policies(
         .commands
         .iter()
         .map(|entry| {
-            let policy = match &entry.value.grant {
-                Grant::All(AllGrant::All) => Ok(widened.clone()),
-                Grant::Lists(lists) => resolver.with(lists, &entry.file),
+            let runtime = match &entry.value.runtime {
+                CommandRuntime::Host => EntryRuntime::Host,
+                CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => EntryRuntime::Sandbox(Ok(widened.clone())),
+                CommandRuntime::Sandbox(Grant::Lists(lists)) => {
+                    EntryRuntime::Sandbox(resolver.with(lists, &entry.file))
+                }
             };
-            (entry.clone(), policy)
+            (entry.clone(), runtime)
         })
         .collect();
     CommandPolicies {
@@ -144,6 +163,7 @@ pub fn command_policies(
         silence,
         credentials,
         claude_login,
+        writable_vars,
     }
 }
 

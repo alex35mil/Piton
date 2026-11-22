@@ -228,12 +228,12 @@ impl<'a> Items<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AllGrant, CommandGrant, CommandPattern, Grant};
+    use crate::config::{AllGrant, CommandGrant, CommandPattern, CommandRuntime, Grant};
 
     fn grant(pattern: &str) -> CommandGrant {
         CommandGrant {
             pattern: CommandPattern::new(pattern).unwrap(),
-            grant: Grant::All(AllGrant::All),
+            runtime: CommandRuntime::Sandbox(Grant::All(AllGrant::All)),
         }
     }
 
@@ -254,15 +254,29 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "# mine\n[sandbox]\nwrite = [\"/a\"]\n").unwrap();
         global.append_command_grant(&paths, &grant("husky install *")).unwrap();
-        global.append_command_grant(&paths, &grant("git push")).unwrap();
+        global
+            .append_command_grant(
+                &paths,
+                &CommandGrant {
+                    pattern: CommandPattern::new("git push").unwrap(),
+                    runtime: CommandRuntime::Host,
+                },
+            )
+            .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# mine\n[sandbox]\nwrite = [\"/a\"]\n"), "{text}");
         let parsed: toml::Table = toml::from_str(&text).unwrap();
         let commands = parsed["sandbox"]["commands"].as_array().unwrap();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0]["match"].as_str(), Some("bash(husky install *)"));
+        assert_eq!(commands[0]["runtime"].as_str(), Some("sandbox"));
         assert_eq!(commands[0]["grant"].as_str(), Some("all"));
         assert_eq!(commands[1]["match"].as_str(), Some("bash(git push)"));
+        assert_eq!(commands[1]["runtime"].as_str(), Some("host"));
+        assert!(commands[1].get("grant").is_none());
+        // What it wrote reads back as the configuration reads it.
+        let back: crate::config::SandboxTable = parsed["sandbox"].clone().try_into().unwrap();
+        assert_eq!(back.commands[1].runtime, CommandRuntime::Host);
 
         let source = dir.path().join("repo");
         let project = |sharing| ConfigFile {

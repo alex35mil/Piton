@@ -360,12 +360,20 @@ pub async fn prepare_sandbox(
         None => sandbox::grant::Credentials::Liftable,
     };
     let claude_login = resolution.claude_code.as_ref().map(|c| c.login);
+    // What a host run gets that the agent may have chosen: values set by a file the launch's sandbox can write.
+    let writable_vars = launch_env.agent_writable(|file| {
+        resolution
+            .policy
+            .decide(&crate::agent::canonical_target(file), sandbox::Access::Write)
+            .allowed
+    });
     let commands = sandbox::grant::command_policies(
         &resolution.policy,
         credentials,
         resolver,
         resolution.silence.clone(),
         claude_login,
+        writable_vars,
     );
     let warnings = launch_warnings(&resolution, &env, proxy.as_ref());
     let sockets = with_claude_sockets(&mut env, &resolution);

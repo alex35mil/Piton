@@ -175,6 +175,8 @@ pub struct ViewState {
     pub queue: Queue,
     /// Pending extension dialogs, as pi's `extension_ui_request` records.
     pub dialogs: Vec<Value>,
+    /// Pending Piton questions, typed (`agent/question.rs`): answered with `session.decide`.
+    pub questions: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -191,6 +193,7 @@ pub struct StateInput {
     pub session_id: Option<String>,
     pub session_file: Option<String>,
     pub dialogs: Vec<Value>,
+    pub questions: Vec<Value>,
 }
 
 /// A committed change, serialized once for every watcher.
@@ -373,6 +376,7 @@ impl View {
             thinking_level: self.thinking_level.clone(),
             queue: self.queue.clone(),
             dialogs: input.dialogs,
+            questions: input.questions,
         };
         if self.state.as_ref() == Some(&state) {
             return None;
@@ -1496,14 +1500,34 @@ mod tests {
         };
         let mut view = View::new(7);
         let mut lines: Vec<String> = Vec::new();
-        let state = |status, dialogs| StateInput {
+        let state = |status, dialogs, questions| StateInput {
             status,
             workspace: "/Users/me/Projects/app".into(),
             mode: LaunchMode::Sandbox,
             session_id: Some("01a1-session".into()),
             session_file: Some("/Users/me/.config/pi/agent/sessions/--app--/s.jsonl".into()),
             dialogs,
+            questions,
         };
+        let question = crate::agent::question::Question {
+            id: "piton:question:3".into(),
+            command: "sh cli/tests/probe/protected.sh".into(),
+            reason: Some("it starts a sandbox of its own".into()),
+            refusals: vec!["process-exec /Users/me/.local/bin/piton".into()],
+            note: None,
+            writable_vars: vec![
+                crate::launch::env::WritableVars {
+                    source: Some("/Users/me/Projects/app/mise.toml".into()),
+                    names: vec!["RUST_LOG".into()],
+                },
+                crate::launch::env::WritableVars {
+                    source: None,
+                    names: vec!["PATH".into()],
+                },
+            ],
+            runtime: crate::agent::question::Target::Sandbox,
+        }
+        .view();
         let snapshot_before = view.snapshot(50).to_string();
         for record in tool_turn() {
             let (k, m) = rec(record);
@@ -1512,7 +1536,7 @@ mod tests {
             }
         }
         let dialog = json!({"type":"extension_ui_request","id":"d1","method":"select","title":"Allow?","options":["Allow","Block"],"timeout":30000});
-        if let Some(change) = view.publish_state(state(SessionStatus::NeedsInput, vec![dialog])) {
+        if let Some(change) = view.publish_state(state(SessionStatus::NeedsInput, vec![dialog], vec![question])) {
             lines.push(view.commit(change).line.to_string());
         }
         for notice in [
@@ -1627,6 +1651,7 @@ mod tests {
                     json!({"type":"reply","id":"r1","ok":true,"data":{}}),
                     json!({"type":"reply","id":2,"ok":true,"data":{"session":info}}),
                     json!({"type":"reply","id":"r3","ok":false,"error":"no live session 9"}),
+                    json!({"type":"reply","id":"r4","ok":false,"error":"that question was already answered or expired"}),
                 ]
                 .iter()
                 .map(Value::to_string)
