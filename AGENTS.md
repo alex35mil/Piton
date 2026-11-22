@@ -42,6 +42,8 @@ Piton: the user's setup for running pi coding agents on macOS.
   `~/.local/state/piton/logs/` directory, never its parent or the daemon socket.
 - Host steps for the user: list them in the final message with each step's exact commands or edits, never a pointer
   to notes. For configuration, read the user's files first and say what changes on this machine, or that nothing
-  does. Say which steps end live sessions (the agent's own included), keep to one daemon restart as the last step,
+  does. `config.local.toml` files (a checkout's or a parent's `.piton/`, the global `~/.config/piton/`) are
+  gitignored, so `rg --files` skips them: take the list from `piton config check` in each project, or search with
+  `rg --files -uu`. Say which steps end live sessions (the agent's own included), keep to one daemon restart as the last step,
   and say which branch the host checkout must be on.
 - When a change alters documented behavior, update the docs in the same change.
