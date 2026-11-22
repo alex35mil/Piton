@@ -1,10 +1,15 @@
 // End-to-end tests of #241 on the host: a sandboxed session's bash calls run through the daemon, each in its own
 // sandbox; a rerun the agent asks for is asked of the user and runs with everything but the floor; a persisted grant
 // runs the next matching call without asking; a blocked process that isn't a bash call is offered as a sandbox entry.
-// Real pi with the faux extension, sandbox mode.
+// Real pi in sandbox mode, loading Piton's pi package (`pi/`, whose permissions extension sends bash to the daemon;
+// its dependencies come from `mise run pi:install`) and the faux extension (the scripted model and its test tools).
+// The test's `[permissions] default_mode = "allow"` keeps the extension from asking before each call.
 //
 // Usage (in cli/): cargo build && node tests/e2e/blocks.mjs, or `mise run cli:test`. Sandboxes don't nest and `log`
 // refuses inside one, so in a sandboxed session (PITON_RUNTIME=sandbox) every test is skipped.
+//
+// macOS may not report a process's first sandbox refusals for some seconds (docs/pi-findings.md), so the faux tool
+// that blocks pi's own process keeps trying for 10 s until the kernel's record reaches the daemon.
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -16,6 +21,7 @@ import { writeConfig } from "./config.mjs";
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
 const ext = join(root, "tests/fixtures/faux-extension.ts");
+const pkg = resolve(root, "../pi");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nested = process.env.PITON_RUNTIME === "sandbox";
 // The block question's title in either runtime.
@@ -27,6 +33,7 @@ function setup() {
     const agent = join(dir, "agent");
     mkdirSync(join(ws, ".git"), { recursive: true });
     mkdirSync(agent);
+    writeFileSync(join(agent, "settings.json"), JSON.stringify({ packages: [pkg] }));
     mkdirSync(join(dir, "state"));
     // Outside every grant: the temp folder is writable, so the blocked writes go to the home folder, under names this
     // test removes.
@@ -42,6 +49,7 @@ function setup() {
             stop: { grace_ms: 3000, term_grace_ms: 1000 },
         },
         host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
+        project: { permissions: { default_mode: "allow" } },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
     return { dir, ws, config, env, outside };
@@ -137,8 +145,12 @@ const tests = {
     async "the switch asks again on the host; a host run passes the floor and starts a sandbox of its own"(ctx) {
         const a = attach(ctx);
         const target = join(ctx.ws, ".pi", "host-wrote");
-        // Only a host run writes a protected file, and only a host run can start a sandbox (they don't nest).
-        const command = `mkdir -p .pi && touch ${target} && ${piton} sandbox-exec -- /usr/bin/true && echo nested-ok`;
+        // Only a host run writes a protected file, and only a host run can start a sandbox (they don't nest). The helper
+        // applies the policy in its environment: the one a launch in this workspace gets.
+        const policy = `${piton} sandbox show | node -e 'process.stdout.write(JSON.stringify(JSON.parse(require("fs").readFileSync(0)).policy))'`;
+        const command =
+            `mkdir -p .pi && touch ${target} && ` +
+            `PITON_SANDBOX_POLICY="$(${policy})" ${piton} sandbox-exec -- /usr/bin/true && echo nested-ok`;
         const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && QUESTION.test(r.title ?? ""));
         const done = a.bash(`rerun host tools|${command}`);
         const sandboxed = await dialog;
@@ -150,7 +162,7 @@ const tests = {
         a.send({ type: "extension_ui_response", id: host.id, value: host.options.find((o) => o.startsWith("Run once on the host")) });
         const result = await done;
         assert.ok(existsSync(target), "on the host: no floor");
-        assert.match(result, /nested-ok/, "no sandbox around it");
+        assert.match(result, /nested-ok/, `no sandbox around it: ${result}`);
         assert.match(result, /on the host/, "the result says where it ran");
         await a.close();
     },
@@ -203,12 +215,15 @@ const tests = {
         assert.ok(req.title.includes(`= [\"${target}\"]`), req.title);
         assert.equal(req.options[0], "Choose an answer below");
         assert.ok(req.options.includes("Not now"));
-        // The run ends before an answer: the question is asked again, not lost.
-        await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
-        const again = await a.waitNew(
+        // The run ends before an answer: the question is asked again, not lost. Both waits start now: the repeat can
+        // arrive in the same chunk as `agent_settled`.
+        const settled = a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
+        const repeated = a.waitNew(
             (r) => r.type === "extension_ui_request" && r.method === "select" && r.title === req.title && r.id !== req.id,
-            15000,
+            45000,
         );
+        await settled;
+        const again = await repeated;
         a.send({ type: "extension_ui_response", id: again.id, value: "Not now" });
 
         // A second block queued behind a command question is shown once that question is answered.
@@ -238,7 +253,8 @@ const tests = {
         );
         a.send({ type: "prompt", message: `write ${join(ctx.ws, ".git/config")}` });
         const shown = await notice;
-        assert.match(shown.message, /git preset/);
+        assert.ok(shown.message.includes(join(ctx.ws, ".git/config")), shown.message);
+        assert.match(shown.message, /Git skipped that step/);
         await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
         assert.ok(
             !a.records.some((r) => r.type === "extension_ui_request" && r.method === "select" && (r.title ?? "").includes(".git/config")),
@@ -253,8 +269,8 @@ const tests = {
         a.send({ type: "extension_ui_response", id: req.id, value: "Deny everywhere" });
         await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
         const saved = readFileSync(join(ctx.config, "config.toml"), "utf8");
-        assert.match(saved, /silence = \[/);
-        assert.ok(saved.includes(target), saved);
+        assert.match(saved, /\[\[sandbox\.silence\]\]/);
+        assert.ok(saved.includes(`target = "${target}"`), saved);
         await a.close();
 
         const b = attach(ctx);
@@ -265,6 +281,8 @@ const tests = {
             !b.records.some((r) => r.type === "extension_ui_request" && (r.title ?? r.message ?? "").includes(target)),
             "a silenced path is only logged",
         );
+        const log = readFileSync(join(ctx.dir, "piton.log"), "utf8");
+        assert.ok(log.split("\n").some((l) => l.includes(target) && l.includes("silenced by")), "the daemon logged it");
         await b.close();
     },
 };
