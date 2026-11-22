@@ -3,9 +3,8 @@
 // Prompt directives (anything else gets a short text reply):
 //   "slow <n>"   reply with n words, streamed slowly, so a test can attach mid-stream
 //   "tool"       call the built-in bash tool with `sleep 2; echo done`, then answer
-//   "bash <cmd>" call the bash tool with <cmd>; "rerun <reason>|<cmd>" with <cmd> and a sandbox rerun at `all`;
-//                "rerun-host <reason>|<cmd>" with a host rerun; "rerun-grant <json>|<reason>|<cmd>" with a sandbox rerun
-//                narrowed to the grant lists <json> (#343)
+//   "bash <cmd>" call the bash tool with <cmd>; "rerun <reason>|<cmd>" with <cmd> and a sandbox rerun;
+//                "rerun-host <reason>|<cmd>" with a host rerun
 //   "write <path>" call the `faux_write` tool: pi's own process writes <path> (a block that isn't a bash call), once a
 //                second for up to 10 s while it's refused: macOS may not report a process's first refusals for a
 //                few seconds (docs/pi-findings.md)
@@ -39,15 +38,13 @@ export default function (pi: ExtensionAPI) {
         if (bash) {
             return fauxAssistantMessage([fauxToolCall("bash", { command: bash[1] })], { stopReason: "toolUse" });
         }
-        const rerunCall = (command: string, reason: string, rerun: object) =>
-            fauxAssistantMessage([fauxToolCall("bash", { command, rerun, reason })], { stopReason: "toolUse" });
-        const rerun = /^rerun ([^|]*)\|(.+)$/s.exec(text);
-        if (rerun) return rerunCall(rerun[2], rerun[1], { runtime: "sandbox", grant: "all" });
-        const rerunHost = /^rerun-host ([^|]*)\|(.+)$/s.exec(text);
-        if (rerunHost) return rerunCall(rerunHost[2], rerunHost[1], { runtime: "host" });
-        const rerunGrant = /^rerun-grant (\{[^|]*\})\|([^|]*)\|(.+)$/s.exec(text);
-        if (rerunGrant) {
-            return rerunCall(rerunGrant[3], rerunGrant[2], { runtime: "sandbox", grant: JSON.parse(rerunGrant[1]) });
+        const rerun = /^rerun(-host)? ([^|]*)\|(.+)$/s.exec(text);
+        if (rerun) {
+            const runtime = rerun[1] ? "host" : "sandbox";
+            return fauxAssistantMessage(
+                [fauxToolCall("bash", { command: rerun[3], rerun: { runtime }, reason: rerun[2] })],
+                { stopReason: "toolUse" },
+            );
         }
         const write = /^write (.+)$/.exec(text);
         if (write) {

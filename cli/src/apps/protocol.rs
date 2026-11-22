@@ -104,9 +104,7 @@ pub enum ViewRequest {
         answer: serde_json::Value,
     },
     /// Answer a Piton question (the state's `questions`) with its typed answer. For the block question:
-    /// `{"once": {"runtime", "grant"?}}`, `"deny"`, or `{"always": {"runtime", "grant"?, "scope": "project" | "global",
-    /// "pattern"}}`, the runtime and grant as a `[[sandbox.commands]]` entry writes them, limited to what the question
-    /// offers (the host, `all`, or the requested grant).
+    /// `{"once": "sandbox" | "host"}`, `"deny"`, or `{"always": {"runtime", "scope": "project" | "global", "pattern"}}`.
     #[serde(rename = "session.decide")]
     SessionDecide {
         session: u64,

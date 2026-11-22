@@ -10,7 +10,7 @@ use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{io::AsyncReadExt, process::Command, sync::mpsc};
 
 use crate::{
-    config::{CommandPattern, CommandRuntime, Grant},
+    config::CommandPattern,
     launch::{Env, sandbox::Policy},
 };
 
@@ -18,7 +18,7 @@ use crate::{
 const EXIT_GRACE: Duration = Duration::from_millis(100);
 
 /// A request to run a bash call through the daemon (`agent.sock`): every bash call and `!` command of a sandboxed
-/// session. `rerun` asks to run it again where it names after the sandbox blocked it (the user is asked).
+/// session. `rerun` asks to run it again after the sandbox blocked it, hinting where (the user is asked).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RunRequest {
     /// pi's id of the bash tool call (the daemon accepts only a call pi reported running with this command), or
@@ -37,9 +37,15 @@ pub struct RunRequest {
     /// Why the agent asks to rerun, shown to the user.
     #[serde(default)]
     pub reason: Option<String>,
-    /// The rerun the agent asks for: the runtime and grant of a `[[sandbox.commands]]` entry, read by the same parser.
     #[serde(default)]
-    pub rerun: Option<CommandRuntime>,
+    pub rerun: Option<Rerun>,
+}
+
+/// The agent's rerun request: the runtime it hints, which the question opens on. The user may choose the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rerun {
+    pub runtime: super::question::Target,
 }
 
 impl RunRequest {
@@ -64,8 +70,8 @@ pub enum RunDecision {
 pub enum Runtime {
     /// The session's own sandbox: a plain call, or a command the user typed. Tagged with the call.
     Session(Policy),
-    /// The session's sandbox widened by `grant` (never past the floor), tagged with the call.
-    Widened { policy: Policy, grant: Grant, by: Why },
+    /// The session's sandbox widened (never past the floor), tagged with the call.
+    Widened { policy: Policy, by: Why },
     /// The host, with no sandbox.
     Host { by: Why },
 }
@@ -88,28 +94,31 @@ impl Runtime {
         };
         match self {
             Runtime::Session(_) => None,
-            Runtime::Widened { grant, by: why, .. } => Some(Ran::Sandbox {
-                grant: grant.inline(),
+            Runtime::Widened { by: why, .. } => Some(Ran {
+                runtime: RanRuntime::Sandbox,
                 by: by(why),
             }),
-            Runtime::Host { by: why } => Some(Ran::Host { by: by(why) }),
+            Runtime::Host { by: why } => Some(Ran {
+                runtime: RanRuntime::Host,
+                by: by(why),
+            }),
         }
     }
 }
 
-/// Where a widened or host run ran, as sent to the agent before its output: `{"runtime": "sandbox", "grant", "by"}`
-/// or `{"runtime": "host", "by"}`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "runtime", rename_all = "snake_case")]
-pub enum Ran {
-    /// A sandbox widened by `grant`, as written after `grant = ` (`"all"`, or an inline table).
-    Sandbox {
-        grant: String,
-        by: RanBy,
-    },
-    Host {
-        by: RanBy,
-    },
+/// Where a widened or host run ran, as sent to the agent before its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Ran {
+    pub runtime: RanRuntime,
+    pub by: RanBy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RanRuntime {
+    /// A widened sandbox.
+    Sandbox,
+    Host,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -511,31 +520,20 @@ mod tests {
         assert_eq!(
             Runtime::Widened {
                 policy: policy(),
-                grant: Grant::All(crate::config::AllGrant::All),
                 by: Why::Approval
             }
             .ran(),
-            Some(Ran::Sandbox {
-                grant: "\"all\"".into(),
+            Some(Ran {
+                runtime: RanRuntime::Sandbox,
                 by: RanBy::Approval
             })
         );
-        let narrowed = Runtime::Widened {
-            policy: policy(),
-            grant: Grant::Lists(Box::new(crate::config::GrantLists {
-                write: vec!["~/x".into()],
-                ..Default::default()
-            })),
-            by: Why::Approval,
-        };
         assert_eq!(
-            serde_json::to_value(narrowed.ran()).unwrap(),
-            serde_json::json!({"runtime": "sandbox", "grant": "{ write = [\"~/x\"] }", "by": "approval"})
-        );
-        assert_eq!(Runtime::Host { by: grant }.ran(), Some(Ran::Host { by: RanBy::Grant }));
-        assert_eq!(
-            serde_json::to_value(Runtime::Host { by: Why::Approval }.ran()).unwrap(),
-            serde_json::json!({"runtime": "host", "by": "approval"})
+            Runtime::Host { by: grant }.ran(),
+            Some(Ran {
+                runtime: RanRuntime::Host,
+                by: RanBy::Grant
+            })
         );
     }
 

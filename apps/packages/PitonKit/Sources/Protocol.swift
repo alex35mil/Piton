@@ -330,12 +330,8 @@ public struct Question: Codable, Sendable, Hashable, Identifiable {
     public let refusals: [String]
     /// What the command opens, for `open`.
     public let note: String?
-    /// Where the agent asked to run it: the app's switch starts here.
+    /// Where the daemon's own rendering shows it; the app keeps its own switch, starting here.
     public let runtime: CommandRuntime
-    /// Exactly what the agent asked for: the runtime and grant of a `[[sandbox.commands]]` entry.
-    public let requested: RerunRuntime
-    /// A narrowed requested grant as written after `grant = `; nil for `all` or the host.
-    public let grantEntry: String?
     public let wording: Wording
     /// The command and its subcommand plus ` *`.
     public let suggestedPattern: String
@@ -343,27 +339,14 @@ public struct Question: Codable, Sendable, Hashable, Identifiable {
     /// may have chosen.
     public let writableVars: [WritableVars]
 
-    /// The sandbox side's grant: the requested one, or `all` when the agent asked for the host (the agent can't remove
-    /// the safer choice).
-    public var sandboxGrant: RerunGrant {
-        switch requested {
-        case .sandbox(let grant): grant
-        case .host: .all
-        }
-    }
-
     public struct Wording: Codable, Sendable, Hashable {
-        /// Everything open except the floor.
-        public let all: String
-        /// Only the requested grant added; nil when it isn't narrowed.
-        public let narrowed: String?
+        public let sandbox: String
         public let host: String
 
-        public func text(_ runtime: RerunRuntime) -> String {
+        public func text(_ runtime: CommandRuntime) -> String {
             switch runtime {
+            case .sandbox: sandbox
             case .host: host
-            case .sandbox(.all): all
-            case .sandbox(.lists): narrowed ?? all
             }
         }
     }
@@ -375,87 +358,18 @@ public struct Question: Codable, Sendable, Hashable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, command, reason, refusals, note, runtime, requested, wording
-        case grantEntry = "grant_entry"
+        case id, kind, command, reason, refusals, note, runtime, wording
         case suggestedPattern = "suggested_pattern"
         case writableVars = "writable_vars"
     }
 }
 
-/// Which side of the block question's switch: a sandbox (with the question's grant) or the host.
+/// Where an approved command runs again.
 public enum CommandRuntime: String, Codable, Sendable, Hashable, CaseIterable {
+    /// The session's sandbox with everything lifted except protected files, configuration, and the daemon's state.
     case sandbox
     /// The host, with no sandbox.
     case host
-}
-
-/// Where an approved command runs again, as a `[[sandbox.commands]]` entry writes it: `{"runtime": "host"}` or
-/// `{"runtime": "sandbox", "grant": ...}`.
-public enum RerunRuntime: Codable, Sendable, Hashable {
-    case host
-    case sandbox(RerunGrant)
-
-    public var side: CommandRuntime {
-        switch self {
-        case .host: .host
-        case .sandbox: .sandbox
-        }
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case runtime, grant
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        switch try container.decode(CommandRuntime.self, forKey: .runtime) {
-        case .host: self = .host
-        case .sandbox: self = .sandbox(try container.decode(RerunGrant.self, forKey: .grant))
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        try json.encode(to: encoder)
-    }
-
-    /// The entry's fields, to merge into an answer.
-    var fields: [String: JSON] {
-        switch self {
-        case .host: ["runtime": .string("host")]
-        case .sandbox(let grant): ["runtime": .string("sandbox"), "grant": grant.json]
-        }
-    }
-
-    var json: JSON { .object(fields) }
-}
-
-/// A sandbox rerun's grant: `"all"` (everything except the floor), or the grant lists the agent asked for, kept as sent
-/// so an answer returns them unchanged.
-public enum RerunGrant: Codable, Sendable, Hashable {
-    case all
-    case lists(JSON)
-
-    public init(from decoder: Decoder) throws {
-        let value = try JSON(from: decoder)
-        switch value {
-        case .string("all"): self = .all
-        case .object: self = .lists(value)
-        case .null, .bool, .integer, .number, .string, .array:
-            throw DecodingError.dataCorrupted(
-                .init(codingPath: decoder.codingPath, debugDescription: "a grant is \"all\" or a table of lists"))
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        try json.encode(to: encoder)
-    }
-
-    var json: JSON {
-        switch self {
-        case .all: .string("all")
-        case .lists(let lists): lists
-        }
-    }
 }
 
 /// Where an "always" answer saves its entry.
@@ -464,24 +378,23 @@ public enum PersistScope: String, Codable, Sendable, Hashable, CaseIterable {
     case global
 }
 
-/// A typed answer to a Piton question (`session.decide`). The runtime is one the question offers: the host, `all`, or
-/// exactly the requested grant.
+/// A typed answer to a Piton question (`session.decide`).
 public enum Decision: Sendable, Hashable {
-    case once(RerunRuntime)
+    case once(CommandRuntime)
     case deny
-    /// Run it and save a `[[sandbox.commands]]` entry for `pattern` with exactly this runtime and grant.
-    case always(RerunRuntime, scope: PersistScope, pattern: String)
+    /// Run it and save a `[[sandbox.commands]]` entry for `pattern`.
+    case always(CommandRuntime, scope: PersistScope, pattern: String)
 
     var json: JSON {
         switch self {
-        case .once(let runtime): .object(["once": runtime.json])
+        case .once(let runtime): .object(["once": .string(runtime.rawValue)])
         case .deny: .string("deny")
         case .always(let runtime, let scope, let pattern):
             .object([
-                "always": .object(
-                    runtime.fields.merging(["scope": .string(scope.rawValue), "pattern": .string(pattern)]) { a, _ in a
-                    }
-                )
+                "always": .object([
+                    "runtime": .string(runtime.rawValue), "scope": .string(scope.rawValue),
+                    "pattern": .string(pattern),
+                ])
             ])
         }
     }
