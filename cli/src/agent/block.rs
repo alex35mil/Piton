@@ -7,7 +7,10 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::config::CommandPattern;
+use crate::{
+    config::CommandPattern,
+    launch::sandbox::grant::{Lift, Offer},
+};
 
 /// Where "Allow and persist" saves the grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -125,27 +128,24 @@ pub fn pattern_dialog(id: &str, command: &str, scope: PersistScope) -> Value {
     })
 }
 
-/// What a process question offers in each scope: the `[sandbox]` key and the path it saves.
-pub struct ProcessOffer<'a> {
-    pub project: (&'a str, &'a str),
-    pub everywhere: (&'a str, &'a str),
-}
-
 /// The question for a process that isn't a bash call (an MCP server, an extension, pi): the refusal, and per answer
 /// the exact entry it saves. Allow adds a `[sandbox]` entry and restarts; Deny adds a `silence` entry, so the block is
 /// only logged from then on.
-pub fn process_dialog(id: &str, process: &str, refusal: &str, offer: &ProcessOffer) -> Value {
-    let entry = |(key, value): (&str, &str)| format!("`{key} = [\"{value}\"]`");
-    let silence = |(_, value): (&str, &str)| {
+pub fn process_dialog(id: &str, process: &str, refusal: &str, offer: &Offer) -> Value {
+    let entry = |lift: &Lift| {
+        let (key, value) = lift.entry();
+        format!("`{key} = [{}]`", toml::Value::String(value))
+    };
+    let silence = |lift: &Lift| {
         let entry = crate::config::Silence {
-            target: crate::config::SilenceTarget::Path(value.to_string()),
+            target: lift.silence_target(),
             process: None,
         };
         format!("`silence = [{}]`", entry.inline())
     };
     let scopes = [
-        (PersistScope::Project, offer.project),
-        (PersistScope::Global, offer.everywhere),
+        (PersistScope::Project, &offer.project),
+        (PersistScope::Global, &offer.everywhere),
     ];
     let mut lines = Vec::new();
     for (scope, at) in scopes {
@@ -316,9 +316,9 @@ mod tests {
             "p",
             "claude",
             "file-write-create /h/c/-w-p",
-            &ProcessOffer {
-                project: ("write", "/h/c/-w-p"),
-                everywhere: ("write", "/h/c"),
+            &Offer {
+                project: Lift::Write("/h/c/-w-p".into()),
+                everywhere: Lift::Write("/h/c".into()),
             },
         );
         let title = process["title"].as_str().unwrap();
@@ -358,10 +358,27 @@ mod tests {
     fn the_first_option_decides_nothing() {
         let first = |d: Value| d["options"][0].as_str().unwrap().to_string();
         assert_eq!(first(dialog("x", &Question::default())), CHOOSE_BELOW);
-        let offer = ProcessOffer {
-            project: ("write", "/x"),
-            everywhere: ("write", "/x"),
+        let offer = Offer {
+            project: Lift::Write("/x".into()),
+            everywhere: Lift::Write("/x".into()),
         };
         assert_eq!(first(process_dialog("p", "n", "r", &offer)), CHOOSE_BELOW);
+    }
+
+    /// A blocked Mach service offers `services = [name]`, and Deny silences that service.
+    #[test]
+    fn a_service_offer_names_the_service() {
+        let name = crate::config::ServiceName::Exact("com.example.agent".into());
+        let offer = Offer {
+            project: Lift::Service(name.clone()),
+            everywhere: Lift::Service(name),
+        };
+        let d = process_dialog("p", "tool", "mach-lookup com.example.agent", &offer);
+        let title = d["title"].as_str().unwrap();
+        assert!(title.contains("`services = [\"com.example.agent\"]`"), "{title}");
+        assert!(
+            title.contains("`silence = [{ target = \"com.example.agent\" }]`"),
+            "{title}"
+        );
     }
 }

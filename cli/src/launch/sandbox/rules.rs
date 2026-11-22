@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::policy::Source;
 use crate::{
     agent::{GitControl, ProtectedRoots},
-    config::NetworkTarget,
+    config::{NetworkTarget, ServiceName},
 };
 
 /// What a process does to a path.
@@ -93,8 +93,12 @@ pub struct Rule {
 pub struct Policy {
     /// In order; the last matching rule decides.
     pub rules: Vec<Rule>,
-    /// Keychain Mach services allowed: a `read` entry covers the user's keychains.
+    /// Keychain Mach services allowed: a `read` entry covers the user's keychains. Decided after `services`.
     pub keychain: bool,
+    /// The Mach services the sandbox may look up.
+    pub services: Services,
+    /// Whether processes may launch apps and send Apple Events.
+    pub apps: Apps,
     /// The network destinations `connect` grants, in order: carried for `piton sandbox show` and the network filter
     /// (#228). They decide nothing yet: TCP is open.
     #[serde(default)]
@@ -107,6 +111,36 @@ pub struct Policy {
 
 /// The prefix of every launch's tag in the kernel's log.
 pub const TAG_PREFIX: &str = "piton-";
+
+/// The Mach services a launch may look up. Any app's service is reachable through it, so a service whose app runs
+/// commands (Hammerspoon's, Keyboard Maestro's) runs them on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Services {
+    /// Every service but the keychain's, from this entry.
+    Every { source: Source },
+    /// Only these: the built-in list, then the presets' and the user's entries, each with where it came from.
+    Listed { grants: Vec<ServiceGrant> },
+}
+
+/// A Mach service the policy allows, and where the grant came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceGrant {
+    pub name: ServiceName,
+    pub source: Source,
+}
+
+/// Launching apps (`lsopen`: `open`, Launch Services) and sending Apple Events (`osascript`, scripting another app).
+/// What macOS starts this way runs outside the sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Apps {
+    Closed,
+    /// Open, from this entry.
+    Open {
+        source: Source,
+    },
+}
 
 /// A network destination the policy grants, and where the grant came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +199,70 @@ impl Policy {
         decision
     }
 
+    /// The decision for a lookup of the Mach service `service`, as Seatbelt makes it: the keychain's decide last.
+    pub fn decide_service(&self, service: &str) -> Decision {
+        if KEYCHAIN_SERVICES.contains(&service) {
+            return match self.keychain {
+                true => Decision {
+                    allowed: true,
+                    source: Source::BuiltIn {
+                        what: "the keychain: a `read` entry covers it".into(),
+                    },
+                },
+                false => Decision {
+                    allowed: false,
+                    source: Source::BuiltIn {
+                        what: CLOSED_KEYCHAIN.into(),
+                    },
+                },
+            };
+        }
+        match &self.services {
+            Services::Every { source } => Decision {
+                allowed: true,
+                source: source.clone(),
+            },
+            Services::Listed { grants } => match grants.iter().rev().find(|g| g.name.matches(service)) {
+                Some(grant) => Decision {
+                    allowed: true,
+                    source: grant.source.clone(),
+                },
+                None => Decision {
+                    allowed: false,
+                    source: Source::BuiltIn {
+                        what: CLOSED_SERVICES.into(),
+                    },
+                },
+            },
+        }
+    }
+
+    /// The Mach service and app rules, after the path rules and before the keychain's: under a list, every lookup is
+    /// denied and the listed ones allowed again (nono allows every lookup first).
+    fn service_rules(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        match &self.services {
+            Services::Every { .. } => {}
+            Services::Listed { grants } => {
+                out.push("(deny mach-lookup)".to_string());
+                for grant in grants {
+                    out.push(match &grant.name {
+                        ServiceName::Exact(name) => format!("(allow mach-lookup (global-name \"{name}\"))"),
+                        ServiceName::Prefix(start) => format!("(allow mach-lookup (global-name-prefix \"{start}\"))"),
+                    });
+                }
+            }
+        }
+        match &self.apps {
+            Apps::Closed => {}
+            Apps::Open { .. } => {
+                out.push("(allow lsopen)".to_string());
+                out.push("(allow appleevent-send)".to_string());
+            }
+        }
+        out
+    }
+
     /// The Seatbelt rules, in order. Filesystem and Mach rules first, network rules last: the library emits them in
     /// two groups (after its file allows, and after its network section), each in this order.
     ///
@@ -185,14 +283,6 @@ impl Policy {
         let (network, other): (Vec<String>, Vec<String>) = tagged.into_iter().partition(is_network);
         let mut out = vec![tag("(deny file-write*)".into())];
         out.extend(other.into_iter().map(tag));
-        // The library's keychain denies carry no message: repeated, tagged.
-        if !self.keychain {
-            out.extend(
-                KEYCHAIN_SERVICES
-                    .iter()
-                    .map(|s| tag(format!("(deny mach-lookup (global-name \"{s}\"))"))),
-            );
-        }
         out.extend(network.into_iter().map(tag));
         Ok(out)
     }
@@ -270,10 +360,15 @@ impl Policy {
                 }
             }
         }
-        if self.keychain {
-            for service in KEYCHAIN_SERVICES {
-                out.push(format!("(allow mach-lookup (global-name \"{service}\"))"));
-            }
+        out.extend(self.service_rules());
+        // The keychain's services decide after every service rule, so no entry (a `com.apple.*` prefix) reopens them;
+        // the library's own denies come before the platform rules and carry no message.
+        let effect = match self.keychain {
+            true => "allow",
+            false => "deny",
+        };
+        for service in KEYCHAIN_SERVICES {
+            out.push(format!("({effect} mach-lookup (global-name \"{service}\"))"));
         }
         // Network rules after the rest, keeping their own order, after the base's socket denies: a path filter on a
         // network operation matches Unix sockets only, so TCP stays as the library leaves it.
@@ -298,6 +393,13 @@ const CLOSED_SOCKETS: &str = "Unix sockets are closed: a `connect` entry opens o
 /// Why creating a socket is denied when no rule decides.
 const CLOSED_BIND: &str = "creating Unix sockets is closed: a `bind` entry opens a path (global config.toml or a \
                            config.local.toml)";
+
+/// Why a lookup of a service outside the list is denied: what `piton sandbox why --service` prints.
+const CLOSED_SERVICES: &str = "Mach services outside the built-in list are closed: a `services` entry opens one (global \
+                               config.toml or a config.local.toml)";
+
+/// Why a lookup of a keychain service is denied.
+const CLOSED_KEYCHAIN: &str = "the keychain is closed: a `read` of ~/Library/Keychains opens it";
 
 /// The Mach services that broker keychain access, which the library always denies. Reopened only when the user exposes
 /// their keychains (nono's CLI does the same).
@@ -358,6 +460,10 @@ mod tests {
                 rule(Effect::Allow, &[Access::Read], "/h/.ssh/config", "read"),
             ],
             keychain: false,
+            services: crate::launch::sandbox::Services::Every {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
+            apps: crate::launch::sandbox::Apps::Closed,
             network: Vec::new(),
             tag: String::new(),
         };
@@ -400,6 +506,10 @@ mod tests {
                 },
             ],
             keychain: false,
+            services: crate::launch::sandbox::Services::Every {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
+            apps: crate::launch::sandbox::Apps::Closed,
             network: Vec::new(),
             tag: String::new(),
         };
@@ -439,6 +549,10 @@ mod tests {
                 rule(Effect::Allow, &[Access::Bind], "/w", "bind"),
             ],
             keychain: true,
+            services: crate::launch::sandbox::Services::Every {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
+            apps: crate::launch::sandbox::Apps::Closed,
             network: Vec::new(),
             tag: String::new(),
         };
@@ -479,6 +593,10 @@ mod tests {
         let tagged = Policy {
             tag: "abc\"1".into(),
             keychain: false,
+            services: crate::launch::sandbox::Services::Every {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
+            apps: crate::launch::sandbox::Apps::Closed,
             ..policy
         }
         .seatbelt()
@@ -506,5 +624,81 @@ mod tests {
             tagged[first_network],
             format!(r#"(deny network-outbound (subpath "/") {message})"#)
         );
+    }
+
+    fn listed(names: &[ServiceName]) -> Services {
+        Services::Listed {
+            grants: names
+                .iter()
+                .map(|name| ServiceGrant {
+                    name: name.clone(),
+                    source: Source::Workspace,
+                })
+                .collect(),
+        }
+    }
+
+    fn services_policy(services: Services, apps: Apps, keychain: bool) -> Policy {
+        Policy {
+            rules: Vec::new(),
+            keychain,
+            services,
+            apps,
+            network: Vec::new(),
+            tag: String::new(),
+        }
+    }
+
+    /// A list denies every lookup, then allows each entry; the keychain's services decide after every entry, so a
+    /// prefix never reopens them. Every service emits nothing of its own: the library allows them.
+    #[test]
+    fn services_and_apps_in_seatbelt() {
+        let prefix = ServiceName::Prefix("com.apple.".into());
+        let exact = ServiceName::Exact("Hammerspoon".into());
+        let p = services_policy(
+            listed(&[exact.clone(), prefix.clone()]),
+            Apps::Open {
+                source: Source::Workspace,
+            },
+            false,
+        );
+        let rules = p.seatbelt().unwrap();
+        let at = |r: &str| {
+            rules
+                .iter()
+                .position(|x| x == r)
+                .unwrap_or_else(|| panic!("{r} in {rules:?}"))
+        };
+        let deny_all = at("(deny mach-lookup)");
+        assert!(deny_all < at(r#"(allow mach-lookup (global-name "Hammerspoon"))"#));
+        let allow_prefix = at(r#"(allow mach-lookup (global-name-prefix "com.apple."))"#);
+        assert!(allow_prefix < at(r#"(deny mach-lookup (global-name "com.apple.secd"))"#));
+        at("(allow lsopen)");
+        at("(allow appleevent-send)");
+        assert!(p.decide_service("Hammerspoon").allowed);
+        assert!(p.decide_service("com.apple.fonts").allowed);
+        assert!(
+            !p.decide_service("com.apple.secd").allowed,
+            "a prefix doesn't reopen the keychain"
+        );
+        assert!(!p.decide_service("org.other").allowed);
+        super::super::apply::capabilities(&p).expect("nono accepts it");
+
+        let every = services_policy(
+            Services::Every {
+                source: Source::Workspace,
+            },
+            Apps::Closed,
+            true,
+        );
+        let rules = every.seatbelt().unwrap();
+        assert!(!rules.iter().any(|r| r == "(deny mach-lookup)" || r.contains("lsopen")));
+        assert!(rules.contains(&r#"(allow mach-lookup (global-name "com.apple.secd"))"#.to_string()));
+        assert!(every.decide_service("org.other").allowed);
+        assert!(every.decide_service("com.apple.secd").allowed, "keychain read");
+
+        // Tagged: the list's deny carries the tag, so a blocked lookup reaches the question.
+        let tagged = Policy { tag: "t".into(), ..p }.seatbelt().unwrap();
+        assert!(tagged.contains(&r#"(deny mach-lookup (with message "piton-t"))"#.to_string()));
     }
 }

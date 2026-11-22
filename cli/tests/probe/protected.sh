@@ -32,6 +32,7 @@ cleanup_real() {
     rm -f "$HOME/$probe"
     rmdir "$HOME/Library/Caches/$probe" "$agent_dir/extensions/$probe" 2>/dev/null || true
     rmdir "$agent_dir/TRUST.JSON.LOCK" 2>/dev/null || true
+    rm -f "$HOME/$probe-launched"
 }
 listener=
 # The listener is waited for after it's killed, so the shell doesn't report its end ("Terminated: 15").
@@ -82,6 +83,21 @@ policy_says() {
 }
 bind="$scratch/bind.py"
 echo 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' > "$bind"
+# A Mach service lookup: exits 0 when found, 1 when the sandbox refuses it (1100), 2 when no such service runs (1102).
+lookup="$scratch/lookup.py"
+cat > "$lookup" <<'PY'
+import ctypes, sys
+lib = ctypes.CDLL("/usr/lib/libSystem.dylib")
+port = ctypes.c_uint(0)
+kr = lib.bootstrap_look_up(ctypes.c_uint.in_dll(lib, "bootstrap_port").value, sys.argv[1].encode(), ctypes.byref(port))
+sys.exit({0: 0, 1100: 1}.get(kr, 2))
+PY
+# What `open` and `osascript` would start on the host: a script that leaves a marker, checked from outside.
+launched="$HOME/$probe-launched"
+printf '#!/bin/sh\ntouch "%s"\n' "$launched" > "$src/x.command"
+chmod +x "$src/x.command"
+expect_pasteboard=$(policy_says --service com.apple.pasteboard.1)
+expect_apps=$("$piton" sandbox show --workspace "$src" | python3 -I -c 'import json,sys; print("ok" if json.load(sys.stdin)["policy"]["apps"]["kind"] == "open" else "denied")')
 expect_bind=$(policy_says --bind "$src/probe.sock")
 expect_ssh_agent=$(needs "${SSH_AUTH_SOCK:-/nonexistent}" "$(policy_says --connect "${SSH_AUTH_SOCK:-/nonexistent}")")
 ssh_pub=$(ls "$HOME"/.ssh/*.pub "$HOME"/.ssh/*/*.pub 2>/dev/null | head -n 1 || true)
@@ -229,6 +245,13 @@ attempt denied "rename a named socket's folder"        "mv $(dirname $LISTED_SOC
 attempt "$EXPECT_BIND" "create a socket in the workspace" "python3 -I $BIND probe.sock"
 attempt "$EXPECT_SSH_AGENT" "list the SSH agent's keys" "ssh-add -l"
 attempt "$EXPECT_SSH_PUB" "read an SSH public key"    "cat '$SSH_PUB'"
+# Mach services and apps: the keychain's closed; the rest as the profile decides (standard: every service).
+attempt ok     "look up a built-in service (fonts)"    "python3 -I $LOOKUP com.apple.fonts"
+attempt "$EXPECT_KEYCHAIN" "look up the keychain's service" "python3 -I $LOOKUP com.apple.SecurityServer"
+attempt "$EXPECT_PASTEBOARD" "look up the pasteboard's service" "python3 -I $LOOKUP com.apple.pasteboard.1"
+attempt "$EXPECT_APPS" "open a script the sandbox wrote"   "open -g x.command"
+attempt "$EXPECT_APPS" "open an app"                       "open -g -a Calculator"
+attempt "$EXPECT_APPS" "tell Terminal to run a command"    "osascript -e 'tell application \"Terminal\" to do script \"touch $LAUNCHED\"'"
 EOF
 
 cd "$src"
@@ -238,6 +261,7 @@ EXPECT_HISTORY="$expect_history" EXPECT_DATABASE="$expect_database" EXPECT_CONTR
 EXPECT_AGENT="$expect_agent" CONNECT="$connect" BIND="$bind" EXPECT_BIND="$expect_bind" \
 HOST_SOCK="$host_sock" LISTED_SOCK="$listed_sock" EXPECT_SSH_AGENT="$expect_ssh_agent" \
 EXPECT_SSH_PUB="$expect_ssh_pub" SSH_PUB="$ssh_pub" \
+LOOKUP="$lookup" EXPECT_PASTEBOARD="$expect_pasteboard" EXPECT_APPS="$expect_apps" LAUNCHED="$launched" \
 EXPECT_SETTINGS_TARGET="$expect_settings_target" SETTINGS_TARGET="$settings_target" \
 SETTINGS_FOLDER="$settings_folder" SETTINGS_MOVED="$settings_moved" \
 OUTSIDE="$outside" AGENT_DIR="$agent_dir" STATE="$state" STATE_OTHER_CASE="$state_other_case" CONFIG_HOME="$config_home" PROBE="$probe" ERR="$scratch/err" \
@@ -256,4 +280,68 @@ fi
 if [ "$(cat "$src/.piton/config.toml")" = "$marker" ]; then echo "pass  ok      protected file unchanged"; else echo "FAIL  changed protected file changed"; fi
 # The named socket, checked from outside the sandbox: still the host's listener, still in its folder.
 if [ -S "$listed_sock" ] && python3 -I "$connect" "$listed_sock" 2>/dev/null; then echo "pass  ok      named socket in place"; else echo "FAIL  moved   named socket moved"; fi
+# Nothing `open` or `osascript` tried started on the host, unless the policy launches apps.
+sleep 2
+if [ -e "$launched" ] && [ "$expect_apps" = denied ]; then
+    echo "FAIL  ran     a launched app ran the sandbox's script" | tee -a "$scratch/out"
+else
+    echo "pass  ok      no app ran the sandbox's script"
+fi
+quit_calculator() { osascript -e 'tell application "Calculator" to quit' >/dev/null 2>&1 || true; }
+test "$expect_apps" = denied || quit_calculator
+
+# The strict profile: basic tools still work with only the built-in Mach services; another app's service is refused.
+# Run in a second checkout whose config.local.toml picks strict (loosening keys: this machine's own file).
+strict="$scratch/strict"
+mkdir -p "$strict/.piton/.local"
+git -C "$strict" init -q
+printf '[sandbox]\nprofile = "strict"\n' > "$strict/.piton/config.local.toml"
+strict_policy=$("$piton" sandbox show --workspace "$strict" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
+cat > "$scratch/strict.sh" <<'EOF'
+attempt() {
+    expect=$1; what=$2; shift 2
+    if sh -c "$*" </dev/null >/dev/null 2>"$ERR"; then got=ok; else got=denied; fi
+    if [ "$got" = "$expect" ]; then mark=pass; else mark=FAIL; fi
+    printf '%-5s %-7s strict: %s\n' "$mark" "$got" "$what"
+    # The error's first lines: the cause comes first (node ends with its version banner).
+    if [ "$mark" = FAIL ] && [ -s "$ERR" ]; then head -n 12 "$ERR" | sed 's/^/      /'; fi
+}
+attempt ok     "git status"                               'git status'
+attempt ok     "git over HTTPS (TLS)"                     'git ls-remote https://github.com/git/git HEAD'
+attempt ok     "curl over HTTPS"                          'curl -sfI https://example.com'
+attempt ok     "python TLS"                               "python3 -I -c 'import ssl,socket; ssl.create_default_context().wrap_socket(socket.create_connection((\"github.com\", 443), 10), server_hostname=\"github.com\").close()'"
+attempt ok     "user name (id)"                           'id -un'
+attempt ok     "read a preference (defaults)"            'defaults read -g AppleLocale'
+attempt ok     "look up a built-in service (logd)"       "python3 -I $LOOKUP com.apple.logd"
+attempt denied "look up the pasteboard's service"        "python3 -I $LOOKUP com.apple.pasteboard.1"
+attempt denied "open a link"                             'open -g https://example.com'
+EOF
+# Node's TLS: a script file, so no quoting nests (`echo` treats backslashes differently across shells).
+cat > "$scratch/fetch.mjs" <<'JS'
+const r = await fetch("https://example.com").catch(e => { console.error(e.cause ?? e); process.exit(1) })
+process.exit(r.ok ? 0 : 1)
+JS
+if command -v node >/dev/null 2>&1; then
+    echo "attempt ok \"node fetch over HTTPS\" 'node $scratch/fetch.mjs'" >> "$scratch/strict.sh"
+fi
+(cd "$strict" && LOOKUP="$lookup" ERR="$scratch/err" PITON_SANDBOX_POLICY="$strict_policy" \
+    "$piton" sandbox-exec -- sh "$scratch/strict.sh" </dev/null >"$scratch/strict-out" 2>&1) \
+    || echo "FAIL  the strict sandbox didn't start" >> "$scratch/strict-out"
+# Shown whole, so a failed line keeps the error line below it.
+cat "$scratch/strict-out"
+cat "$scratch/strict-out" >> "$scratch/out"
+
+# The apps preset: a link opens in the browser (from a strict checkout whose config.local.toml lists it, so the preset's
+# own services are what open uses).
+apps="$scratch/apps"
+mkdir -p "$apps/.piton/.local"
+git -C "$apps" init -q
+printf '[sandbox]\nprofile = "strict"\npresets = ["apps"]\n' > "$apps/.piton/config.local.toml"
+apps_policy=$("$piton" sandbox show --workspace "$apps" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
+if (cd "$apps" && PITON_SANDBOX_POLICY="$apps_policy" "$piton" sandbox-exec -- open -g https://example.com </dev/null >/dev/null 2>"$scratch/err"); then
+    echo "pass  ok      strict + apps preset: open a link" | tee -a "$scratch/out"
+else
+    echo "FAIL  denied  strict + apps preset: open a link" | tee -a "$scratch/out"
+    printf '      %s\n' "$(tail -n 1 "$scratch/err")"
+fi
 ! rg -q '^FAIL' "$scratch/out"

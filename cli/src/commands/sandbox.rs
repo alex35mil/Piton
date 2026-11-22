@@ -51,6 +51,17 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                 Some(WhyAccess::Write) => Access::Write,
                 Some(WhyAccess::Connect) => Access::Connect,
                 Some(WhyAccess::Bind) => Access::Bind,
+                Some(WhyAccess::Service) => {
+                    let service = path.to_string_lossy().into_owned();
+                    let decision = policy.decide_service(&service);
+                    let outcome = if decision.allowed { "allowed" } else { "denied" };
+                    println!("{outcome}: look up the Mach service {service}");
+                    println!("  because: {}", explain(&decision.source));
+                    return match decision.allowed {
+                        true => ExitCode::SUCCESS,
+                        false => ExitCode::from(4),
+                    };
+                }
             };
             let target = crate::agent::canonical_target(&std::path::absolute(&path).unwrap_or(path));
             let decision = policy.decide(&target, access);

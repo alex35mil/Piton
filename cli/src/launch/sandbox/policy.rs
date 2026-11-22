@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::config::{ClaudeLogin, Connect, Preset, Profile};
+use crate::config::{ClaudeLogin, Connect, Preset, Profile, ServiceEntry};
 
 /// Where a deny or a grant comes from: what `piton sandbox why` reports.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -52,12 +52,12 @@ impl std::fmt::Display for Provenance {
 }
 
 /// A profile's entries, as written: added before the user's own lists. Profiles only add: `strict` adds nothing, and
-/// each profile holds the one before it. The Tasks that close apps (#249) and filter the network (#228) enforce what
-/// `connect` here grants to hosts.
+/// each profile holds the one before it. The network filter (#228) enforces what `connect` here grants to hosts.
 pub struct ProfileEntries {
     pub read: Vec<ReadEntry>,
     pub connect: Vec<Connect>,
     pub bind: &'static [&'static str],
+    pub services: Vec<ServiceEntry>,
     pub presets: Vec<Preset>,
 }
 
@@ -74,7 +74,8 @@ pub enum ReadEntry {
 pub fn profile_entries(profile: Profile) -> ProfileEntries {
     let entry = |text: &str| Connect::try_from(text.to_string()).expect("a profile's connect entries are valid");
     // Git over SSH: the user's SSH agent (keys used, never read), the host names and keys SSH checks, and the public
-    // halves of the keys. Creating sockets anywhere: test servers, IPC, language servers.
+    // halves of the keys. Creating sockets anywhere: test servers, IPC, language servers. Every Mach service but the
+    // keychain's, as the library allows: toolchains and GUI-adjacent tools reach services no fixed list foresees.
     let standard = ProfileEntries {
         read: vec![
             ReadEntry::Path("~/.ssh/config"),
@@ -83,6 +84,7 @@ pub fn profile_entries(profile: Profile) -> ProfileEntries {
         ],
         connect: vec![entry("$SSH_AUTH_SOCK"), entry("*")],
         bind: &["/"],
+        services: vec![ServiceEntry::Every],
         presets: Vec::new(),
     };
     match profile {
@@ -90,14 +92,16 @@ pub fn profile_entries(profile: Profile) -> ProfileEntries {
             read: Vec::new(),
             connect: Vec::new(),
             bind: &[],
+            services: Vec::new(),
             presets: Vec::new(),
         },
         Profile::Standard => standard,
         Profile::Yolo => {
             let mut yolo = standard;
-            // Every Unix socket.
+            // Every Unix socket, Git's control files, and launching apps.
             yolo.connect.push(entry("/"));
             yolo.presets.push(Preset::Git);
+            yolo.presets.push(Preset::Apps);
             yolo
         }
     }
@@ -220,6 +224,63 @@ pub fn agent_dir_runtime(relative: &std::path::Path) -> bool {
     })
 }
 
+/// The Mach services every launch may look up, each with why: what command-line tools reach without a window. Claude
+/// Code's list for its command sandbox, plus what Piton's whole-process sandbox needs for pi, its MCP servers, and
+/// their tools (TLS, proxies and reachability, preferences). Anything else is a `services` entry, or `standard`'s `*`.
+pub const BASE_SERVICES: &[(&str, &str)] = &[
+    ("com.apple.logd", "logging"),
+    ("com.apple.system.logger", "logging (syslog)"),
+    ("com.apple.diagnosticd", "logging (os_log activity)"),
+    ("com.apple.analyticsd", "crash and usage reports the runtime files"),
+    (
+        "com.apple.system.opendirectoryd.libinfo",
+        "user and group names (getpwuid, id)",
+    ),
+    ("com.apple.system.opendirectoryd.membership", "group membership"),
+    ("com.apple.bsd.dirhelper", "the per-user temp and cache folders"),
+    (
+        "com.apple.system.notification_center",
+        "notify(3): time zone and network changes",
+    ),
+    ("com.apple.distributed_notifications@Uv3", "distributed notifications"),
+    ("com.apple.FontObjectsServer", "fonts"),
+    ("com.apple.fonts", "fonts"),
+    (
+        "com.apple.PowerManagement.control",
+        "power assertions (keeping the Mac awake)",
+    ),
+    ("com.apple.audio.systemsoundserver", "system sounds"),
+    ("com.apple.securityd.xpc", "code signature checks"),
+    ("com.apple.trustd", "TLS certificate checks"),
+    ("com.apple.trustd.agent", "TLS certificate checks (Go, curl, git)"),
+    (
+        "com.apple.SystemConfiguration.configd",
+        "proxy settings and reachability",
+    ),
+    ("com.apple.cfprefsd.daemon", "preferences"),
+    ("com.apple.cfprefsd.agent", "preferences"),
+    (
+        "com.apple.lsd.mapdb",
+        "Launch Services' read-only database: what app handles a type",
+    ),
+    (
+        "com.apple.coreservices.launchservicesd",
+        "Launch Services lookups (not launching: that's `lsopen`)",
+    ),
+];
+
+/// The Mach services the `apps` preset adds besides `lsopen` and Apple Events: what `open` and `osascript` reach.
+pub const APP_SERVICES: &[&str] = &[
+    // What `open` looked up in `strict`, from the kernel's record (#249's host probe).
+    "com.apple.lsd.open",
+    "com.apple.DiskArbitration.diskarbitrationd",
+    "com.apple.coreservices.sharedfilelistd.xpc",
+    "com.apple.metadata.mds.legacy",
+    "com.apple.coreservices.appleevents",
+    "com.apple.CoreServices.coreservicesd",
+    "com.apple.coreservices.quarantine-resolver",
+];
+
 /// What a preset grants, as written (`~/...`): added to the `[sandbox]` lists of the same names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PresetGrants {
@@ -227,6 +288,8 @@ pub struct PresetGrants {
     pub write_file: Vec<&'static str>,
     pub read: Vec<&'static str>,
     pub connect: Vec<Connect>,
+    /// Mach services, by exact name.
+    pub services: Vec<&'static str>,
 }
 
 /// The Mach services that broker keychain access (the library denies them).
@@ -248,6 +311,7 @@ pub const CLAUDE_CODE_CACHE: &str = "~/Library/Caches/claude-cli-nodejs";
 /// which is why none is on by default. None of them writes what the host executes or trusts (checked below): mise's
 /// installed tools and trusted configs, cargo's installed binaries, rustup's toolchains. An install that needs them is
 /// asked about and run by the daemon (#241). `git` grants no path: it leaves out the Git rule instead (`resolve.rs`).
+/// `apps` grants its services here, and `resolve.rs` opens launching and Apple Events.
 /// `pi-claude-code`'s config folder and its lock (`<folder>.lock` beside it: `claude` locks the folder itself with
 /// `proper-lockfile`) come from the launch's environment, so `resolve.rs` grants them; here are its fixed parts.
 pub fn preset_grants(preset: &Preset) -> PresetGrants {
@@ -258,6 +322,10 @@ pub fn preset_grants(preset: &Preset) -> PresetGrants {
     };
     match preset {
         Preset::Git => PresetGrants::default(),
+        Preset::Apps => PresetGrants {
+            services: APP_SERVICES.to_vec(),
+            ..PresetGrants::default()
+        },
         Preset::Mise => writes(
             &[
                 "~/Library/Caches/mise",
@@ -310,6 +378,7 @@ pub fn preset_grants(preset: &Preset) -> PresetGrants {
                 ClaudeLogin::Keychain => vec![KEYCHAINS],
             },
             write_file: Vec::new(),
+            services: Vec::new(),
         },
     }
 }
@@ -353,6 +422,10 @@ mod tests {
             let grants = preset_grants(&preset);
             match preset {
                 Preset::Git => assert_eq!(grants, PresetGrants::default(), "git grants no path"),
+                Preset::Apps => {
+                    assert_eq!(grants.services, APP_SERVICES, "apps grants services, no path");
+                    assert!(grants.write.is_empty() && grants.read.is_empty());
+                }
                 Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::PiClaudeCode(_) => {
                     assert!(!grants.write.is_empty(), "{}", preset.name());
                 }

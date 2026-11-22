@@ -166,6 +166,7 @@ pub static CATALOG: &[Entry] = &[
     project("sandbox.read", TextList, empty),
     project("sandbox.connect", TextList, empty),
     project("sandbox.bind", TextList, empty),
+    project("sandbox.services", TextList, empty),
     project("sandbox.deny", TextList, empty),
     // Not `sandbox.silence`: its entries are tables (`{ target, process }`), edited in the file; a notice names each.
     project("workers.skip", TextList, empty),
@@ -526,8 +527,9 @@ mod tests {
                 ValueType::ChoiceList { options } => json!([options[0]]),
                 Bool => json!(default != json!(true)),
                 Text => json!("/x"),
-                // `workers.skip` takes relative paths, `[sandbox]` absolute ones.
+                // `workers.skip` takes relative paths, `sandbox.services` Mach service names, `[sandbox]` absolute paths.
                 TextList if entry.key == "workers.skip" => json!(["x"]),
+                TextList if entry.key == "sandbox.services" => json!(["com.example.agent"]),
                 TextList => json!(["~/x"]),
                 Integer => json!(default.as_u64().unwrap_or(0) + 1),
                 ValueType::Choice { options } => {

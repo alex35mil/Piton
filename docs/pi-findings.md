@@ -217,6 +217,28 @@ Verified on the host, macOS 27.0.1, with `piton sandbox-exec` (#241's spike):
   (cfprefsd checks the caller's write access to the plist).
 - Other apps' refusals stream all the time (WhatsApp, sharingd, WebKit), so only tagged ones are Piton's.
 
+## Launching apps and Mach services from the sandbox
+
+Checked in a sandboxed session (nono 0.82, macOS 27.0, `standard`), from exit codes and `sandbox_check` (#249):
+
+- nono's `(deny default)` never allows `lsopen` or `appleevent-send`. `open x.command`, `open -a Calculator`,
+  `open -b com.apple.Terminal`, and `open https://…` fail with `_LSOpenURLsWithCompletionHandler() … error -54`;
+  `osascript` telling Terminal to `do script` fails with `sandbox_extension_issue_file failed … -54`; JXA
+  `NSWorkspace.openURL` returns false. Nothing ran on the host.
+- `launchctl submit`, `bootstrap`, `load`, `kickstart`, and `at` fail; `launchctl asuser` runs its command still
+  sandboxed. `job-creation`, `distributed-notification-post`, and `user-preference-write` are denied.
+- `(allow mach-lookup)` reaches every other app's service: Hammerspoon's `hs` reached the lookup and failed only
+  because its `ipc` module wasn't loaded; `shortcuts run` reached the Shortcuts service.
+- `bootstrap_look_up` returns 1100 for a sandbox-denied lookup and 1102 for a service that isn't running, so a probe can
+  tell them apart (`cli/tests/probe/protected.sh`).
+- Launch Services' `LSCopyDefaultApplicationURLForURL` answers from inside the sandbox (lookups go through
+  `com.apple.lsd.mapdb` and `launchservicesd`, not `lsopen`).
+- On the host, with only the built-in list (`strict`), the kernel's record shows `open https://…` looking up
+  `CoreServices.coreservicesd`, `DiskArbitration.diskarbitrationd`, `coreservices.quarantine-resolver`, `lsd.open`,
+  `SharedWebCredentials`, `coreservices.sharedfilelistd.xpc`, `metadata.mds.legacy`, and `coreservices.appleevents`. It
+  opens the link with all but `SharedWebCredentials`. git, curl, python, and node TLS, `id`, and `defaults read` need
+  nothing beyond the list.
+
 ## pi behind fnox's credential proxy
 
 Verified on the host with fnox 1.48.0, op 2.34.1, claude 2.1.309, pi 1.5.2 (#229):
