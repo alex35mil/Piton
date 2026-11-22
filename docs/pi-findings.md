@@ -208,8 +208,13 @@ Verified on the host, macOS 27.0.1, with `piton sandbox-exec` (#241's spike):
   `file-write-data`, `file-read-data`, `mach-lookup com.apple.SecurityServer` (the keychain),
   `user-preference-write <domain>` (`defaults write`). `log` refuses to run inside a sandbox.
 - A deny with `(with message "<text>")` appends `\n<text>` to its event. nono's own `(deny default)` has none.
-- One report per process: 200 refused writes in one process, to one path or to 200, logged one event. Separate
-  processes each get theirs, and the kernel folds repeats into `N duplicate reports for ...`.
+- Repeats in a burst fold: 200 refused writes in one process, to one path or to 200, logged one event. Separate
+  processes each get theirs, and the kernel folds repeats into `N duplicate reports for ...`. Refusals a second or
+  more apart are each reported, to the same path or new ones (#342).
+- A sandboxed `node` process's first refusals are sometimes not reported: in several runs, nothing for the first
+  5-7 s after its first refusal, then every one; in others, all of them. `touch` and `python3` were always reported
+  (#342; the rule behind it is unverified). A block in that window isn't asked about unless it happens again, so
+  `cli/tests/e2e/blocks.mjs`'s faux tool retries its refused write once a second for 10 s.
 - The pid is the refused process (`touch`, not the shell that ran it), usually gone when the event arrives. macOS
   returns another process's arguments but not its environment to a non-root reader (`KERN_PROCARGS2`), even for the
   same user's processes.

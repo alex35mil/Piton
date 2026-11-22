@@ -4,7 +4,9 @@
 //   "slow <n>"   reply with n words, streamed slowly, so a test can attach mid-stream
 //   "tool"       call the built-in bash tool with `sleep 2; echo done`, then answer
 //   "bash <cmd>" call the bash tool with <cmd>; "rerun <reason>|<cmd>" with <cmd> and outside_sandbox (#241)
-//   "write <path>" call the `faux_write` tool: pi's own process writes <path> (a block that isn't a bash call)
+//   "write <path>" call the `faux_write` tool: pi's own process writes <path> (a block that isn't a bash call), once a
+//                second for up to 10 s while it's refused: macOS may not report a process's first refusals for a
+//                few seconds (docs/pi-findings.md)
 //   "ask"        ask a select dialog through the `faux_ask` tool, then answer with the choice
 //   "picture"    call the `faux_picture` tool, which returns a 2 MB image (larger than a phone's WebSocket message)
 //   "status"     call the `faux_status` tool, which sets a status line and a widget, then clears them on "status clear"
@@ -123,12 +125,17 @@ export default function (pi: ExtensionAPI) {
         parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
         async execute(_id, params) {
             const fs = await import("node:fs");
-            try {
-                fs.writeFileSync(String(params.path), "x");
-                return { content: [{ type: "text", text: "written" }], details: {} };
-            } catch (error) {
-                return { content: [{ type: "text", text: String(error) }], details: {} };
+            let failure: unknown;
+            for (let attempt = 0; attempt < 10; attempt++) {
+                if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 1000));
+                try {
+                    fs.writeFileSync(String(params.path), "x");
+                    return { content: [{ type: "text", text: "written" }], details: {} };
+                } catch (error) {
+                    failure = error;
+                }
             }
+            return { content: [{ type: "text", text: String(failure) }], details: {} };
         },
     });
 
