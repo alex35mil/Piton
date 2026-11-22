@@ -500,7 +500,7 @@ arrive out of request order.
 | `session.send {session, message_id, text, mode?}` | pi's response data. Always pi's `prompt` with a `streamingBehavior`, so pi, not the daemon's view of its status, decides whether a run is active: `prompt` (default) and `follow_up` start a run when idle and queue a follow-up during one; `steer` steers a run. pi gets one prompt at a time (see "pi version"). `message_id` is the client's id for the message: a repeat with the same id reaches pi once and gets the first reply (see "Lost replies") |
 | `session.abort {session}` | `{}` |
 | `session.answer {session, request_id, answer}` | `{}`; `answer` has pi's `value`, `confirmed`, or `cancelled`. Refused when already answered |
-| `session.decide {session, question, answer}` | `{}`; a typed answer to a pending Piton question. The block question takes `{"once": {runtime, grant?}}`, `"deny"`, or `{"always": {runtime, grant?, scope: "project" \| "global", pattern}}`, the runtime and grant read as a `[[sandbox.commands]]` entry's and limited to what the question offers (the host, `all`, or the requested grant). Refused when already answered, expired, invalid, or not offered |
+| `session.decide {session, question, answer}` | `{}`; a typed answer to a pending Piton question. The block question takes `{"once": "sandbox" \| "host"}`, `"deny"`, or `{"always": {runtime, scope: "project" \| "global", pattern}}`. Refused when already answered, expired, or invalid |
 
 A session's `checkout` is `{kind: "source"}` (the workspace is the project) or `{kind: "worker", source, name}` for a
 worker `<repo>--<name>` of the project at `source`. The daemon decides it the way it does for the sandbox (the worker's
@@ -1123,11 +1123,10 @@ with no helper and no policy, and only a saved `runtime = "host"` entry or the u
 - The permissions extension registers pi's own bash tool definition (rendering, truncation, session environment) with
   operations that send `run_command {token, call_id, command, cwd, timeout, env, reason?, rerun?}` over `agent.sock`
   and stream the answer (output chunks, then the exit, a timeout, or why it didn't run), and handles `user_bash` the
-  same way (`call_id: "user:<n>"`, never a `rerun`). Outside a daemon-launched sandboxed session pi's own bash stays.
+  same way (`call_id: "user:<n>"`). Outside a daemon-launched sandboxed session pi's own bash stays.
 - The daemon accepts a request only for a bash call pi reported running (`tool_execution_start`) with exactly that
-  command, once per call; a rerun only when that call's arguments asked for exactly that rerun (`rerun`, read from
-  pi's event with the same parser, since pi emits it before validating). A typed command always runs at the session's
-  policy. The daemon picks the shell and `shellCommandPrefix` from pi's settings
+  command, once per call; a rerun only when that call's arguments asked for it (`rerun: {runtime}`). A typed
+  command always runs at the session's policy. The daemon picks the shell and `shellCommandPrefix` from pi's settings
   files (the agent directory's and the workspace's `.pi/`, neither writable from the sandbox).
 - At the session's own policy the command gets the environment the extension sends (pi's shell environment); widened,
   the session's launch environment, so a request can't point a granted command at its own `PATH`. Either reaches only
@@ -1140,10 +1139,10 @@ with no helper and no policy, and only a saved `runtime = "host"` entry or the u
   records which of those values came from a file the launch's sandbox can write (`launch/env.rs`,
   `SandboxEnv::agent_writable`; a tool that names no file counts as writable), and the block question shows them on its
   host side.
-- When a call runs anywhere but the session's own sandbox, the daemon sends `{type: "ran", runtime: "sandbox", grant,
-  by}` (the grant as written after `grant = `: `"all"` or an inline table) or `{type: "ran", runtime: "host", by}`,
-  `by` being `"grant"` or `"approval"`, before its output, and the extension adds a line saying where, and with what,
-  to the result.
+- When a call runs anywhere but the session's own sandbox, the daemon sends `{type: "ran", runtime: "sandbox" |
+  "host", by: "grant" | "approval"}` before its output, and the extension adds a line saying where to the result. A
+  sandbox run by a saved entry only says the entry widened it (its grant may be narrowed); an approved rerun says
+  everything but the floor was open.
 - As in pi's bash, the call ends when the shell exits and its background jobs keep running; the agent's stop (the
   connection closes) or the timeout kills the call's process group.
 - Limit: commands the daemon runs don't go through fnox's proxy. And pi reports a call running before its permission
@@ -1152,43 +1151,33 @@ with no helper and no policy, and only a saved `runtime = "host"` entry or the u
 
 **Per-command entries** (`[[sandbox.commands]]`, `match = "bash(...)"`, a required `runtime`: `"sandbox"` with
 `grant = "all"` or a table of the `[sandbox]` grant lists, or `"host"` with no grant; the user's own files only;
-`CommandRuntime` in the model, so a host entry with a grant can't be represented; a rerun request, a block question's
-answer, and a saved entry all go through its one parser): a matching call runs where its entry says from the start,
-never failing first. The
+`CommandRuntime` in the model, so a host entry with a grant can't be represented): a matching call runs where its
+entry says from the start, never failing first. The
 daemon matches with a Rust port of the permissions extension's Bash analysis and glob (`agent/command.rs`), held
 identical by one fixture file run by both test suites (`pi/tests/fixtures/bash-matching.json`): every command node must
 match the same entry, and a command that writes a file through a redirect gets no grant. A narrowed grant's policy is
 the launch's resolved again with the grant's lists added, so it never reaches the floor either.
 
-**The block question.** After a command failed in the sandbox, the agent asks for a rerun with `rerun` (and a
-`reason`): the runtime and grant of a `[[sandbox.commands]]` entry, `{runtime: "host"}` or `{runtime: "sandbox",
-grant: "all" | {write?, write_file?, read?, connect?, bind?, services?, presets?}}`, so it names exactly what it
-needs; the tool's schema is a union, so it can't build a host rerun with a grant or a sandbox one without. A narrowed
-grant is resolved before the question through the launch's configuration, as if this project's `config.local.toml`
-listed it (as a saved narrowed entry is), so it never reaches the floor; one that can't resolve (an unset `$VAR`, a
-relative path) is refused without asking. The question is Piton's own, a typed value the daemon holds
-(`agent/question.rs`): the command, the agent's reason, the refusals the kernel recorded for the call's last run, what
-`open` would do, the session's agent-writable variables, and what was requested. It opens on the request. Its sandbox
-side is the requested grant, or `all` when the agent asked for the host (the agent asks for more access, so it can't
-remove the safer choice); a narrowed grant can be widened to `all`. An answer runs only where the question offers
-(the host, `all`, or exactly the requested grant); editing the grant lists is #338. Answers: once, deny, or always for
-this command or an edited pattern, in this project (its source checkout's `.piton/config.local.toml`) or everywhere
-(the global `config.toml`), each at the chosen runtime; always appends one `[[sandbox.commands]]` entry with exactly
-that runtime and grant, and new sessions use it. The daemon renders the question per connection, by the protocol its
-hello chose, so the view protocol isn't shaped by pi's dialogs:
+**The block question.** The agent asks for a rerun with `rerun: {runtime: "sandbox" | "host"}` (and a `reason`) after
+a command failed in the sandbox; `runtime` is only a hint for the side the question opens on, and anything else in
+`rerun`, such as a grant, is refused. The question is Piton's own, a typed value the daemon holds (`agent/question.rs`): the command,
+the agent's reason, the refusals the kernel recorded for the call's last run, what `open` would do, the session's
+agent-writable variables, and the runtime it opens on (the hint: sandbox at `all`, or the host; both are always
+offered). Answers: once, deny, or always
+for this command or an edited pattern, in this project (its source checkout's `.piton/config.local.toml`) or
+everywhere (the global `config.toml`), each in the chosen runtime; always appends one `[[sandbox.commands]]` entry,
+`runtime = "sandbox"` with `grant = "all"` or `runtime = "host"`, and new sessions use it. The daemon renders the
+question per connection, by the protocol its hello chose, so the view protocol isn't shaped by pi's dialogs:
 
-- `view` clients (the apps) get it typed in the session state (`questions`: `runtime`, the side the switch starts on;
-  `requested`, the entry as `{runtime, grant?}`; `grant_entry`, a narrowed grant as inline TOML or null; `wording`
-  with `all`, `narrowed` or null, and `host`) and answer with `session.decide`. The apps draw the runtime as a switch
-  (left and right arrows with a keyboard), a narrowed grant's entry with a toggle that widens it to `all`, the pattern
-  inline, and on the host side the agent-writable variables in a disclosure folded by default.
+- `view` clients (the apps) get it typed in the session state (`questions`) and answer with `session.decide`. The apps
+  draw the runtime as a switch (left and right arrows with a keyboard), the pattern inline, and on the host side the
+  agent-writable variables in a disclosure folded by default.
 - `rpc` clients (`piton attach`, so pi.nvim) get pi's dialog record (`select`), inserted like the protected-write
   dialog and kept out of the `view` state's `dialogs`. Its first option, "Choose an answer below", decides nothing and
   shows the question again (clients highlight the first option, and pi's `select` has no unselected state), so Enter
-  alone never answers; its last switches the runtime and shows it again; while a narrowed grant shows, the one before
-  it widens to `all` and shows it again; a pattern is a second dialog, an `input` prefilled with the command and
-  subcommand plus ` *`. A narrowed grant's title shows its entry; on the host side the title lists the agent-writable
-  variables, ten per file. A label of another side's dialog denies.
+  alone never answers; its last switches the runtime and shows it again; a pattern is a second dialog, an `input`
+  prefilled with the command and subcommand plus ` *`. On the host side the title lists the agent-writable variables,
+  ten per file. A label of the other runtime's dialog denies.
 - Both map to the same typed answer, and answering either closes both. This is the first Piton question; protected
   writes and process questions are still pi dialogs (#338 generalizes it).
 

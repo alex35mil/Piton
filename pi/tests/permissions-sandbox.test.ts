@@ -126,10 +126,9 @@ describe("bash in a sandboxed session under piton", () => {
                 const { registered, bash } = register(daemon.socket)
                 assert.ok(registered && bash)
                 const updates: string[] = []
-                const rerun = { runtime: "sandbox" as const, grant: { write: ["~/.cache/husky"] } }
                 const result = await bash.execute(
                     "call-7",
-                    { command: "husky install", rerun, reason: "hooks" },
+                    { command: "husky install", rerun: { runtime: "host" }, reason: "hooks" },
                     undefined,
                     (update) => updates.push(update.content.map((p) => (p.type === "text" ? p.text : "")).join("")),
                     context(daemon.dir),
@@ -145,7 +144,7 @@ describe("bash in a sandboxed session under piton", () => {
                 assert.equal(request!.token, "token")
                 assert.equal(request!.call_id, "call-7")
                 assert.equal(request!.command, "husky install", "the agent's command, unprefixed")
-                assert.deepEqual(request!.rerun, rerun, "the rerun as the agent wrote it")
+                assert.deepEqual(request!.rerun, { runtime: "host" }, "the hinted runtime")
                 assert.equal(request!.reason, "hooks")
                 const env = request!.env as Record<string, string>
                 assert.equal(env.PI_SESSION_ID, "s", "pi's session variables")
@@ -165,7 +164,7 @@ describe("bash in a sandboxed session under piton", () => {
             await assert.rejects(
                 bash!.execute(
                     "c",
-                    { command: "rm x", rerun: { runtime: "sandbox", grant: "all" } },
+                    { command: "rm x", rerun: { runtime: "sandbox" } },
                     undefined,
                     undefined,
                     context(daemon.dir),
@@ -184,24 +183,11 @@ describe("bash in a sandboxed session under piton", () => {
     })
 
     it("says where a widened or host run ran, and nothing for the session's own sandbox", async () => {
-        const narrowed = '{ connect = ["$TMPDIR"] }'
-        const daemon = await fakeDaemon((request) => {
-            switch (request.command) {
-                case "plain":
-                    return [out("ok\n"), { type: "exit", code: 0 }]
-                case "tests":
-                    return [
-                        { type: "ran", runtime: "sandbox", grant: narrowed, by: "approval" },
-                        { type: "exit", code: 0 },
-                    ]
-                default:
-                    return [
-                        { type: "ran", runtime: "host", by: "approval" },
-                        out("probed\n"),
-                        { type: "exit", code: 1 },
-                    ]
-            }
-        })
+        const daemon = await fakeDaemon((request) =>
+            request.command === "plain"
+                ? [out("ok\n"), { type: "exit", code: 0 }]
+                : [{ type: "ran", runtime: "host", by: "approval" }, out("probed\n"), { type: "exit", code: 1 }],
+        )
         try {
             const { bash } = register(daemon.socket)
             const host = await bash!.execute(
@@ -214,19 +200,6 @@ describe("bash in a sandboxed session under piton", () => {
             assert.match(text(host), /probed/)
             assert.match(text(host), /on the host/)
             assert.deepEqual((host.structuredContent as { ran?: unknown }).ran, { runtime: "host", by: "approval" })
-            const tests = await bash!.execute(
-                "t",
-                { command: "tests", rerun: { runtime: "sandbox", grant: { connect: ["$TMPDIR"] } } },
-                undefined,
-                undefined,
-                context(daemon.dir),
-            )
-            assert.ok(text(tests).includes(narrowed), "names the narrowed grant")
-            assert.deepEqual((tests.structuredContent as { ran?: unknown }).ran, {
-                runtime: "sandbox",
-                grant: narrowed,
-                by: "approval",
-            })
             const plain = await bash!.execute("d", { command: "plain" }, undefined, undefined, context(daemon.dir))
             assert.doesNotMatch(text(plain), /on the host|widened/)
         } finally {
@@ -236,32 +209,18 @@ describe("bash in a sandboxed session under piton", () => {
 
     it("names each runtime and cause", () => {
         assert.match(ranLine({ runtime: "host", by: "grant" }), /host[\s\S]*saved/)
-        assert.match(ranLine({ runtime: "sandbox", grant: '"all"', by: "approval" }), /everything[\s\S]*user/)
-        assert.match(ranLine({ runtime: "sandbox", grant: '{ write = ["/x"] }', by: "grant" }), /\/x[\s\S]*saved/)
+        assert.match(ranLine({ runtime: "sandbox", by: "approval" }), /everything open[\s\S]*user/)
+        assert.match(ranLine({ runtime: "sandbox", by: "grant" }), /widened[\s\S]*saved/)
+        assert.doesNotMatch(ranLine({ runtime: "sandbox", by: "grant" }), /everything/, "a saved grant may be narrowed")
     })
 
-    it("takes a rerun shaped like a per-command entry: a host one has no grant, a sandbox one needs one", () => {
+    it("takes a rerun that hints only the runtime", () => {
         const { bash } = register("/nowhere")
-        const rerun = (bash!.parameters as { properties: { rerun: unknown } }).properties.rerun
-        assert.ok(rerun, "the tool takes `rerun`")
-        assert.ok(!("outside_sandbox" in (bash!.parameters as { properties: object }).properties))
+        const properties = (bash!.parameters as { properties: Record<string, unknown> }).properties
+        assert.ok(properties.rerun && !("outside_sandbox" in properties))
         const validator = compile(RerunSchema)
-        for (const ok of [
-            { runtime: "host" },
-            { runtime: "sandbox", grant: "all" },
-            { runtime: "sandbox", grant: { connect: ["$TMPDIR"], write: ["~/x"] } },
-            { runtime: "sandbox", grant: {} },
-        ])
-            assert.ok(validator.validate(ok).ok, JSON.stringify(ok))
-        for (const bad of [
-            { runtime: "host", grant: "all" },
-            { runtime: "sandbox" },
-            { runtime: "sandbox", grant: "everything" },
-            { runtime: "sandbox", grant: { deny: ["/"] } },
-            { runtime: "sandbox", grant: { write: "/x" } },
-            { runtime: "vm" },
-            true,
-        ])
+        for (const ok of [{ runtime: "sandbox" }, { runtime: "host" }]) assert.ok(validator.validate(ok).ok)
+        for (const bad of [{ runtime: "sandbox", grant: "all" }, { runtime: "vm" }, {}, true])
             assert.ok(!validator.validate(bad).ok, JSON.stringify(bad))
     })
 

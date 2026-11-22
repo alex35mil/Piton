@@ -26,7 +26,9 @@ pub use self::{
         Controls, PROTECTED_ENV, Protected, ProtectedFacts, ProtectedRoots, canonical_target, fixed_entries, lexical,
         link_entries,
     },
-    run::{Approved, PiShell, Ran, RunDecision, RunEnd, RunEvent, RunRequest, RunSpec, Runtime, Why, host_env, run},
+    run::{
+        Approved, PiShell, Ran, Rerun, RunDecision, RunEnd, RunEvent, RunRequest, RunSpec, Runtime, Why, host_env, run,
+    },
     socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, random_hex, serve},
     write::{
         FileMode, WriteDecision, WriteOutcome, WriteRequest, remove_file, write_approved, write_dialog, write_file,

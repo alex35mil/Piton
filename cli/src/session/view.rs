@@ -1509,13 +1509,13 @@ mod tests {
             dialogs,
             questions,
         };
-        let question = crate::agent::question::Question::new(
-            "piton:question:3".into(),
-            "mise run cli:test".into(),
-            Some("its test daemons connect to sockets in temp".into()),
-            vec!["network-outbound /private/var/folders/x/T/piton-e2e/daemon.sock".into()],
-            None,
-            vec![
+        let question = crate::agent::question::Question {
+            id: "piton:question:3".into(),
+            command: "sh cli/tests/probe/protected.sh".into(),
+            reason: Some("it starts a sandbox of its own".into()),
+            refusals: vec!["process-exec /Users/me/.local/bin/piton".into()],
+            note: None,
+            writable_vars: vec![
                 crate::launch::env::WritableVars {
                     source: Some("/Users/me/Projects/app/mise.toml".into()),
                     names: vec!["RUST_LOG".into()],
@@ -1525,11 +1525,8 @@ mod tests {
                     names: vec!["PATH".into()],
                 },
             ],
-            crate::config::CommandRuntime::Sandbox(crate::config::Grant::Lists(Box::new(crate::config::GrantLists {
-                connect: vec![crate::config::Connect::Socket("$TMPDIR".into())],
-                ..Default::default()
-            }))),
-        )
+            runtime: crate::agent::question::Target::Sandbox,
+        }
         .view();
         let snapshot_before = view.snapshot(50).to_string();
         for record in tool_turn() {
