@@ -96,8 +96,11 @@ In a sandboxed session Piton's daemon launched (`PITON_RUNTIME=sandbox` with `PI
 the daemon, and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
 sandbox, so the daemon runs each in its own, tagged with the call (`sandbox.ts`). pi's rendering, truncation,
 `shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `outside_sandbox`
-(after the sandbox blocked this exact command, run it again outside; the user is asked) and `reason`. Permission rules
-still decide first. Elsewhere pi's own bash stays. See "Asking when the sandbox blocks" in `docs/design.md`.
+(after the sandbox blocked this exact command, run it again outside; the user is asked and may run it in a widened
+sandbox or on the host with no sandbox) and `reason`. When a call ran anywhere but the session's own sandbox (a
+per-command entry or the user's answer), the daemon says so before the output, and the result ends with one line
+naming where (`structuredContent.ran`). Permission rules still decide first. Elsewhere pi's own bash stays. See
+"Asking when the sandbox blocks" in `docs/design.md`.
 
 The daemon matches `[[sandbox.commands]]` grants with a Rust port of this extension's Bash analysis and glob; both
 run the cases in `pi/tests/fixtures/bash-matching.json`.

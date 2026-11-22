@@ -462,7 +462,8 @@ sends a snapshot plus numbered changes. It's built from pi's entries (`get_entri
   `state {state}`, `reset` (conversation replaced; a new snapshot follows).
 - **State:** `status` (`idle`, `working`, `needs_input`, `stopping`), workspace, mode, session id/file/name, `title`
   (name, else the first line of the first user message), model, thinking level, queue (`steering`, `follow_up`),
-  pending dialogs (pi's `extension_ui_request` records).
+  pending dialogs (pi's `extension_ui_request` records), and pending Piton questions (`questions`, typed; today the
+  block question for a command, `kind: "command"`, see "The block question").
 - **Window:** the newest `limit` items (default 50, max 200); `session.history` pages back.
 - **Resume:** every change has a `seq`. `session.watch {from}` sends the missed changes, or a snapshot when they aren't
   kept (5000 per session) or a reset happened since.
@@ -499,6 +500,7 @@ arrive out of request order.
 | `session.send {session, message_id, text, mode?}` | pi's response data. Always pi's `prompt` with a `streamingBehavior`, so pi, not the daemon's view of its status, decides whether a run is active: `prompt` (default) and `follow_up` start a run when idle and queue a follow-up during one; `steer` steers a run. pi gets one prompt at a time (see "pi version"). `message_id` is the client's id for the message: a repeat with the same id reaches pi once and gets the first reply (see "Lost replies") |
 | `session.abort {session}` | `{}` |
 | `session.answer {session, request_id, answer}` | `{}`; `answer` has pi's `value`, `confirmed`, or `cancelled`. Refused when already answered |
+| `session.decide {session, question, answer}` | `{}`; a typed answer to a pending Piton question. The block question takes `{"once": "sandbox" \| "host"}`, `"deny"`, or `{"always": {runtime, scope: "project" \| "global", pattern}}`. Refused when already answered, expired, or invalid |
 
 A session's `checkout` is `{kind: "source"}` (the workspace is the project) or `{kind: "worker", source, name}` for a
 worker `<repo>--<name>` of the project at `source`. The daemon decides it the way it does for the sandbox (the worker's
@@ -576,7 +578,8 @@ Every connection starts with a hello declaring its protocol:
     `session.stop {id}`;
   - `session.watch {id, from?}` → snapshot + changes, `session.unwatch`, `session.history {id, before, limit}`;
   - `session.send {id, message_id, text, images?, mode: prompt|steer|follow_up}`, `session.abort {id}`,
-    `session.answer {id, requestId, value|confirmed|cancelled}`;
+    `session.answer {id, requestId, value|confirmed|cancelled}`, `session.decide {id, question, answer}` (a Piton
+    question's typed answer);
   - `workspaces.browse {path?}`, `workspaces.recent`, `workspaces.search {query}`, `devices.register {apnsToken}`, `presence {id?, foreground}`.
 
   Commands map to pi RPC commands, so pi sees the same thing whichever client sent it.
@@ -1042,7 +1045,8 @@ fnox files, and gives pi a copy in `PITON_PROTECTED` (set after the workspace's 
 protected` answers from. Outside a session it answers from the workspace (levels and `PI_CODING_AGENT_DIR` or
 `~/.pi/agent`, no fnox files). Changing that copy only changes where pi sends a write: the sandbox still denies the
 direct write, and the daemon checks the path against its own. The sandbox closes these files as rules 4 and 6 of
-"Agent access" say; no command approval ("Allow once", `grant = "all"`) opens them.
+"Agent access" say; no sandboxed command approval ("Allow once" in the sandbox, `grant = "all"`) opens them. A command
+the user chose to run on the host has no sandbox, so they're open to it like any program the user runs.
 
 Changes are gated where they're written:
 
@@ -1090,14 +1094,15 @@ shares.
 
 ### Asking when the sandbox blocks
 
-When the sandbox blocks something a sandboxed agent needs, the user is asked, and nothing runs fully unsandboxed
-(#241). Permissions decide whether the agent may make a call; the sandbox decides what a running process may touch;
-when the sandbox blocks something, the user decides.
+When the sandbox blocks something a sandboxed agent needs, the user is asked (#241), and nothing runs fully
+unsandboxed unless the user chooses the host for a command (#335). Permissions decide whether the agent may make a
+call; the sandbox decides what a running process may touch; when the sandbox blocks something, the user decides.
 
 **The floor** is what no approval lifts: protected files, every configuration level and pi's agent directory (and
 the folders on the way to them), the daemon's state and control socket, the user's own `[sandbox] deny`, the files
 fnox loads, and, while fnox is on, the credential denies (the sandbox could run `fnox get`). The configuration in it
-changes only through a write the user approves ("Protected files"); the rest never. `all` is the launch's policy with everything else open: writes
+changes only through a write the user approves ("Protected files"); the rest never. Only a command the user chose to
+run on the host passes it, since a host run has no sandbox at all. `all` is the launch's policy with everything else open: writes
 below every entry of `/` (nono refuses a write grant on `/` itself) and every socket connect and bind allowed first, then the launch's
 rules with every liftable deny left out, so the floor still decides last
 (`launch/sandbox/grant.rs`, where each deny's source and target say whether it's floor, matched exhaustively). Git's
@@ -1110,7 +1115,10 @@ process's pid, which is usually gone, and hides another process's environment fr
 sandboxed session the daemon, outside any sandbox, starts every bash call and `!` command itself, through
 `piton sandbox-exec` (`agent/run.rs`), each in its own sandbox: the session's policy, unless a grant or an approval
 widens it, tagged with the call. pi, its extensions, and MCP servers stay in pi's sandbox, which carries the session's
-tag; a process can't leave or widen its sandbox, so only the daemon can start one with more.
+tag; a process can't leave or widen its sandbox, so only the daemon can start one with more. Where a call runs is one
+sum type the daemon decides and the runner matches (`Runtime`: the session's sandbox, a widened one with what widened
+it, or the host with what put it there), so nothing runs on the host by default: a host run starts the shell itself,
+with no helper and no policy, and only a saved `runtime = "host"` entry or the user's answer makes one.
 
 - The permissions extension registers pi's own bash tool definition (rendering, truncation, session environment) with
   operations that send `run_command {token, call_id, command, cwd, timeout, env, reason?, rerun}` over `agent.sock`
@@ -1125,36 +1133,59 @@ tag; a process can't leave or widen its sandbox, so only the daemon can start on
   the command: `piton sandbox-exec` runs outside any sandbox until it applies one, and the dynamic loader reads `DYLD_*`
   before `main`, so every sandboxed start (pi, environment tools, Git for workers, these commands) gives the helper only
   its own variables and carries the command's environment in `PITON_LAUNCH_ENV`, which it unpacks after applying the
-  sandbox.
+  sandbox. On the host, the command gets the session's launch environment, the workspace's environment tools'
+  values included (as Claude Code passes its own environment to an unsandboxed command), without `PITON_RUNTIME`,
+  `PITON_SESSION_TOKEN`, and `PITON_AGENT_SOCKET`, so it isn't taken for the session's pi. At launch the daemon
+  records which of those values came from a file the launch's sandbox can write (`launch/env.rs`,
+  `SandboxEnv::agent_writable`; a tool that names no file counts as writable), and the block question shows them on its
+  host side.
+- When a call runs anywhere but the session's own sandbox, the daemon sends `{type: "ran", runtime: "sandbox" |
+  "host", by: "grant" | "approval"}` before its output, and the extension adds a line saying where to the result.
 - As in pi's bash, the call ends when the shell exits and its background jobs keep running; the agent's stop (the
   connection closes) or the timeout kills the call's process group.
 - Limit: commands the daemon runs don't go through fnox's proxy. And pi reports a call running before its permission
   gate decides, so another command could ask the daemon to run a call that's still waiting for an `ask` answer; only a
   command a per-command grant covers runs widened that way, and a rerun always asks the user.
 
-**Per-command grants** (`[[sandbox.commands]]`, `match = "bash(...)"`, `grant = "all"` or a table of the `[sandbox]`
-grant lists; the user's own files only): a matching call runs at that grant from the start, never failing first. The
+**Per-command entries** (`[[sandbox.commands]]`, `match = "bash(...)"`, a required `runtime`: `"sandbox"` with
+`grant = "all"` or a table of the `[sandbox]` grant lists, or `"host"` with no grant; the user's own files only;
+`CommandRuntime` in the model, so a host entry with a grant can't be represented): a matching call runs where its
+entry says from the start, never failing first. The
 daemon matches with a Rust port of the permissions extension's Bash analysis and glob (`agent/command.rs`), held
 identical by one fixture file run by both test suites (`pi/tests/fixtures/bash-matching.json`): every command node must
 match the same entry, and a command that writes a file through a redirect gets no grant. A narrowed grant's policy is
 the launch's resolved again with the grant's lists added, so it never reaches the floor either.
 
 **The block question.** The agent asks for a rerun with `outside_sandbox: true` (and a `reason`) after a command
-failed in the sandbox. The daemon asks through pi's dialog record (`select`), inserted like the protected-write
-dialog, so the apps and pi.nvim show it with their dialog UI; only a client answers. It names the command, the
-agent's reason, and the refusals the kernel recorded for the call's last run. The first option, "Choose an answer
-below", decides nothing and shows the question again (clients highlight the first option, and pi's `select` has no
-unselected state), so Enter alone never answers. Options: allow once (the whole command
-runs again, at `all`), deny, allow this command or an edited pattern (an `input` prefilled with the command and
-subcommand plus ` *`), in this project (its source checkout's `.piton/config.local.toml`) or everywhere (the global
-`config.toml`). Persisting appends one `[[sandbox.commands]]` entry with `grant = "all"`; new sessions use it. One
+failed in the sandbox. The question is Piton's own, a typed value the daemon holds (`agent/question.rs`): the command,
+the agent's reason, the refusals the kernel recorded for the call's last run, what `open` would do, the session's
+agent-writable variables, and the runtime it reruns in (sandbox at `all`, or the host). Answers: once, deny, or always
+for this command or an edited pattern, in this project (its source checkout's `.piton/config.local.toml`) or
+everywhere (the global `config.toml`), each in the chosen runtime; always appends one `[[sandbox.commands]]` entry,
+`runtime = "sandbox"` with `grant = "all"` or `runtime = "host"`, and new sessions use it. The daemon renders the
+question per connection, by the protocol its hello chose, so the view protocol isn't shaped by pi's dialogs:
+
+- `view` clients (the apps) get it typed in the session state (`questions`) and answer with `session.decide`. The apps
+  draw the runtime as a switch (left and right arrows with a keyboard), the pattern inline, and on the host side the
+  agent-writable variables in a disclosure folded by default.
+- `rpc` clients (`piton attach`, so pi.nvim) get pi's dialog record (`select`), inserted like the protected-write
+  dialog and kept out of the `view` state's `dialogs`. Its first option, "Choose an answer below", decides nothing and
+  shows the question again (clients highlight the first option, and pi's `select` has no unselected state), so Enter
+  alone never answers; its last switches the runtime and shows it again; a pattern is a second dialog, an `input`
+  prefilled with the command and subcommand plus ` *`. On the host side the title lists the agent-writable variables,
+  ten per file. A label of the other runtime's dialog denies.
+- Both map to the same typed answer, and answering either closes both. This is the first Piton question; protected
+  writes and process questions are still pi dialogs (#338 generalizes it).
+
+Only a client answers. One
 question at a time per session, shared with protected writes; no answer within `confirmation_timeout_ms` (host
 configuration, 10 minutes by default), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
 (`agent/open/`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
 scheme names the app Launch Services hands it to (`LSCopyDefaultApplicationURLForURL`, asked by the daemon) and is
 refused when none does or the app is one the sandbox could have written; a file or app the sandbox could have written,
-as a path or a `file:` URL (decoded to its path), is refused, since macOS would run it unsandboxed. The rerun opens
-every Mach service and launching apps (`grant::all`), so an approved `open` opens.
+as a path or a `file:` URL (decoded to its path), is refused, since macOS would run it unsandboxed. These checks
+guard both runtimes. A sandboxed rerun opens every Mach service and launching apps (`grant::all`), so an approved
+`open` opens.
 
 **Blocks with nothing to rerun** (an MCP server, an extension, pi itself). Every deny Piton emits carries
 `(with message "piton-<tag>")`: `<session>-<random>` for pi's sandbox, `<session>-<random>-<n>` for a call's. A

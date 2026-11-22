@@ -81,6 +81,11 @@ pub enum ViewCommand {
         request_id: String,
         answer: Value,
     },
+    /// A typed answer to a Piton question (`session.decide`).
+    Decide {
+        question: String,
+        answer: Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -970,11 +975,15 @@ impl SessionTask {
     }
 
     fn publish_view_state(&mut self) {
+        // The block question goes to `view` clients typed; its `rpc` rendering is for `piton attach` only.
+        let rpc_only = self.question.as_ref().map(|q| q.dialog_id.as_str());
         let dialogs: Vec<Value> = self
             .replay
             .pending_dialogs()
-            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|d| d.get("id").and_then(Value::as_str) != rpc_only || rpc_only.is_none())
             .collect();
+        let questions: Vec<Value> = self.question.iter().map(|q| q.question.view()).collect();
         let input = {
             let shared = lock(&self.shared);
             StateInput {
@@ -984,6 +993,7 @@ impl SessionTask {
                 session_id: shared.id.clone(),
                 session_file: shared.file.clone(),
                 dialogs,
+                questions,
             }
         };
         if let Some(change) = self.view.publish_state(input) {
@@ -1025,6 +1035,13 @@ impl SessionTask {
                 let rpc = json!({"type": "abort"});
                 let command = command_type(rpc.as_object().expect("an object"));
                 (rpc, Pending::View { command, reply })
+            }
+            ViewCommand::Decide { question, answer } => {
+                let result = self.decide(&question, &answer);
+                let _ = reply.send(result.map(|()| json!({})));
+                self.sync_shared();
+                self.publish_view_state();
+                return;
             }
             ViewCommand::Answer { request_id, answer } => {
                 let mut response = match answer {
@@ -1101,7 +1118,7 @@ impl SessionTask {
                     self.publish_view_state();
                     return;
                 }
-                if self.question.as_ref().is_some_and(|q| q.id == id) {
+                if self.question.as_ref().is_some_and(|q| q.dialog_id == id) {
                     self.answer_question(&command);
                     self.sync_shared();
                     self.publish_view_state();
@@ -1263,17 +1280,27 @@ impl SessionTask {
         match commands.decide(&mut self.calls, &request) {
             commands::First::Decided(decision) => {
                 match &decision {
-                    // Every call runs here; only a widened one is worth a line in the daemon log.
-                    RunDecision::Run(approved) => {
-                        if approved.policy.rules != commands.policies.launch.rules {
+                    // Every call runs here; only a widened or host one is worth a line in the daemon log.
+                    RunDecision::Run(approved) => match &approved.runtime {
+                        crate::agent::Runtime::Session(_) => {}
+                        crate::agent::Runtime::Widened { .. } => {
                             crate::log!("session {key}: running a command with its per-command grant");
                         }
-                    }
+                        crate::agent::Runtime::Host { .. } => {
+                            crate::log!("session {key}: running a command on the host by its per-command entry");
+                        }
+                    },
                     RunDecision::NotRun { reason } => crate::log!("session {key}: command request refused: {reason}"),
                 }
                 let _ = reply.send(decision);
             }
             commands::First::Ask { refusals, tag, note } => {
+                let question = commands.question(
+                    format!("piton:question:{}", self.next_internal + 1),
+                    &request,
+                    refusals,
+                    note,
+                );
                 if self.asking() {
                     let _ = reply.send(RunDecision::NotRun {
                         reason: "another question is waiting for the user; try again after it's answered".into(),
@@ -1281,87 +1308,135 @@ impl SessionTask {
                     return;
                 }
                 self.next_internal += 1;
-                let id = format!("piton:block:{}", self.next_internal);
                 crate::log!("session {key}: asking to run a command outside the sandbox");
-                let record = crate::agent::block::dialog(
-                    &id,
-                    &crate::agent::block::Question {
-                        command: &request.command,
-                        reason: request.reason.as_deref(),
-                        refusals: &refusals,
-                        note: note.as_deref(),
-                    },
-                );
+                let dialog_id = self.next_dialog_id();
+                let record = crate::agent::question::rpc_dialog(&dialog_id, &question);
                 self.question = Some(commands::PendingQuestion {
-                    id,
+                    question,
+                    dialog_id,
                     stage: commands::Stage::Choice,
-                    dialog: record.clone(),
                     request,
                     tag,
                     reply,
                     deadline: Instant::now() + Duration::from_millis(self.config.confirmation_timeout_ms),
                 });
+                // To `rpc` clients as pi's dialog, kept for replay until answered; `view` clients get the typed
+                // question in the state instead.
                 self.on_pi_line(record.to_string());
             }
         }
     }
 
-    /// A client's answer to the block question: ask for the pattern, or decide.
+    /// A fresh id for the block question's `rpc` dialog.
+    fn next_dialog_id(&mut self) -> String {
+        self.next_internal += 1;
+        format!("piton:block:{}", self.next_internal)
+    }
+
+    /// An `rpc` client's answer to the block question's dialog: show it again, switch the runtime, ask for the
+    /// pattern, or decide.
     fn answer_question(&mut self, answer: &Map<String, Value>) {
-        use crate::agent::RunDecision;
         let Some(pending) = self.question.take() else { return };
-        let key = lock(&self.shared).key;
-        let decision = match commands::answer(pending.stage, &pending.request.command, answer) {
+        let next = commands::rpc_answer(pending.stage, &pending.question, answer);
+        let (question, stage, record) = match next {
+            commands::Next::Decided(answer) => return self.decide_question(pending, answer),
             commands::Next::AskAgain => {
-                // The same question, as a new dialog every client shows.
-                self.next_internal += 1;
-                let id = format!("piton:block:{}", self.next_internal);
-                let mut record = pending.dialog.clone();
-                record["id"] = Value::String(id.clone());
-                self.question = Some(commands::PendingQuestion { id, ..pending });
-                self.on_pi_line(record.to_string());
-                return;
+                let id = self.next_dialog_id();
+                let record = crate::agent::question::rpc_dialog(&id, &pending.question);
+                (pending.question.clone(), commands::Stage::Choice, (id, record))
             }
-            commands::Next::AskPattern(scope) => {
-                self.next_internal += 1;
-                let id = format!("piton:block:{}", self.next_internal);
-                let record = crate::agent::block::pattern_dialog(&id, &pending.request.command, scope);
-                self.question = Some(commands::PendingQuestion {
-                    id,
-                    stage: commands::Stage::Pattern(scope),
-                    ..pending
-                });
-                self.on_pi_line(record.to_string());
-                return;
+            commands::Next::Switch => {
+                let question = pending.question.switched();
+                let id = self.next_dialog_id();
+                let record = crate::agent::question::rpc_dialog(&id, &question);
+                (question, commands::Stage::Choice, (id, record))
             }
-            commands::Next::Deny => {
+            commands::Next::AskPattern(target, scope) => {
+                let id = self.next_dialog_id();
+                let record = crate::agent::question::rpc_pattern_dialog(&id, &pending.request.command, target, scope);
+                (
+                    pending.question.clone(),
+                    commands::Stage::Pattern(target, scope),
+                    (id, record),
+                )
+            }
+        };
+        let (dialog_id, record) = record;
+        self.question = Some(commands::PendingQuestion {
+            question,
+            dialog_id,
+            stage,
+            ..pending
+        });
+        self.on_pi_line(record.to_string());
+    }
+
+    /// A `view` client's typed answer to the block question (`session.decide`).
+    fn decide(&mut self, question: &str, answer: &Value) -> Result<(), String> {
+        let Some(pending) = &self.question else {
+            return Err("that question was already answered or expired".into());
+        };
+        if pending.question.id != question {
+            return Err("that question was already answered or expired".into());
+        }
+        let answer = crate::agent::question::parse_decision(answer)?;
+        let Some(pending) = self.question.take() else {
+            return Ok(());
+        };
+        // The `rpc` rendering's dialog closes in every attached client.
+        self.replay.answer_dialog(&pending.dialog_id);
+        self.decide_question(pending, answer);
+        Ok(())
+    }
+
+    /// The user's decision, from either rendering: save the entry when asked, then run or refuse.
+    fn decide_question(&mut self, pending: commands::PendingQuestion, answer: crate::agent::question::Answer) {
+        use crate::agent::{
+            RunDecision,
+            question::{Answer, Target},
+        };
+        let key = lock(&self.shared).key;
+        let where_ = |target: Target| match target {
+            Target::Sandbox => "in the sandbox",
+            Target::Host => "on the host",
+        };
+        let decision = match answer {
+            Answer::Deny => {
                 crate::log!("session {key}: the user denied running a command outside the sandbox");
                 RunDecision::NotRun {
                     reason: "the user denied running it outside the sandbox".into(),
                 }
             }
-            commands::Next::Run { persist } => {
-                let Some(commands) = &self.commands else { return };
-                let mut note = String::new();
-                if let Some((scope, pattern)) = persist {
-                    let shown = pattern.pattern().to_string();
-                    match commands.persist(scope, pattern) {
-                        Ok(path) => {
-                            crate::log!(
-                                "session {key}: saved a per-command grant for `{shown}` in {}",
-                                path.display()
-                            );
-                            note = format!(" (saved `bash({shown})` in {}; new sessions use it)", path.display());
-                        }
-                        Err(e) => {
-                            crate::log!("session {key}: couldn't save the per-command grant for `{shown}`: {e}");
-                            note = format!(" (couldn't save the grant: {e})");
-                        }
-                    }
+            Answer::Once(target) => match &self.commands {
+                Some(commands) => {
+                    crate::log!("session {key}: the user approved running a command {}", where_(target));
+                    RunDecision::Run(Box::new(commands.approved_rerun(
+                        &pending.request,
+                        &pending.tag,
+                        target,
+                    )))
                 }
-                crate::log!("session {key}: the user approved running a command outside the sandbox{note}");
-                RunDecision::Run(Box::new(commands.approved_rerun(&pending.request, &pending.tag)))
-            }
+                None => return,
+            },
+            Answer::Always { target, scope, pattern } => match &self.commands {
+                Some(commands) => {
+                    let shown = pattern.pattern().to_string();
+                    let note = match commands.persist(scope, pattern, target) {
+                        Ok(path) => format!(" (saved `bash({shown})` in {}; new sessions use it)", path.display()),
+                        Err(e) => format!(" (couldn't save the entry for `{shown}`: {e})"),
+                    };
+                    crate::log!(
+                        "session {key}: the user approved running a command {}{note}",
+                        where_(target)
+                    );
+                    RunDecision::Run(Box::new(commands.approved_rerun(
+                        &pending.request,
+                        &pending.tag,
+                        target,
+                    )))
+                }
+                None => return,
+            },
         };
         let _ = pending.reply.send(decision);
         self.ask_next_process();
@@ -1371,7 +1446,7 @@ impl SessionTask {
     /// stopped waiting.
     fn settle_question(&mut self) {
         let Some(pending) = &self.question else { return };
-        let gone = !self.replay.has_dialog(&pending.id);
+        let gone = !self.replay.has_dialog(&pending.dialog_id);
         if !gone && !pending.reply.is_closed() {
             return;
         }
@@ -1387,10 +1462,11 @@ impl SessionTask {
                 });
             }
             false => {
-                self.replay.answer_dialog(&pending.id);
+                self.replay.answer_dialog(&pending.dialog_id);
                 self.sync_shared();
             }
         }
+        self.publish_view_state();
     }
 
     /// A refusal the kernel recorded for this session: kept for the bash call it belongs to, or, for a process that
@@ -1619,7 +1695,7 @@ impl SessionTask {
     fn expire_question(&mut self) {
         let Some(pending) = self.question.take() else { return };
         crate::log!("session {}: a command question timed out", lock(&self.shared).key);
-        self.replay.answer_dialog(&pending.id);
+        self.replay.answer_dialog(&pending.dialog_id);
         let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
             reason: "the user didn't answer in time; it didn't run".into(),
         });

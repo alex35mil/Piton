@@ -103,6 +103,14 @@ pub enum ViewRequest {
         request_id: String,
         answer: serde_json::Value,
     },
+    /// Answer a Piton question (the state's `questions`) with its typed answer. For the block question:
+    /// `{"once": "sandbox" | "host"}`, `"deny"`, or `{"always": {"runtime", "scope": "project" | "global", "pattern"}}`.
+    #[serde(rename = "session.decide")]
+    SessionDecide {
+        session: u64,
+        question: String,
+        answer: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

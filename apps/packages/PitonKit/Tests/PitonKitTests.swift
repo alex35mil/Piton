@@ -46,6 +46,13 @@ private let decoder = JSONDecoder()
     #expect(state.dialogs.first?.method == .select)
     #expect(state.dialogs.first?.options == ["Allow", "Block"])
     #expect(state.dialogs.first?.timeout == 30000)
+    let question = try #require(state.questions.first)
+    #expect(question.kind == .command)
+    #expect(question.runtime == .sandbox)
+    #expect(question.suggestedPattern == "sh *")
+    #expect(question.wording.text(.host).contains("no sandbox"))
+    #expect(question.writableVars.map(\.source) == ["/Users/me/Projects/app/mise.toml", nil])
+    #expect(question.writableVars.last?.names == ["PATH"])
 }
 
 @Test func changesRebuildTheSnapshot() throws {
@@ -269,6 +276,8 @@ private let decoder = JSONDecoder()
     }
     #expect(data["session"]?["key"] == .integer(7))
     #expect(replies[2] == .reply(.failed(id: .string("r3"), error: "no live session 9")))
+    #expect(
+        replies[3] == .reply(.failed(id: .string("r4"), error: "that question was already answered or expired")))
 }
 
 @Test func unknownVariantsFailLoudly() {
@@ -284,6 +293,16 @@ private let decoder = JSONDecoder()
     #expect(back["session"] == .integer(7))
     #expect(String(decoding: encoded, as: UTF8.self).contains(#""session":7"#), "integers encode without a fraction")
     #expect(back["answer"]?["value"]?.string == "Allow")
+    let decide = Request.sessionDecide(7, question: "q1", decision: .once(.host)).json(id: "z")
+    #expect(decide["type"]?.string == "session.decide")
+    #expect(decide["question"]?.string == "q1")
+    #expect(decide["answer"]?["once"]?.string == "host")
+    #expect(Request.sessionDecide(7, question: "q1", decision: .deny).json(id: "z")["answer"]?.string == "deny")
+    let always = Request.sessionDecide(7, question: "q1", decision: .always(.sandbox, scope: .global, pattern: "git *"))
+        .json(id: "z")["answer"]?["always"]
+    #expect(always?["runtime"]?.string == "sandbox")
+    #expect(always?["scope"]?.string == "global")
+    #expect(always?["pattern"]?.string == "git *")
     let send = Request.sessionSend(7, messageID: "m1", text: "hi", mode: .followUp).json(id: "y")
     #expect(send["mode"]?.string == "follow_up")
     #expect(send["message_id"]?.string == "m1")

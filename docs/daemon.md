@@ -415,6 +415,7 @@ blocked too: the command meets the question below, or takes a per-command grant:
 ```toml
 [[sandbox.commands]]
 match = "bash(mise run cli:test*)"
+runtime = "sandbox"
 grant = { connect = ["$TMPDIR"] }
 ```
 
@@ -534,14 +535,24 @@ sandboxed session can write.
 
 In a sandboxed session, the daemon runs every bash command and `!` command, each in its own sandbox with the same rules
 as pi's. When a command fails because the sandbox blocked it, the agent can ask to run it again outside the sandbox,
-and you're asked in the apps or pi.nvim. The first option, **Choose an answer below**, decides nothing: it shows the
-question again, so Enter alone never answers.
+and you're asked in the apps or pi.nvim. You choose where it runs again, then answer:
 
-- **Allow once:** it runs again with everything open except the floor: protected files, configuration, pi's agent
+- **In the sandbox** (the default): everything open except the floor: protected files, configuration, pi's agent
   directory, Piton's state, your `deny`, and credentials while fnox is on. Every Mach service and launching apps
-  are open too, so an approved `open` opens. The whole command runs again, so its side effects repeat.
-- **Deny:** it stays failed.
-- **Allow this command, or a pattern, in this project or everywhere:** saves a per-command grant, and runs it.
+  are open too, so an approved `open` opens.
+- **On the host:** no sandbox at all, as you. For commands no sandbox can run: anything that starts a sandbox of its
+  own (`piton sandbox-exec`, `sh cli/tests/probe/protected.sh`), `log`, and tools that must write the floor. It
+  gets the session's environment, the workspace's `mise env` included, so it runs whatever the agent wrote into the
+  files it runs and into the files that set its environment (`mise.toml` can set `PATH` or `BASH_ENV`). The question
+  lists those variables, by file (folded in the apps).
+
+Then: **Allow once** (or **Run once on the host**), **Deny** (it stays failed), or **always** for this command or an
+edited pattern, in this project or everywhere, which saves a per-command entry for that runtime and runs it. The
+whole command runs again, so its side effects repeat. The agent's result says where it ran.
+
+The apps show a switch (left and right arrows with a keyboard) and the pattern inline. pi.nvim shows pi's dialog: its
+first option, **Choose an answer below**, decides nothing and shows the question again, so Enter alone never answers;
+its last option switches to the other runtime and asks again.
 
 No answer within `confirmation_timeout_ms` (10 minutes by default): it doesn't run. The agent can ask, never approve.
 `osascript` is never offered, and neither is `open` of a file or app the sandbox could have written, as a path or a
@@ -549,19 +560,31 @@ No answer within `confirmation_timeout_ms` (10 minutes by default): it doesn't r
 and is refused when no app handles it or the app is one the sandbox could have written. A blocked Mach service of a
 process that isn't a command (an MCP server, an extension) is asked about with `services = ["<name>"]`.
 
-Per-command grants, in the global `config.toml` or a `config.local.toml`:
+Per-command entries, in the global `config.toml` or a `config.local.toml`. `runtime` is required: `"sandbox"` with a
+`grant`, or `"host"` without one.
 
 ```toml
 [[sandbox.commands]]
 match = "bash(husky install *)"
-grant = "all"                               # everything except the floor (what "allow" saves)
+runtime = "sandbox"
+grant = "all"                               # everything except the floor (what "always" in the sandbox saves)
 
 [[sandbox.commands]]
 match = "bash(git push *)"
+runtime = "sandbox"
 grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed by hand: write, write_file, read, connect, bind, presets
+
+[[sandbox.commands]]
+match = "bash(sh cli/tests/probe/protected.sh)"
+runtime = "host"                            # no sandbox (what "always" on the host saves)
 ```
 
-A matching command runs with its grant from the start, matched as `[permissions]` rules match (every part of a
+A saved host entry runs its command on the host without asking, so whatever the agent writes into a file that command
+runs (a script, a Makefile, a package script, a `mise` task) or into a file that sets its environment runs on the host
+too, and no question shows the variables first. Claude Code's docs say the same about `excludedCommands`. Prefer a
+sandbox entry, narrowed if you can, and save a host entry only for a command whose files the agent can't change.
+
+A matching command runs where its entry says from the start, matched as `[permissions]` rules match (every part of a
 compound command must match the same entry; a command that writes a file with `>` gets none). Your `[permissions]`
 rules still decide first whether it runs at all.
 

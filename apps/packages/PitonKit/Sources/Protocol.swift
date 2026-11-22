@@ -288,9 +288,11 @@ public struct ViewState: Codable, Sendable, Hashable {
     public let queue: Queue
     /// Pending extension dialogs: pi's `extension_ui_request` records.
     public let dialogs: [Dialog]
+    /// Pending Piton questions, typed: answered with `session.decide`.
+    public let questions: [Question]
 
     enum CodingKeys: String, CodingKey {
-        case status, workspace, mode, title, model, queue, dialogs
+        case status, workspace, mode, title, model, queue, dialogs, questions
         case sessionID = "session_id"
         case sessionFile = "session_file"
         case sessionName = "session_name"
@@ -312,6 +314,90 @@ public struct Dialog: Codable, Sendable, Hashable, Identifiable {
     public let placeholder: String?
     public let prefill: String?
     public let timeout: Int?
+}
+
+/// A question Piton asks, typed. Today one kind: the block question for a command.
+public struct Question: Codable, Sendable, Hashable, Identifiable {
+    public enum Kind: String, Codable, Sendable {
+        case command
+    }
+
+    public let id: String
+    public let kind: Kind
+    public let command: String
+    public let reason: String?
+    /// What the sandbox refused when the command last ran (`operation path`).
+    public let refusals: [String]
+    /// What the command opens, for `open`.
+    public let note: String?
+    /// Where the daemon's own rendering shows it; the app keeps its own switch, starting here.
+    public let runtime: CommandRuntime
+    public let wording: Wording
+    /// The command and its subcommand plus ` *`.
+    public let suggestedPattern: String
+    /// The session's environment variables set by files the agent could write: what a host run gets that the agent
+    /// may have chosen.
+    public let writableVars: [WritableVars]
+
+    public struct Wording: Codable, Sendable, Hashable {
+        public let sandbox: String
+        public let host: String
+
+        public func text(_ runtime: CommandRuntime) -> String {
+            switch runtime {
+            case .sandbox: sandbox
+            case .host: host
+            }
+        }
+    }
+
+    public struct WritableVars: Codable, Sendable, Hashable {
+        /// The file that set them; nil when the tool named none.
+        public let source: String?
+        public let names: [String]
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, command, reason, refusals, note, runtime, wording
+        case suggestedPattern = "suggested_pattern"
+        case writableVars = "writable_vars"
+    }
+}
+
+/// Where an approved command runs again.
+public enum CommandRuntime: String, Codable, Sendable, Hashable, CaseIterable {
+    /// The session's sandbox with everything lifted except protected files, configuration, and the daemon's state.
+    case sandbox
+    /// The host, with no sandbox.
+    case host
+}
+
+/// Where an "always" answer saves its entry.
+public enum PersistScope: String, Codable, Sendable, Hashable, CaseIterable {
+    case project
+    case global
+}
+
+/// A typed answer to a Piton question (`session.decide`).
+public enum Decision: Sendable, Hashable {
+    case once(CommandRuntime)
+    case deny
+    /// Run it and save a `[[sandbox.commands]]` entry for `pattern`.
+    case always(CommandRuntime, scope: PersistScope, pattern: String)
+
+    var json: JSON {
+        switch self {
+        case .once(let runtime): .object(["once": .string(runtime.rawValue)])
+        case .deny: .string("deny")
+        case .always(let runtime, let scope, let pattern):
+            .object([
+                "always": .object([
+                    "runtime": .string(runtime.rawValue), "scope": .string(scope.rawValue),
+                    "pattern": .string(pattern),
+                ])
+            ])
+        }
+    }
 }
 
 /// How to answer a dialog (pi's `extension_ui_response` fields).
@@ -741,6 +827,7 @@ public enum Request: Sendable, Hashable {
     case sessionSend(SessionKey, messageID: String, text: String, mode: SendMode)
     case sessionAbort(SessionKey)
     case sessionAnswer(SessionKey, requestID: String, answer: DialogAnswer)
+    case sessionDecide(SessionKey, question: String, decision: Decision)
 
     /// The request as a JSON object with `id`.
     public func json(id: String) -> JSON {
@@ -809,6 +896,11 @@ public enum Request: Sendable, Hashable {
             session(key)
             fields["request_id"] = .string(requestID)
             fields["answer"] = answer.json
+        case .sessionDecide(let key, let question, let decision):
+            fields["type"] = .string("session.decide")
+            session(key)
+            fields["question"] = .string(question)
+            fields["answer"] = decision.json
         }
         return .object(fields)
     }

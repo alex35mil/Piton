@@ -1,14 +1,18 @@
 //! A bash call of a sandboxed session, run by the daemon: a sandboxed process can't apply a new sandbox, so the daemon,
-//! outside any, starts each call through `piton sandbox-exec` in its own sandbox: the session's policy, or one a grant
-//! or the user's approval widened, tagged with the call so the kernel's record of a refusal names it. It runs in its own
-//! process group; its output streams back to the agent's tool call. As in pi's own bash, the call ends when the shell
-//! exits (its background jobs keep running); the agent's stop or the timeout kills the whole group.
+//! outside any, starts each call where its [`Runtime`] says: through `piton sandbox-exec` in its own sandbox (the
+//! session's policy, or one a grant or the user's approval widened, tagged with the call so the kernel's record of a
+//! refusal names it), or, when the user chose it, on the host with no sandbox. It runs in its own process group; its
+//! output streams back to the agent's tool call. As in pi's own bash, the call ends when the shell exits (its
+//! background jobs keep running); the agent's stop or the timeout kills the whole group.
 
 use std::{path::Path, process::Stdio, time::Duration};
 
 use tokio::{io::AsyncReadExt, process::Command, sync::mpsc};
 
-use crate::launch::{Env, sandbox::Policy};
+use crate::{
+    config::CommandPattern,
+    launch::{Env, sandbox::Policy},
+};
 
 /// How long output may still arrive after the shell exits, as pi waits for its pipes (`EXIT_STDIO_GRACE_MS`).
 const EXIT_GRACE: Duration = Duration::from_millis(100);
@@ -53,11 +57,88 @@ pub enum RunDecision {
     NotRun { reason: String },
 }
 
+/// Where a command runs, decided by the daemon. Only [`Runtime::Host`] runs without a sandbox, and only a saved
+/// `runtime = "host"` entry or the user's answer makes one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Runtime {
+    /// The session's own sandbox: a plain call, or a command the user typed. Tagged with the call.
+    Session(Policy),
+    /// The session's sandbox widened (never past the floor), tagged with the call.
+    Widened { policy: Policy, by: Why },
+    /// The host, with no sandbox.
+    Host { by: Why },
+}
+
+/// What made a command run widened or on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Why {
+    /// A saved `[[sandbox.commands]]` entry matched it.
+    Grant(CommandPattern),
+    /// The user approved it in the block question.
+    Approval,
+}
+
+impl Runtime {
+    /// What the agent is told about where it ran: `None` for the session's own sandbox (nothing changed).
+    pub fn ran(&self) -> Option<Ran> {
+        let by = |why: &Why| match why {
+            Why::Grant(_) => RanBy::Grant,
+            Why::Approval => RanBy::Approval,
+        };
+        match self {
+            Runtime::Session(_) => None,
+            Runtime::Widened { by: why, .. } => Some(Ran {
+                runtime: RanRuntime::Sandbox,
+                by: by(why),
+            }),
+            Runtime::Host { by: why } => Some(Ran {
+                runtime: RanRuntime::Host,
+                by: by(why),
+            }),
+        }
+    }
+}
+
+/// Where a widened or host run ran, as sent to the agent before its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Ran {
+    pub runtime: RanRuntime,
+    pub by: RanBy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RanRuntime {
+    /// A widened sandbox.
+    Sandbox,
+    Host,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RanBy {
+    Grant,
+    Approval,
+}
+
+/// The variables a launch sets that mark a sandboxed pi and reach `agent.sock` as the session: never given to a host
+/// run, which isn't the session's pi and has no sandbox.
+const SESSION_ONLY: [&str; 3] = ["PITON_RUNTIME", super::TOKEN_ENV, super::SOCKET_ENV];
+
+/// A host run's environment: the session's launch environment (the workspace's environment tools included, as the
+/// user's own shell would have them) without [`SESSION_ONLY`].
+pub fn host_env(launch: &Env) -> Env {
+    let mut env = launch.clone();
+    for name in SESSION_ONLY {
+        env.remove(name);
+    }
+    env
+}
+
 /// A command the daemon runs, everything decided by the daemon.
 #[derive(Debug, Clone)]
 pub struct Approved {
-    /// Tagged with the call.
-    pub policy: Policy,
+    pub runtime: Runtime,
     pub shell: String,
     /// The command with pi's `shellCommandPrefix`.
     pub command: String,
@@ -118,9 +199,9 @@ impl PiShell {
 /// One command to run.
 #[derive(Debug, Clone)]
 pub struct RunSpec<'a> {
-    /// `<piton> sandbox-exec`.
+    /// `<piton> sandbox-exec`, for a sandboxed runtime.
     pub helper: &'a Path,
-    pub policy: &'a Policy,
+    pub runtime: &'a Runtime,
     /// The shell (`/bin/bash`, or pi's `shellPath`) and the command it runs with `-c`.
     pub shell: &'a str,
     pub command: &'a str,
@@ -152,32 +233,21 @@ pub enum RunEnd {
 /// Runs `spec`, sending its output to `events` as it comes, until the shell exits. Dropping the returned future (the
 /// agent stopped waiting) or the timeout kills the process group.
 pub async fn run(spec: RunSpec<'_>, events: mpsc::UnboundedSender<RunEvent>) -> RunEnd {
-    let policy = match serde_json::to_string(spec.policy) {
-        Ok(policy) => policy,
-        Err(e) => {
-            return RunEnd::Failed {
-                reason: format!("can't encode the sandbox: {e}"),
-            };
+    let mut command = match spec.runtime {
+        Runtime::Session(policy) | Runtime::Widened { policy, .. } => match sandboxed(&spec, policy) {
+            Ok(command) => command,
+            Err(reason) => return RunEnd::Failed { reason },
+        },
+        // No helper and no policy: the shell itself, with the environment the daemon chose for a host run.
+        Runtime::Host { .. } => {
+            let mut command = Command::new(spec.shell);
+            command.args(["-c", spec.command]).env_clear().envs(spec.env);
+            command
         }
     };
-    // The helper is unsandboxed until it applies the policy: the command's environment (which a request may have
-    // chosen) reaches only the command, after the sandbox is on.
-    let own = [(crate::launch::sandbox::POLICY_ENV.to_string(), policy)]
-        .into_iter()
-        .collect();
-    let env = match crate::launch::handoff::for_helper(spec.env, own) {
-        Ok(env) => env,
-        Err(e) => {
-            return RunEnd::Failed {
-                reason: format!("can't encode the environment: {e}"),
-            };
-        }
-    };
-    let child = Command::new(spec.helper)
-        .args(["sandbox-exec", "--", spec.shell, "-c", spec.command])
+    let program = command.as_std().get_program().to_string_lossy().into_owned();
+    let child = command
         .current_dir(spec.cwd)
-        .env_clear()
-        .envs(&env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -188,7 +258,7 @@ pub async fn run(spec: RunSpec<'_>, events: mpsc::UnboundedSender<RunEvent>) -> 
         Ok(child) => child,
         Err(e) => {
             return RunEnd::Failed {
-                reason: format!("can't start {}: {e}", spec.helper.display()),
+                reason: format!("can't start {program}: {e}"),
             };
         }
     };
@@ -247,6 +317,23 @@ pub async fn run(spec: RunSpec<'_>, events: mpsc::UnboundedSender<RunEvent>) -> 
             reason: format!("waiting for the command: {e}"),
         },
     }
+}
+
+/// `<piton> sandbox-exec -- <shell> -c <command>` with `policy`. The helper is unsandboxed until it applies the policy:
+/// the command's environment (which a request may have chosen) reaches only the command, after the sandbox is on.
+fn sandboxed(spec: &RunSpec<'_>, policy: &Policy) -> Result<Command, String> {
+    let policy = serde_json::to_string(policy).map_err(|e| format!("can't encode the sandbox: {e}"))?;
+    let own = [(crate::launch::sandbox::POLICY_ENV.to_string(), policy)]
+        .into_iter()
+        .collect();
+    let env =
+        crate::launch::handoff::for_helper(spec.env, own).map_err(|e| format!("can't encode the environment: {e}"))?;
+    let mut command = Command::new(spec.helper);
+    command
+        .args(["sandbox-exec", "--", spec.shell, "-c", spec.command])
+        .env_clear()
+        .envs(&env);
+    Ok(command)
 }
 
 async fn pump(reader: &mut (impl AsyncReadExt + Unpin), mut send: impl FnMut(&[u8])) {
@@ -359,10 +446,10 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let policy = policy();
+        let sandboxed = Runtime::Session(policy());
         let (out, end) = collect(RunSpec {
             helper: &helper,
-            policy: &policy,
+            runtime: &sandboxed,
             shell: "/bin/sh",
             command: "echo out; echo err >&2; pwd; echo cmd-x=$X; exit 3",
             cwd: dir.path(),
@@ -379,6 +466,68 @@ mod tests {
         assert!(out.contains(&cwd.display().to_string()), "{out}");
         assert!(out.contains("cmd-x=1"), "the command does: {out}");
         assert_eq!(end, RunEnd::Exited { code: 3 });
+
+        // On the host: the shell itself, no helper and no policy, with the given environment.
+        let host = Runtime::Host { by: Why::Approval };
+        let (out, end) = collect(RunSpec {
+            helper: &helper,
+            runtime: &host,
+            shell: "/bin/sh",
+            command: "echo policy=${PITON_SANDBOX_POLICY:-none} cmd-x=$X; pwd; exit 4",
+            cwd: dir.path(),
+            env: &env,
+            timeout: None,
+        })
+        .await;
+        assert!(!out.contains("own-x"), "the helper didn't run: {out}");
+        assert!(out.contains("policy=none cmd-x=1"), "{out}");
+        assert!(out.contains(&cwd.display().to_string()), "{out}");
+        assert_eq!(end, RunEnd::Exited { code: 4 });
+    }
+
+    /// A host run gets the session's launch environment without what marks a sandboxed pi or reaches `agent.sock`.
+    #[test]
+    fn a_host_run_drops_the_session_s_own_variables() {
+        let launch: Env = [
+            ("PATH", "/w/bin:/usr/bin"),
+            ("RUST_LOG", "debug"),
+            ("PITON_RUNTIME", "sandbox"),
+            (super::super::TOKEN_ENV, "t"),
+            (super::super::SOCKET_ENV, "/s/agent.sock"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let env = host_env(&launch);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/w/bin:/usr/bin"));
+        assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("debug"));
+        for gone in SESSION_ONLY {
+            assert!(!env.contains_key(gone), "{gone}");
+        }
+    }
+
+    #[test]
+    fn only_a_widened_or_host_run_is_reported() {
+        assert_eq!(Runtime::Session(policy()).ran(), None);
+        let grant = Why::Grant(CommandPattern::new("log show *").unwrap());
+        assert_eq!(
+            Runtime::Widened {
+                policy: policy(),
+                by: Why::Approval
+            }
+            .ran(),
+            Some(Ran {
+                runtime: RanRuntime::Sandbox,
+                by: RanBy::Approval
+            })
+        );
+        assert_eq!(
+            Runtime::Host { by: grant }.ran(),
+            Some(Ran {
+                runtime: RanRuntime::Host,
+                by: RanBy::Grant
+            })
+        );
     }
 
     /// A timeout, and dropping the run (the agent's stop), kill the whole process group: a background child too. A
@@ -390,15 +539,22 @@ mod tests {
         let env: Env = [("PATH".to_string(), "/usr/bin:/bin".to_string())]
             .into_iter()
             .collect();
-        let policy = policy();
-        let marker = |name: &str| dir.path().join(name);
+        for runtime in [Runtime::Session(policy()), Runtime::Host { by: Why::Approval }] {
+            let sub = dir.path().join(format!("{}", runtime.ran().is_some()));
+            std::fs::create_dir_all(&sub).unwrap();
+            stops_and_finishes(&helper, &runtime, &sub, &env).await;
+        }
+    }
+
+    async fn stops_and_finishes(helper: &Path, runtime: &Runtime, dir: &Path, env: &Env) {
+        let marker = |name: &str| dir.join(name);
         let spec = |command: &'static str, timeout| RunSpec {
-            helper: &helper,
-            policy: &policy,
+            helper,
+            runtime,
             shell: "/bin/sh",
             command,
-            cwd: dir.path(),
-            env: &env,
+            cwd: dir,
+            env,
             timeout,
         };
 

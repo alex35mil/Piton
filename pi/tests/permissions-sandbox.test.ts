@@ -14,7 +14,7 @@ import type {
     ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
 
-import { registerSandboxBash, unprefixed, type RunLine } from "../extensions/permissions/sandbox.ts"
+import { ranLine, registerSandboxBash, unprefixed, type RunLine } from "../extensions/permissions/sandbox.ts"
 
 /** A fake daemon on a Unix socket: records each request and answers with the lines `answer` gives. */
 async function fakeDaemon(answer: (request: Record<string, unknown>) => RunLine[]) {
@@ -173,6 +173,36 @@ describe("bash in a sandboxed session under piton", () => {
         } finally {
             await daemon.close()
         }
+    })
+
+    it("says where a widened or host run ran, and nothing for the session's own sandbox", async () => {
+        const daemon = await fakeDaemon((request) =>
+            request.command === "plain"
+                ? [out("ok\n"), { type: "exit", code: 0 }]
+                : [{ type: "ran", runtime: "host", by: "approval" }, out("probed\n"), { type: "exit", code: 1 }],
+        )
+        try {
+            const { bash } = register(daemon.socket)
+            const host = await bash!.execute(
+                "c",
+                { command: "sh probe.sh", outside_sandbox: true },
+                undefined,
+                undefined,
+                context(daemon.dir),
+            )
+            assert.match(text(host), /probed/)
+            assert.match(text(host), /on the host/)
+            assert.deepEqual((host.structuredContent as { ran?: unknown }).ran, { runtime: "host", by: "approval" })
+            const plain = await bash!.execute("d", { command: "plain" }, undefined, undefined, context(daemon.dir))
+            assert.doesNotMatch(text(plain), /on the host|widened/)
+        } finally {
+            await daemon.close()
+        }
+    })
+
+    it("names each runtime and cause", () => {
+        assert.match(ranLine({ runtime: "host", by: "grant" }), /host[\s\S]*saved/)
+        assert.match(ranLine({ runtime: "sandbox", by: "approval" }), /widened[\s\S]*user/)
     })
 
     it("maps the daemon's timeout to pi's timeout result", async () => {

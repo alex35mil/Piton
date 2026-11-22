@@ -294,6 +294,10 @@ public final class Store {
         await attempt { try await self.require().answer(session, dialog: dialog, with: answer) }
     }
 
+    public func decide(_ session: SessionKey, question: String, _ decision: Decision) async -> Bool {
+        await attempt { try await self.require().decide(session, question: question, decision) }
+    }
+
     /// Turns keep-awake on or off: `keep_awake` in the host's `config.host.toml`, in whichever file of the pair sets it.
     public func setKeepAwake(_ on: Bool) async -> Bool {
         await setSetting(.host, "keep_awake", to: .bool(on))

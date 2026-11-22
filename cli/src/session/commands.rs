@@ -3,8 +3,9 @@
 //!
 //! A request over `agent.sock` is only a request. The daemon accepts one for a bash call pi reported running
 //! (`tool_execution_start`) with exactly that command, once per call; a rerun only when that call's arguments asked for
-//! it (`outside_sandbox: true`). It decides the policy (a per-command grant it matched itself, or `all` once the user
-//! approves), the shell and its prefix (pi's settings files), and the environment (the session's launch environment).
+//! it (`outside_sandbox: true`). It decides where it runs (a per-command entry it matched itself, or, once the user
+//! approves, `all` in the sandbox or the host), the shell and its prefix (pi's settings files), and the environment
+//! (the session's launch environment).
 
 use std::{
     collections::HashMap,
@@ -17,12 +18,16 @@ use tokio::sync::oneshot;
 
 use crate::{
     agent::{
-        Approved, Matched, PiShell, RunDecision, RunRequest,
-        block::{self, Answer, PersistScope},
+        Approved, Matched, PiShell, RunDecision, RunRequest, Runtime, Why,
+        block::PersistScope,
         grant_for,
+        question::{self, Answer, Question, RpcChoice, Target},
     },
-    config::{AllGrant, CommandGrant, CommandPattern, ConfigFile, Grant, Paths, Sharing, WriteLevel},
-    launch::{Env, sandbox::grant::CommandPolicies},
+    config::{AllGrant, CommandGrant, CommandPattern, CommandRuntime, ConfigFile, Grant, Paths, Sharing, WriteLevel},
+    launch::{
+        Env,
+        sandbox::grant::{CommandPolicies, EntryRuntime},
+    },
 };
 
 /// A bash call pi is running.
@@ -54,10 +59,11 @@ pub struct Commands {
 
 /// The question the user is being asked, and where the decision goes.
 pub struct PendingQuestion {
-    pub id: String,
+    /// The typed question: its id is what `session.decide` names; its runtime is the one the `rpc` dialog shows.
+    pub question: Question,
+    /// The `rpc` rendering's dialog showing now, and which one it is.
+    pub dialog_id: String,
     pub stage: Stage,
-    /// The first dialog's record, shown again after the option that decides nothing.
-    pub dialog: Value,
     /// The request, as the agent sent it.
     pub request: RunRequest,
     /// The tag the call's sandbox gets.
@@ -163,11 +169,11 @@ impl Commands {
     }
 }
 
-/// Which dialog is showing.
+/// Which `rpc` dialog is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Choice,
-    Pattern(PersistScope),
+    Pattern(Target, PersistScope),
 }
 
 /// The calls pi is running, from its events.
@@ -363,15 +369,6 @@ pub enum First {
     },
 }
 
-/// Which environment a run gets.
-enum RunEnv {
-    /// At the session's own policy: the extension's (pi's shell environment). It reaches only the command, inside its
-    /// sandbox (`launch::handoff::for_helper`), never the helper that applies it.
-    Request,
-    /// Widened: the session's launch environment, so a request can't point a granted command at its own `PATH`.
-    Launch,
-}
-
 impl Commands {
     /// The first decision for `request`. `calls` is the session's running calls.
     pub fn decide(&self, calls: &mut Calls, request: &RunRequest) -> First {
@@ -384,7 +381,10 @@ impl Commands {
             if request.rerun {
                 return not_run("a command you type runs in the sandbox".into());
             }
-            return self.run(request, &self.policies.launch, &calls.typed_tag(), RunEnv::Request);
+            return self.run(
+                request,
+                Runtime::Session(tagged(&self.policies.launch, &calls.typed_tag())),
+            );
         }
         let (call, tag) = match calls.take(request) {
             Ok(taken) => taken,
@@ -416,48 +416,68 @@ impl Commands {
                 false => not_run("the call didn't ask to run outside the sandbox (outside_sandbox: true)".into()),
             },
             false => match grant_for(&self.grants, &request.command, &request.cwd) {
-                Ok(Matched::Grant(entry)) => match self.policies.of(entry) {
-                    Ok(policy) => self.run(request, policy, &tag, RunEnv::Launch),
-                    Err(reason) => not_run(format!(
-                        "the grant for `{}` can't be used: {reason}",
-                        entry.value.pattern.pattern()
-                    )),
-                },
+                Ok(Matched::Grant(entry)) => {
+                    let by = Why::Grant(entry.value.pattern.clone());
+                    match self.policies.of(entry) {
+                        Ok(EntryRuntime::Host) => self.run(request, Runtime::Host { by }),
+                        Ok(EntryRuntime::Sandbox(Ok(policy))) => self.run(
+                            request,
+                            Runtime::Widened {
+                                policy: tagged(policy, &tag),
+                                by,
+                            },
+                        ),
+                        Ok(EntryRuntime::Sandbox(Err(reason))) => not_run(format!(
+                            "the grant for `{}` can't be used: {reason}",
+                            entry.value.pattern.pattern()
+                        )),
+                        Err(reason) => not_run(format!(
+                            "the grant for `{}` can't be used: {reason}",
+                            entry.value.pattern.pattern()
+                        )),
+                    }
+                }
                 Ok(Matched::None | Matched::Redirect) | Err(_) => {
-                    self.run(request, &self.policies.launch, &tag, RunEnv::Request)
+                    self.run(request, Runtime::Session(tagged(&self.policies.launch, &tag)))
                 }
             },
         }
     }
 
-    fn run(&self, request: &RunRequest, policy: &crate::launch::sandbox::Policy, tag: &str, env: RunEnv) -> First {
-        First::Decided(RunDecision::Run(Box::new(self.approved(request, policy, tag, env))))
+    fn run(&self, request: &RunRequest, runtime: Runtime) -> First {
+        First::Decided(RunDecision::Run(Box::new(self.approved(request, runtime))))
     }
 
-    /// A rerun the user approved: at `all`, with the launch environment.
-    pub fn approved_rerun(&self, request: &RunRequest, tag: &str) -> Approved {
-        self.approved(request, &self.policies.all, tag, RunEnv::Launch)
+    /// A rerun the user approved, where they chose: at `all` in the sandbox, or on the host.
+    pub fn approved_rerun(&self, request: &RunRequest, tag: &str, target: Target) -> Approved {
+        let runtime = match target {
+            Target::Sandbox => Runtime::Widened {
+                policy: tagged(&self.policies.all, tag),
+                by: Why::Approval,
+            },
+            Target::Host => Runtime::Host { by: Why::Approval },
+        };
+        self.approved(request, runtime)
     }
 
-    /// The command as the daemon runs it: its policy tagged with the call, the shell and prefix from pi's settings.
-    fn approved(
-        &self,
-        request: &RunRequest,
-        policy: &crate::launch::sandbox::Policy,
-        tag: &str,
-        env: RunEnv,
-    ) -> Approved {
-        let mut policy = policy.clone();
-        policy.tag = tag.to_string();
+    /// The command as the daemon runs it: where `runtime` says, the shell and prefix from pi's settings, and the
+    /// environment the runtime gets.
+    fn approved(&self, request: &RunRequest, runtime: Runtime) -> Approved {
+        let env = match &runtime {
+            // The session's own sandbox: the extension's (pi's shell environment). It reaches only the command, inside
+            // its sandbox (`launch::handoff::for_helper`), never the helper that applies it.
+            Runtime::Session(_) => request.env.clone(),
+            // Widened: the session's launch environment, so a request can't point a granted command at its own `PATH`.
+            Runtime::Widened { .. } => self.env.clone(),
+            // On the host: the launch environment without what marks a sandboxed pi.
+            Runtime::Host { .. } => crate::agent::host_env(&self.env),
+        };
         Approved {
-            policy,
+            runtime,
             shell: self.shell.shell.clone(),
             command: self.shell.command(&request.command),
             cwd: request.cwd.clone(),
-            env: match env {
-                RunEnv::Request => request.env.clone(),
-                RunEnv::Launch => self.env.clone(),
-            },
+            env,
             timeout: request
                 .timeout
                 .filter(|t| t.is_finite() && *t > 0.0)
@@ -465,12 +485,28 @@ impl Commands {
         }
     }
 
-    /// Saves a per-command grant for `pattern` with `grant = "all"`.
-    pub fn persist(&self, scope: PersistScope, pattern: CommandPattern) -> Result<PathBuf, String> {
+    /// The typed question for a rerun request: starts in the sandbox.
+    pub fn question(&self, id: String, request: &RunRequest, refusals: Vec<String>, note: Option<String>) -> Question {
+        Question {
+            id,
+            command: request.command.clone(),
+            reason: request.reason.clone().filter(|r| !r.trim().is_empty()),
+            refusals,
+            note,
+            writable_vars: self.policies.writable_vars.clone(),
+            runtime: Target::Sandbox,
+        }
+    }
+
+    /// Saves a per-command entry for `pattern`: `runtime = "sandbox"` with `grant = "all"`, or `runtime = "host"`.
+    pub fn persist(&self, scope: PersistScope, pattern: CommandPattern, target: Target) -> Result<PathBuf, String> {
         let file = self.file(scope);
         let grant = CommandGrant {
             pattern,
-            grant: Grant::All(AllGrant::All),
+            runtime: match target {
+                Target::Sandbox => CommandRuntime::Sandbox(Grant::All(AllGrant::All)),
+                Target::Host => CommandRuntime::Host,
+            },
         };
         let path = file.path(&self.paths).map_err(|e| e.to_string())?;
         file.append_command_grant(&self.paths, &grant)
@@ -486,40 +522,44 @@ impl Commands {
     }
 }
 
-/// What the user's answer to a dialog leads to.
+/// `policy` tagged with a call.
+fn tagged(policy: &crate::launch::sandbox::Policy, tag: &str) -> crate::launch::sandbox::Policy {
+    let mut policy = policy.clone();
+    policy.tag = tag.to_string();
+    policy
+}
+
+/// What an answer to an `rpc` dialog leads to.
 pub enum Next {
     /// No answer yet (the first option, which decides nothing): show the question again.
     AskAgain,
+    /// Show the question again in the other runtime.
+    Switch,
     /// Ask the pattern dialog.
-    AskPattern(PersistScope),
-    /// Run at `all` (after persisting, when `persist` says so).
-    Run {
-        persist: Option<(PersistScope, CommandPattern)>,
-    },
-    Deny,
+    AskPattern(Target, PersistScope),
+    /// The user decided.
+    Decided(Answer),
 }
 
-/// Reads an answer to the dialog at `stage`.
-pub fn answer(stage: Stage, command: &str, answer: &Map<String, Value>) -> Next {
+/// Reads an answer to the `rpc` dialog at `stage`, shown for `question`.
+pub fn rpc_answer(stage: Stage, question: &Question, answer: &Map<String, Value>) -> Next {
+    let target = question.runtime;
     match stage {
-        Stage::Choice => match block::read_answer(answer) {
-            Answer::AskAgain => Next::AskAgain,
-            Answer::Once => Next::Run { persist: None },
-            Answer::Deny => Next::Deny,
-            Answer::Persist(scope) => match CommandPattern::new(command) {
-                Ok(pattern) => Next::Run {
-                    persist: Some((scope, pattern)),
-                },
+        Stage::Choice => match question::read_rpc_choice(target, answer) {
+            RpcChoice::AskAgain => Next::AskAgain,
+            RpcChoice::Switch => Next::Switch,
+            RpcChoice::Once => Next::Decided(Answer::Once(target)),
+            RpcChoice::Deny => Next::Decided(Answer::Deny),
+            RpcChoice::Command(scope) => match CommandPattern::new(&question.command) {
+                Ok(pattern) => Next::Decided(Answer::Always { target, scope, pattern }),
                 // A multi-line command can't be a pattern: run it once.
-                Err(_) => Next::Run { persist: None },
+                Err(_) => Next::Decided(Answer::Once(target)),
             },
-            Answer::Pattern(scope) => Next::AskPattern(scope),
+            RpcChoice::Pattern(scope) => Next::AskPattern(target, scope),
         },
-        Stage::Pattern(scope) => match block::read_pattern(answer) {
-            Some(pattern) => Next::Run {
-                persist: Some((scope, pattern)),
-            },
-            None => Next::Deny,
+        Stage::Pattern(target, scope) => match question::read_pattern(answer) {
+            Some(pattern) => Next::Decided(Answer::Always { target, scope, pattern }),
+            None => Next::Decided(Answer::Deny),
         },
     }
 }
@@ -550,7 +590,7 @@ mod tests {
             .map(|p| Listed {
                 value: CommandGrant {
                     pattern: CommandPattern::new(p).unwrap(),
-                    grant: Grant::All(AllGrant::All),
+                    runtime: CommandRuntime::Sandbox(Grant::All(AllGrant::All)),
                 },
                 file: dir.join("g.toml"),
             })
@@ -561,7 +601,10 @@ mod tests {
             policies: CommandPolicies {
                 launch: policy(),
                 all,
-                entries: grants.iter().map(|g| (g.clone(), Ok(policy()))).collect(),
+                entries: grants
+                    .iter()
+                    .map(|g| (g.clone(), EntryRuntime::Sandbox(Ok(policy()))))
+                    .collect(),
                 resolver: crate::launch::sandbox::grant::Resolver::new(
                     crate::config::LaunchConfig {
                         sandbox: Default::default(),
@@ -575,6 +618,7 @@ mod tests {
                 silence: Vec::new(),
                 credentials: crate::launch::sandbox::grant::Credentials::Liftable,
                 claude_login: None,
+                writable_vars: Vec::new(),
             },
             env: [("FROM".to_string(), "launch".to_string())].into_iter().collect(),
             shell: PiShell {
@@ -617,6 +661,14 @@ mod tests {
         }
     }
 
+    /// The sandbox policy a run got: panics for a host run.
+    fn sandbox(approved: &Approved) -> &crate::launch::sandbox::Policy {
+        match &approved.runtime {
+            Runtime::Session(policy) | Runtime::Widened { policy, .. } => policy,
+            Runtime::Host { .. } => panic!("ran on the host"),
+        }
+    }
+
     fn run(first: First) -> Box<Approved> {
         match first {
             First::Decided(RunDecision::Run(approved)) => approved,
@@ -649,7 +701,8 @@ mod tests {
         let granted = run(c.decide(&mut calls, &request(&dir, "1", "git push", false)));
         assert_eq!(granted.command, "set -e\ngit push", "pi's prefix");
         assert_eq!(granted.timeout, Some(Duration::from_secs(5)));
-        assert_eq!(granted.policy.tag, "7-ab-1");
+        assert_eq!(sandbox(&granted).tag, "7-ab-1");
+        assert!(matches!(granted.runtime, Runtime::Widened { by: Why::Grant(_), .. }));
         assert_eq!(
             granted.env["FROM"], "launch",
             "a widened run gets the launch environment"
@@ -662,8 +715,9 @@ mod tests {
 
         start(&mut calls, "2", "ls", false);
         let plain = run(c.decide(&mut calls, &request(&dir, "2", "ls", false)));
-        assert_eq!(plain.policy.tag, "7-ab-2");
-        assert_eq!(plain.policy.rules, c.policies.launch.rules, "the session's own policy");
+        assert!(matches!(plain.runtime, Runtime::Session(_)), "the session's own policy");
+        assert_eq!(sandbox(&plain).tag, "7-ab-2");
+        assert_eq!(sandbox(&plain).rules, c.policies.launch.rules);
         assert_eq!(plain.env["FROM"], "request", "pi's shell environment");
         assert_eq!(calls.owner("7-ab-2"), TagOwner::Call("2".into()));
         assert_eq!(calls.owner("7-ab"), TagOwner::Session, "pi's own sandbox");
@@ -671,11 +725,11 @@ mod tests {
         assert_eq!(calls.owner("7-abc-2"), TagOwner::Other);
 
         let typed = run(c.decide(&mut calls, &request(&dir, "user:1", "ls ~", false)));
-        assert_eq!(
-            typed.policy.rules, c.policies.launch.rules,
+        assert!(
+            matches!(typed.runtime, Runtime::Session(_)),
             "a typed command is never widened"
         );
-        assert_eq!(calls.owner(&typed.policy.tag), TagOwner::Typed);
+        assert_eq!(calls.owner(&sandbox(&typed).tag), TagOwner::Typed);
         assert_eq!(
             kind(&c.decide(&mut calls, &request(&dir, "user:2", "ls", true))),
             "refused"
@@ -687,9 +741,9 @@ mod tests {
         }) else {
             panic!("a rerun asks");
         };
-        let rerun = c.approved_rerun(&request(&dir, "9", "husky install", true), &tag);
-        assert!(rerun.policy.keychain, "at `all`");
-        assert_eq!(rerun.policy.tag, tag);
+        let rerun = c.approved_rerun(&request(&dir, "9", "husky install", true), &tag, Target::Sandbox);
+        assert!(sandbox(&rerun).keychain, "at `all`");
+        assert_eq!(sandbox(&rerun).tag, tag);
         assert_eq!(rerun.env["FROM"], "launch");
 
         start(&mut calls, "3", "husky install", false);
@@ -782,32 +836,120 @@ mod tests {
         assert_eq!(shown, 20);
     }
 
+    /// Each `rpc` option leads to the same typed answer a `view` client sends, in the runtime the dialog showed.
     #[test]
-    fn answers_lead_somewhere() {
-        let a = |stage, value: &str| answer(stage, "husky install", json!({"value": value}).as_object().unwrap());
-        let labels: Vec<String> = block::dialog("x", &block::Question::default())["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        // The first option decides nothing: the question is asked again.
-        assert!(matches!(a(Stage::Choice, &labels[0]), Next::AskAgain));
-        assert!(matches!(a(Stage::Choice, &labels[1]), Next::Run { persist: None }));
-        assert!(matches!(a(Stage::Choice, &labels[2]), Next::Deny));
+    fn rpc_answers_map_to_typed_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = commands(dir.path(), &[]);
+        let mut req = request(dir.path(), "1", "husky install", true);
+        req.reason = Some("hooks".into());
+        let sandbox = c.question("q".into(), &req, Vec::new(), None);
+        assert_eq!(sandbox.runtime, Target::Sandbox, "starts in the sandbox");
+        let host = sandbox.switched();
+        let labels = |q: &Question| -> Vec<String> {
+            question::rpc_dialog("d", q)["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        let a = |q: &Question, stage, value: &str| rpc_answer(stage, q, json!({"value": value}).as_object().unwrap());
+        let decided = |next: Next| match next {
+            Next::Decided(answer) => answer,
+            Next::AskAgain | Next::Switch | Next::AskPattern(..) => panic!("not decided"),
+        };
+        let (s, h) = (labels(&sandbox), labels(&host));
+        assert!(matches!(a(&sandbox, Stage::Choice, &s[0]), Next::AskAgain));
+        assert!(matches!(a(&sandbox, Stage::Choice, &s[7]), Next::Switch));
+        assert_eq!(
+            decided(a(&sandbox, Stage::Choice, &s[1])),
+            Answer::Once(Target::Sandbox)
+        );
+        assert_eq!(decided(a(&host, Stage::Choice, &h[1])), Answer::Once(Target::Host));
+        assert_eq!(decided(a(&host, Stage::Choice, &h[2])), Answer::Deny);
+        assert_eq!(
+            decided(a(&host, Stage::Choice, &h[3])),
+            Answer::Always {
+                target: Target::Host,
+                scope: PersistScope::Project,
+                pattern: CommandPattern::new("husky install").unwrap(),
+            }
+        );
         assert!(matches!(
-            a(Stage::Choice, &labels[3]),
-            Next::Run { persist: Some((PersistScope::Project, ref p)) } if p.pattern() == "husky install"
+            a(&host, Stage::Choice, &h[6]),
+            Next::AskPattern(Target::Host, PersistScope::Global)
         ));
-        assert!(matches!(
-            a(Stage::Choice, &labels[6]),
-            Next::AskPattern(PersistScope::Global)
-        ));
-        assert!(matches!(
-            a(Stage::Pattern(PersistScope::Global), "husky *"),
-            Next::Run { persist: Some((PersistScope::Global, ref p)) } if p.pattern() == "husky *"
-        ));
-        assert!(matches!(a(Stage::Pattern(PersistScope::Global), ""), Next::Deny));
+        assert_eq!(
+            decided(a(&host, Stage::Pattern(Target::Host, PersistScope::Global), "husky *")),
+            Answer::Always {
+                target: Target::Host,
+                scope: PersistScope::Global,
+                pattern: CommandPattern::new("husky *").unwrap(),
+            }
+        );
+        assert_eq!(
+            decided(a(&host, Stage::Pattern(Target::Host, PersistScope::Global), "")),
+            Answer::Deny
+        );
+        // The sandbox dialog's labels don't approve a host run, nor the other way round.
+        assert_eq!(decided(a(&sandbox, Stage::Choice, &h[1])), Answer::Deny);
+    }
+
+    /// An approved rerun runs where the user chose: at `all` with the launch environment, or on the host without the
+    /// session's own variables.
+    #[test]
+    fn an_approved_rerun_runs_where_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = commands(dir.path(), &[]);
+        c.env.insert("PITON_RUNTIME".into(), "sandbox".into());
+        let req = request(dir.path(), "1", "husky install", true);
+        let sandboxed = c.approved_rerun(&req, "t-1", Target::Sandbox);
+        match &sandboxed.runtime {
+            Runtime::Widened { policy, by } => {
+                assert!(policy.keychain, "at `all`");
+                assert_eq!(policy.tag, "t-1");
+                assert_eq!(*by, Why::Approval);
+            }
+            Runtime::Session(_) | Runtime::Host { .. } => panic!("not widened"),
+        }
+        assert_eq!(sandboxed.env["PITON_RUNTIME"], "sandbox");
+        let host = c.approved_rerun(&req, "t-1", Target::Host);
+        assert_eq!(host.runtime, Runtime::Host { by: Why::Approval });
+        assert_eq!(host.env["FROM"], "launch");
+        assert!(!host.env.contains_key("PITON_RUNTIME"));
+        assert_eq!(host.command, "set -e\nhusky install");
+    }
+
+    /// A saved host entry runs its matching command on the host, without asking; a sandbox entry runs widened.
+    #[test]
+    fn a_host_entry_runs_on_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &["husky install *"]);
+        let host = Listed {
+            value: CommandGrant {
+                pattern: CommandPattern::new("log show *").unwrap(),
+                runtime: CommandRuntime::Host,
+            },
+            file: dir.join("g.toml"),
+        };
+        c.grants.push(host.clone());
+        c.policies.entries.push((host, EntryRuntime::Host));
+        let mut calls = Calls::new("7-ab");
+        start(&mut calls, "1", "log show --last 1m", false);
+        let ran = run(c.decide(&mut calls, &request(&dir, "1", "log show --last 1m", false)));
+        assert_eq!(
+            ran.runtime,
+            Runtime::Host {
+                by: Why::Grant(CommandPattern::new("log show *").unwrap())
+            }
+        );
+        assert_eq!(ran.env["FROM"], "launch");
+        // A redirect gets no entry at all: the session's sandbox.
+        start(&mut calls, "2", "log show > ~/.zshrc", false);
+        let redirected = run(c.decide(&mut calls, &request(&dir, "2", "log show > ~/.zshrc", false)));
+        assert!(matches!(redirected.runtime, Runtime::Session(_)));
     }
 
     #[test]
@@ -815,13 +957,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = commands(dir.path(), &[]);
         let global = c
-            .persist(PersistScope::Global, CommandPattern::new("husky install").unwrap())
+            .persist(
+                PersistScope::Global,
+                CommandPattern::new("husky install").unwrap(),
+                Target::Sandbox,
+            )
             .unwrap();
         assert_eq!(global, dir.path().join("g/config.toml"));
+        let text = std::fs::read_to_string(&global).unwrap();
+        assert!(
+            text.contains("runtime = \"sandbox\"") && text.contains("grant = \"all\""),
+            "{text}"
+        );
         let project = c
-            .persist(PersistScope::Project, CommandPattern::new("git push *").unwrap())
+            .persist(
+                PersistScope::Project,
+                CommandPattern::new("git push *").unwrap(),
+                Target::Host,
+            )
             .unwrap();
         assert_eq!(project, dir.path().join(".piton/config.local.toml"));
-        assert!(std::fs::read_to_string(project).unwrap().contains("bash(git push *)"));
+        let text = std::fs::read_to_string(project).unwrap();
+        assert!(
+            text.contains("bash(git push *)") && text.contains("runtime = \"host\""),
+            "{text}"
+        );
+        assert!(!text.contains("grant"), "{text}");
     }
 }
