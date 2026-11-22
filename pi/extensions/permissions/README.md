@@ -95,11 +95,14 @@ In a sandboxed session Piton's daemon launched (`PITON_RUNTIME=sandbox` with `PI
 `PITON_SESSION_TOKEN`), the extension registers pi's own `bash` tool definition with operations that send each call to
 the daemon, and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
 sandbox, so the daemon runs each in its own, tagged with the call (`sandbox.ts`). pi's rendering, truncation,
-`shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `outside_sandbox`
-(after the sandbox blocked this exact command, run it again outside; the user is asked and may run it in a widened
-sandbox or on the host with no sandbox) and `reason`. When a call ran anywhere but the session's own sandbox (a
-per-command entry or the user's answer), the daemon says so before the output, and the result ends with one line
-naming where (`structuredContent.ran`). Permission rules still decide first. Elsewhere pi's own bash stays. See
+`shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `rerun` (after
+the sandbox blocked this exact command, run it again with what it names: the runtime and grant of a
+`[[sandbox.commands]]` entry, `{ runtime: "host" }` or `{ runtime: "sandbox", grant: "all" | { write?, write_file?,
+read?, connect?, bind?, services?, presets? } }`; a union, so a host rerun can't carry a grant and a sandbox one needs
+one; the daemon reads it with the entry's parser, asks the user, and the user may choose the host, `all`, or deny) and
+`reason`. When a call ran anywhere but the session's own sandbox (a per-command entry or the user's answer), the
+daemon says so before the output, and the result ends with one line naming where and with which grant
+(`structuredContent.ran`). Permission rules still decide first. Elsewhere pi's own bash stays. See
 "Asking when the sandbox blocks" in `docs/design.md`.
 
 The daemon matches `[[sandbox.commands]]` grants with a Rust port of this extension's Bash analysis and glob; both

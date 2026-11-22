@@ -14,7 +14,14 @@ import type {
     ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
 
-import { ranLine, registerSandboxBash, unprefixed, type RunLine } from "../extensions/permissions/sandbox.ts"
+import { compile } from "../extensions/__lib/schema.ts"
+import {
+    ranLine,
+    registerSandboxBash,
+    RerunSchema,
+    unprefixed,
+    type RunLine,
+} from "../extensions/permissions/sandbox.ts"
 
 /** A fake daemon on a Unix socket: records each request and answers with the lines `answer` gives. */
 async function fakeDaemon(answer: (request: Record<string, unknown>) => RunLine[]) {
@@ -119,9 +126,10 @@ describe("bash in a sandboxed session under piton", () => {
                 const { registered, bash } = register(daemon.socket)
                 assert.ok(registered && bash)
                 const updates: string[] = []
+                const rerun = { runtime: "sandbox" as const, grant: { write: ["~/.cache/husky"] } }
                 const result = await bash.execute(
                     "call-7",
-                    { command: "husky install", outside_sandbox: true, reason: "hooks" },
+                    { command: "husky install", rerun, reason: "hooks" },
                     undefined,
                     (update) => updates.push(update.content.map((p) => (p.type === "text" ? p.text : "")).join("")),
                     context(daemon.dir),
@@ -137,7 +145,7 @@ describe("bash in a sandboxed session under piton", () => {
                 assert.equal(request!.token, "token")
                 assert.equal(request!.call_id, "call-7")
                 assert.equal(request!.command, "husky install", "the agent's command, unprefixed")
-                assert.equal(request!.rerun, true)
+                assert.deepEqual(request!.rerun, rerun, "the rerun as the agent wrote it")
                 assert.equal(request!.reason, "hooks")
                 const env = request!.env as Record<string, string>
                 assert.equal(env.PI_SESSION_ID, "s", "pi's session variables")
@@ -157,12 +165,12 @@ describe("bash in a sandboxed session under piton", () => {
             await assert.rejects(
                 bash!.execute(
                     "c",
-                    { command: "rm x", outside_sandbox: true },
+                    { command: "rm x", rerun: { runtime: "sandbox", grant: "all" } },
                     undefined,
                     undefined,
                     context(daemon.dir),
                 ),
-                /Not run outside the sandbox: the user denied it/,
+                /Not run: the user denied it/,
             )
             const stop = new AbortController()
             const running = bash!.execute("d", { command: "wait" }, stop.signal, undefined, context(daemon.dir))
@@ -176,16 +184,29 @@ describe("bash in a sandboxed session under piton", () => {
     })
 
     it("says where a widened or host run ran, and nothing for the session's own sandbox", async () => {
-        const daemon = await fakeDaemon((request) =>
-            request.command === "plain"
-                ? [out("ok\n"), { type: "exit", code: 0 }]
-                : [{ type: "ran", runtime: "host", by: "approval" }, out("probed\n"), { type: "exit", code: 1 }],
-        )
+        const narrowed = '{ connect = ["$TMPDIR"] }'
+        const daemon = await fakeDaemon((request) => {
+            switch (request.command) {
+                case "plain":
+                    return [out("ok\n"), { type: "exit", code: 0 }]
+                case "tests":
+                    return [
+                        { type: "ran", runtime: "sandbox", grant: narrowed, by: "approval" },
+                        { type: "exit", code: 0 },
+                    ]
+                default:
+                    return [
+                        { type: "ran", runtime: "host", by: "approval" },
+                        out("probed\n"),
+                        { type: "exit", code: 1 },
+                    ]
+            }
+        })
         try {
             const { bash } = register(daemon.socket)
             const host = await bash!.execute(
                 "c",
-                { command: "sh probe.sh", outside_sandbox: true },
+                { command: "sh probe.sh", rerun: { runtime: "host" } },
                 undefined,
                 undefined,
                 context(daemon.dir),
@@ -193,6 +214,19 @@ describe("bash in a sandboxed session under piton", () => {
             assert.match(text(host), /probed/)
             assert.match(text(host), /on the host/)
             assert.deepEqual((host.structuredContent as { ran?: unknown }).ran, { runtime: "host", by: "approval" })
+            const tests = await bash!.execute(
+                "t",
+                { command: "tests", rerun: { runtime: "sandbox", grant: { connect: ["$TMPDIR"] } } },
+                undefined,
+                undefined,
+                context(daemon.dir),
+            )
+            assert.ok(text(tests).includes(narrowed), "names the narrowed grant")
+            assert.deepEqual((tests.structuredContent as { ran?: unknown }).ran, {
+                runtime: "sandbox",
+                grant: narrowed,
+                by: "approval",
+            })
             const plain = await bash!.execute("d", { command: "plain" }, undefined, undefined, context(daemon.dir))
             assert.doesNotMatch(text(plain), /on the host|widened/)
         } finally {
@@ -202,7 +236,33 @@ describe("bash in a sandboxed session under piton", () => {
 
     it("names each runtime and cause", () => {
         assert.match(ranLine({ runtime: "host", by: "grant" }), /host[\s\S]*saved/)
-        assert.match(ranLine({ runtime: "sandbox", by: "approval" }), /widened[\s\S]*user/)
+        assert.match(ranLine({ runtime: "sandbox", grant: '"all"', by: "approval" }), /everything[\s\S]*user/)
+        assert.match(ranLine({ runtime: "sandbox", grant: '{ write = ["/x"] }', by: "grant" }), /\/x[\s\S]*saved/)
+    })
+
+    it("takes a rerun shaped like a per-command entry: a host one has no grant, a sandbox one needs one", () => {
+        const { bash } = register("/nowhere")
+        const rerun = (bash!.parameters as { properties: { rerun: unknown } }).properties.rerun
+        assert.ok(rerun, "the tool takes `rerun`")
+        assert.ok(!("outside_sandbox" in (bash!.parameters as { properties: object }).properties))
+        const validator = compile(RerunSchema)
+        for (const ok of [
+            { runtime: "host" },
+            { runtime: "sandbox", grant: "all" },
+            { runtime: "sandbox", grant: { connect: ["$TMPDIR"], write: ["~/x"] } },
+            { runtime: "sandbox", grant: {} },
+        ])
+            assert.ok(validator.validate(ok).ok, JSON.stringify(ok))
+        for (const bad of [
+            { runtime: "host", grant: "all" },
+            { runtime: "sandbox" },
+            { runtime: "sandbox", grant: "everything" },
+            { runtime: "sandbox", grant: { deny: ["/"] } },
+            { runtime: "sandbox", grant: { write: "/x" } },
+            { runtime: "vm" },
+            true,
+        ])
+            assert.ok(!validator.validate(bad).ok, JSON.stringify(bad))
     })
 
     it("maps the daemon's timeout to pi's timeout result", async () => {
@@ -240,7 +300,7 @@ describe("bash in a sandboxed session under piton", () => {
                 const [request] = daemon.requests
                 assert.equal(request!.command, "ls", "pi's prefix removed")
                 assert.match(String(request!.call_id), /^user:\d+$/)
-                assert.equal(request!.rerun, false)
+                assert.ok(!("rerun" in request!), "a typed command never asks for a rerun")
             })
         } finally {
             await daemon.close()

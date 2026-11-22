@@ -83,8 +83,8 @@ impl CommandPolicies {
         self.all.tag = tag.to_string();
         for (_, runtime) in &mut self.entries {
             match runtime {
-                EntryRuntime::Sandbox(Ok(policy)) => policy.tag = tag.to_string(),
-                EntryRuntime::Sandbox(Err(_)) | EntryRuntime::Host => {}
+                EntryRuntime::Sandbox { policy: Ok(policy), .. } => policy.tag = tag.to_string(),
+                EntryRuntime::Sandbox { policy: Err(_), .. } | EntryRuntime::Host => {}
             }
         }
     }
@@ -103,9 +103,12 @@ impl CommandPolicies {
 pub enum EntryRuntime {
     /// `runtime = "host"`.
     Host,
-    /// `runtime = "sandbox"`: its policy, or why it couldn't be resolved (a narrowed grant naming a `$VAR` that isn't
-    /// set).
-    Sandbox(Result<Policy, String>),
+    /// `runtime = "sandbox"`: its grant, and its policy or why it couldn't be resolved (a narrowed grant naming a `$VAR`
+    /// that isn't set).
+    Sandbox {
+        grant: Grant,
+        policy: Result<Policy, String>,
+    },
 }
 
 /// The configuration a narrowed grant resolves with: the launch's, with the grant's lists added as if the file that
@@ -147,10 +150,13 @@ pub fn command_policies(
         .map(|entry| {
             let runtime = match &entry.value.runtime {
                 CommandRuntime::Host => EntryRuntime::Host,
-                CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => EntryRuntime::Sandbox(Ok(widened.clone())),
-                CommandRuntime::Sandbox(Grant::Lists(lists)) => {
-                    EntryRuntime::Sandbox(resolver.with(lists, &entry.file))
-                }
+                CommandRuntime::Sandbox(grant) => EntryRuntime::Sandbox {
+                    grant: grant.clone(),
+                    policy: match grant {
+                        Grant::All(AllGrant::All) => Ok(widened.clone()),
+                        Grant::Lists(lists) => resolver.with(lists, &entry.file),
+                    },
+                },
             };
             (entry.clone(), runtime)
         })
