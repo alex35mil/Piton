@@ -138,11 +138,11 @@ const tests = {
         const result = await done;
         assert.ok(existsSync(target), "allowed once: it ran outside the sandbox");
         assert.match(result, /floor-held/, "a protected file stays closed");
-        assert.match(result, /widened sandbox/, "the result says where it ran");
+        assert.match(result, /sandbox widened by everything/, "the result says where it ran, at `all`");
         await a.close();
     },
 
-    async "the switch asks again on the host; a host run passes the floor and starts a sandbox of its own"(ctx) {
+    async "a host request opens on the host; a host run passes the floor and starts a sandbox of its own"(ctx) {
         const a = attach(ctx);
         const target = join(ctx.ws, ".pi", "host-wrote");
         // Only a host run writes a protected file, and only a host run can start a sandbox (they don't nest). The helper
@@ -152,18 +152,51 @@ const tests = {
             `mkdir -p .pi && touch ${target} && ` +
             `PITON_SANDBOX_POLICY="$(${policy})" ${piton} sandbox-exec -- /usr/bin/true && echo nested-ok`;
         const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && QUESTION.test(r.title ?? ""));
-        const done = a.bash(`rerun host tools|${command}`);
-        const sandboxed = await dialog;
-        assert.match(sandboxed.title, /^Run again in the sandbox\?/);
-        const switched = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && r.id !== sandboxed.id);
+        const done = a.bash(`rerun-host host tools|${command}`);
+        const host = await dialog;
+        assert.match(host.title, /^Run on the host, with no sandbox\?/, "opens on what was asked");
+        // The sandbox side stays: switching shows it at `all`, and switching back returns to the host.
+        const switched = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && r.id !== host.id);
+        a.send({ type: "extension_ui_response", id: host.id, value: host.options.find((o) => o.startsWith("Switch to running in the sandbox")) });
+        const sandboxed = await switched;
+        assert.match(sandboxed.title, /^Run again in the sandbox\?[\s\S]*everything open/);
+        const back = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && r.id !== sandboxed.id);
         a.send({ type: "extension_ui_response", id: sandboxed.id, value: sandboxed.options.find((o) => o.startsWith("Switch to running on the host")) });
-        const host = await switched;
-        assert.match(host.title, /^Run on the host, with no sandbox\?/);
-        a.send({ type: "extension_ui_response", id: host.id, value: host.options.find((o) => o.startsWith("Run once on the host")) });
+        const again = await back;
+        a.send({ type: "extension_ui_response", id: again.id, value: again.options.find((o) => o.startsWith("Run once on the host")) });
         const result = await done;
         assert.ok(existsSync(target), "on the host: no floor");
         assert.match(result, /nested-ok/, `no sandbox around it: ${result}`);
         assert.match(result, /on the host/, "the result says where it ran");
+        await a.close();
+    },
+
+    async "a narrowed request opens on its grant, runs with only it, and always saves exactly it"(ctx) {
+        const a = attach(ctx);
+        const granted = `${ctx.outside}-narrow`;
+        const other = `${ctx.outside}-narrow-other`;
+        mkdirSync(granted);
+        const grant = JSON.stringify({ write: [granted] });
+        // Only the granted folder opens: the second write stays refused.
+        const command = `touch ${granted}/x && (touch ${other} 2>&1 || echo other-refused)`;
+        const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && QUESTION.test(r.title ?? ""));
+        const done = a.bash(`rerun-grant ${grant}|needs one folder|${command}`);
+        const req = await dialog;
+        assert.match(req.title, /^Run again in the sandbox\?/);
+        assert.ok(req.title.includes(`grant = { write = ["${granted}"] }`), req.title);
+        assert.ok(req.options.some((o) => o.startsWith("Widen to everything but the floor")), "the grant can be widened");
+        const project = req.options.find((o) => o.startsWith("With this grant: Allow this command in this project"));
+        a.send({ type: "extension_ui_response", id: req.id, value: project });
+        const result = await done;
+        assert.ok(existsSync(join(granted, "x")), "the granted folder is writable");
+        assert.ok(!existsSync(other), "nothing else opens");
+        assert.match(result, /other-refused/);
+        assert.ok(result.includes("widened by `grant = { write = "), `the result names the grant: ${result}`);
+        const saved = readFileSync(join(ctx.ws, ".piton/config.local.toml"), "utf8");
+        assert.ok(saved.includes(`bash(${command})`), saved);
+        assert.match(saved, /runtime = "sandbox"/);
+        assert.ok(saved.includes(granted) && !saved.includes('grant = "all"'), `exactly the requested grant: ${saved}`);
+        rmSync(join(ctx.ws, ".piton"), { recursive: true, force: true });
         await a.close();
     },
 
@@ -307,8 +340,8 @@ for (const [name, test] of Object.entries(tests)) {
     } finally {
         daemon.kill("SIGTERM");
         await daemon.exited;
-        for (const suffix of ["-plain", "-rerun", "-rerun2", "-persist", "-process", "-process2", "-silenced"]) {
-            rmSync(`${ctx.outside}${suffix}`, { force: true });
+        for (const suffix of ["-plain", "-rerun", "-rerun2", "-persist", "-process", "-process2", "-silenced", "-narrow", "-narrow-other"]) {
+            rmSync(`${ctx.outside}${suffix}`, { recursive: true, force: true });
         }
         rmSync(ctx.dir, { recursive: true, force: true });
     }

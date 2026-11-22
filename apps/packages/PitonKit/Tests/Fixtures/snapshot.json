@@ -95,18 +95,28 @@
       {
         "id": "piton:question:3",
         "kind": "command",
-        "command": "sh cli/tests/probe/protected.sh",
-        "reason": "it starts a sandbox of its own",
+        "command": "mise run cli:test",
+        "reason": "its test daemons connect to sockets in temp",
         "refusals": [
-          "process-exec /Users/me/.local/bin/piton"
+          "network-outbound /private/var/folders/x/T/piton-e2e/daemon.sock"
         ],
         "note": null,
         "runtime": "sandbox",
+        "requested": {
+          "runtime": "sandbox",
+          "grant": {
+            "connect": [
+              "$TMPDIR"
+            ]
+          }
+        },
+        "grant_entry": "{ connect = [\"$TMPDIR\"] }",
         "wording": {
-          "sandbox": "It runs again in the sandbox with everything open except protected files, configuration, and the daemon's state.",
+          "all": "It runs again in the sandbox with everything open except protected files, configuration, and the daemon's state.",
+          "narrowed": "It runs again in the sandbox with only this added: `grant = { connect = [\"$TMPDIR\"] }`. Protected files, configuration, and the daemon's state stay closed.",
           "host": "It runs again on your Mac with no sandbox, as you, including whatever the agent wrote into the files it runs and the environment variables those files set."
         },
-        "suggested_pattern": "sh *",
+        "suggested_pattern": "mise run *",
         "writable_vars": [
           {
             "source": "/Users/me/Projects/app/mise.toml",

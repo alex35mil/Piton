@@ -221,13 +221,101 @@ pub struct CommandGrant {
     pub runtime: CommandRuntime,
 }
 
-/// Where a per-command entry's command runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where a command the user approved runs: a `[[sandbox.commands]]` entry's `runtime` and `grant`, and the same pair in
+/// a rerun the agent asks for (the bash tool's `rerun`). Both are read by [`CommandRuntime::from_parts`], so a host
+/// runtime with a grant, or a sandbox one without, is refused in both with the same words.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "RuntimeEntry", into = "RuntimeEntry")]
 pub enum CommandRuntime {
     /// `runtime = "host"`: no sandbox, the user's full access.
     Host,
     /// `runtime = "sandbox"` with its `grant`: the launch's sandbox widened by it, never past the floor.
     Sandbox(Grant),
+}
+
+/// Why a `runtime` and `grant` pair isn't a [`CommandRuntime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeError {
+    Missing,
+    GrantOnHost,
+    SandboxWithoutGrant,
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::Missing => write!(f, "`runtime` is required: \"sandbox\" (with `grant`) or \"host\""),
+            RuntimeError::GrantOnHost => {
+                write!(
+                    f,
+                    "`grant` is for `runtime = \"sandbox\"`; a host command runs with no sandbox"
+                )
+            }
+            RuntimeError::SandboxWithoutGrant => {
+                write!(
+                    f,
+                    "`runtime = \"sandbox\"` needs `grant`: \"all\" or a table of grant lists"
+                )
+            }
+        }
+    }
+}
+
+impl CommandRuntime {
+    /// The one reading of a `runtime` and its `grant`, for a saved entry and a rerun request alike.
+    fn from_parts(runtime: Option<RuntimeName>, grant: Option<Grant>) -> Result<Self, RuntimeError> {
+        match (runtime, grant) {
+            (None, _) => Err(RuntimeError::Missing),
+            (Some(RuntimeName::Host), None) => Ok(CommandRuntime::Host),
+            (Some(RuntimeName::Host), Some(_)) => Err(RuntimeError::GrantOnHost),
+            (Some(RuntimeName::Sandbox), Some(grant)) => Ok(CommandRuntime::Sandbox(grant)),
+            (Some(RuntimeName::Sandbox), None) => Err(RuntimeError::SandboxWithoutGrant),
+        }
+    }
+
+    /// The `runtime` word and the `grant`, as written.
+    fn parts(self) -> (RuntimeName, Option<Grant>) {
+        match self {
+            CommandRuntime::Host => (RuntimeName::Host, None),
+            CommandRuntime::Sandbox(grant) => (RuntimeName::Sandbox, Some(grant)),
+        }
+    }
+
+    /// A narrowed grant's paths must be absolute, or start with `~/` or `$`.
+    pub fn check(&self) -> Result<(), String> {
+        match self {
+            CommandRuntime::Host | CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => Ok(()),
+            CommandRuntime::Sandbox(Grant::Lists(lists)) => lists.check(),
+        }
+    }
+}
+
+/// A runtime as written on its own (a rerun request): `runtime`, and `grant` for a sandbox one only.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeEntry {
+    #[serde(default)]
+    runtime: Option<RuntimeName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<Grant>,
+}
+
+impl TryFrom<RuntimeEntry> for CommandRuntime {
+    type Error = RuntimeError;
+
+    fn try_from(entry: RuntimeEntry) -> Result<Self, RuntimeError> {
+        CommandRuntime::from_parts(entry.runtime, entry.grant)
+    }
+}
+
+impl From<CommandRuntime> for RuntimeEntry {
+    fn from(runtime: CommandRuntime) -> Self {
+        let (runtime, grant) = runtime.parts();
+        Self {
+            runtime: Some(runtime),
+            grant,
+        }
+    }
 }
 
 /// A `[[sandbox.commands]]` entry as written: `match`, a required `runtime`, and `grant` for a sandbox entry only.
@@ -255,26 +343,8 @@ impl TryFrom<CommandEntry> for CommandGrant {
 
     fn try_from(entry: CommandEntry) -> Result<Self, String> {
         let rule = String::from(entry.pattern.clone());
-        let runtime = match (entry.runtime, entry.grant) {
-            (None, _) => {
-                return Err(format!(
-                    "sandbox.commands {rule}: `runtime` is required: \"sandbox\" (with `grant`) or \"host\""
-                ));
-            }
-            (Some(RuntimeName::Host), None) => CommandRuntime::Host,
-            (Some(RuntimeName::Host), Some(_)) => {
-                return Err(format!(
-                    "sandbox.commands {rule}: `grant` is for `runtime = \"sandbox\"`; a host command runs with no \
-                     sandbox"
-                ));
-            }
-            (Some(RuntimeName::Sandbox), Some(grant)) => CommandRuntime::Sandbox(grant),
-            (Some(RuntimeName::Sandbox), None) => {
-                return Err(format!(
-                    "sandbox.commands {rule}: `runtime = \"sandbox\"` needs `grant`: \"all\" or a table of grant lists"
-                ));
-            }
-        };
+        let runtime = CommandRuntime::from_parts(entry.runtime, entry.grant)
+            .map_err(|why| format!("sandbox.commands {rule}: {why}"))?;
         Ok(Self {
             pattern: entry.pattern,
             runtime,
@@ -284,10 +354,7 @@ impl TryFrom<CommandEntry> for CommandGrant {
 
 impl From<CommandGrant> for CommandEntry {
     fn from(grant: CommandGrant) -> Self {
-        let (runtime, grant_value) = match grant.runtime {
-            CommandRuntime::Host => (RuntimeName::Host, None),
-            CommandRuntime::Sandbox(g) => (RuntimeName::Sandbox, Some(g)),
-        };
+        let (runtime, grant_value) = grant.runtime.parts();
         Self {
             pattern: grant.pattern,
             runtime: Some(runtime),
@@ -342,7 +409,17 @@ pub enum Grant {
     /// `"all"`: everything except the floor. What persisting a sandbox answer saves.
     All(AllGrant),
     /// The `[sandbox]` grant lists, added as the user's own lists are.
-    Lists(GrantLists),
+    Lists(Box<GrantLists>),
+}
+
+impl Grant {
+    /// The grant as written after `grant = `: `"all"`, or an inline table of its lists.
+    pub fn inline(&self) -> String {
+        match self {
+            Grant::All(AllGrant::All) => toml_string("all"),
+            Grant::Lists(lists) => lists.inline(),
+        }
+    }
 }
 
 /// The word `all`.
@@ -742,18 +819,21 @@ impl TableValue for SandboxTable {
             }
         }
         for command in &self.commands {
-            match &command.runtime {
-                CommandRuntime::Host | CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => {}
-                CommandRuntime::Sandbox(Grant::Lists(lists)) => lists
-                    .check()
-                    .map_err(|why| format!("sandbox.commands {}: {why}", String::from(command.pattern.clone())))?,
-            }
+            command
+                .runtime
+                .check()
+                .map_err(|why| format!("sandbox.commands {}: {why}", String::from(command.pattern.clone())))?;
         }
         Ok(())
     }
 }
 
 impl GrantLists {
+    /// The lists as an inline TOML table: `{ write = ["/x"] }`.
+    pub fn inline(&self) -> String {
+        toml::Value::try_from(self).map_or_else(|e| format!("{{ /* {e} */ }}"), |value| value.to_string())
+    }
+
     fn check(&self) -> Result<(), String> {
         for (key, paths) in [
             ("write", &self.write),
@@ -1151,11 +1231,11 @@ mod tests {
         );
         assert_eq!(
             parsed.commands[1].runtime,
-            CommandRuntime::Sandbox(Grant::Lists(GrantLists {
+            CommandRuntime::Sandbox(Grant::Lists(Box::new(GrantLists {
                 connect: vec![Connect::Socket("$SSH_AUTH_SOCK".into())],
                 write: vec!["~/x".into()],
                 ..GrantLists::default()
-            }))
+            })))
         );
         assert_eq!(parsed.commands[2].runtime, CommandRuntime::Host);
         assert!(parsed.check().is_ok());
@@ -1214,10 +1294,10 @@ mod tests {
         let bind = table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { bind = [\"$TMPDIR\"] }");
         assert_eq!(
             bind.commands[0].runtime,
-            CommandRuntime::Sandbox(Grant::Lists(GrantLists {
+            CommandRuntime::Sandbox(Grant::Lists(Box::new(GrantLists {
                 bind: vec!["$TMPDIR".into()],
                 ..GrantLists::default()
-            }))
+            })))
         );
         assert!(bind.check().is_ok());
         assert!(
@@ -1226,6 +1306,67 @@ mod tests {
                 .is_err()
         );
         assert!(table("bind = [\"rel\"]").check().is_err());
+    }
+
+    /// A rerun request's runtime is read by the same parser as a `[[sandbox.commands]]` entry's: the same shapes pass,
+    /// and the same ones are refused with the same words.
+    #[test]
+    fn a_runtime_reads_the_same_on_its_own_and_in_an_entry() {
+        let alone = |v: serde_json::Value| serde_json::from_value::<CommandRuntime>(v).map_err(|e| e.to_string());
+        assert_eq!(alone(serde_json::json!({"runtime": "host"})), Ok(CommandRuntime::Host));
+        assert_eq!(
+            alone(serde_json::json!({"runtime": "sandbox", "grant": "all"})),
+            Ok(CommandRuntime::Sandbox(Grant::All(AllGrant::All)))
+        );
+        assert_eq!(
+            alone(serde_json::json!({"runtime": "sandbox", "grant": {"bind": ["$TMPDIR"]}})),
+            Ok(CommandRuntime::Sandbox(Grant::Lists(Box::new(GrantLists {
+                bind: vec!["$TMPDIR".into()],
+                ..GrantLists::default()
+            }))))
+        );
+        for (runtime, says) in [
+            (
+                "runtime = \"host\"\ngrant = \"all\"",
+                "`grant` is for `runtime = \"sandbox\"`",
+            ),
+            ("runtime = \"sandbox\"", "`runtime = \"sandbox\"` needs `grant`"),
+            ("grant = \"all\"", "`runtime` is required"),
+        ] {
+            let value: toml::Value = toml::from_str(runtime).unwrap();
+            let json = serde_json::to_value(&value).unwrap();
+            let request = alone(json).expect_err(runtime);
+            let entry = toml::from_str::<SandboxTable>(&format!("[[commands]]\nmatch = \"bash(x)\"\n{runtime}"))
+                .expect_err(runtime)
+                .to_string();
+            assert!(request.contains(says) && entry.contains(says), "{request} / {entry}");
+        }
+        for bad in [
+            serde_json::json!({"runtime": "vm"}),
+            serde_json::json!({"runtime": "sandbox", "grant": "everything"}),
+            serde_json::json!({"runtime": "sandbox", "grant": {"deny": ["/"]}}),
+            serde_json::json!({"runtime": "host", "match": "bash(x)"}),
+        ] {
+            assert!(alone(bad.clone()).is_err(), "{bad}");
+        }
+        // Written back as read.
+        let narrowed = CommandRuntime::Sandbox(Grant::Lists(Box::new(GrantLists {
+            write: vec!["~/x".into()],
+            ..GrantLists::default()
+        })));
+        assert_eq!(
+            serde_json::to_value(&narrowed).unwrap(),
+            serde_json::json!({"runtime": "sandbox", "grant": {"write": ["~/x"]}})
+        );
+        assert_eq!(
+            serde_json::to_value(CommandRuntime::Host).unwrap(),
+            serde_json::json!({"runtime": "host"})
+        );
+        assert_eq!(Grant::All(AllGrant::All).inline(), "\"all\"");
+        let CommandRuntime::Sandbox(grant) = narrowed else {
+            unreachable!()
+        };
+        assert_eq!(grant.inline(), "{ write = [\"~/x\"] }");
     }
 
     /// Every key that loosens a protection is the user's own: the global file or a `config.local.toml`. Writes,

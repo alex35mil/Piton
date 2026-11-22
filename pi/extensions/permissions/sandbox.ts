@@ -2,8 +2,8 @@
  * Bash in a sandboxed session piton's daemon launched. A sandboxed process can't start one with another sandbox, so
  * the daemon, outside any, runs every bash call and `!` command, each in its own sandbox tagged with the call: the
  * session's rules, or more when the user granted them (`[[sandbox.commands]]`) or approved a rerun the agent asked for
- * after the sandbox blocked it (`outside_sandbox: true`), never past the floor; or, when the user chose it, on the
- * host with no sandbox. The tag lets the daemon tell which call the kernel refused; refusals in pi's own sandbox (MCP
+ * after the sandbox blocked it (`rerun`: a per-command entry's runtime and grant), never past the floor; or, when the
+ * user chose it, on the host with no sandbox. The tag lets the daemon tell which call the kernel refused; refusals in pi's own sandbox (MCP
  * servers, extensions) are the session's.
  *
  * The tool is pi's own bash definition, with pi's `shellPath`, `shellCommandPrefix`, rendering, truncation, and
@@ -21,13 +21,13 @@ import {
     type BashOperations,
     type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent"
-import { Type } from "typebox"
+import { Type, type Static } from "typebox"
 
 import { agentChannel } from "../__lib/protected.js"
 
 /** What the daemon answers a run request with, line by line. */
 export type RunLine =
-    | { type: "ran"; runtime: RanRuntime; by: RanBy }
+    | ({ type: "ran" } & Ran)
     | { type: "output"; data: string }
     | { type: "exit"; code: number }
     | { type: "timed_out" }
@@ -43,26 +43,85 @@ export interface RunRequest {
     /** pi's shell environment for the command: used when it runs with the session's own rules. */
     env: Record<string, string>
     reason?: string
-    rerun: boolean
+    /** The rerun the agent asked for, as it wrote it; absent for a plain call or a `!` command. */
+    rerun?: Rerun
 }
 
-/** Where a widened or host run ran: a widened sandbox, or the host with no sandbox. */
-export type RanRuntime = "sandbox" | "host"
-/** What made it run there: a saved `[[sandbox.commands]]` entry, or the user's answer. */
+const RERUN_DESCRIPTION =
+    "Only after this exact command failed because the sandbox blocked it (Operation not permitted, a refused " +
+    "keychain or socket): run it again with what you name. Ask for the narrowest grant that lifts the block (the " +
+    'refusal names the path), `"all"` when unsure, and the host only for what no sandbox can run. The user is ' +
+    "asked first and may choose differently (another runtime, `all`, or deny); the whole command runs again."
+
+const grantList = (description: string) => Type.Optional(Type.Array(Type.String(), { description }))
+
+/** A narrowed grant: the `[sandbox]` lists a `[[sandbox.commands]]` entry's `grant` takes. */
+const GrantListsSchema = Type.Object(
+    {
+        write: grantList("Folders to make writable, each with everything below it."),
+        write_file: grantList("Files to make writable, exactly each path."),
+        read: grantList("Paths whose credential deny to lift for reading."),
+        connect: grantList("Unix sockets (a path), `localhost:PORT`, `*:PORT`, `*`, or a host to connect to."),
+        bind: grantList("Paths where Unix sockets may be created."),
+        services: grantList("Mach services to look up: a name, `name.*`, or `*`."),
+        presets: grantList("Built-in sets of entries, by name (`git`, `apps`, `rust`, ...)."),
+    },
+    {
+        additionalProperties: false,
+        description:
+            "Only what lifts the block, named by the refusal (paths absolute, or starting with `~/` or `$`), e.g. " +
+            '`{ "write": ["~/.cache/tool"] }` or `{ "connect": ["$TMPDIR"] }`.',
+    },
+)
+
+/**
+ * The bash tool's `rerun`: the runtime and grant of a `[[sandbox.commands]]` entry. A union, so neither a host rerun with
+ * a grant nor a sandbox one without fits; the daemon reads it with the same parser as the entry.
+ */
+export const RerunSchema = Type.Union(
+    [
+        Type.Object(
+            {
+                runtime: Type.Literal("sandbox"),
+                grant: Type.Union([
+                    Type.Literal("all", { description: "Everything except protected files and configuration." }),
+                    GrantListsSchema,
+                ]),
+            },
+            { additionalProperties: false },
+        ),
+        Type.Object(
+            { runtime: Type.Literal("host") },
+            {
+                additionalProperties: false,
+                description:
+                    "No sandbox: only for what no sandbox can run (a command that starts a sandbox of its own, `log`, " +
+                    "writing protected files or configuration).",
+            },
+        ),
+    ],
+    { description: RERUN_DESCRIPTION },
+)
+
+export type Rerun = Static<typeof RerunSchema>
+
+/** What made a widened or host run run there: a saved `[[sandbox.commands]]` entry, or the user's answer. */
 export type RanBy = "grant" | "approval"
 
-/** Where a call ran, when the daemon said it wasn't the session's own sandbox. */
-export interface Ran {
-    runtime: RanRuntime
-    by: RanBy
-}
+/**
+ * Where a call ran, when the daemon said it wasn't the session's own sandbox: a sandbox widened by `grant` (as written
+ * after `grant = `: `"all"` or an inline table), or the host with no sandbox.
+ */
+export type Ran = { runtime: "sandbox"; grant: string; by: RanBy } | { runtime: "host"; by: RanBy }
 
 /** The line the tool's result gets for a run outside the session's own sandbox. */
 export function ranLine(ran: Ran): string {
     const where = ((): string => {
         switch (ran.runtime) {
             case "sandbox":
-                return "Ran in a widened sandbox (everything open but protected files and configuration)"
+                return ran.grant === '"all"'
+                    ? "Ran in a sandbox widened by everything but protected files and configuration"
+                    : `Ran in a sandbox widened by \`grant = ${ran.grant}\``
             case "host":
                 return "Ran on the host with no sandbox"
         }
@@ -130,8 +189,10 @@ export function requestRun(
                 return finish(() => reject(new Error("piton's daemon sent an unreadable answer")))
             }
             switch (parsed.type) {
-                case "ran":
-                    return onRan?.({ runtime: parsed.runtime, by: parsed.by })
+                case "ran": {
+                    const { type: _, ...ran } = parsed
+                    return onRan?.(ran)
+                }
                 case "output":
                     return onData(Buffer.from(parsed.data, "base64"))
                 case "exit":
@@ -139,7 +200,7 @@ export function requestRun(
                 case "timed_out":
                     return finish(() => reject(new Error(`timeout:${request.timeout ?? 0}`)))
                 case "not_run":
-                    return finish(() => reject(new Error(`Not run outside the sandbox: ${parsed.reason}`)))
+                    return finish(() => reject(new Error(`Not run: ${parsed.reason}`)))
                 case "error":
                     return finish(() => reject(new Error(`piton's daemon refused: ${parsed.message}`)))
             }
@@ -161,11 +222,6 @@ export function requestRun(
     })
 }
 
-const OUTSIDE_SANDBOX_DESCRIPTION =
-    "Only after this exact command failed because the sandbox blocked it (Operation not permitted, a refused " +
-    "keychain or socket): run it again outside the sandbox. The user is asked first, and may run it again in a " +
-    "widened sandbox or on the host with no sandbox; the whole command runs again."
-
 /** Strips pi's `shellCommandPrefix` from a command pi prefixed: the daemon applies it itself. */
 export function unprefixed(resolved: string, prefix: string | undefined): string {
     return prefix && resolved.startsWith(`${prefix}\n`) ? resolved.slice(prefix.length + 1) : resolved
@@ -183,11 +239,11 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
         ...base,
         parameters: Type.Object({
             ...base.parameters.properties,
-            outside_sandbox: Type.Optional(Type.Boolean({ description: OUTSIDE_SANDBOX_DESCRIPTION })),
-            reason: Type.Optional(Type.String({ description: "With outside_sandbox: why it needs to run outside." })),
+            rerun: Type.Optional(RerunSchema),
+            reason: Type.Optional(Type.String({ description: "With rerun: why it needs what it asks for." })),
         }),
         async execute(toolCallId, params, signal, onUpdate, ctx) {
-            const { command, timeout, outside_sandbox: outside, reason } = params
+            const { command, timeout, rerun, reason } = params
             const { commandPrefix } = piShellSettings(ctx.cwd)
             let ran: Ran | undefined
             const operations: BashOperations = {
@@ -200,7 +256,7 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
                         timeout,
                         env: piShellEnv(options.env),
                         reason,
-                        rerun: outside === true,
+                        rerun,
                     }
                     return requestRun(channel, request, options.onData, options.signal, (r) => {
                         ran = r
@@ -211,12 +267,11 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
             const result = await tool.execute(toolCallId, { command, timeout }, signal, onUpdate, ctx)
             if (!ran) return result
             const structured = result.structuredContent
-            const where = { runtime: ran.runtime, by: ran.by }
             return {
                 ...result,
                 content: [...result.content, { type: "text" as const, text: ranLine(ran) }],
                 ...(structured && typeof structured === "object" && !Array.isArray(structured)
-                    ? { structuredContent: { ...structured, ran: where } }
+                    ? { structuredContent: { ...structured, ran } }
                     : {}),
             }
         },
@@ -232,7 +287,6 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
                     cwd,
                     timeout: options.timeout,
                     env: piShellEnv(options.env),
-                    rerun: false,
                 }
                 return requestRun(channel, request, options.onData, options.signal)
             },

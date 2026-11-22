@@ -1,13 +1,16 @@
 import PitonKit
 import SwiftUI
 
-/// The block question for a command: the agent asks to run it again after the sandbox blocked it. A switch picks where
-/// it runs (a widened sandbox or the host), and the answers act there: once, deny, or always for this command or a
-/// pattern, in this project or everywhere. Left and right arrows move the switch with a hardware keyboard.
+/// The block question for a command: the agent asks to run it again after the sandbox blocked it, naming where (a
+/// sandbox grant or the host). A switch, starting on that request, picks where it runs; on the sandbox side a narrowed
+/// grant shows its entry and can be widened to everything but the floor. The answers act there: once, deny, or always
+/// for this command or a pattern, in this project or everywhere, saving exactly that runtime and grant. Left and right
+/// arrows move the switch with a hardware keyboard.
 struct CommandQuestionCard: View {
     let question: Question
     let decide: (Decision) -> Void
     @State private var runtime: CommandRuntime
+    @State private var widened = false
     @State private var scope: PersistScope = .project
     @State private var pattern: String
     @State private var showVariables = false
@@ -24,6 +27,30 @@ struct CommandQuestionCard: View {
         switch runtime {
         case .sandbox: Theme.accent
         case .host: Theme.alert
+        }
+    }
+
+    /// The sandbox side's grant as the user left it: the requested one, or `all` once widened.
+    private var grant: RerunGrant {
+        switch question.sandboxGrant {
+        case .all: .all
+        case .lists: widened ? .all : question.sandboxGrant
+        }
+    }
+
+    /// What an answer runs with.
+    private var chosen: RerunRuntime {
+        switch runtime {
+        case .sandbox: .sandbox(grant)
+        case .host: .host
+        }
+    }
+
+    /// The narrowed entry the sandbox side shows, when the agent asked for one.
+    private var narrowedEntry: String? {
+        switch question.sandboxGrant {
+        case .all: nil
+        case .lists: question.grantEntry
         }
     }
 
@@ -53,7 +80,16 @@ struct CommandQuestionCard: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            Text(question.wording.text(runtime))
+            if runtime == .sandbox, let entry = narrowedEntry {
+                Text("grant = \(entry)")
+                    .font(typography.data(.footnote))
+                    .foregroundStyle(widened ? Theme.dim : Theme.secondary)
+                    .strikethrough(widened)
+                    .textSelection(.enabled)
+                Toggle("Widen to everything but protected files and configuration", isOn: $widened)
+                    .font(typography.content(.footnote))
+            }
+            Text(question.wording.text(chosen))
                 .font(typography.content(.callout))
                 .foregroundStyle(runtime == .host ? Theme.alert : Theme.secondary)
             if runtime == .host && variableCount > 0 {
@@ -74,7 +110,7 @@ struct CommandQuestionCard: View {
                 }
             }
             HStack {
-                Button(runtime == .host ? "Run once on the host" : "Allow once") { decide(.once(runtime)) }
+                Button(runtime == .host ? "Run once on the host" : "Allow once") { decide(.once(chosen)) }
                     .buttonStyle(OutlineButtonStyle(prominent: true, color: color))
                 Button("Deny") { decide(.deny) }
                     .buttonStyle(OutlineButtonStyle(color: Theme.secondary))
@@ -101,7 +137,7 @@ struct CommandQuestionCard: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                Button("Save and run") { decide(.always(runtime, scope: scope, pattern: pattern)) }
+                Button("Save and run") { decide(.always(chosen, scope: scope, pattern: pattern)) }
                     .buttonStyle(OutlineButtonStyle(color: color))
                     .disabled(pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

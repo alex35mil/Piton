@@ -534,12 +534,16 @@ sandboxed session can write.
 #### When the sandbox blocks something
 
 In a sandboxed session, the daemon runs every bash command and `!` command, each in its own sandbox with the same rules
-as pi's. When a command fails because the sandbox blocked it, the agent can ask to run it again outside the sandbox,
-and you're asked in the apps or pi.nvim. You choose where it runs again, then answer:
+as pi's. When a command fails because the sandbox blocked it, the agent can ask to run it again, naming what it needs
+the way a per-command entry does (below): a sandbox `grant` (`"all"`, or only the lists that lift the block, such as
+`{ connect = ["$TMPDIR"] }`) or the host. You're asked in the apps or pi.nvim; the question opens on what the agent
+asked for, and you choose where it runs again, then answer:
 
-- **In the sandbox** (the default): everything open except the floor: protected files, configuration, pi's agent
-  directory, Piton's state, your `deny`, and credentials while fnox is on. Every Mach service and launching apps
-  are open too, so an approved `open` opens.
+- **In the sandbox:** with the grant the agent asked for, which you can widen to `all`; or `all` when it asked for the
+  host. `all` is everything open except the floor: protected files, configuration, pi's agent directory, Piton's
+  state, your `deny`, and credentials while fnox is on. Every Mach service and launching apps are open too, so an
+  approved `open` opens. A narrowed grant adds only its lists, never past the floor either; one that can't be
+  resolved (a `$VAR` that isn't set, a relative path) is refused before you're asked.
 - **On the host:** no sandbox at all, as you. For commands no sandbox can run: anything that starts a sandbox of its
   own (`piton sandbox-exec`, `sh cli/tests/probe/protected.sh`), `log`, and tools that must write the floor. It
   gets the session's environment, the workspace's `mise env` included, so it runs whatever the agent wrote into the
@@ -547,12 +551,14 @@ and you're asked in the apps or pi.nvim. You choose where it runs again, then an
   lists those variables, by file (folded in the apps).
 
 Then: **Allow once** (or **Run once on the host**), **Deny** (it stays failed), or **always** for this command or an
-edited pattern, in this project or everywhere, which saves a per-command entry for that runtime and runs it. The
-whole command runs again, so its side effects repeat. The agent's result says where it ran.
+edited pattern, in this project or everywhere, which saves a per-command entry with exactly that runtime and grant
+and runs it. The whole command runs again, so its side effects repeat. The agent's result says where it ran, and with
+which grant.
 
-The apps show a switch (left and right arrows with a keyboard) and the pattern inline. pi.nvim shows pi's dialog: its
-first option, **Choose an answer below**, decides nothing and shows the question again, so Enter alone never answers;
-its last option switches to the other runtime and asks again.
+The apps show a switch (left and right arrows with a keyboard), a narrowed grant's entry with a toggle that widens it
+to `all`, and the pattern inline. pi.nvim shows pi's dialog: its first option, **Choose an answer below**, decides
+nothing and shows the question again, so Enter alone never answers; its last option switches to the other runtime and
+asks again; with a narrowed grant, the one before it widens to `all`.
 
 No answer within `confirmation_timeout_ms` (10 minutes by default): it doesn't run. The agent can ask, never approve.
 `osascript` is never offered, and neither is `open` of a file or app the sandbox could have written, as a path or a
@@ -567,16 +573,16 @@ Per-command entries, in the global `config.toml` or a `config.local.toml`. `runt
 [[sandbox.commands]]
 match = "bash(husky install *)"
 runtime = "sandbox"
-grant = "all"                               # everything except the floor (what "always" in the sandbox saves)
+grant = "all"                               # everything except the floor
 
 [[sandbox.commands]]
 match = "bash(git push *)"
 runtime = "sandbox"
-grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed by hand: write, write_file, read, connect, bind, presets
+grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed: write, write_file, read, connect, bind, services, presets
 
 [[sandbox.commands]]
 match = "bash(sh cli/tests/probe/protected.sh)"
-runtime = "host"                            # no sandbox (what "always" on the host saves)
+runtime = "host"                            # no sandbox
 ```
 
 A saved host entry runs its command on the host without asking, so whatever the agent writes into a file that command
