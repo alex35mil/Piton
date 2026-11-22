@@ -15,7 +15,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 pub use self::resolve::{ClaudeCode, ProfileChoice};
 #[cfg(test)]
-pub use self::rules::{Effect, Rule, Target};
+pub use self::rules::{Apps, Effect, Rule, ServiceGrant, Services, Target};
 pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
     policy::{Provenance, Source, WRITE_ROOTS, agent_dir_runtime, nono_version},

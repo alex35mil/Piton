@@ -1,9 +1,9 @@
 //! `[sandbox]`: what a sandboxed pi may do beyond Piton's base policy (`launch/sandbox/`). A profile adds a fixed set of
 //! entries; the user's lists add on top, and lists only add across levels.
 //!
-//! A key that loosens a protection (`profile`, `read`, `connect`, `bind`, the `git` preset, `commands`) is accepted in the
-//! global `config.toml` or a `config.local.toml`, never a project's committed `config.toml`: a repository can't open
-//! the sandbox for whoever clones it.
+//! A key that loosens a protection (`profile`, `read`, `connect`, `bind`, `services`, the `git`, `apps`, and
+//! `pi-claude-code` presets, `commands`) is accepted in the global `config.toml` or a `config.local.toml`, never a
+//! project's committed `config.toml`: a repository can't open the sandbox for whoever clones it.
 
 use std::path::{Path, PathBuf};
 
@@ -35,7 +35,11 @@ pub struct SandboxTable {
     /// Paths where processes may create Unix sockets (`bind`): each path and everything below it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bind: Vec<String>,
-    /// Named bundles: toolchain caches, and `git`.
+    /// Mach services the sandbox may look up beyond the built-in list: a name, a `name.*` prefix, or `*` for every
+    /// service. The keychain's stay closed unless `read` opens the keychain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceEntry>,
+    /// Named bundles: toolchain caches, `git`, `apps`, and `pi-claude-code`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
     /// Paths denied like the built-in credential list: no read, write, or connect.
@@ -69,7 +73,7 @@ pub enum SilenceTarget {
     /// `/...`, `~/...`, or `$VAR/...`: the path and everything below it. A `*` segment matches one folder entry, a
     /// `**` segment any number of them.
     Path(String),
-    /// A Mach service (`com.apple.SecurityServer`): a reverse-DNS name, matched exactly against a lookup of it.
+    /// A Mach service (`com.apple.SecurityServer`), matched exactly against a lookup of it.
     Service(String),
 }
 
@@ -80,12 +84,7 @@ impl TryFrom<String> for SilenceTarget {
         if is_grant_path(&target) {
             return Ok(SilenceTarget::Path(target));
         }
-        let service = !target.is_empty()
-            && target.contains('.')
-            && target.split('.').all(|label| {
-                !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            });
-        match service {
+        match ServiceName::valid_text(&target) && !target.contains('*') {
             true => Ok(SilenceTarget::Service(target)),
             false => Err(format!(
                 "silence target {target:?}: a path (absolute, or starting with `~/` or `$`; `*` and `**` segments \
@@ -121,6 +120,96 @@ impl Silence {
 /// A TOML basic string.
 fn toml_string(text: &str) -> String {
     toml::Value::String(text.to_string()).to_string()
+}
+
+/// A `services` entry: every Mach service, or a name.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum ServiceEntry {
+    /// `*`: every service but the keychain's.
+    Every,
+    Name(ServiceName),
+}
+
+/// A Mach service's global name, or the start of one. Real names aren't all reverse-DNS
+/// (`com.apple.distributed_notifications@Uv3`, an app's plain-word port), so a name is checked only for what a Seatbelt
+/// string and a lookup need: not empty, and no quote, backslash, slash, whitespace, control character, or `*` other
+/// than a trailing `.*`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum ServiceName {
+    /// Exactly this name.
+    Exact(String),
+    /// Every name starting with this (`com.example.` from `com.example.*`).
+    Prefix(String),
+}
+
+impl ServiceName {
+    /// Text a name may be: what Seatbelt can quote and a lookup can name (a `*` is checked by the caller).
+    pub fn valid_text(text: &str) -> bool {
+        !text.is_empty()
+            && text
+                .chars()
+                .all(|c| !matches!(c, '"' | '\\' | '/') && !c.is_whitespace() && !c.is_control())
+    }
+
+    /// A name as a lookup reports it, or as an entry writes it (`name.*` for a prefix).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let bad = || {
+            format!(
+                "service {text:?}: a Mach service name (`com.example.agent`), a prefix (`com.example.*`), or `*`; \
+                 no quotes, slashes, or spaces"
+            )
+        };
+        let (name, prefix) = match text.strip_suffix(".*") {
+            Some(start) => (format!("{start}."), true),
+            None => (text.to_string(), false),
+        };
+        if !Self::valid_text(&name) || name.contains('*') || name == "." {
+            return Err(bad());
+        }
+        Ok(match prefix {
+            true => ServiceName::Prefix(name),
+            false => ServiceName::Exact(name),
+        })
+    }
+
+    /// Whether a lookup of `service` matches.
+    pub fn matches(&self, service: &str) -> bool {
+        match self {
+            ServiceName::Exact(name) => name == service,
+            ServiceName::Prefix(start) => service.starts_with(start.as_str()),
+        }
+    }
+}
+
+impl std::fmt::Display for ServiceName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceName::Exact(name) => write!(f, "{name}"),
+            ServiceName::Prefix(start) => write!(f, "{start}*"),
+        }
+    }
+}
+
+impl TryFrom<String> for ServiceEntry {
+    type Error = String;
+
+    fn try_from(entry: String) -> Result<Self, String> {
+        match entry.as_str() {
+            "*" => Ok(ServiceEntry::Every),
+            text => ServiceName::parse(text).map(ServiceEntry::Name),
+        }
+    }
+}
+
+impl From<ServiceEntry> for String {
+    fn from(entry: ServiceEntry) -> String {
+        match entry {
+            ServiceEntry::Every => "*".into(),
+            ServiceEntry::Name(name) => name.to_string(),
+        }
+    }
 }
 
 /// `[[sandbox.commands]]`: what a matching command gets.
@@ -203,6 +292,8 @@ pub struct GrantLists {
     pub connect: Vec<Connect>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bind: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
 }
@@ -356,6 +447,9 @@ pub enum Preset {
     /// writable, so `husky install` and `git remote add` work in the sandbox, and the next Git command on the host may
     /// run an agent's code (`agent/git.rs`). Hooks run in the sandbox either way.
     Git,
+    /// Launching apps and sending Apple Events: `open`, `osascript`, and an app's own launches through Launch Services.
+    /// What macOS starts this way runs outside the sandbox, so the agent can run what it wrote on the host.
+    Apps,
     /// What the pi-claude-code extension's `claude` writes: the config folder `PI_CLAUDE_CODE_CONFIG_DIR` names (never
     /// the interactive Claude Code's, which loads hooks and plugins), and its log cache; the extension's local relay;
     /// and, with `login = "keychain"`, the keychain.
@@ -396,17 +490,18 @@ impl ClaudeLogin {
 
 impl Preset {
     #[cfg(test)]
-    pub const ALL: [Preset; 6] = [
+    pub const ALL: [Preset; 7] = [
         Preset::Mise,
         Preset::Rust,
         Preset::Node,
         Preset::Swift,
         Preset::Git,
+        Preset::Apps,
         Preset::PiClaudeCode(ClaudeCodeOptions { login: None }),
     ];
 
     /// Every preset's name, as written.
-    pub const NAMES: [&'static str; 6] = ["mise", "rust", "node", "swift", "git", "pi-claude-code"];
+    pub const NAMES: [&'static str; 7] = ["mise", "rust", "node", "swift", "git", "apps", "pi-claude-code"];
 
     pub fn name(&self) -> &'static str {
         match self {
@@ -415,6 +510,7 @@ impl Preset {
             Preset::Node => "node",
             Preset::Swift => "swift",
             Preset::Git => "git",
+            Preset::Apps => "apps",
             Preset::PiClaudeCode(_) => "pi-claude-code",
         }
     }
@@ -423,7 +519,7 @@ impl Preset {
     pub fn has_options(&self) -> bool {
         match self {
             Preset::PiClaudeCode(options) => options.login.is_some(),
-            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git => false,
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::Apps => false,
         }
     }
 
@@ -435,8 +531,16 @@ impl Preset {
                     options.login = n.login;
                 }
             }
-            (Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::PiClaudeCode(_), _) => {
-            }
+            (
+                Preset::Mise
+                | Preset::Rust
+                | Preset::Node
+                | Preset::Swift
+                | Preset::Git
+                | Preset::Apps
+                | Preset::PiClaudeCode(_),
+                _,
+            ) => {}
         }
     }
 
@@ -445,6 +549,7 @@ impl Preset {
     fn loosening(&self) -> Option<&'static str> {
         match self {
             Preset::Git => Some("sandbox.presets git"),
+            Preset::Apps => Some("sandbox.presets apps"),
             Preset::PiClaudeCode(_) => Some("sandbox.presets pi-claude-code"),
             Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => None,
         }
@@ -478,6 +583,7 @@ impl TryFrom<toml::Value> for Preset {
             "node" => Preset::Node,
             "swift" => Preset::Swift,
             "git" => Preset::Git,
+            "apps" => Preset::Apps,
             "pi-claude-code" => {
                 let login = match options.remove("login") {
                     None => None,
@@ -512,7 +618,8 @@ impl From<Preset> for toml::Value {
             | Preset::Rust
             | Preset::Node
             | Preset::Swift
-            | Preset::Git => {}
+            | Preset::Git
+            | Preset::Apps => {}
         }
         match table.is_empty() {
             true => toml::Value::String(preset.name().into()),
@@ -534,6 +641,7 @@ impl TableValue for SandboxTable {
                 ("sandbox.read", !self.read.is_empty()),
                 ("sandbox.connect", !self.connect.is_empty()),
                 ("sandbox.bind", !self.bind.is_empty()),
+                ("sandbox.services", !self.services.is_empty()),
                 ("sandbox.commands", !self.commands.is_empty()),
             ],
         );
@@ -600,6 +708,7 @@ impl Merge for SandboxTable {
         union(&mut self.read, n.read);
         union(&mut self.connect, n.connect);
         union(&mut self.bind, n.bind);
+        union(&mut self.services, n.services);
         for preset in n.presets {
             match self.presets.iter_mut().find(|p| p.name() == preset.name()) {
                 Some(existing) => existing.merge(&preset),
@@ -630,6 +739,7 @@ pub struct SandboxSettings {
     pub read: Vec<Listed<String>>,
     pub connect: Vec<Listed<Connect>>,
     pub bind: Vec<Listed<String>>,
+    pub services: Vec<Listed<ServiceEntry>>,
     pub presets: Vec<Listed<Preset>>,
     pub deny: Vec<Listed<String>>,
     pub silence: Vec<Listed<Silence>>,
@@ -647,6 +757,7 @@ impl SandboxSettings {
             read,
             connect,
             bind,
+            services,
             presets,
             deny,
             silence,
@@ -663,6 +774,7 @@ impl SandboxSettings {
         add_listed(&mut self.read, read, file);
         add_listed(&mut self.connect, connect, file);
         add_listed(&mut self.bind, bind, file);
+        add_listed(&mut self.services, services, file);
         // A preset is listed once, with the file that decided it: the nearest that sets one of its options, else the
         // first that lists it.
         for preset in presets {
@@ -822,6 +934,38 @@ mod tests {
             value["connect"].to_string(),
             r#"["*:22", "$SSH_AUTH_SOCK", "example.com"]"#
         );
+    }
+
+    /// A `services` entry is `*`, a name, or a `name.*` prefix; real names that aren't reverse-DNS parse too.
+    #[test]
+    fn service_entries_are_typed() {
+        let parse = |text: &str| ServiceEntry::try_from(text.to_string());
+        let exact = |n: &str| Ok(ServiceEntry::Name(ServiceName::Exact(n.into())));
+        assert_eq!(parse("*"), Ok(ServiceEntry::Every));
+        assert_eq!(parse("com.apple.fonts"), exact("com.apple.fonts"));
+        assert_eq!(
+            parse("com.apple.distributed_notifications@Uv3"),
+            exact("com.apple.distributed_notifications@Uv3")
+        );
+        assert_eq!(parse("Hammerspoon"), exact("Hammerspoon"));
+        assert_eq!(
+            parse("com.example.*"),
+            Ok(ServiceEntry::Name(ServiceName::Prefix("com.example.".into())))
+        );
+        for bad in ["", ".*", "a*b", "com.*.x", "a\"b", "a b", "a/b", "a\\b", "a\nb"] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+        let prefix = ServiceName::Prefix("com.example.".into());
+        assert!(prefix.matches("com.example.agent"));
+        assert!(!prefix.matches("com.examplex"));
+        assert!(ServiceName::Exact("a.b".into()).matches("a.b"));
+        assert!(!ServiceName::Exact("a.b".into()).matches("a.b.c"));
+        // Written back as given.
+        let value = toml::Value::try_from(table("services = [\"*\", \"com.example.*\", \"x.y\"]")).unwrap();
+        assert_eq!(value["services"].to_string(), r#"["*", "com.example.*", "x.y"]"#);
+        // A silence entry names one service, never a prefix.
+        assert!(SilenceTarget::try_from("Hammerspoon".to_string()).is_ok());
+        assert!(SilenceTarget::try_from("com.example.*".to_string()).is_err());
     }
 
     /// A preset is its name, or a table with its name and its own options; anything else is refused, the `mise`
@@ -984,6 +1128,13 @@ mod tests {
         assert_eq!(
             table("presets = [\"git\", \"rust\"]").ruled_keys(),
             [("sandbox.presets git", Rule::USERS_OWN)]
+        );
+        assert_eq!(
+            table("presets = [\"apps\"]\nservices = [\"x.y\"]").ruled_keys(),
+            [
+                ("sandbox.services", Rule::USERS_OWN),
+                ("sandbox.presets apps", Rule::USERS_OWN)
+            ]
         );
         assert_eq!(
             table("profile = \"yolo\"\nread = [\"~/.ssh/config\"]\nconnect = [\"*\"]\nbind = [\"/\"]").ruled_keys(),

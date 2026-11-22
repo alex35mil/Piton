@@ -418,6 +418,10 @@ mod tests {
         Policy {
             rules,
             keychain,
+            services: crate::launch::sandbox::Services::Every {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
+            apps: crate::launch::sandbox::Apps::Closed,
             network: Vec::new(),
             tag: String::new(),
         }

@@ -751,8 +751,8 @@ the line. A host or client file has one schema and is read whole.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
   - Every key that loosens the sandbox, `sandbox.profile`, `sandbox.read` (lifting a built-in credential deny),
-    `sandbox.connect`, `sandbox.commands` (per-command grants), and the `git` preset (letting agents write Git's hooks
-    and configuration): the global `config.toml` or a `config.local.toml`, never a project's `config.toml`, which
+    `sandbox.connect`, `sandbox.bind`, `sandbox.services`, `sandbox.commands` (per-command grants), and the `git`
+    (letting agents write Git's hooks and configuration), `apps` (launching apps), and `pi-claude-code` presets: the global `config.toml` or a `config.local.toml`, never a project's `config.toml`, which
     travels with the repository, so a repository can't open the sandbox for whoever clones it.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
     repository's.
@@ -760,9 +760,9 @@ the line. A host or client file has one schema and is read whole.
   - `branches.username`: the same files, as a personal value.
   - Everything else, keep-awake included: either file, any level.
 - **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
-  - `[sandbox]`: the nearest `profile` wins; lists (`write`, `write_file`, `read`, `connect`, `presets`, `deny`) only
-    add, each entry keeping the file that listed it; a preset named at several levels takes each option from the
-    nearest level that sets it. The daemon's `launch/sandbox` module, the only code that knows the backend, resolves
+  - `[sandbox]`: the nearest `profile` wins; lists (`write`, `write_file`, `read`, `connect`, `bind`, `services`,
+    `presets`, `deny`) only add, each entry keeping the file that listed it; a preset named at several levels takes
+    each option from the nearest level that sets it. The daemon's `launch/sandbox` module, the only code that knows the backend, resolves
     them with the base policy and the profile's entries into each launch's rules ("Agent access").
   - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
     and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
@@ -869,8 +869,8 @@ and the network can be closed only to everything but pi's own destinations (a pr
 **The model.** The base is the floor: everything that can be closed is closed, and every grant list is empty. A
 profile (`[sandbox] profile`: `strict`, `standard` by default, `yolo`) is a fixed set of list entries
 (`launch/sandbox/policy.rs`, `profile_entries`), each profile holding the one before; `strict` adds nothing. The
-user's lists (`write`, `write_file`, `read`, `connect`, `presets`, `deny`) add on top across levels. A profile's
-entry is removed only by choosing another profile: there are no negative entries, so what a level grants is always
+user's lists (`write`, `write_file`, `read`, `connect`, `bind`, `services`, `presets`, `deny`) add on top across
+levels. A profile's entry is removed only by choosing another profile: there are no negative entries, so what a level grants is always
 what it lists. Every list entry keeps where it came from (a profile, or the file that listed it), carried in each
 rule's source (`Source::Config` and `Source::Preset` with a `Provenance`), so `piton sandbox why` names it. Each Task
 that closes more of the base (sockets #248, apps #249, the network #228) adds the entries that reopen it to the
@@ -980,6 +980,22 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    log and `piton config check` say so) and refuses the flag.
    Without it, a `connect` entry covering the folder (yolo's `/`) would let a sandboxed agent connect to it and act as
    a client: approve its own protected writes, start host sessions.
+8. **Mach services and apps** (`Policy::services`, `Policy::apps`, emitted after the path rules). nono allows every
+   lookup but the keychain's, and any app's Mach service is a way to drive that app outside the sandbox (Hammerspoon's
+   `hs`, Keyboard Maestro, Shortcuts). `Services::Listed` emits a tagged `(deny mach-lookup)` and then an allow per
+   entry: the built-in list (`policy::BASE_SERVICES`, Claude Code's list plus TLS, proxy settings, and preferences,
+   which pi, MCP servers, and their tools need), the presets' services, and the user's `services` entries (an exact
+   name or a `name.*` prefix; names are checked only for what a Seatbelt string needs, since real ones include
+   `com.apple.distributed_notifications@Uv3` and plain words). A `*` anywhere, `standard`'s included, makes it
+   `Services::Every`, which emits nothing. The keychain's five services decide after both, allowed only with a
+   keychain `read`, so no prefix reopens them. `Policy::decide_service` answers a lookup the same way, for
+   `sandbox why --service` and the block question. nono's `(deny default)` never allows `lsopen` (Launch Services'
+   launch requests: `open`, an app's own launches) or `appleevent-send` (`osascript` scripting another app), so they're
+   closed in every profile until `Apps::Open`, from the `apps` preset (in `yolo`, the user's own files only), emits
+   both; the preset's services (Apple Events, quarantine, and what `open` looks up, from the kernel's record) join the
+   list. The host probe runs git, TLS (curl, python, node), `id`, and `defaults` in `strict` with only the built-in
+   list, and `open` of a link in `strict` with the preset. Verified in #249: with both closed, `open` of
+   a script, an app, or a link and AppleScript to Terminal fail with -54, and nothing runs on the host.
 
 **Symlinks.** Seatbelt compares real paths, so each rule also gets its real-path form (`/var` is `/private/var`). A
 deny follows every symlink: it closes what a link points to as well. A grant follows only links no sandboxed session
@@ -1134,9 +1150,11 @@ subcommand plus ` *`), in this project (its source checkout's `.piton/config.loc
 `config.toml`). Persisting appends one `[[sandbox.commands]]` entry with `grant = "all"`; new sessions use it. One
 question at a time per session, shared with protected writes; no answer within `confirmation_timeout_ms` (host
 configuration, 10 minutes by default), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
-(`agent/open.rs`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
-scheme says it opens in the app registered for it; a file or app the sandbox could have written is refused, since macOS
-would run it unsandboxed.
+(`agent/open/`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
+scheme names the app Launch Services hands it to (`LSCopyDefaultApplicationURLForURL`, asked by the daemon) and is
+refused when none does or the app is one the sandbox could have written; a file or app the sandbox could have written,
+as a path or a `file:` URL (decoded to its path), is refused, since macOS would run it unsandboxed. The rerun opens
+every Mach service and launching apps (`grant::all`), so an approved `open` opens.
 
 **Blocks with nothing to rerun** (an MCP server, an extension, pi itself). Every deny Piton emits carries
 `(with message "piton-<tag>")`: `<session>-<random>` for pi's sandbox, `<session>-<random>-<n>` for a call's. A

@@ -26,11 +26,14 @@ use std::{
 use super::{
     SandboxError,
     policy::{self, AgentDirWrite, Provenance, Source},
-    rules::{Access, Effect, NetworkGrant, Policy, Rule, Target},
+    rules::{Access, Apps, Effect, NetworkGrant, Policy, Rule, ServiceGrant, Services, Target},
 };
 use crate::{
     agent::{GitControl, canonical_target, lexical},
-    config::{ClaudeCodeOptions, ClaudeLogin, Connect, LOCAL_DIR, LaunchConfig, Listed, Preset, Profile, expand_home},
+    config::{
+        ClaudeCodeOptions, ClaudeLogin, Connect, LOCAL_DIR, LaunchConfig, Listed, Preset, Profile, ServiceEntry,
+        ServiceName, expand_home,
+    },
     launch::{
         Env,
         env::{Origin, SandboxEnv, ToolSource, Widening},
@@ -807,6 +810,8 @@ fn build(
     let policy = Policy {
         rules,
         keychain,
+        services: grants.services.clone(),
+        apps: grants.apps.clone(),
         network: grants.network.clone(),
         tag: String::new(),
     };
@@ -887,6 +892,8 @@ struct Grants {
     sockets: Vec<(PathBuf, Source)>,
     bind: Vec<(PathBuf, Source)>,
     network: Vec<NetworkGrant>,
+    services: Services,
+    apps: Apps,
     presets: Vec<(Preset, Provenance)>,
     deny: Vec<(PathBuf, Source)>,
     /// The `pi-claude-code` preset, when it's on: its options and where they came from. Its config folder is decided
@@ -1002,8 +1009,64 @@ impl Grants {
 
         let claude_code = presets.iter().find_map(|(preset, from)| match preset {
             Preset::PiClaudeCode(options) => Some((*options, from.clone())),
-            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git => None,
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::Apps => None,
         });
+
+        // Mach services: the built-in list, then the presets', the profile's, and the user's; `*` anywhere opens every
+        // service, named after the first entry that did.
+        let mut grants: Vec<ServiceGrant> = policy::BASE_SERVICES
+            .iter()
+            .map(|(name, why)| ServiceGrant {
+                name: ServiceName::Exact((*name).to_string()),
+                source: Source::BuiltIn {
+                    what: format!("a service every launch may look up: {why}"),
+                },
+            })
+            .collect();
+        let mut every = None;
+        for (preset, from) in &presets {
+            for name in policy::preset_grants(preset).services {
+                grants.push(ServiceGrant {
+                    name: ServiceName::Exact(name.to_string()),
+                    source: Source::Preset {
+                        preset: preset.name().into(),
+                        from: from.clone(),
+                    },
+                });
+            }
+        }
+        let entries_listed = entries
+            .services
+            .into_iter()
+            .map(|e| (e, from_profile.clone()))
+            .chain(settings.services.iter().map(|l| (l.value.clone(), from_file(&l.file))));
+        for (entry, from) in entries_listed {
+            let source = source("services", from);
+            match entry {
+                ServiceEntry::Every => {
+                    every.get_or_insert(source);
+                }
+                ServiceEntry::Name(name) => grants.push(ServiceGrant { name, source }),
+            }
+        }
+        let services = match every {
+            Some(source) => Services::Every { source },
+            None => Services::Listed { grants },
+        };
+        let apps = presets
+            .iter()
+            .find_map(|(preset, from)| match preset {
+                Preset::Apps => Some(Apps::Open {
+                    source: Source::Preset {
+                        preset: preset.name().into(),
+                        from: from.clone(),
+                    },
+                }),
+                Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::PiClaudeCode(_) => {
+                    None
+                }
+            })
+            .unwrap_or(Apps::Closed);
 
         Ok(Self {
             write,
@@ -1012,6 +1075,8 @@ impl Grants {
             sockets,
             bind,
             network,
+            services,
+            apps,
             presets,
             deny: user("deny", &settings.deny)?,
             claude_code,
@@ -2273,12 +2338,77 @@ mod tests {
             assert!(rules.iter().any(|r| r.contains("piton.sock")), "{}", profile.name());
             let every_socket = rules.iter().any(|r| r == r#"(allow network-outbound (subpath "/"))"#);
             let ssh_agent = rules.iter().any(|r| r.contains("/private/tmp/agent.sock"));
+            let services_listed = rules.iter().any(|r| r == "(deny mach-lookup)");
+            let apps = rules.iter().any(|r| r == "(allow lsopen)");
             match profile {
-                Profile::Strict => assert!(!every_socket && !ssh_agent),
-                Profile::Standard => assert!(!every_socket && ssh_agent),
-                Profile::Yolo => assert!(every_socket && ssh_agent),
+                Profile::Strict => assert!(!every_socket && !ssh_agent && services_listed && !apps),
+                Profile::Standard => assert!(!every_socket && ssh_agent && !services_listed && !apps),
+                Profile::Yolo => assert!(every_socket && ssh_agent && !services_listed && apps),
             }
         }
+    }
+
+    /// Mach services: `strict` allows only the built-in list, `standard` and `yolo` every service but the keychain's;
+    /// the user's own `services` and the `apps` preset add to `strict`, each named where it came from.
+    #[test]
+    fn services_and_apps_follow_the_profile() {
+        let f = fixture("[sandbox]\nprofile = \"strict\"\n", "");
+        let p = policy(&f);
+        assert!(p.decide_service("com.apple.logd").allowed, "the built-in list");
+        assert!(p.decide_service("com.apple.trustd.agent").allowed, "TLS");
+        assert!(!p.decide_service("com.apple.pasteboard.1").allowed);
+        assert!(!p.decide_service("Hammerspoon").allowed);
+        assert!(!p.decide_service("com.apple.SecurityServer").allowed, "the keychain");
+        assert_eq!(p.apps, Apps::Closed);
+
+        let standard = policy(&fixture("", ""));
+        assert!(standard.decide_service("Hammerspoon").allowed);
+        assert!(
+            matches!(&standard.decide_service("x").source, Source::Config { key, from: Provenance::Profile { profile: Profile::Standard } } if key == "sandbox.services")
+        );
+        assert!(
+            !standard.decide_service("com.apple.secd").allowed,
+            "the keychain stays closed"
+        );
+        assert_eq!(standard.apps, Apps::Closed);
+
+        let yolo = policy(&fixture("[sandbox]\nprofile = \"yolo\"\n", ""));
+        assert!(matches!(&yolo.apps, Apps::Open { source: Source::Preset { preset, .. } } if preset == "apps"));
+        assert!(yolo.decide_service("com.apple.coreservices.appleevents").allowed);
+
+        let listed = fixture(
+            "[sandbox]\nprofile = \"strict\"\nservices = [\"com.example.*\"]\npresets = [\"apps\"]\n",
+            "",
+        );
+        let p = policy(&listed);
+        let from = p.decide_service("com.example.agent");
+        assert!(from.allowed);
+        assert!(matches!(
+            &from.source,
+            Source::Config {
+                from: Provenance::File { .. },
+                ..
+            }
+        ));
+        assert!(
+            p.decide_service("com.apple.coreservices.appleevents").allowed,
+            "the apps preset"
+        );
+        assert!(matches!(p.apps, Apps::Open { .. }));
+        assert!(!p.decide_service("com.apple.pasteboard.1").allowed);
+        super::super::apply::capabilities(&p).expect("nono accepts it");
+
+        // A user `*` opens every service in `strict` too, named after that file.
+        let every = policy(&fixture("[sandbox]\nprofile = \"strict\"\nservices = [\"*\"]\n", ""));
+        assert!(matches!(
+            every.services,
+            Services::Every {
+                source: Source::Config {
+                    from: Provenance::File { .. },
+                    ..
+                }
+            }
+        ));
     }
 
     fn from_file(file: &Path) -> Origin {

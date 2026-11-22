@@ -257,8 +257,8 @@ enum SandboxAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
-    /// Whether a sandboxed pi in the workspace may read, write, connect to, or create a socket at PATH, and which rule
-    /// decides.
+    /// Whether a sandboxed pi in the workspace may read, write, connect to, or create a socket at PATH, or look up the
+    /// Mach service PATH names (`--service`), and which rule decides.
     Why {
         path: PathBuf,
         /// The access checked: one of the flags, or reading when none is given.
@@ -279,6 +279,8 @@ pub enum WhyAccess {
     Connect,
     /// Check creating a Unix socket.
     Bind,
+    /// Check looking up a Mach service: PATH is the service's name.
+    Service,
 }
 
 #[derive(Subcommands)]
@@ -604,6 +606,7 @@ mod tests {
         assert!(matches!(why(&["--write"]), Ok(Some(WhyAccess::Write))));
         assert!(matches!(why(&["--connect"]), Ok(Some(WhyAccess::Connect))));
         assert!(matches!(why(&["--bind"]), Ok(Some(WhyAccess::Bind))));
+        assert!(matches!(why(&["--service"]), Ok(Some(WhyAccess::Service))));
         for pair in [["--write", "--bind"], ["--connect", "--write"], ["--bind", "--connect"]] {
             assert!(why(&pair).is_err(), "{pair:?}");
         }

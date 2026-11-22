@@ -1537,13 +1537,7 @@ impl SessionTask {
         if let Some(asking) = &mut self.process.asking {
             asking.id = id.clone();
         }
-        let project = next.offer.project.entry();
-        let everywhere = next.offer.everywhere.entry();
-        let offer = crate::agent::block::ProcessOffer {
-            project: (project.0, &project.1),
-            everywhere: (everywhere.0, &everywhere.1),
-        };
-        let record = crate::agent::block::process_dialog(&id, &next.process, &next.refusal, &offer);
+        let record = crate::agent::block::process_dialog(&id, &next.process, &next.refusal, &next.offer);
         self.on_pi_line(record.to_string());
     }
 
@@ -1566,15 +1560,18 @@ impl SessionTask {
             }
             ProcessAnswer::Silence(scope) => {
                 let Some(commands) = &mut self.commands else { return };
-                let path = question.offer.at(grant_scope(scope)).path().to_path_buf();
-                let entry = crate::config::Silence {
-                    target: crate::config::SilenceTarget::Path(path.display().to_string()),
-                    process: None,
+                let target = question.offer.at(grant_scope(scope)).silence_target();
+                let silent = match &target {
+                    crate::config::SilenceTarget::Path(path) => crate::launch::sandbox::Silent::Path(path.into()),
+                    crate::config::SilenceTarget::Service(name) => {
+                        crate::launch::sandbox::Silent::Service(name.clone())
+                    }
                 };
+                let entry = crate::config::Silence { target, process: None };
                 let message = match commands.persist_silence(scope, &entry) {
                     Ok(file) => {
                         commands.policies.silence.push(crate::launch::sandbox::Silenced {
-                            target: crate::launch::sandbox::Silent::Path(path.clone()),
+                            target: silent,
                             process: None,
                             source: crate::launch::sandbox::SilenceSource::File(file.clone()),
                         });

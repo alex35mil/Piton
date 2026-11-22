@@ -24,7 +24,8 @@ pub use self::{
         paths::{AGENTS_DIR, LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
         tables::{
             AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, Connect, Grant, GrantLists, Listed,
-            NetworkTarget, PermissionSettings, Preset, Profile, SandboxTable, Silence, SilenceTarget,
+            NetworkTarget, PermissionSettings, Preset, Profile, SandboxTable, ServiceEntry, ServiceName, Silence,
+            SilenceTarget,
         },
     },
     read::{

@@ -5,15 +5,16 @@
 //! later pi or Piton loads, so a lifted command could grant the agent more), the daemon's state and control socket, the
 //! user's own `deny`, and the credential denies while fnox is on (the sandbox could run `fnox get`). Git's hooks and
 //! configuration and the credential denies otherwise are liftable: `husky install` and Git's keychain sign-in work once
-//! approved.
+//! approved. So are Mach services and launching apps: an approved `open https://…` opens the page (what `open` may
+//! name is checked before the question, `agent/open.rs`).
 
 use std::path::{Path, PathBuf};
 
 use super::{
     policy::{self, Source},
-    rules::{Access, Effect, Policy, Rule, Target},
+    rules::{Access, Apps, Effect, Policy, Rule, Services, Target},
 };
-use crate::config::{AllGrant, CommandGrant, Grant, GrantLists, LaunchConfig, Listed};
+use crate::config::{AllGrant, CommandGrant, Grant, GrantLists, LaunchConfig, Listed, ServiceEntry, ServiceName};
 
 /// The policies a session's approved commands run with, resolved at launch: `all`, and each `[[sandbox.commands]]`
 /// entry's.
@@ -103,6 +104,7 @@ pub fn widened_config(config: &LaunchConfig, lists: &GrantLists, file: &Path) ->
             read: lists.read.clone(),
             connect: lists.connect.clone(),
             bind: lists.bind.clone(),
+            services: lists.services.clone(),
             presets: lists.presets.clone(),
             ..crate::config::SandboxTable::default()
         },
@@ -158,6 +160,7 @@ pub enum Credentials {
 ///
 /// Every write, connect, and bind is allowed first, then the launch's rules follow with every liftable deny left out, so each
 /// floor deny (and the allows that reopen part of it, such as the daemon's logs and `agent.sock`) still decides last.
+/// Every Mach service and launching apps are open; the keychain's services stay closed behind fnox.
 ///
 /// Writes open below each entry of the root ([`root_entries`]), never `/` itself: nono refuses a platform rule that
 /// grants `(allow file-write* (subpath "/"))`. The root's own entries (`/Users`, `/tmp`) stay as the launch decides:
@@ -194,6 +197,8 @@ fn all_below(policy: &Policy, credentials: Credentials, roots: &[PathBuf]) -> Po
             Credentials::Liftable => true,
             Credentials::Floor => policy.keychain,
         },
+        services: Services::Every { source: source() },
+        apps: Apps::Open { source: source() },
         network: policy.network.clone(),
         tag: policy.tag.clone(),
     }
@@ -259,6 +264,8 @@ pub enum Lift {
     Connect(PathBuf),
     /// `bind = [path]`: where a Unix socket is created.
     Bind(PathBuf),
+    /// `services = [name]`: one Mach service.
+    Service(ServiceName),
 }
 
 impl Lift {
@@ -269,13 +276,17 @@ impl Lift {
             Lift::WriteFile(path) => ("write_file", path.display().to_string()),
             Lift::Connect(path) => ("connect", path.display().to_string()),
             Lift::Bind(path) => ("bind", path.display().to_string()),
+            Lift::Service(name) => ("services", name.to_string()),
         }
     }
 
-    /// The path the entry names.
-    pub fn path(&self) -> &Path {
+    /// What a `silence` entry for the same block names: the path, or the service.
+    pub fn silence_target(&self) -> crate::config::SilenceTarget {
         match self {
-            Lift::Write(path) | Lift::WriteFile(path) | Lift::Connect(path) | Lift::Bind(path) => path,
+            Lift::Write(path) | Lift::WriteFile(path) | Lift::Connect(path) | Lift::Bind(path) => {
+                crate::config::SilenceTarget::Path(path.display().to_string())
+            }
+            Lift::Service(name) => crate::config::SilenceTarget::Service(name.to_string()),
         }
     }
 
@@ -289,6 +300,7 @@ impl Lift {
                 .connect
                 .push(crate::config::Connect::Socket(path.display().to_string())),
             Lift::Bind(path) => lists.bind.push(path.display().to_string()),
+            Lift::Service(name) => lists.services.push(ServiceEntry::Name(name.clone())),
         }
         lists
     }
@@ -467,6 +479,19 @@ pub fn lift_for(
         "mach-lookup" if policy::KEYCHAIN_TARGETS.contains(&refused.target) => {
             return Err(keychain(bounds.credentials));
         }
+        // One service, the same entry in both scopes; offered only when the widened policy opens it.
+        "mach-lookup" => {
+            let name = ServiceName::parse(refused.target).map_err(|_| NoLift::Unsupported)?;
+            let lift = Lift::Service(name);
+            let opens = |scope| widened(&lift, scope).is_ok_and(|p| p.decide_service(refused.target).allowed);
+            return match opens(Scope::Project) && opens(Scope::Everywhere) {
+                true => Ok(Offer {
+                    project: lift.clone(),
+                    everywhere: lift,
+                }),
+                false => Err(NoLift::Unsupported),
+            };
+        }
         op if op.starts_with("file-read") && absolute && keychain_path(target, bounds.home) => {
             return Err(keychain(bounds.credentials));
         }
@@ -503,10 +528,10 @@ pub fn lift_for(
         None => project,
         Some(own) => {
             let folder = own.parent().unwrap_or(own).to_path_buf();
-            let lift = match &project {
-                Lift::Connect(_) => Lift::Connect(folder.clone()),
-                Lift::Bind(_) => Lift::Bind(folder.clone()),
-                Lift::Write(_) | Lift::WriteFile(_) => Lift::Write(folder.clone()),
+            let lift = match access {
+                Access::Connect => Lift::Connect(folder.clone()),
+                Access::Bind => Lift::Bind(folder.clone()),
+                Access::Read | Access::Write => Lift::Write(folder.clone()),
             };
             let offered = safe_folder(&folder, bounds)
                 && [Scope::Project, Scope::Everywhere]
@@ -642,12 +667,26 @@ mod tests {
                 },
             ],
             keychain: false,
+            services: Services::Listed { grants: Vec::new() },
+            apps: Apps::Closed,
             network: Vec::new(),
             tag: String::new(),
         }
     }
 
     /// `all` opens everything the launch closes except the floor, which still decides wherever it applies.
+    /// Mach services and launching apps open too; the keychain's services stay closed behind fnox.
+    #[test]
+    fn all_opens_services_and_apps() {
+        let widened = all_below(&launch(), Credentials::Liftable, &roots());
+        assert!(widened.decide_service("com.example.agent").allowed);
+        assert!(widened.decide_service("com.apple.SecurityServer").allowed, "fnox off");
+        assert!(matches!(widened.apps, Apps::Open { .. }));
+        let floor = all_below(&launch(), Credentials::Floor, &roots());
+        assert!(floor.decide_service("com.example.agent").allowed);
+        assert!(!floor.decide_service("com.apple.SecurityServer").allowed, "fnox on");
+        super::super::apply::capabilities(&widened).expect("nono accepts it");
+    }
     #[test]
     fn all_keeps_the_floor() {
         let launch = launch();
@@ -767,6 +806,17 @@ mod tests {
             Lift::WriteFile(p) => (Access::Write, Target::Literal { path: p.clone() }),
             Lift::Connect(p) => (Access::Connect, Target::Subpath { path: p.clone() }),
             Lift::Bind(p) => (Access::Bind, Target::Subpath { path: p.clone() }),
+            Lift::Service(name) => {
+                let mut policy = launch.clone();
+                match &mut policy.services {
+                    Services::Every { .. } => {}
+                    Services::Listed { grants } => grants.push(crate::launch::sandbox::ServiceGrant {
+                        name: name.clone(),
+                        source: Source::Workspace,
+                    }),
+                }
+                return policy;
+            }
         };
         let mut policy = launch.clone();
         policy.rules.insert(
@@ -795,7 +845,7 @@ mod tests {
                     },
                 );
             }
-            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) => {}
+            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) | Lift::Service(_) => {}
         }
         policy
     }
@@ -917,7 +967,14 @@ mod tests {
             decided(DeniedBy::Floor)
         );
         assert_eq!(lift("file-write-create", "/h/.pi/agent/x"), decided(DeniedBy::Floor));
-        assert_eq!(lift("mach-lookup", "com.apple.diagnosticd"), Err(NoLift::Unsupported));
+        // A Mach service outside the list: that service, in both scopes; a name no entry can hold isn't offered.
+        assert_eq!(
+            lift("mach-lookup", "com.example.agent"),
+            Ok(only(Lift::Service(crate::config::ServiceName::Exact(
+                "com.example.agent".into()
+            ))))
+        );
+        assert_eq!(lift("mach-lookup", "bad name"), Err(NoLift::Unsupported));
         assert_eq!(lift("user-preference-write", "com.x"), Err(NoLift::Unsupported));
     }
 

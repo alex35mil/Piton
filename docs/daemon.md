@@ -305,20 +305,29 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
 - **Network:** TCP is open for now, localhost included. Closing it except through Piton's proxy
   ([#228](https://github.com/alex35mil/Piton/issues/228)) makes the base strict; `connect` entries then say what
   opens.
+- **Mach services:** only a built-in list (logging, user and group names, fonts, TLS checks, proxy settings,
+  preferences, Launch Services lookups; `piton sandbox why --service NAME` names any one). Any app's service is a
+  way to drive that app, which runs outside the sandbox: with Hammerspoon's `ipc` module loaded, `hs -c` runs shell
+  commands on the host. A `services` entry (below) opens one; `standard` opens every service. The keychain's
+  services stay closed unless `read` opens the keychain.
+- **Launching apps:** closed. `open` (a file, an app, a link) and `osascript` scripting another app fail, as in
+  Claude Code: what macOS starts runs outside the sandbox, a script the agent wrote included. The `apps` preset
+  (below) opens them; an approved command (below) runs with them open.
 
 The profiles, each holding the one before it:
 
 ```toml
 # strict: nothing
 
-# standard (the default): Git over SSH through your SSH agent (keys used, never read), the network, and creating
-# sockets anywhere (test servers, IPC)
+# standard (the default): Git over SSH through your SSH agent (keys used, never read), the network, creating
+# sockets anywhere (test servers, IPC), and every Mach service but the keychain's
 read = ["~/.ssh/config", "~/.ssh/known_hosts"]   # and every public key (*.pub) under ~/.ssh, found at launch
 connect = ["$SSH_AUTH_SOCK", "*"]
 bind = ["/"]
+services = ["*"]
 
 # yolo: standard, plus
-presets = ["git"]
+presets = ["git", "apps"]
 connect = ["/"]   # every Unix socket, except the ones in credential folders (below)
 ```
 
@@ -335,8 +344,10 @@ write_file = []       # writable files: exactly each path
 read = []             # lift a built-in credential deny for reading a path (writable with write; never connectable)
 connect = []          # sockets, ports, and hosts (below)
 bind = []             # where processes may create Unix sockets: each path and everything below it
+services = []         # Mach services: a name, a prefix ("com.example.*"), or "*" for every one
 presets = []          # "mise", "rust", "node", "swift": toolchain caches and state;
                       # "git": agents may write Git's hooks and configuration (see below);
+                      # "apps": launching apps and Apple Events (see below);
                       # "pi-claude-code": what pi's Claude Code needs (see below)
 deny = []             # paths closed like the credentials: no read, write, connect, or bind
 silence = []          # blocks that stay blocked without a question or a notice (below; "Deny" saves here)
@@ -407,14 +418,19 @@ match = "bash(mise run cli:test*)"
 grant = { connect = ["$TMPDIR"] }
 ```
 
-The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `bind`, `commands` (below), and the `git`
-and `pi-claude-code` presets are accepted in the global `config.toml` or any `config.local.toml`, never in a project's `config.toml`, which
+The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `bind`, `services`, `commands` (below),
+and the `git`, `apps`, and `pi-claude-code` presets are accepted in the global `config.toml` or any `config.local.toml`,
+never in a project's `config.toml`, which
 travels with the repository: a repository can't open the sandbox for whoever clones it. `write`, `write_file`,
 toolchain presets, and `deny` may be set anywhere.
 
 The `git` preset lets agents write Git's hooks and configuration, so `husky install`, `git remote add`, and
 `git submodule update --init` work in the sandbox, and the next Git command on the host may run an agent's code.
 Hooks run in the sandbox either way.
+
+The `apps` preset lets processes launch apps and send Apple Events: `open` of a file, app, or link, `osascript`
+scripting another app, and an app opening a browser for a sign-in. What macOS starts runs outside the sandbox, so an
+agent can run a script it wrote on the host (`open x.command`).
 
 Paths are absolute, `~/...`, or `$VAR/...` from the daemon's login-shell environment (never the workspace's).
 
@@ -496,8 +512,9 @@ and when the token login finds no `CLAUDE_CODE_OAUTH_TOKEN` in pi's environment 
 writes to a folder the preset didn't open are blocked and asked about like any other. `piton sandbox show` prints the
 same warnings.
 
-`piton sandbox why PATH [--write | --connect | --bind] [--workspace DIR]` says whether a sandboxed pi there may read,
-write, connect to, or create a socket at PATH, and which rule decides: built in, or an entry from a profile or the file that lists it.
+`piton sandbox why PATH [--write | --connect | --bind | --service] [--workspace DIR]` says whether a sandboxed pi there
+may read, write, connect to, or create a socket at PATH, or look up the Mach service PATH names, and which rule decides:
+built in, or an entry from a profile or the file that lists it.
 `piton sandbox show` prints the profile (and the file that chose it), the `silence` entries with their source (yours
 and the presets'), every rule with where it came from, and the
 network destinations `connect` grants.
@@ -521,13 +538,16 @@ and you're asked in the apps or pi.nvim. The first option, **Choose an answer be
 question again, so Enter alone never answers.
 
 - **Allow once:** it runs again with everything open except the floor: protected files, configuration, pi's agent
-  directory, Piton's state, your `deny`, and credentials while fnox is on. The whole command runs again, so its side
-  effects repeat.
+  directory, Piton's state, your `deny`, and credentials while fnox is on. Every Mach service and launching apps
+  are open too, so an approved `open` opens. The whole command runs again, so its side effects repeat.
 - **Deny:** it stays failed.
 - **Allow this command, or a pattern, in this project or everywhere:** saves a per-command grant, and runs it.
 
-No answer within `confirmation_timeout_ms` (10 minutes by default): it doesn't run. The agent can ask, never approve. `osascript` is never offered, and neither is
-`open` of a file or app the sandbox could have written; `open` of a link says where it goes.
+No answer within `confirmation_timeout_ms` (10 minutes by default): it doesn't run. The agent can ask, never approve.
+`osascript` is never offered, and neither is `open` of a file or app the sandbox could have written, as a path or a
+`file:` URL. `open` of a web link says it opens in the browser; another URL scheme names the app macOS hands it to,
+and is refused when no app handles it or the app is one the sandbox could have written. A blocked Mach service of a
+process that isn't a command (an MCP server, an extension) is asked about with `services = ["<name>"]`.
 
 Per-command grants, in the global `config.toml` or a `config.local.toml`:
 
