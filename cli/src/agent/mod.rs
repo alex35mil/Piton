@@ -27,7 +27,8 @@ pub use self::{
         link_entries,
     },
     run::{
-        Approved, PiShell, Ran, Rerun, RunDecision, RunEnd, RunEvent, RunRequest, RunSpec, Runtime, Why, host_env, run,
+        Approved, Failed, PiShell, Ran, Rerun, RunDecision, RunEnd, RunEvent, RunRequest, RunSpec, Runtime, Why,
+        host_env, run,
     },
     socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, random_hex, serve},
     write::{

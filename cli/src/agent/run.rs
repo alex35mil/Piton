@@ -64,6 +64,20 @@ pub enum RunDecision {
     NotRun { reason: String },
 }
 
+/// What the session says about a call that failed in its own sandbox.
+#[derive(Debug)]
+pub enum Failed {
+    /// Nothing recorded yet: look again shortly.
+    Wait,
+    /// No question: the blocks the agent is shown (each `operation target`, with why it isn't asked about) and a note.
+    Report { blocks: Vec<String>, note: Option<String> },
+    /// The user is asked: the blocks, and the decision that follows.
+    Asked {
+        blocks: Vec<String>,
+        decision: tokio::sync::oneshot::Receiver<RunDecision>,
+    },
+}
+
 /// Where a command runs, decided by the daemon. Only [`Runtime::Host`] runs without a sandbox, and only a saved
 /// `runtime = "host"` entry or the user's answer makes one.
 #[derive(Debug, Clone, PartialEq)]

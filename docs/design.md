@@ -1158,10 +1158,28 @@ identical by one fixture file run by both test suites (`pi/tests/fixtures/bash-m
 match the same entry, and a command that writes a file through a redirect gets no grant. A narrowed grant's policy is
 the launch's resolved again with the grant's lists added, so it never reaches the floor either.
 
+**Who asks.** Piton asks when it sees the block: when a call run in the session's own sandbox exits non-zero, the
+socket asks the session (`SessionCmd::RunFailed`, decided by `Commands::after_failure`) whether the call has a
+recorded block an approved rerun lifts (`grant::command_block` against `all`). The kernel's record usually arrives
+within ~5 ms, so the socket looks every 10 ms for at most 50 ms, and stops at the first look that finds a block. A
+success never waits. Credential reads (ssh's key probe on every SSH Git command), blocks the floor decides, and
+silenced blocks are reported, not asked; so is a block while another question holds the slot. A blocked `open` or
+`osascript` is a block too: with launching apps closed, the policy emits tagged `(deny lsopen)` and
+`(deny appleevent-send)` (nono's default deny already refuses both, untagged), and when Launch Services refuses
+without a kernel record, its error -54 in the output counts (an `open` that never ran prints none). The target check
+below then decides. When asked, the socket sends `blocks` and `blocked`; an approved rerun's output and exit become
+the call's result, and a denial or no answer sends `not_rerun` and the first run's exit. A failed call's result ends
+with the blocks recorded for it (`operation target`, with why one isn't asked about), even when nothing is asked. After
+the user denies a block question (Piton's or the agent's), an agent `rerun` of the same command is refused for the rest
+of that run. Records
+later than 50 ms (node's first refusals can take seconds) aren't chased: they stay on the call, and the sandboxed bash
+tool's system-prompt guideline tells the agent that such a failure is likely a block and to ask with `rerun`.
+
 **The block question.** The agent asks for a rerun with `rerun: {runtime: "sandbox" | "host"}` (and a `reason`) after
-a command failed in the sandbox; `runtime` is only a hint for the side the question opens on, and anything else in
-`rerun`, such as a grant, is refused. The question is Piton's own, a typed value the daemon holds (`agent/question.rs`): the command,
-the agent's reason, the refusals the kernel recorded for the call's last run, what `open` would do, the session's
+a command failed in the sandbox and Piton didn't ask; `runtime` is only a hint for the side the question opens on, and
+anything else in `rerun`, such as a grant, is refused. The question is Piton's own, a typed value the daemon holds
+(`agent/question.rs`): the command, who asked (`Asker`: the agent with its reason, or Piton, which opens in the
+sandbox), the refusals the kernel recorded for the call's last run, what `open` would do, the session's
 agent-writable variables, and the runtime it opens on (the hint: sandbox at `all`, or the host; both are always
 offered). Answers: once, deny, or always
 for this command or an edited pattern, in this project (its source checkout's `.piton/config.local.toml`) or

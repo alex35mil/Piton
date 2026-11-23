@@ -254,7 +254,12 @@ impl Policy {
             }
         }
         match &self.apps {
-            Apps::Closed => {}
+            // nono's own default deny already refuses both, without a message: repeated here so the tag pass marks them,
+            // and a blocked `open` reaches its call in the kernel's record.
+            Apps::Closed => {
+                out.push("(deny lsopen)".to_string());
+                out.push("(deny appleevent-send)".to_string());
+            }
             Apps::Open { .. } => {
                 out.push("(allow lsopen)".to_string());
                 out.push("(allow appleevent-send)".to_string());
@@ -692,7 +697,22 @@ mod tests {
             true,
         );
         let rules = every.seatbelt().unwrap();
-        assert!(!rules.iter().any(|r| r == "(deny mach-lookup)" || r.contains("lsopen")));
+        assert!(
+            !rules
+                .iter()
+                .any(|r| r == "(deny mach-lookup)" || r.contains("allow lsopen"))
+        );
+        assert!(rules.contains(&"(deny lsopen)".to_string()));
+        assert!(rules.contains(&"(deny appleevent-send)".to_string()));
+        super::super::apply::capabilities(&every).expect("nono accepts the closed apps' denies");
+        let closed = Policy {
+            tag: "t".into(),
+            ..every.clone()
+        }
+        .seatbelt()
+        .unwrap();
+        assert!(closed.contains(&r#"(deny lsopen (with message "piton-t"))"#.to_string()));
+        assert!(closed.contains(&r#"(deny appleevent-send (with message "piton-t"))"#.to_string()));
         assert!(rules.contains(&r#"(allow mach-lookup (global-name "com.apple.secd"))"#.to_string()));
         assert!(every.decide_service("org.other").allowed);
         assert!(every.decide_service("com.apple.secd").allowed, "keychain read");

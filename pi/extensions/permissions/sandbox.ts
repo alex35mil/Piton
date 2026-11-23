@@ -8,7 +8,9 @@
  *
  * The tool is pi's own bash definition, with pi's `shellPath`, `shellCommandPrefix`, rendering, truncation, and
  * session environment; only where a command runs changes. The daemon decides what a request gets: it matches grants
- * itself and asks the user for a rerun, so the agent can ask but never approve.
+ * itself and asks the user for a rerun, so the agent can ask but never approve. When a call fails on a block the
+ * daemon recorded and an approved rerun lifts, the daemon asks the user itself, and the rerun's result is the call's;
+ * a failed call's result ends with the blocks the daemon recorded.
  */
 
 import * as net from "node:net"
@@ -34,6 +36,41 @@ export type RunLine =
     | { type: "timed_out" }
     | { type: "not_run"; reason: string }
     | { type: "error"; message: string }
+    /** The blocks the daemon recorded for a failed run (`operation target`, with why one isn't asked about). */
+    | { type: "blocks"; blocks: string[]; note?: string }
+    /** The run failed on a block and the user is asked to run it again: what follows is the rerun's, or `not_rerun`. */
+    | { type: "blocked" }
+    /** The user didn't approve running it again: the first run's exit follows. */
+    | { type: "not_rerun"; reason: string }
+
+/** What the daemon said about a failed run's blocks, for the tool's result. */
+export interface BlockReport {
+    blocks: string[]
+    note?: string
+    /** Piton asked the user to run it again. */
+    asked: boolean
+    /** Why it didn't run again, when the user didn't approve. */
+    notRerun?: string
+}
+
+/** What goes into the output stream when Piton asks: the rerun's output follows. */
+export const BLOCKED_SEPARATOR = "\n[The sandbox blocked this run; Piton asked the user to run it again.]\n"
+
+/** The lines the tool's result ends with for a failed run's blocks. */
+export function blockLines(report: BlockReport): string[] {
+    const lines: string[] = []
+    if (report.blocks.length > 0) lines.push(`The sandbox blocked: ${report.blocks.join("; ")}.`)
+    if (report.note) lines.push(`${report.note}.`)
+    if (report.notRerun) lines.push(`Not run again: ${report.notRerun}.`)
+    return lines
+}
+
+/** The system-prompt guideline the sandboxed bash tool adds. */
+export const SANDBOX_GUIDELINE =
+    "Commands run in Piton's sandbox. When a command fails with 'Operation not permitted', a refused socket or " +
+    "keychain, or `open` error -54, the sandbox likely blocked it even when no block is listed: ask with `rerun` " +
+    "instead of explaining the failure or working around it, unless the user already declined to run that command " +
+    "again. When Piton saw the block it asks the user itself, and the result says so."
 
 export interface RunRequest {
     /** pi's tool call id, or `user:<n>` for a `!` command. */
@@ -61,8 +98,9 @@ export const RerunSchema = Type.Object(
         additionalProperties: false,
         description:
             "Only after this exact command failed because the sandbox blocked it (Operation not permitted, a refused " +
-            "keychain or socket): run it again where `runtime` says. The user is asked first and may choose the " +
-            "other runtime or deny; the whole command runs again.",
+            "keychain or socket) and Piton didn't already ask: run it again where `runtime` says. The user is asked " +
+            "first and may choose the other runtime or deny; the whole command runs again. Never after the user " +
+            "declined to run it again.",
     },
 )
 
@@ -124,10 +162,12 @@ export function piShellEnv(env: NodeJS.ProcessEnv = process.env): Record<string,
 }
 
 /**
- * Sends a run request and streams the daemon's answer: output chunks to `onData`, and where it ran (when not the
- * session's own sandbox) to `onRan`. Resolves with the exit code. Rejects with the daemon's reason when it didn't run
- * (denied, unanswered, refused), with `timeout:<s>` when it timed out (pi's own timeout message), and `aborted` when
- * `signal` stops it (the daemon kills it).
+ * Sends a run request and streams the daemon's answer: output chunks to `onData`, where it ran (when not the
+ * session's own sandbox) to `onRan`, and a failed run's blocks to `report`. When Piton asks the user to run it again,
+ * `onData` gets [`BLOCKED_SEPARATOR`] and the rerun's output follows. Resolves with the exit code (the rerun's, or the
+ * first run's when it didn't run again). Rejects with the daemon's reason when it didn't run (denied, unanswered,
+ * refused), with `timeout:<s>` when it timed out (pi's own timeout message), and `aborted` when `signal` stops it (the
+ * daemon kills it).
  */
 export function requestRun(
     channel: { socket: string; token: string },
@@ -135,6 +175,7 @@ export function requestRun(
     onData: (data: Buffer) => void,
     signal?: AbortSignal,
     onRan?: (ran: Ran) => void,
+    report?: BlockReport,
 ): Promise<{ exitCode: number }> {
     return new Promise((resolve, reject) => {
         const sock = net.connect(channel.socket)
@@ -171,6 +212,18 @@ export function requestRun(
                     return finish(() => reject(new Error(`Not run: ${parsed.reason}`)))
                 case "error":
                     return finish(() => reject(new Error(`piton's daemon refused: ${parsed.message}`)))
+                case "blocks":
+                    if (report) {
+                        report.blocks = parsed.blocks
+                        if (parsed.note) report.note = parsed.note
+                    }
+                    return
+                case "blocked":
+                    if (report) report.asked = true
+                    return onData(Buffer.from(BLOCKED_SEPARATOR))
+                case "not_rerun":
+                    if (report) report.notRerun = parsed.reason
+                    return
             }
         }
         sock.on("data", (chunk: string) => {
@@ -205,6 +258,7 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
     const base = createBashToolDefinition(process.cwd())
     pi.registerTool({
         ...base,
+        promptGuidelines: [...(base.promptGuidelines ?? []), SANDBOX_GUIDELINE],
         parameters: Type.Object({
             ...base.parameters.properties,
             rerun: Type.Optional(RerunSchema),
@@ -214,6 +268,7 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
             const { command, timeout, rerun, reason } = params
             const { commandPrefix } = piShellSettings(ctx.cwd)
             let ran: Ran | undefined
+            const report: BlockReport = { blocks: [], asked: false }
             const operations: BashOperations = {
                 async exec(_resolved, cwd, options) {
                     // The agent's command: the daemon applies pi's prefix and shell itself, from pi's settings files.
@@ -226,21 +281,33 @@ export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
                         reason,
                         rerun,
                     }
-                    return requestRun(channel, request, options.onData, options.signal, (r) => {
-                        ran = r
-                    })
+                    return requestRun(
+                        channel,
+                        request,
+                        options.onData,
+                        options.signal,
+                        (r) => {
+                            ran = r
+                        },
+                        report,
+                    )
                 },
             }
             const tool = createBashToolDefinition(ctx.cwd, { operations, commandPrefix })
             const result = await tool.execute(toolCallId, { command, timeout }, signal, onUpdate, ctx)
-            if (!ran) return result
+            const lines = blockLines(report)
+            if (ran) lines.push(ranLine(ran))
+            if (lines.length === 0) return result
             const structured = result.structuredContent
-            const where = { runtime: ran.runtime, by: ran.by }
+            const extra = {
+                ...(ran ? { ran: { runtime: ran.runtime, by: ran.by } } : {}),
+                ...(report.blocks.length > 0 ? { blocks: report.blocks } : {}),
+            }
             return {
                 ...result,
-                content: [...result.content, { type: "text" as const, text: ranLine(ran) }],
+                content: [...result.content, ...lines.map((text) => ({ type: "text" as const, text }))],
                 ...(structured && typeof structured === "object" && !Array.isArray(structured)
-                    ? { structuredContent: { ...structured, ran: where } }
+                    ? { structuredContent: { ...structured, ...extra } }
                     : {}),
             }
         },

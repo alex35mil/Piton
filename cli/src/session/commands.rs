@@ -38,10 +38,69 @@ pub struct BashCall {
     pub rerun: Option<crate::agent::Rerun>,
     /// A request was taken for it: one per call.
     pub used: bool,
-    /// The kernel's refusals routed to this call (`operation path`).
-    pub refusals: Vec<String>,
+    /// The kernel's refusals routed to this call.
+    pub refusals: Vec<CallRefusal>,
     /// The call's number in its sandbox's tag.
     pub number: u64,
+    /// Piton asked the user about it after it failed: once per call.
+    pub asked: bool,
+    /// The user denied running this command outside the sandbox in this run (Piton's question about it, or the last run
+    /// of the same command that this rerun follows).
+    pub declined: bool,
+}
+
+/// One refusal of a call's sandbox, as the kernel names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallRefusal {
+    pub process: String,
+    pub operation: String,
+    pub target: String,
+}
+
+impl CallRefusal {
+    /// `operation target`, as the question shows it.
+    pub fn summary(&self) -> String {
+        match self.target.is_empty() {
+            true => self.operation.clone(),
+            false => format!("{} {}", self.operation, self.target),
+        }
+    }
+}
+
+impl From<&crate::daemon::Refusal> for CallRefusal {
+    fn from(refusal: &crate::daemon::Refusal) -> Self {
+        Self {
+            process: refusal.process.clone(),
+            operation: refusal.operation.clone(),
+            target: refusal.target.clone(),
+        }
+    }
+}
+
+/// What the session decides about a call that failed in its own sandbox, before the agent hears of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterFailure {
+    /// No block recorded yet: the kernel's record may still come.
+    Wait,
+    /// Not asked: the blocks (with why each isn't asked about) and anything else the agent should know.
+    Report { blocks: Vec<String>, note: Option<String> },
+    /// Ask the user: the blocks, the refusals the question shows, the tag a rerun's sandbox gets, and what `open`
+    /// would do.
+    Ask {
+        blocks: Vec<String>,
+        refusals: Vec<String>,
+        tag: String,
+        note: Option<String>,
+    },
+}
+
+/// How a failed call's block is treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Treated {
+    /// An approved rerun lifts it.
+    Asked,
+    /// Not asked about, with why.
+    Shown(&'static str),
 }
 
 /// What the session needs to run commands: fixed at launch.
@@ -214,16 +273,17 @@ impl Calls {
                 let rerun = args
                     .and_then(|a| a.get("rerun"))
                     .and_then(|r| serde_json::from_value::<crate::agent::Rerun>(r.clone()).ok());
-                // A rerun shows what the last run of the same command was refused.
-                let refusals = match rerun {
+                // A rerun shows what the last run of the same command was refused, and keeps the user's denial of
+                // Piton's question about it.
+                let (refusals, declined) = match rerun {
                     Some(_) => self
                         .ended
                         .iter()
                         .rev()
                         .find(|(_, call)| call.command == command)
-                        .map(|(_, call)| call.refusals.clone())
+                        .map(|(_, call)| (call.refusals.clone(), call.declined))
                         .unwrap_or_default(),
-                    None => Vec::new(),
+                    None => (Vec::new(), false),
                 };
                 self.next += 1;
                 let number = self.next;
@@ -235,6 +295,8 @@ impl Calls {
                         used: false,
                         refusals,
                         number,
+                        asked: false,
+                        declined,
                     },
                 );
             }
@@ -245,10 +307,14 @@ impl Calls {
                     self.end(id, call);
                 }
             }
-            // A run that ended (aborted, crashed) leaves no call running.
+            // A run that ended (aborted, crashed) leaves no call running. A denial holds for the run it was given in:
+            // the user may ask the agent to try again in the next one.
             "agent_end" => {
                 for (id, call) in std::mem::take(&mut self.calls) {
                     self.end(id, call);
+                }
+                for (_, call) in &mut self.ended {
+                    call.declined = false;
                 }
             }
             _ => {}
@@ -273,7 +339,7 @@ impl Calls {
     }
 
     /// Records a refusal for the call `id`, running or recently ended. False when it's neither.
-    pub fn note(&mut self, id: &str, refusal: &str) -> bool {
+    pub fn note(&mut self, id: &str, refusal: CallRefusal) -> bool {
         let call = match self.calls.get_mut(id) {
             Some(call) => call,
             None => match self.ended.iter_mut().rev().find(|(i, _)| i == id) {
@@ -281,10 +347,17 @@ impl Calls {
                 None => return false,
             },
         };
-        if call.refusals.len() < REFUSALS_KEPT && !call.refusals.iter().any(|r| r == refusal) {
-            call.refusals.push(refusal.to_string());
+        if call.refusals.len() < REFUSALS_KEPT && !call.refusals.contains(&refusal) {
+            call.refusals.push(refusal);
         }
         true
+    }
+
+    /// The user denied Piton's question about the running call `id`: a rerun the agent asks for in this run is refused.
+    pub fn decline(&mut self, id: &str) {
+        if let Some(call) = self.calls.get_mut(id) {
+            call.declined = true;
+        }
     }
 
     /// Takes the call a request names: it must be running, with the same command, and not taken before. Returns it with
@@ -391,9 +464,12 @@ impl Commands {
         };
         match request.rerun {
             Some(asked) => match call.rerun {
+                Some(_) if call.declined => {
+                    not_run("the user already declined to run this command outside the sandbox; don't ask again".into())
+                }
                 Some(called) if called == asked => {
                     use crate::agent::open::{self, OpenCheck};
-                    let refusals = call.refusals.clone();
+                    let refusals = call.refusals.iter().map(CallRefusal::summary).collect();
                     let nodes = match crate::agent::analyze(&request.command, Some(&request.cwd)) {
                         Ok(analysis) => analysis.commands,
                         Err(e) => return not_run(e.to_string()),
@@ -444,6 +520,115 @@ impl Commands {
         }
     }
 
+    /// What a call that failed in the session's own sandbox gets before the agent hears of it: Piton asks the user when
+    /// a block it recorded for the call is one an approved rerun lifts; otherwise the blocks are reported. `last` is the
+    /// last look (the kernel's record had its time); `launch_refused` says the run's output showed Launch Services'
+    /// refusal (`open` or `osascript`, which may leave no kernel record). `slot_taken`: another question is showing.
+    pub fn after_failure(
+        &self,
+        calls: &mut Calls,
+        request: &RunRequest,
+        last: bool,
+        launch_refused: bool,
+        slot_taken: bool,
+    ) -> AfterFailure {
+        use crate::{
+            agent::open::{self, OpenCheck},
+            launch::sandbox::grant::{CommandBlock, command_block},
+        };
+        let report = |blocks, note| AfterFailure::Report { blocks, note };
+        let prefix = calls.tag_prefix.clone();
+        let Some(call) = calls.calls.get_mut(&request.call_id) else {
+            return report(Vec::new(), None);
+        };
+        if request.typed_by_user() || call.command != request.command || call.asked {
+            return report(Vec::new(), None);
+        }
+        let nodes = crate::agent::analyze(&request.command, Some(&request.cwd))
+            .map(|a| a.commands)
+            .unwrap_or_default();
+        let program = |node: &String| {
+            node.split_whitespace()
+                .next()
+                .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+        };
+        let launches: Vec<&String> = nodes
+            .iter()
+            .filter(|n| matches!(program(n).as_deref(), Some("open" | "osascript")))
+            .collect();
+        let mut refusals = call.refusals.clone();
+        let launch_ops = |r: &CallRefusal| matches!(r.operation.as_str(), "lsopen" | "appleevent-send");
+        // Launch Services may refuse without a kernel record: the run's output is the evidence then.
+        let closed = match self.policies.launch.apps {
+            crate::launch::sandbox::Apps::Closed => true,
+            crate::launch::sandbox::Apps::Open { .. } => false,
+        };
+        if launch_refused && closed && !refusals.iter().any(launch_ops) {
+            for node in &launches {
+                refusals.push(CallRefusal {
+                    process: program(node).unwrap_or_default(),
+                    operation: "lsopen".into(),
+                    target: node.to_string(),
+                });
+            }
+        }
+        if refusals.is_empty() {
+            return match last {
+                true => report(Vec::new(), None),
+                false => AfterFailure::Wait,
+            };
+        }
+        let treated: Vec<(String, Treated)> = refusals
+            .iter()
+            .map(|r| {
+                let silenced =
+                    crate::launch::sandbox::silenced(&self.policies.silence, &r.process, &r.operation, &r.target)
+                        .is_some();
+                let treated = match silenced {
+                    true => Treated::Shown("silenced"),
+                    false => match command_block(&self.policies.launch, &self.policies.all, &r.operation, &r.target) {
+                        CommandBlock::Liftable => Treated::Asked,
+                        CommandBlock::CredentialRead => Treated::Shown("a credential read"),
+                        CommandBlock::Floor => Treated::Shown("protected: no approval lifts it"),
+                        CommandBlock::Unsupported => Treated::Shown("not one an approval lifts"),
+                    },
+                };
+                (r.summary(), treated)
+            })
+            .collect();
+        let blocks: Vec<String> = treated
+            .iter()
+            .map(|(summary, treated)| match treated {
+                Treated::Asked => summary.clone(),
+                Treated::Shown(why) => format!("{summary} ({why})"),
+            })
+            .collect();
+        if !treated.iter().any(|(_, t)| *t == Treated::Asked) {
+            return report(blocks, None);
+        }
+        if slot_taken {
+            return report(
+                blocks,
+                Some("Piton didn't ask about it: another question was waiting for the user".into()),
+            );
+        }
+        let note = match refusals.iter().any(launch_ops) {
+            true => match open::check(&nodes, &request.cwd, &self.policies.launch) {
+                OpenCheck::Refused { reason } => return report(blocks, Some(reason)),
+                OpenCheck::Ask { note } => Some(note),
+                OpenCheck::Other => None,
+            },
+            false => None,
+        };
+        call.asked = true;
+        AfterFailure::Ask {
+            refusals: treated.into_iter().map(|(summary, _)| summary).collect(),
+            blocks,
+            tag: format!("{prefix}-{}", call.number),
+            note,
+        }
+    }
+
     fn run(&self, request: &RunRequest, runtime: Runtime) -> First {
         First::Decided(RunDecision::Run(Box::new(self.approved(request, runtime))))
     }
@@ -485,12 +670,20 @@ impl Commands {
         }
     }
 
-    /// The typed question for a rerun request: opens on the side the agent hinted.
-    pub fn question(&self, id: String, request: &RunRequest, refusals: Vec<String>, note: Option<String>) -> Question {
+    /// The typed question for a rerun request (opens on the side the agent hinted) or for Piton's own after a failed
+    /// call (opens in the sandbox).
+    pub fn question(
+        &self,
+        id: String,
+        request: &RunRequest,
+        asker: question::Asker,
+        refusals: Vec<String>,
+        note: Option<String>,
+    ) -> Question {
         Question {
             id,
             command: request.command.clone(),
-            reason: request.reason.clone().filter(|r| !r.trim().is_empty()),
+            asker,
             refusals,
             note,
             writable_vars: self.policies.writable_vars.clone(),
@@ -672,6 +865,233 @@ mod tests {
         request_with(dir, id, command, sandbox_rerun(rerun))
     }
 
+    fn agent() -> question::Asker {
+        question::Asker::Agent { reason: None }
+    }
+
+    fn refusal(operation: &str, target: &str) -> CallRefusal {
+        CallRefusal {
+            process: "touch".into(),
+            operation: operation.into(),
+            target: target.into(),
+        }
+    }
+
+    /// Starts a plain call and runs it at the session's policy: what a failed call looks like before `after_failure`.
+    fn begin(c: &Commands, calls: &mut Calls, dir: &Path, id: &str, command: &str) -> RunRequest {
+        start(calls, id, command, false);
+        run(c.decide(calls, &request(dir, id, command, false)));
+        request(dir, id, command, false)
+    }
+
+    /// An `Ask`'s blocks, refusals, tag, and note; panics otherwise.
+    fn asked(after: AfterFailure) -> (Vec<String>, Vec<String>, String, Option<String>) {
+        match after {
+            AfterFailure::Ask {
+                blocks,
+                refusals,
+                tag,
+                note,
+            } => (blocks, refusals, tag, note),
+            AfterFailure::Wait | AfterFailure::Report { .. } => panic!("not asked: {after:?}"),
+        }
+    }
+
+    /// A `Report`'s blocks and note; panics otherwise.
+    fn reported(after: AfterFailure) -> (Vec<String>, Option<String>) {
+        match after {
+            AfterFailure::Report { blocks, note } => (blocks, note),
+            AfterFailure::Wait | AfterFailure::Ask { .. } => panic!("not reported: {after:?}"),
+        }
+    }
+
+    fn after(c: &Commands, calls: &mut Calls, req: &RunRequest, last: bool, launch: bool) -> AfterFailure {
+        c.after_failure(calls, req, last, launch, false)
+    }
+
+    /// A failed call is asked about only for a block an approved rerun lifts, once; everything else is reported with
+    /// why, and a call with nothing recorded waits for the kernel's record until the last look.
+    #[test]
+    fn a_failed_call_is_asked_about_only_for_a_liftable_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &[]);
+        let home = dir.join("h");
+        // The launch denies writes below the agent directory (floor) and reads of ~/.ssh (a credential); `all` keeps
+        // the floor and lifts the rest.
+        let deny = |access: crate::launch::sandbox::Access, path: PathBuf, source| crate::launch::sandbox::Rule {
+            effect: crate::launch::sandbox::Effect::Deny,
+            access: vec![access],
+            target: crate::launch::sandbox::Target::Subpath { path },
+            source,
+        };
+        let floor = deny(
+            crate::launch::sandbox::Access::Write,
+            home.join(".pi"),
+            crate::launch::sandbox::Source::Piton {
+                what: "agent dir".into(),
+            },
+        );
+        let ssh = deny(
+            crate::launch::sandbox::Access::Read,
+            home.join(".ssh"),
+            crate::launch::sandbox::Source::NonoGroup { group: "ssh".into() },
+        );
+        c.policies.launch.rules = vec![floor.clone(), ssh];
+        c.policies.all.rules = vec![
+            crate::launch::sandbox::Rule {
+                effect: crate::launch::sandbox::Effect::Allow,
+                access: vec![
+                    crate::launch::sandbox::Access::Write,
+                    crate::launch::sandbox::Access::Read,
+                ],
+                target: crate::launch::sandbox::Target::Subpath { path: "/".into() },
+                source: crate::launch::sandbox::Source::Workspace,
+            },
+            floor,
+        ];
+        c.policies.launch.apps = crate::launch::sandbox::Apps::Closed;
+        c.policies.all.apps = crate::launch::sandbox::Apps::Open {
+            source: crate::launch::sandbox::Source::Workspace,
+        };
+        let kind = |a: &AfterFailure| match a {
+            AfterFailure::Wait => "wait",
+            AfterFailure::Report { .. } => "report",
+            AfterFailure::Ask { .. } => "ask",
+        };
+        let mut calls = Calls::new("7-ab");
+
+        // Nothing recorded: wait, then report nothing on the last look.
+        let req = begin(&c, &mut calls, &dir, "1", "make");
+        assert_eq!(after(&c, &mut calls, &req, false, false), AfterFailure::Wait);
+        assert_eq!(
+            after(&c, &mut calls, &req, true, false),
+            AfterFailure::Report {
+                blocks: Vec::new(),
+                note: None
+            }
+        );
+
+        // A liftable write: asked, once, tagged as the call.
+        let req = begin(&c, &mut calls, &dir, "2", "touch ~/x");
+        let target = home.join("x").display().to_string();
+        calls.note("2", refusal("file-write-create", &target));
+        let (blocks, refusals, tag, note) = asked(after(&c, &mut calls, &req, false, false));
+        assert_eq!(blocks, [format!("file-write-create {target}")]);
+        assert_eq!(refusals, blocks);
+        assert_eq!(tag, "7-ab-2");
+        assert_eq!(note, None);
+        assert_eq!(kind(&after(&c, &mut calls, &req, true, false)), "report", "asked once");
+
+        // The floor and a credential read: reported with why, not asked.
+        let req = begin(&c, &mut calls, &dir, "3", "git push");
+        calls.note(
+            "3",
+            refusal("file-write-create", &home.join(".pi/x").display().to_string()),
+        );
+        calls.note(
+            "3",
+            refusal("file-read-data", &home.join(".ssh/id").display().to_string()),
+        );
+        let (blocks, note) = reported(after(&c, &mut calls, &req, false, false));
+        assert_eq!(note, None);
+        assert!(blocks[0].ends_with("(protected: no approval lifts it)"), "{blocks:?}");
+        assert!(blocks[1].ends_with("(a credential read)"), "{blocks:?}");
+
+        // Silenced: reported, not asked.
+        c.policies.silence.push(crate::launch::sandbox::Silenced {
+            target: crate::launch::sandbox::Silent::Path(home.join("quiet")),
+            process: None,
+            source: crate::launch::sandbox::SilenceSource::Preset("test"),
+        });
+        let req = begin(&c, &mut calls, &dir, "4", "touch ~/quiet/x");
+        calls.note(
+            "4",
+            refusal("file-write-create", &home.join("quiet/x").display().to_string()),
+        );
+        let (blocks, _) = reported(after(&c, &mut calls, &req, true, false));
+        assert!(blocks[0].ends_with("(silenced)"), "{blocks:?}");
+
+        // Another question showing: reported, saying why.
+        let req = begin(&c, &mut calls, &dir, "5", "touch ~/y");
+        calls.note("5", refusal("file-write-create", &home.join("y").display().to_string()));
+        let (_, note) = reported(c.after_failure(&mut calls, &req, false, false, true));
+        assert!(note.is_some_and(|n| n.contains("another question")));
+
+        // A typed command is never asked about.
+        let typed = request(&dir, "user:1", "touch ~/z", false);
+        assert_eq!(kind(&after(&c, &mut calls, &typed, true, false)), "report");
+    }
+
+    /// A blocked `open` is asked about with what it opens, from the kernel's tagged record or, without one, Launch
+    /// Services' refusal in the output. An `open` that never ran (an earlier part failed) isn't; `osascript` is refused.
+    #[test]
+    fn a_blocked_open_is_asked_about_from_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &[]);
+        c.policies.launch.apps = crate::launch::sandbox::Apps::Closed;
+        c.policies.all.apps = crate::launch::sandbox::Apps::Open {
+            source: crate::launch::sandbox::Source::Workspace,
+        };
+        let mut calls = Calls::new("7-ab");
+        let web = "open https://example.com";
+
+        // The kernel's tagged record.
+        let req = begin(&c, &mut calls, &dir, "1", web);
+        calls.note("1", refusal("lsopen", ""));
+        let (_, _, _, note) = asked(after(&c, &mut calls, &req, false, false));
+        assert!(note.is_some_and(|n| n.contains("browser")));
+
+        // Only Launch Services' line in the output.
+        let req = begin(&c, &mut calls, &dir, "2", web);
+        let (blocks, _, _, note) = asked(after(&c, &mut calls, &req, false, true));
+        assert_eq!(blocks, [format!("lsopen {web}")]);
+        assert!(note.is_some());
+
+        // `open` never ran: no record, no line.
+        let never = format!("false && {web}");
+        let req = begin(&c, &mut calls, &dir, "3", &never);
+        assert_eq!(
+            after(&c, &mut calls, &req, true, false),
+            AfterFailure::Report {
+                blocks: Vec::new(),
+                note: None
+            }
+        );
+
+        // `osascript`: reported with the refusal, never asked.
+        let script = "osascript -e 'tell application \"Terminal\" to do script \"x\"'";
+        let req = begin(&c, &mut calls, &dir, "4", script);
+        let (_, note) = reported(after(&c, &mut calls, &req, false, true));
+        assert!(note.is_some_and(|n| n.contains("osascript")));
+    }
+
+    /// After the user denies Piton's question, the agent's rerun of the same command in that run is refused; a new
+    /// run may ask again.
+    #[test]
+    fn a_denied_command_isn_t_asked_again_in_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let c = commands(&dir, &[]);
+        let mut calls = Calls::new("7-ab");
+        start(&mut calls, "1", "touch ~/x", false);
+        run(c.decide(&mut calls, &request(&dir, "1", "touch ~/x", false)));
+        calls.decline("1");
+        calls.track("tool_execution_end", json!({"toolCallId": "1"}).as_object().unwrap());
+        start(&mut calls, "2", "touch ~/x", true);
+        assert_eq!(
+            kind(&c.decide(&mut calls, &request(&dir, "2", "touch ~/x", true))),
+            "refused"
+        );
+        calls.track("agent_end", &Map::new());
+        start(&mut calls, "3", "touch ~/x", true);
+        assert_eq!(
+            kind(&c.decide(&mut calls, &request(&dir, "3", "touch ~/x", true))),
+            "ask"
+        );
+    }
+
     /// The question opens on the side the agent hinted; a rerun must be the one the call asked for, and a `grant` is no
     /// part of a rerun.
     #[test]
@@ -685,9 +1105,12 @@ mod tests {
         start_with(&mut calls, "1", "probe", Some(json!({"runtime": "host"})));
         let req = request_with(&dir, "1", "probe", host);
         assert_eq!(kind(&c.decide(&mut calls, &req)), "ask");
-        assert_eq!(c.question("q".into(), &req, Vec::new(), None).runtime, Target::Host);
         assert_eq!(
-            c.question("q".into(), &request(&dir, "2", "x", true), Vec::new(), None)
+            c.question("q".into(), &req, agent(), Vec::new(), None).runtime,
+            Target::Host
+        );
+        assert_eq!(
+            c.question("q".into(), &request(&dir, "2", "x", true), agent(), Vec::new(), None)
                 .runtime,
             Target::Sandbox
         );
@@ -839,21 +1262,21 @@ mod tests {
     fn refusals_follow_their_call() {
         let mut calls = Calls::new("1-x");
         start(&mut calls, "1", "husky install", false);
-        assert!(calls.note("1", "file-write-create /w/.git/hooks/pre-commit"));
+        assert!(calls.note("1", refusal("file-write-create", "/w/.git/hooks/pre-commit")));
         assert!(
-            calls.note("1", "file-write-create /w/.git/hooks/pre-commit"),
+            calls.note("1", refusal("file-write-create", "/w/.git/hooks/pre-commit")),
             "kept once"
         );
-        assert!(!calls.note("9", "x"), "unknown call");
+        assert!(!calls.note("9", refusal("x", "")), "unknown call");
         calls.track("tool_execution_end", json!({"toolCallId": "1"}).as_object().unwrap());
         assert!(
-            calls.note("1", "file-write-data /w/.git/config"),
+            calls.note("1", refusal("file-write-data", "/w/.git/config")),
             "recorded after it ended"
         );
         start(&mut calls, "2", "husky install", true);
         let rerun = calls.get_running("2").unwrap();
         assert_eq!(
-            rerun.refusals,
+            rerun.refusals.iter().map(CallRefusal::summary).collect::<Vec<_>>(),
             [
                 "file-write-create /w/.git/hooks/pre-commit",
                 "file-write-data /w/.git/config"
@@ -904,7 +1327,15 @@ mod tests {
         let c = commands(dir.path(), &[]);
         let mut req = request(dir.path(), "1", "husky install", true);
         req.reason = Some("hooks".into());
-        let sandbox = c.question("q".into(), &req, Vec::new(), None);
+        let sandbox = c.question(
+            "q".into(),
+            &req,
+            question::Asker::Agent {
+                reason: req.reason.clone(),
+            },
+            Vec::new(),
+            None,
+        );
         assert_eq!(sandbox.runtime, Target::Sandbox, "starts in the sandbox");
         let host = sandbox.switched();
         let labels = |q: &Question| -> Vec<String> {

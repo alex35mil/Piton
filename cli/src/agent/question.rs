@@ -53,7 +53,8 @@ pub struct Question {
     /// Stable for the question's life: what `session.decide` names.
     pub id: String,
     pub command: String,
-    pub reason: Option<String>,
+    /// Who asked: the agent's rerun request, or Piton itself after the command failed on a block it recorded.
+    pub asker: Asker,
     /// The refusals the kernel recorded for the call's last run (`operation path`), as context.
     pub refusals: Vec<String>,
     /// What the command opens, for `open`.
@@ -62,6 +63,24 @@ pub struct Question {
     pub writable_vars: Vec<WritableVars>,
     /// The runtime the `rpc` rendering shows; a `view` client keeps its own switch.
     pub runtime: Target,
+}
+
+/// Who brought the question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asker {
+    /// The agent asked to rerun it, with why (when it said).
+    Agent { reason: Option<String> },
+    /// The command failed and the daemon recorded a block an approved rerun lifts.
+    Piton,
+}
+
+impl Asker {
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Asker::Agent { reason } => reason.as_deref().map(str::trim).filter(|r| !r.is_empty()),
+            Asker::Piton => None,
+        }
+    }
 }
 
 /// The user's answer, from either rendering.
@@ -84,7 +103,7 @@ impl Question {
             "id": self.id,
             "kind": "command",
             "command": self.command,
-            "reason": self.reason,
+            "reason": self.asker.reason(),
             "refusals": self.refusals,
             "note": self.note,
             "runtime": self.runtime,
@@ -195,16 +214,16 @@ pub fn rpc_dialog(dialog_id: &str, question: &Question) -> Value {
         Target::Sandbox => "in the sandbox",
         Target::Host => "on the host",
     };
-    let mut message = format!(
-        "The agent asks to run this again {where_}:\n\n{}\n\n{}",
-        question.command,
-        wording(question.runtime)
-    );
+    let lead = match question.asker {
+        Asker::Agent { .. } => format!("The agent asks to run this again {where_}"),
+        Asker::Piton => format!("The sandbox blocked this command; run it again {where_}?"),
+    };
+    let mut message = format!("{lead}:\n\n{}\n\n{}", question.command, wording(question.runtime));
     if let Some(note) = &question.note {
         message.push_str(&format!("\n\nIt {note}."));
     }
-    if let Some(reason) = question.reason.as_deref().filter(|r| !r.trim().is_empty()) {
-        message.push_str(&format!("\n\nWhy: {}", reason.trim()));
+    if let Some(reason) = question.asker.reason() {
+        message.push_str(&format!("\n\nWhy: {reason}"));
     }
     if !question.refusals.is_empty() {
         message.push_str("\n\nThe sandbox refused:");
@@ -302,7 +321,9 @@ mod tests {
         Question {
             id: "piton:question:1".into(),
             command: "husky install".into(),
-            reason: Some("hooks".into()),
+            asker: Asker::Agent {
+                reason: Some("hooks".into()),
+            },
             refusals: (0..12).map(|i| format!("file-write-create /h/{i}")).collect(),
             note: Some("opens https://x in your browser".into()),
             writable_vars: vec![
@@ -390,6 +411,17 @@ mod tests {
         );
         assert!(title.contains("/h/9") && title.contains("and 2 more"), "{title}");
         assert!(!title.contains("V00"), "no variables on the sandbox side: {title}");
+        assert!(title.contains("The agent asks"), "{title}");
+
+        // Piton's own question says the sandbox blocked it, with no reason.
+        let piton = Question {
+            asker: Asker::Piton,
+            ..question(Target::Sandbox)
+        };
+        let title = rpc_dialog("d", &piton)["title"].as_str().unwrap().to_string();
+        assert!(title.contains("The sandbox blocked this command"), "{title}");
+        assert!(!title.contains("Why:"), "{title}");
+        assert_eq!(piton.view()["reason"], Value::Null);
 
         let host = rpc_dialog("d", &question(Target::Host));
         let title = host["title"].as_str().unwrap();

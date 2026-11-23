@@ -193,6 +193,15 @@ pub enum SessionCmd {
         request: crate::agent::RunRequest,
         reply: oneshot::Sender<crate::agent::RunDecision>,
     },
+    /// A call the daemon ran in the session's own sandbox failed: ask the user when a block it recorded is liftable.
+    RunFailed {
+        request: crate::agent::RunRequest,
+        /// The last look: the kernel's record had its time.
+        last: bool,
+        /// The run's output showed Launch Services' refusal (`open`, `osascript`).
+        launch_refused: bool,
+        reply: oneshot::Sender<crate::agent::Failed>,
+    },
     /// The agent stopped waiting for a run request: settle its question if it's still pending.
     SettleQuestion,
     /// A refusal the kernel recorded for this session's sandbox.
@@ -824,6 +833,12 @@ impl SessionTask {
                 self.publish_view_state();
             }
             SessionCmd::RunCommand { request, reply } => self.run_command(request, reply),
+            SessionCmd::RunFailed {
+                request,
+                last,
+                launch_refused,
+                reply,
+            } => self.run_failed(request, last, launch_refused, reply),
             SessionCmd::SettleQuestion => {
                 self.settle_question();
                 self.ask_next_process();
@@ -1295,9 +1310,13 @@ impl SessionTask {
                 let _ = reply.send(decision);
             }
             commands::First::Ask { refusals, tag, note } => {
+                let asker = crate::agent::question::Asker::Agent {
+                    reason: request.reason.clone(),
+                };
                 let question = commands.question(
                     format!("piton:question:{}", self.next_internal + 1),
                     &request,
+                    asker,
                     refusals,
                     note,
                 );
@@ -1307,22 +1326,89 @@ impl SessionTask {
                     });
                     return;
                 }
-                self.next_internal += 1;
                 crate::log!("session {key}: asking to run a command outside the sandbox");
-                let dialog_id = self.next_dialog_id();
-                let record = crate::agent::question::rpc_dialog(&dialog_id, &question);
-                self.question = Some(commands::PendingQuestion {
-                    question,
-                    dialog_id,
-                    stage: commands::Stage::Choice,
-                    request,
-                    tag,
-                    reply,
-                    deadline: Instant::now() + Duration::from_millis(self.config.confirmation_timeout_ms),
-                });
-                // To `rpc` clients as pi's dialog, kept for replay until answered; `view` clients get the typed
-                // question in the state instead.
-                self.on_pi_line(record.to_string());
+                self.ask_question(question, request, tag, reply);
+            }
+        }
+    }
+
+    /// Shows the block question: to `rpc` clients as pi's dialog, kept for replay until answered; `view` clients get the
+    /// typed question in the state instead.
+    fn ask_question(
+        &mut self,
+        question: crate::agent::question::Question,
+        request: crate::agent::RunRequest,
+        tag: String,
+        reply: oneshot::Sender<crate::agent::RunDecision>,
+    ) {
+        self.next_internal += 1;
+        let dialog_id = self.next_dialog_id();
+        let record = crate::agent::question::rpc_dialog(&dialog_id, &question);
+        self.question = Some(commands::PendingQuestion {
+            question,
+            dialog_id,
+            stage: commands::Stage::Choice,
+            request,
+            tag,
+            reply,
+            deadline: Instant::now() + Duration::from_millis(self.config.confirmation_timeout_ms),
+        });
+        self.on_pi_line(record.to_string());
+        self.publish_view_state();
+    }
+
+    /// A call that failed in the session's own sandbox: asked about when a block recorded for it is one an approved
+    /// rerun lifts, otherwise reported to the agent with its blocks.
+    fn run_failed(
+        &mut self,
+        request: crate::agent::RunRequest,
+        last: bool,
+        launch_refused: bool,
+        reply: oneshot::Sender<crate::agent::Failed>,
+    ) {
+        use crate::agent::Failed;
+        let key = lock(&self.shared).key;
+        let slot_taken = self.asking();
+        let Some(commands) = &self.commands else {
+            let _ = reply.send(Failed::Report {
+                blocks: Vec::new(),
+                note: None,
+            });
+            return;
+        };
+        match commands.after_failure(&mut self.calls, &request, last, launch_refused, slot_taken) {
+            commands::AfterFailure::Wait => {
+                let _ = reply.send(Failed::Wait);
+            }
+            commands::AfterFailure::Report { blocks, note } => {
+                if !blocks.is_empty() {
+                    crate::log!(
+                        "session {key}: a command failed on blocks not asked about: {}",
+                        blocks.join("; ")
+                    );
+                }
+                let _ = reply.send(Failed::Report { blocks, note });
+            }
+            commands::AfterFailure::Ask {
+                blocks,
+                refusals,
+                tag,
+                note,
+            } => {
+                let question = commands.question(
+                    format!("piton:question:{}", self.next_internal + 1),
+                    &request,
+                    crate::agent::question::Asker::Piton,
+                    refusals,
+                    note,
+                );
+                crate::log!(
+                    "session {key}: a command failed on a block; asking to run it again: {}",
+                    blocks.join("; ")
+                );
+                let (decided, decision) = oneshot::channel();
+                self.ask_question(question, request, tag, decided);
+                let _ = reply.send(Failed::Asked { blocks, decision });
             }
         }
     }
@@ -1403,8 +1489,10 @@ impl SessionTask {
         let decision = match answer {
             Answer::Deny => {
                 crate::log!("session {key}: the user denied running a command outside the sandbox");
+                // The agent mustn't ask again in this run for what the user just declined.
+                self.calls.decline(&pending.request.call_id);
                 RunDecision::NotRun {
-                    reason: "the user denied running it outside the sandbox".into(),
+                    reason: "the user declined to run it outside the sandbox; don't ask again for this command".into(),
                 }
             }
             Answer::Once(target) => match &self.commands {
@@ -1478,7 +1566,7 @@ impl SessionTask {
         // and it's never rerun. pi's own sandbox, or a call's background job outliving it: a blocked process, asked about.
         match self.calls.owner(&refusal.tag) {
             commands::TagOwner::Call(id) => {
-                self.calls.note(&id, &summary);
+                self.calls.note(&id, commands::CallRefusal::from(&refusal));
                 return;
             }
             commands::TagOwner::Typed | commands::TagOwner::Other => return,

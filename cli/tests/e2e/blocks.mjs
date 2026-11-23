@@ -113,9 +113,33 @@ const tests = {
         const ok = await a.bash("bash echo inside > out.txt && cat out.txt");
         assert.match(ok, /inside/);
         assert.ok(existsSync(join(ctx.ws, "out.txt")), "the workspace is writable");
-        const blocked = await a.bash(`bash touch ${ctx.outside}-plain`);
+        // A block Piton sees is asked about without the agent's `rerun`; a denial keeps the failed run and lists it.
+        const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && QUESTION.test(r.title ?? ""));
+        const done = a.bash(`bash touch ${ctx.outside}-plain`);
+        const req = await dialog;
+        assert.match(req.title, /The sandbox blocked this command/);
+        a.send({ type: "extension_ui_response", id: req.id, value: "Deny" });
+        const blocked = await done;
         assert.match(blocked, /Operation not permitted/);
+        assert.match(blocked, /The sandbox blocked: file-write-create/);
+        assert.match(blocked, /declined/);
         assert.ok(!existsSync(`${ctx.outside}-plain`), "outside the grants it's refused");
+        await a.close();
+    },
+
+    async "piton asks about a blocked call itself; allowing runs it, and the rerun is the result"(ctx) {
+        const a = attach(ctx);
+        const target = `${ctx.outside}-asked`;
+        const dialog = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && QUESTION.test(r.title ?? ""));
+        const done = a.bash(`bash touch ${target} && echo touched`);
+        const req = await dialog;
+        assert.match(req.title, /^Run again in the sandbox\?/, "opens in the sandbox");
+        a.send({ type: "extension_ui_response", id: req.id, value: req.options.find((o) => o.startsWith("Allow once in the sandbox")) });
+        const result = await done;
+        assert.ok(existsSync(target), "allowed once: it ran");
+        assert.match(result, /Piton asked the user/);
+        assert.match(result, /touched/);
+        assert.doesNotMatch(result, /exited with code/, "the rerun's exit is the result's");
         await a.close();
     },
 
@@ -177,7 +201,7 @@ const tests = {
         let done = a.bash(`rerun x|touch ${target}`);
         let req = await dialog;
         a.send({ type: "extension_ui_response", id: req.id, value: "Deny" });
-        assert.match(await done, /denied/);
+        assert.match(await done, /declined/);
         assert.ok(!existsSync(target));
 
         dialog = a.waitNew((r) => r.type === "extension_ui_request" && QUESTION.test(r.title ?? ""));
@@ -310,7 +334,7 @@ for (const [name, test] of Object.entries(tests)) {
     } finally {
         daemon.kill("SIGTERM");
         await daemon.exited;
-        for (const suffix of ["-plain", "-rerun", "-rerun2", "-persist", "-process", "-process2", "-silenced"]) {
+        for (const suffix of ["-plain", "-asked", "-rerun", "-rerun2", "-persist", "-process", "-process2", "-silenced"]) {
             rmSync(`${ctx.outside}${suffix}`, { force: true });
         }
         rmSync(ctx.dir, { recursive: true, force: true });
