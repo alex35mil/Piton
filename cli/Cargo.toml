@@ -12,6 +12,7 @@ name = "piton"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.23.1"
 futures-util = "0.3.34"
 libc = "0.2.191"
 nix = { version = "0.31", features = ["fs", "signal", "user"] }

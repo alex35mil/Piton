@@ -208,6 +208,23 @@ Verified on the host, macOS 27.0.1, with `piton sandbox-exec` (#241's spike):
   `file-write-data`, `file-read-data`, `mach-lookup com.apple.SecurityServer` (the keychain),
   `user-preference-write <domain>` (`defaults write`). `log` refuses to run inside a sandbox.
 - A deny with `(with message "<text>")` appends `\n<text>` to its event. nono's own `(deny default)` has none.
+- A profile has one default action, and a later `(deny default (with message "<text>"))` replaces nono's untagged one:
+  every refusal no rule decides then carries the message, and allows still win (verified with `/usr/bin/sandbox-exec`
+  and with nono, the tagged default as a platform rule; #357, 2026-11-23). Newly tagged that way:
+  `user-preference-write <domain>` (`defaults write`), `signal pgrp [<process>(<pid>)] signum:<n>` (a signal to another
+  process), `lsopen` with an empty target (`open`, `open -a`, `open x.command`, JXA `NSWorkspace.openURL`),
+  `file-issue-extension target:<app> extension-class:com.apple.app-sandbox.read` (`osascript` telling another app to
+  act; still refused with launching apps open, the `apps` preset: `System Events got an error: A privilege violation
+  occurred`), `sysctl-write <name>`, `network-outbound /private/var/run/syslog`. A signal 0 (`kill -0`) is refused
+  with no record.
+- Two refusals never carry the profile's message: `job-creation` (`launchctl submit`, `at`: launchd checks the caller's
+  sandbox itself) and `forbidden-exec-sugid` (running a setuid program: `ps`, `top`, `sudo`). They can't be routed to a
+  call.
+- Incidental: `open` and `osascript` hit `sysctl-write kern.grade_cputype` and connect to
+  `/private/var/run/syslog` while working, also when they succeed. Six hours of sandboxed sessions (pi `--mode rpc` with
+  Piton's package, the GitHub MCP server, pi-claude-code's `claude`, dozens of bash calls) left no other refusal from a
+  session's processes that the tagged default would surface; `claude`'s only one was `forbidden-exec-sugid`. Ordinary
+  commands (`git`, `node`, `python3`, `cargo`, `npm`, `swift`, `xcrun`, `gh`, `mise env`) produced none.
 - Repeats in a burst fold: 200 refused writes in one process, to one path or to 200, logged one event. Separate
   processes each get theirs, and the kernel folds repeats into `N duplicate reports for ...`. Refusals a second or
   more apart are each reported, to the same path or new ones (#342).

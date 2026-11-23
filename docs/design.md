@@ -1163,11 +1163,16 @@ socket asks the session (`SessionCmd::RunFailed`, decided by `Commands::after_fa
 recorded block an approved rerun lifts (`grant::command_block` against `all`). The kernel's record usually arrives
 within ~5 ms, so the socket looks every 10 ms for at most 50 ms, and stops at the first look that finds a block. A
 success never waits. Credential reads (ssh's key probe on every SSH Git command), blocks the floor decides, and
-silenced blocks are reported, not asked; so is a block while another question holds the slot. A blocked `open` or
-`osascript` is a block too: with launching apps closed, the policy emits tagged `(deny lsopen)` and
-`(deny appleevent-send)` (nono's default deny already refuses both, untagged), and when Launch Services refuses
-without a kernel record, its error -54 in the output counts (an `open` that never ran prints none). The target check
-below then decides. When asked, the socket sends `blocks` and `blocked`; an approved rerun's output and exit become
+silenced blocks are reported, not asked; so is a block while another question holds the slot. Every operation's
+refusal reaches its call, since the default deny is tagged (below): a preferences write (`user-preference-write`, which
+`all` lifts), a blocked `open` (`lsopen`, which `all` lifts), `osascript` scripting another app
+(`file-issue-extension`, refused even with apps open), a signal to another process or a `sysctl` write (floor: only a
+host run passes them). Refusals programs hit and recover from
+(`grant::INCIDENTAL`: `open`'s and `osascript`'s `sysctl-write kern.grade_cputype` and connect to syslog's socket) never
+ask, and are listed only when nothing else was recorded. For `open` and `osascript`, the target check below then
+decides. Two refusals never reach a call: `job-creation` (`launchctl submit`, `at`) and `forbidden-exec-sugid` (a
+setuid program: `ps`, `top`, `sudo`) aren't decided by the profile's default, so their records carry no message; the
+agent's `rerun` covers them. When asked, the socket sends `blocks` and `blocked`; an approved rerun's output and exit become
 the call's result, and a denial or no answer sends `not_rerun` and the first run's exit. A failed call's result ends
 with the blocks recorded for it (`operation target`, with why one isn't asked about), even when nothing is asked. After
 the user denies a block question (Piton's or the agent's), an agent `rerun` of the same command is refused for the rest
@@ -1211,8 +1216,11 @@ guard both runtimes. A sandboxed rerun opens every Mach service and launching ap
 
 **Blocks with nothing to rerun** (an MCP server, an extension, pi itself). Every deny Piton emits carries
 `(with message "piton-<tag>")`: `<session>-<random>` for pi's sandbox, `<session>-<random>-<n>` for a call's. A
-leading tagged `(deny file-write*)` labels writes outside every grant (nono's own default deny has no message; Piton
-asks nono for no write grants, so every later grant still wins), and the keychain's Mach denies are repeated tagged.
+leading tagged `(deny default)` replaces nono's untagged one (a profile has one default action, and the last wins), so
+every refusal no rule decides carries the tag; a leading tagged `(deny file-write*)` labels writes outside every grant
+(Piton asks nono for no write grants, so every later grant still wins); and the keychain's Mach denies are repeated
+tagged. A blocked process's refusal an entry can't lift (a signal, a preferences write) is a notice; an incidental one
+(`grant::INCIDENTAL`) is only logged.
 The daemon runs one `log stream` (outside any sandbox; `log` refuses inside one) for the Sandbox kernel extension's
 tagged reports and routes each to its session by tag (`daemon/refusals.rs`). A call's tag: kept for that call (shown
 when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fail. The session's tag, or a call
