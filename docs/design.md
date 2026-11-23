@@ -990,7 +990,7 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
 8. **Mach services and apps** (`Policy::services`, `Policy::apps`, emitted after the path rules). nono allows every
    lookup but the keychain's, and any app's Mach service is a way to drive that app outside the sandbox (Hammerspoon's
    `hs`, Keyboard Maestro, Shortcuts). `Services::Listed` emits a tagged `(deny mach-lookup)` and then an allow per
-   entry: the built-in list (`policy::BASE_SERVICES`, Claude Code's list plus TLS, proxy settings, and preferences,
+   entry: the built-in list (`policy::BASE_SERVICES`, Claude Code's list plus TLS, proxy settings, DNS configuration, and preferences,
    which pi, MCP servers, and their tools need), the presets' services, and the user's `services` entries (an exact
    name or a `name.*` prefix; names are checked only for what a Seatbelt string needs, since real ones include
    `com.apple.distributed_notifications@Uv3` and plain words). A `*` anywhere, `standard`'s included, makes it

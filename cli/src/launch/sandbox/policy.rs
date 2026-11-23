@@ -257,6 +257,10 @@ pub const BASE_SERVICES: &[(&str, &str)] = &[
         "com.apple.SystemConfiguration.configd",
         "proxy settings and reachability",
     ),
+    (
+        "com.apple.SystemConfiguration.DNSConfiguration",
+        "the DNS configuration name resolvers read (Node's at startup)",
+    ),
     ("com.apple.cfprefsd.daemon", "preferences"),
     ("com.apple.cfprefsd.agent", "preferences"),
     (
