@@ -142,11 +142,12 @@ const tests = {
     async "denying refuses it with the gate's reason; allowing in this project saves the entry"(ctx) {
         const a = attach(ctx);
         let dialog = a.waitNew((r) => r.type === "extension_ui_request" && NETWORK.test(r.title ?? ""));
-        let done = a.bash(curl("www.iana.org"));
+        // `curl -f` fails on the gate's 403, so the call fails and its result lists the refusal.
+        let done = a.bash("bash curl -sf -o /dev/null --max-time 20 http://www.iana.org/");
         let q = await dialog;
         a.send({ type: "extension_ui_response", id: q.id, value: "Not now" });
         const refused = await done;
-        assert.match(refused, /code=403/, refused);
+        assert.match(refused, /exit code 22|code 22/, refused);
         assert.match(refused, /refused by the network gate/, "the agent sees why");
 
         dialog = a.waitNew((r) => r.type === "extension_ui_request" && NETWORK.test(r.title ?? ""));

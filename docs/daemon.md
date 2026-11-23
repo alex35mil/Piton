@@ -306,8 +306,8 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
   decides named hosts. pi's own hosts pass without asking: the model providers built into pi and the hosts it signs in
   through, `baseUrl`s in its `models.json`, and the remote MCP servers in your own MCP files. You're asked about any
   other host while the connection waits. `standard` and `yolo` list `*`, which keeps the network open.
-- **Mach services:** only a built-in list (logging, user and group names, fonts, TLS checks, proxy settings,
-  preferences, Launch Services lookups; `piton sandbox why --service NAME` names any one). Any app's service is a
+- **Mach services:** only a built-in list (logging, user and group names, fonts, TLS checks, proxy settings, DNS
+  configuration, preferences, Launch Services lookups; `piton sandbox why --service NAME` names any one). Any app's service is a
   way to drive that app, which runs outside the sandbox: with Hammerspoon's `ipc` module loaded, `hs -c` runs shell
   commands on the host. A `services` entry (below) opens one; `standard` opens every service. The keychain's
   services stay closed unless `read` opens the keychain.
