@@ -16,9 +16,11 @@ import type {
 
 import { compile } from "../extensions/__lib/schema.ts"
 import {
+    BLOCKED_SEPARATOR,
     ranLine,
     registerSandboxBash,
     RerunSchema,
+    SANDBOX_GUIDELINE,
     unprefixed,
     type RunLine,
 } from "../extensions/permissions/sandbox.ts"
@@ -205,6 +207,72 @@ describe("bash in a sandboxed session under piton", () => {
         } finally {
             await daemon.close()
         }
+    })
+
+    it("lists a failed run's blocks; Piton's rerun replaces the result, a denial keeps the first exit", async () => {
+        const daemon = await fakeDaemon((request) => {
+            switch (request.command) {
+                case "reported":
+                    return [
+                        out("denied\n"),
+                        { type: "blocks", blocks: ["file-write-create /h/.pi/x (protected: no approval lifts it)"] },
+                        { type: "exit", code: 1 },
+                    ]
+                case "approved":
+                    return [
+                        out("Operation not permitted\n"),
+                        { type: "blocks", blocks: ["file-write-create /h/x"] },
+                        { type: "blocked" },
+                        { type: "ran", runtime: "sandbox", by: "approval" },
+                        out("done\n"),
+                        { type: "exit", code: 0 },
+                    ]
+                default:
+                    return [
+                        out("Operation not permitted\n"),
+                        { type: "blocks", blocks: ["file-write-create /h/x"] },
+                        { type: "blocked" },
+                        { type: "not_rerun", reason: "the user declined" },
+                        { type: "exit", code: 1 },
+                    ]
+            }
+        })
+        try {
+            const { bash } = register(daemon.socket)
+            const reported = await bash!.execute(
+                "a",
+                { command: "reported" },
+                undefined,
+                undefined,
+                context(daemon.dir),
+            )
+            assert.match(text(reported), /\/h\/\.pi\/x \(protected/)
+            assert.deepEqual((reported.structuredContent as { blocks?: string[] }).blocks?.length, 1)
+
+            const approved = await bash!.execute(
+                "b",
+                { command: "approved" },
+                undefined,
+                undefined,
+                context(daemon.dir),
+            )
+            assert.ok(text(approved).includes(BLOCKED_SEPARATOR.trim()), text(approved))
+            assert.match(text(approved), /done/)
+            assert.doesNotMatch(text(approved), /exited with code/, "the rerun's exit is the result's")
+            assert.match(text(approved), /file-write-create \/h\/x/)
+            assert.match(text(approved), /everything open/)
+
+            const denied = await bash!.execute("c", { command: "denied" }, undefined, undefined, context(daemon.dir))
+            assert.match(text(denied), /exited with code 1/, "the first run's exit")
+            assert.match(text(denied), /user declined/)
+        } finally {
+            await daemon.close()
+        }
+    })
+
+    it("adds the sandbox guideline to pi's own bash guidelines", () => {
+        const { bash } = register("/nowhere")
+        assert.ok(bash!.promptGuidelines?.includes(SANDBOX_GUIDELINE))
     })
 
     it("names each runtime and cause", () => {

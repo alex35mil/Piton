@@ -534,9 +534,18 @@ sandboxed session can write.
 #### When the sandbox blocks something
 
 In a sandboxed session, the daemon runs every bash command and `!` command, each in its own sandbox with the same rules
-as pi's. When a command fails because the sandbox blocked it, the agent can ask to run it again, hinting where (the
-sandbox or the host), and you're asked in the apps or pi.nvim. The question opens on the agent's hint; you choose
-where it runs again, then answer:
+as pi's. When a command fails and Piton saw the sandbox block something an approval would lift, you're asked right
+away in the apps or pi.nvim, without waiting for the agent. That includes a blocked `open` or `osascript`. Piton waits
+at most 50 ms after the failure for the kernel's record. A block it didn't see in time, or didn't see at all, is left to
+the agent, which can ask to run the command again, hinting where (the sandbox or the host). Either way the agent's
+result lists the blocks Piton recorded.
+
+Some blocks aren't asked about, only listed for the agent: credential reads (ssh opens your private keys on every SSH
+Git command and recovers), what the floor protects, and silenced paths. After you deny a question about a command, the
+agent can't ask again for the same command in that turn.
+
+The question opens in the sandbox when Piton asks, and on the agent's hint when the agent asks. You choose where it runs
+again, then answer:
 
 - **In the sandbox:** everything open except the floor: protected files, configuration, pi's agent
   directory, Piton's state, your `deny`, and credentials while fnox is on. Every Mach service and launching apps
@@ -549,7 +558,8 @@ where it runs again, then answer:
 
 Then: **Allow once** (or **Run once on the host**), **Deny** (it stays failed), or **always** for this command or an
 edited pattern, in this project or everywhere, which saves a per-command entry for that runtime and runs it. The
-whole command runs again, so its side effects repeat. The agent's result says where it ran.
+whole command runs again, so its side effects repeat. The agent's result says where it ran. When Piton asked, the
+rerun's output and exit are the agent's result; after a denial, it gets the failed run's.
 
 The apps show a switch (left and right arrows with a keyboard) and the pattern inline. pi.nvim shows pi's dialog: its
 first option, **Choose an answer below**, decides nothing and shows the question again, so Enter alone never answers;

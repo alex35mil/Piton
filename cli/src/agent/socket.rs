@@ -100,6 +100,18 @@ enum Response {
     Exit {
         code: i32,
     },
+    /// The blocks the daemon recorded for a failed run (`operation target`, with why one isn't asked about), and a note.
+    Blocks {
+        blocks: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// The run failed on a block and the user is asked to run it again: what follows is the rerun's, or `not_rerun`.
+    Blocked,
+    /// The user didn't approve running it again: the first run's exit follows.
+    NotRerun {
+        reason: String,
+    },
     TimedOut,
     /// Not run, with why: the user denied it, didn't answer, or the request doesn't match a running call.
     NotRun {
@@ -166,14 +178,31 @@ async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, response: &Response)
     write.write_all(out.as_bytes()).await.is_ok()
 }
 
-/// Decides a bash call with its session (a grant, the user's answer), runs it when approved, and streams it back.
+/// How long a failed call waits for the kernel's record of its blocks: it usually comes within ~5 ms
+/// (docs/pi-findings.md), and the wait ends at the first look that finds one.
+const BLOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+/// How often a failed call looks for its blocks while it waits.
+const BLOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// How much of a run's output is kept to look for Launch Services' refusal.
+const TAIL_KEPT: usize = 64 * 1024;
+
+/// What Launch Services prints when the sandbox refuses `open` or `osascript` (error -54): the evidence for a block
+/// that may leave no kernel record.
+fn launch_refused(output: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(output);
+    (text.contains("_LSOpen") || text.contains("sandbox_extension_issue_file")) && text.contains("-54")
+}
+
+/// Decides a bash call with its session (a grant, the user's answer), runs it when approved, and streams it back. A
+/// call that fails in the session's own sandbox on a block an approved rerun lifts is asked about, and the rerun's
+/// result is the call's.
 async fn run_command(
     daemon: &Daemon,
     token: String,
     request: super::RunRequest,
     write: &mut tokio::net::unix::OwnedWriteHalf,
 ) {
-    use super::{RunDecision, RunEnd, RunEvent};
+    use super::{Failed, RunDecision};
     let Some(handle) = daemon
         .agent_tokens()
         .session(&token)
@@ -189,6 +218,7 @@ async fn run_command(
         return;
     };
     let (reply, decision) = tokio::sync::oneshot::channel();
+    let asked_for = request.clone();
     if handle.tx.send(SessionCmd::RunCommand { request, reply }).is_err() {
         send(
             write,
@@ -218,18 +248,105 @@ async fn run_command(
             return;
         }
     };
-    let helper = match crate::launch::helper() {
-        Ok(helper) => helper,
-        Err(e) => {
-            send(write, &Response::Error { message: e.to_string() }).await;
+    let session = handle.key;
+    let Some((end, tail)) = execute(&approved, session, write).await else {
+        return;
+    };
+    let code = match (&approved.runtime, end) {
+        (super::Runtime::Session(_), Response::Exit { code }) if code != 0 => code,
+        (_, last) => {
+            send(write, &last).await;
             return;
         }
+    };
+    // Failed in the session's own sandbox: the session decides whether to ask, after the kernel's record had its time.
+    let launch = launch_refused(&tail);
+    let started = tokio::time::Instant::now();
+    let failed = loop {
+        let last = started.elapsed() >= BLOCK_WAIT;
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let asked = SessionCmd::RunFailed {
+            request: asked_for.clone(),
+            last,
+            launch_refused: launch,
+            reply,
+        };
+        if handle.tx.send(asked).is_err() {
+            break Failed::Report {
+                blocks: Vec::new(),
+                note: None,
+            };
+        }
+        match answer.await {
+            Ok(Failed::Wait) => tokio::time::sleep(BLOCK_POLL).await,
+            Ok(failed) => break failed,
+            Err(_) => {
+                break Failed::Report {
+                    blocks: Vec::new(),
+                    note: None,
+                };
+            }
+        }
+    };
+    let first_exit = Response::Exit { code };
+    match failed {
+        Failed::Wait => unreachable!("waited above"),
+        Failed::Report { blocks, note } => {
+            if (!blocks.is_empty() || note.is_some()) && !send(write, &Response::Blocks { blocks, note }).await {
+                return;
+            }
+            send(write, &first_exit).await;
+        }
+        Failed::Asked { blocks, decision } => {
+            if !send(write, &Response::Blocks { blocks, note: None }).await || !send(write, &Response::Blocked).await {
+                return;
+            }
+            match decision.await {
+                Ok(RunDecision::Run(rerun)) => {
+                    if let Some((last, _)) = execute(&rerun, session, write).await {
+                        send(write, &last).await;
+                    }
+                }
+                Ok(RunDecision::NotRun { reason }) => {
+                    if send(write, &Response::NotRerun { reason }).await {
+                        send(write, &first_exit).await;
+                    }
+                }
+                Err(_) => {
+                    let reason = "the session ended before the user answered".to_string();
+                    if send(write, &Response::NotRerun { reason }).await {
+                        send(write, &first_exit).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Runs `approved` and streams its output: the `ran` line first when it isn't the session's own sandbox. Returns the
+/// line that ends it (not sent yet) and the tail of its output; `None` when the agent stopped listening.
+async fn execute(
+    approved: &super::Approved,
+    session: crate::session::SessionKey,
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Option<(Response, Vec<u8>)> {
+    use super::{RunEnd, RunEvent};
+    let helper = match crate::launch::helper() {
+        Ok(helper) => helper,
+        Err(e) => return Some((Response::Error { message: e.to_string() }, Vec::new())),
     };
     if let Some(ran) = approved.runtime.ran()
         && !send(write, &Response::Ran(ran)).await
     {
-        return;
+        return None;
     }
+    let mut tail: Vec<u8> = Vec::new();
+    let mut keep = |chunk: &[u8]| {
+        tail.extend_from_slice(chunk);
+        if tail.len() > TAIL_KEPT {
+            tail.drain(..tail.len() - TAIL_KEPT);
+        }
+    };
     let (events, mut output) = tokio::sync::mpsc::unbounded_channel();
     let spec = super::RunSpec {
         helper: &helper,
@@ -246,19 +363,20 @@ async fn run_command(
         tokio::select! {
             end = &mut run => break end,
             Some(RunEvent::Output(chunk)) = output.recv() => {
+                keep(&chunk);
                 if !send(write, &Response::Output { data: base64(&chunk) }).await {
-                    return;
+                    return None;
                 }
             }
         }
     };
     // What the command printed before it ended.
     while let Ok(RunEvent::Output(chunk)) = output.try_recv() {
+        keep(&chunk);
         if !send(write, &Response::Output { data: base64(&chunk) }).await {
-            return;
+            return None;
         }
     }
-    let session = handle.key;
     let last = match end {
         RunEnd::Exited { code } => {
             crate::log!("session {session}: command run by the daemon exited with {code}");
@@ -273,7 +391,7 @@ async fn run_command(
             Response::Error { message: reason }
         }
     };
-    send(write, &last).await;
+    Some((last, tail))
 }
 
 /// Standard base64 with padding.
@@ -357,6 +475,19 @@ mod tests {
         assert_eq!(tokens.session(&a), None);
         assert_eq!(tokens.session(&b), Some(2));
         assert_eq!(tokens.session("guess"), None);
+    }
+
+    /// Launch Services' refusals, as `open` and `osascript` print them in the sandbox (docs/pi-findings.md).
+    #[test]
+    fn reads_launch_services_refusals() {
+        assert!(launch_refused(
+            b"The application cannot be opened because _LSOpenURLsWithCompletionHandler() failed with error -54."
+        ));
+        assert!(launch_refused(b"sandbox_extension_issue_file failed ... -54"));
+        assert!(!launch_refused(b"error: could not compile"));
+        assert!(!launch_refused(
+            b"_LSOpenURLsWithCompletionHandler() failed with error -10814"
+        ));
     }
 
     #[test]

@@ -589,6 +589,68 @@ pub fn lift_for(
     Ok(Offer { project, everywhere })
 }
 
+/// What a block in a bash call's own sandbox is, for asking about it without the agent: whether an approved rerun in
+/// the sandbox (`all`) would lift it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandBlock {
+    /// `all` allows it: an approved rerun lifts it.
+    Liftable,
+    /// A credential read (nono's deny groups): usually a probe the program recovers from (ssh opens each private key
+    /// to read its public half on every SSH Git command), so it isn't asked about by itself.
+    CredentialRead,
+    /// `all` still denies it: only a host run passes the floor, and the floor is never asked about by itself.
+    Floor,
+    /// An operation or target the policy model doesn't know.
+    Unsupported,
+}
+
+/// Classifies the kernel's refusal of `operation` on `target` in a call that ran under `launch`, against `all` (the
+/// launch widened to everything but the floor).
+pub fn command_block(launch: &Policy, all: &Policy, operation: &str, target: &str) -> CommandBlock {
+    let lifted = |allowed: bool| match allowed {
+        true => CommandBlock::Liftable,
+        false => CommandBlock::Floor,
+    };
+    match operation {
+        "lsopen" | "appleevent-send" => {
+            return match all.apps {
+                Apps::Open { .. } => CommandBlock::Liftable,
+                Apps::Closed => CommandBlock::Floor,
+            };
+        }
+        "mach-lookup" => return lifted(all.decide_service(target).allowed),
+        _ => {}
+    }
+    let path = Path::new(target);
+    if !path.is_absolute() {
+        return CommandBlock::Unsupported;
+    }
+    let access = match operation {
+        op if op.starts_with("file-read") || op.starts_with("process-exec") || op == "file-map-executable" => {
+            Access::Read
+        }
+        op if op.starts_with("file-write") => Access::Write,
+        "network-outbound" => Access::Connect,
+        "network-bind" => Access::Bind,
+        _ => return CommandBlock::Unsupported,
+    };
+    match (access, denied_by(launch, path, access)) {
+        (Access::Read, Some(DeniedBy::Credential(_))) => CommandBlock::CredentialRead,
+        (
+            Access::Read | Access::Write | Access::Connect | Access::Bind,
+            None
+            | Some(
+                DeniedBy::Credential(_)
+                | DeniedBy::Keychain(_)
+                | DeniedBy::GitControl
+                | DeniedBy::UserDeny
+                | DeniedBy::FnoxConfig
+                | DeniedBy::Floor,
+            ),
+        ) => lifted(all.decide(path, access).allowed),
+    }
+}
+
 /// The folder above `target`'s per-project part: the parent of its first component that names a project folder the way
 /// pi and Claude Code name per-folder state (the folder's path with every `/` made `-`). `None` when no component does,
 /// or when that parent is too broad to grant everywhere: the root, the home folder or a folder directly in it, or a
@@ -754,6 +816,65 @@ mod tests {
     /// The root entries of the test policies' paths.
     fn roots() -> Vec<PathBuf> {
         ["/h", "/w", "/tmp", "/etc"].map(PathBuf::from).to_vec()
+    }
+
+    /// A call's block is asked about only when `all` lifts it; a credential read is a probe, the floor is never asked.
+    #[test]
+    fn command_blocks_are_classified_against_all() {
+        let launch = launch();
+        let lifted = all_below(&launch, Credentials::Liftable, &roots());
+        let fnox = all_below(&launch, Credentials::Floor, &roots());
+        let block = |all: &Policy, op: &str, target: &str| command_block(&launch, all, op, target);
+        assert_eq!(block(&lifted, "file-write-create", "/h/x"), CommandBlock::Liftable);
+        assert_eq!(
+            block(&lifted, "file-write-data", "/w/.git/hooks/pre-commit"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(
+            block(&lifted, "file-write-create", "/h/.pi/agent/x"),
+            CommandBlock::Floor
+        );
+        assert_eq!(
+            block(&lifted, "file-write-create", "/h/secret/x"),
+            CommandBlock::Floor,
+            "the user's deny"
+        );
+        assert_eq!(
+            block(&lifted, "file-read-data", "/h/.ssh/id_ed25519"),
+            CommandBlock::CredentialRead
+        );
+        assert_eq!(
+            block(&fnox, "file-read-data", "/h/.ssh/id_ed25519"),
+            CommandBlock::CredentialRead
+        );
+        assert_eq!(
+            block(&lifted, "mach-lookup", "com.apple.SecurityServer"),
+            CommandBlock::Liftable,
+            "fnox off"
+        );
+        assert_eq!(
+            block(&fnox, "mach-lookup", "com.apple.SecurityServer"),
+            CommandBlock::Floor,
+            "fnox on"
+        );
+        assert_eq!(
+            block(&lifted, "mach-lookup", "com.example.agent"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(block(&lifted, "lsopen", ""), CommandBlock::Liftable);
+        assert_eq!(
+            block(&lifted, "appleevent-send", "com.apple.Terminal"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(
+            block(&lifted, "network-outbound", "/h/.local/state/piton/piton.sock"),
+            CommandBlock::Floor
+        );
+        assert_eq!(
+            block(&lifted, "network-outbound", "/tmp/nvim.sock"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(block(&lifted, "system-info", "x"), CommandBlock::Unsupported);
     }
 
     /// nono applies the widened policy: it refuses a write grant on `/` (`platform rule must not grant root-level write

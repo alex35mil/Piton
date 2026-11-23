@@ -1512,7 +1512,9 @@ mod tests {
         let question = crate::agent::question::Question {
             id: "piton:question:3".into(),
             command: "sh cli/tests/probe/protected.sh".into(),
-            reason: Some("it starts a sandbox of its own".into()),
+            asker: crate::agent::question::Asker::Agent {
+                reason: Some("it starts a sandbox of its own".into()),
+            },
             refusals: vec!["process-exec /Users/me/.local/bin/piton".into()],
             note: None,
             writable_vars: vec![
