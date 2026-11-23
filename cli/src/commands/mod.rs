@@ -271,6 +271,13 @@ enum SandboxAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
+    /// For the host probe: start the network gate of the workspace's policy, print the policy with it (one JSON line),
+    /// and serve until stdin closes. The policy's entries and pi's hosts decide; nothing is asked.
+    #[usage(hide)]
+    Gate {
+        #[usage(long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 /// The access `piton sandbox why` checks besides reading: one at most.

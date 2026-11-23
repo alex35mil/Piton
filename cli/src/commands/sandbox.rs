@@ -14,7 +14,9 @@ use crate::{
 
 pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     let workspace = match &action {
-        SandboxAction::Show { workspace } | SandboxAction::Why { workspace, .. } => workspace.clone(),
+        SandboxAction::Show { workspace }
+        | SandboxAction::Why { workspace, .. }
+        | SandboxAction::Gate { workspace } => workspace.clone(),
     };
     let (policy, profile, silence, catalog) = match policy(config, workspace).await {
         Ok((resolution, warnings, catalog)) => {
@@ -32,6 +34,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         }
     };
     match action {
+        SandboxAction::Gate { .. } => serve_gate(policy, catalog, config).await,
         SandboxAction::Show { .. } => {
             let output = serde_json::json!({
                 "nono_deny_groups": launch::sandbox::nono_version(),
@@ -115,6 +118,57 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             }
         }
     }
+}
+
+/// Starts a gate for `policy` that the policy's entries and pi's hosts decide, prints the policy with it, and serves until
+/// stdin closes.
+async fn serve_gate(
+    mut policy: launch::sandbox::Policy,
+    catalog: crate::pi_catalog::Catalog,
+    config: &DaemonConfig,
+) -> ExitCode {
+    use launch::sandbox::{Gate, Network};
+    let decider = policy.clone();
+    let catalog = std::sync::Arc::new(catalog);
+    let decide: crate::gate::Decide = std::sync::Arc::new(move |_user, to| {
+        let literal = to.host.parse::<std::net::IpAddr>().is_ok();
+        let verdict = match decider.decide_network(&to).allowed || catalog.allows(&to.host, to.port).is_some() {
+            true => crate::gate::Verdict::Allow { literal },
+            false => crate::gate::Verdict::Deny {
+                reason: format!("Piton's sandbox refused {to}: no connect entry lists it"),
+            },
+        };
+        Box::pin(async move { verdict })
+    });
+    let (refused, _) = tokio::sync::mpsc::unbounded_channel();
+    let gate = match crate::gate::Gate::start(decide, Some(crate::gate::Route::Direct), refused) {
+        Ok(gate) => gate,
+        Err(e) => {
+            eprintln!("piton: can't start the gate: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let (user, credential) = gate.issue("probe");
+    match &mut policy.network {
+        Network::Open { .. } => {
+            eprintln!("piton: the network is open: no gate");
+            return ExitCode::from(3);
+        }
+        Network::Filtered { gate: slot, .. } => {
+            *slot = Gate::Listening {
+                port: gate.port,
+                user,
+                credential,
+                ssh: crate::gate::ssh::ensure(&config.state_dir()),
+            };
+        }
+    }
+    println!("{}", serde_json::to_string(&policy).unwrap_or_default());
+    use tokio::io::AsyncReadExt;
+    let mut sink = Vec::new();
+    let _ = tokio::io::stdin().read_to_end(&mut sink).await;
+    drop(gate);
+    ExitCode::SUCCESS
 }
 
 async fn policy(
