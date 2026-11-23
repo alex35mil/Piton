@@ -214,11 +214,14 @@ impl Commands {
         Ok(path)
     }
 
-    /// Whether this session's configuration reads `file`: the global `config.toml`, or a `config.local.toml` of a level
-    /// of its chain.
+    /// Whether this session's configuration reads `file`: one of the files a network question saves to (its own
+    /// project's or the global one, which exist or not), or a file in a level folder of its chain.
     pub fn reads(&self, file: &Path) -> bool {
+        let own = [PersistScope::Project, PersistScope::Global]
+            .into_iter()
+            .filter_map(|scope| self.scope_file(scope));
         let in_level = |dir: &Path| self.levels.iter().any(|l| l == dir);
-        file.parent().is_some_and(in_level)
+        own.into_iter().any(|f| f == file) || file.parent().is_some_and(in_level)
     }
 
     /// A saved `connect` entry joins the launch's policy and every narrowed grant's, so calls started from now on reach
@@ -975,6 +978,10 @@ mod tests {
         let saved = dir.path().join(".piton/config.local.toml");
         assert!(c.reads(&saved));
         assert!(!c.reads(&dir.path().join("elsewhere/.piton/config.local.toml")));
+        // A project without a `.piton/` folder at launch still reads the file a question saves to.
+        c.levels.clear();
+        assert!(c.reads(&saved), "the project's own file, created by the answer");
+        assert!(c.reads(&dir.path().join("g/config.toml")), "the global file");
         c.add_network_entry(
             crate::config::NetworkTarget::Host {
                 host: "api.vendor.com".into(),
