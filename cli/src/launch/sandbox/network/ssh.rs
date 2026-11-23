@@ -112,17 +112,51 @@ pub fn connect(host: &str, port: u16) -> Result<(), String> {
     }
     let mut upload = stream.try_clone().map_err(|e| e.to_string())?;
     let up = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut upload);
+        let _ = relay(&mut std::io::stdin().lock(), &mut upload);
         let _ = upload.shutdown(std::net::Shutdown::Write);
     });
-    let _ = std::io::copy(&mut stream, &mut std::io::stdout().lock());
+    let _ = relay(&mut stream, &mut std::io::stdout().lock());
     drop(up);
     Ok(())
+}
+
+/// Copies `from` to `to` chunk by chunk, flushing each: stdout is line-buffered, and SSH's binary key exchange has no
+/// newlines, so `io::copy` would hold it back and both ends would wait for each other.
+fn relay(from: &mut impl Read, to: &mut impl Write) -> std::io::Result<()> {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = from.read(&mut buf)?;
+        if n == 0 {
+            return to.flush();
+        }
+        to.write_all(&buf[..n])?;
+        to.flush()?;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each chunk reaches the writer when it's read, newline or not.
+    #[test]
+    fn the_relay_flushes_every_chunk() {
+        struct Flushes(Vec<u8>, usize);
+        impl Write for Flushes {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.1 += 1;
+                Ok(())
+            }
+        }
+        let mut out = Flushes(Vec::new(), 0);
+        relay(&mut &b"\x00\x01binary-no-newline"[..], &mut out).unwrap();
+        assert_eq!(out.0, b"\x00\x01binary-no-newline");
+        assert!(out.1 >= 1, "flushed");
+    }
 
     #[test]
     fn the_real_ssh_skips_the_wrapper() {
