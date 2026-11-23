@@ -49,6 +49,9 @@ pub struct BashCall {
     pub declined: bool,
 }
 
+/// The process name a gate refusal is recorded under.
+pub const GATE_PROCESS: &str = "gate";
+
 /// One refusal of a call's sandbox, as the kernel names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallRefusal {
@@ -570,15 +573,19 @@ impl Commands {
                 let silenced =
                     crate::launch::sandbox::silenced(&self.policies.silence, &r.process, &r.operation, &r.target)
                         .is_some();
-                let treated = match silenced {
-                    true => Treated::Shown("silenced"),
-                    false => match command_block(&self.policies.launch, &self.policies.all, &r.operation, &r.target) {
-                        CommandBlock::Liftable => Treated::Asked,
-                        CommandBlock::CredentialRead => Treated::Shown("a credential read"),
-                        CommandBlock::Floor => Treated::Shown("protected: no approval lifts it"),
-                        CommandBlock::Unsupported => Treated::Shown("not one an approval lifts"),
-                        CommandBlock::Incidental => Treated::Incidental,
-                    },
+                let treated = match (silenced, r.process.as_str()) {
+                    (true, _) => Treated::Shown("silenced"),
+                    // The gate already asked the user about this host, or a `silence` entry refused it.
+                    (false, GATE_PROCESS) => Treated::Shown("refused by the network gate"),
+                    (false, _) => {
+                        match command_block(&self.policies.launch, &self.policies.all, &r.operation, &r.target) {
+                            CommandBlock::Liftable => Treated::Asked,
+                            CommandBlock::CredentialRead => Treated::Shown("a credential read"),
+                            CommandBlock::Floor => Treated::Shown("protected: no approval lifts it"),
+                            CommandBlock::Unsupported => Treated::Shown("not one an approval lifts"),
+                            CommandBlock::Incidental => Treated::Incidental,
+                        }
+                    }
                 };
                 (r.summary(), treated)
             })

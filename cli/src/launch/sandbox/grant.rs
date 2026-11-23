@@ -655,6 +655,14 @@ pub fn command_block(launch: &Policy, all: &Policy, operation: &str, target: &st
         _ => {}
     }
     let path = Path::new(target);
+    // A TCP or UDP connection the sandbox refused directly (a program that ignores the proxy variables): an approved
+    // rerun opens the network.
+    if operation == "network-outbound"
+        && !path.is_absolute()
+        && let Some(to) = super::Destination::parse(target)
+    {
+        return lifted(all.decide_network(&to).allowed);
+    }
     if !path.is_absolute() {
         return CommandBlock::Unsupported;
     }
@@ -861,6 +869,13 @@ mod tests {
         let fnox = all_below(&launch, Credentials::Floor, &roots());
         let block = |all: &Policy, op: &str, target: &str| command_block(&launch, all, op, target);
         assert_eq!(block(&lifted, "file-write-create", "/h/x"), CommandBlock::Liftable);
+        // A direct connection the filtered network refused: an approved rerun opens the network.
+        assert!(matches!(lifted.network, Network::Open { .. }));
+        assert_eq!(
+            block(&lifted, "network-outbound", "140.82.112.3:443"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(block(&lifted, "network-outbound", "[::1]:5432"), CommandBlock::Liftable);
         assert_eq!(
             block(&lifted, "file-write-data", "/w/.git/hooks/pre-commit"),
             CommandBlock::Liftable

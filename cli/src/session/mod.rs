@@ -1863,7 +1863,7 @@ impl SessionTask {
             self.calls.note(
                 &id,
                 commands::CallRefusal {
-                    process: "gate".into(),
+                    process: commands::GATE_PROCESS.into(),
                     operation: "network-outbound".into(),
                     target: refused.to.to_string(),
                 },

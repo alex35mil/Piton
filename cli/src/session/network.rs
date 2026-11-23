@@ -156,3 +156,115 @@ pub fn refused(to: &Destination, why: &str) -> Verdict {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::launch::sandbox::{Gate, Network as Net, NetworkGrant, Source};
+
+    fn policy(entries: &[&str]) -> Policy {
+        let grants = entries
+            .iter()
+            .map(|e| match crate::config::Connect::try_from(e.to_string()).unwrap() {
+                crate::config::Connect::Network(target) => NetworkGrant {
+                    target,
+                    source: Source::Workspace,
+                },
+                crate::config::Connect::Socket(_) => unreachable!(),
+            })
+            .collect();
+        Policy {
+            rules: Vec::new(),
+            keychain: false,
+            services: crate::launch::sandbox::Services::Every {
+                source: Source::Workspace,
+            },
+            apps: crate::launch::sandbox::Apps::Closed,
+            network: Net::Filtered {
+                grants,
+                gate: Gate::None,
+            },
+            tag: String::new(),
+        }
+    }
+
+    fn to(text: &str) -> Destination {
+        Destination::parse(text).unwrap()
+    }
+
+    /// The decision order: the sandbox's entries, pi's hosts, the session's answers, `silence`, else the user. Each
+    /// sandbox decides under its own policy; an unknown user is refused.
+    #[tokio::test]
+    async fn decides_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let deny: gate::Decide =
+            std::sync::Arc::new(|_, _| Box::pin(async { Verdict::Deny { reason: String::new() } }));
+        let gate = gate::Gate::start(deny, Some(gate::Route::Direct), tx).unwrap();
+        let builtin = crate::pi_catalog::Builtin {
+            providers: [("anthropic".to_string(), vec!["api.anthropic.com".to_string()])].into(),
+            sign_in: Vec::new(),
+        };
+        let files = crate::pi_catalog::Files::new(dir.path().join("agent"), dir.path(), &[]);
+        let mut net = Network::new(gate, crate::pi_catalog::Catalog::new(builtin, files), None);
+        let mut pi = policy(&["github.com:22"]);
+        net.issue(PI_USER, &mut pi);
+        assert!(matches!(&pi.network, Net::Filtered { gate: Gate::Listening { user, .. }, .. } if user == PI_USER));
+        let mut call = policy(&["api.vendor.com"]);
+        net.issue("s-1", &mut call);
+        let silence = [crate::launch::sandbox::Silenced {
+            target: crate::launch::sandbox::Silent::named(&crate::config::SilenceTarget::Host(
+                "bad.example:443".into(),
+            ))
+            .unwrap(),
+            process: None,
+            source: crate::launch::sandbox::SilenceSource::File("/g/config.toml".into()),
+        }];
+        let decide = |net: &Network, user: &str, dest: &str| {
+            let (reply, mut verdict) = oneshot::channel();
+            let waiting = net.decide(User(user.into()), to(dest), &silence, reply);
+            (waiting.is_some(), verdict.try_recv().ok())
+        };
+        let allow = |literal| Some(Verdict::Allow { literal });
+        assert_eq!(decide(&net, PI_USER, "github.com:22"), (false, allow(false)));
+        assert_eq!(
+            decide(&net, PI_USER, "api.anthropic.com:443"),
+            (false, allow(false)),
+            "pi's host"
+        );
+        assert_eq!(
+            decide(&net, "s-1", "api.vendor.com:443"),
+            (false, allow(false)),
+            "the call's own grant"
+        );
+        assert!(decide(&net, PI_USER, "api.vendor.com:443").0, "not pi's: asked");
+        assert!(matches!(
+            decide(&net, PI_USER, "bad.example:443"),
+            (false, Some(Verdict::Deny { .. }))
+        ));
+        assert!(matches!(
+            decide(&net, "s-9", "github.com:22"),
+            (false, Some(Verdict::Deny { .. }))
+        ));
+        net.allow_for_session(to("api.vendor.com:443"));
+        assert_eq!(
+            decide(&net, PI_USER, "api.vendor.com:443"),
+            (false, allow(false)),
+            "allowed for the session"
+        );
+        net.forget("s-1");
+        assert!(matches!(
+            decide(&net, "s-1", "github.com:22"),
+            (false, Some(Verdict::Deny { .. }))
+        ));
+        // A saved entry applies at once to every sandbox's policy.
+        net.add_entry(
+            crate::config::NetworkTarget::Host {
+                host: "new.example".into(),
+                port: Some(443),
+            },
+            Source::Workspace,
+        );
+        assert_eq!(decide(&net, PI_USER, "new.example:443"), (false, allow(false)));
+    }
+}
