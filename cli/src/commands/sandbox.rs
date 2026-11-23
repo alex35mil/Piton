@@ -49,7 +49,23 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             let access = match access {
                 None => Access::Read,
                 Some(WhyAccess::Write) => Access::Write,
-                Some(WhyAccess::Connect) => Access::Connect,
+                Some(WhyAccess::Connect) => {
+                    // `host:port` is a network destination; a path is a Unix socket.
+                    let text = path.to_string_lossy().into_owned();
+                    match (text.starts_with('/'), launch::sandbox::Destination::parse(&text)) {
+                        (false, Some(to)) => {
+                            let decision = policy.decide_network(&to);
+                            let outcome = if decision.allowed { "allowed" } else { "denied" };
+                            println!("{outcome}: connect to {to}");
+                            println!("  because: {}", explain(&decision.source));
+                            return match decision.allowed {
+                                true => ExitCode::SUCCESS,
+                                false => ExitCode::from(4),
+                            };
+                        }
+                        (true, _) | (false, None) => Access::Connect,
+                    }
+                }
                 Some(WhyAccess::Bind) => Access::Bind,
                 Some(WhyAccess::Service) => {
                     let service = path.to_string_lossy().into_owned();

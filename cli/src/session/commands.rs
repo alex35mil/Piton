@@ -760,7 +760,9 @@ mod tests {
                 source: crate::launch::sandbox::Source::Workspace,
             },
             apps: crate::launch::sandbox::Apps::Closed,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         }
     }
@@ -784,7 +786,7 @@ mod tests {
                 all,
                 entries: grants
                     .iter()
-                    .map(|g| (g.clone(), EntryRuntime::Sandbox(Ok(policy()))))
+                    .map(|g| (g.clone(), EntryRuntime::Sandbox(Ok(Box::new(policy())))))
                     .collect(),
                 resolver: crate::launch::sandbox::grant::Resolver::new(
                     crate::config::LaunchConfig {

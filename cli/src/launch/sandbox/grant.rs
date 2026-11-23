@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     policy::{self, Source},
-    rules::{Access, Apps, Effect, Policy, Rule, Services, Target},
+    rules::{Access, Apps, Effect, Network, Policy, Rule, Services, Target},
 };
 use crate::config::{
     AllGrant, CommandGrant, CommandRuntime, Grant, GrantLists, LaunchConfig, Listed, ServiceEntry, ServiceName,
@@ -105,7 +105,7 @@ pub enum EntryRuntime {
     Host,
     /// `runtime = "sandbox"`: its policy, or why it couldn't be resolved (a narrowed grant naming a `$VAR` that isn't
     /// set).
-    Sandbox(Result<Policy, String>),
+    Sandbox(Result<Box<Policy>, String>),
 }
 
 /// The configuration a narrowed grant resolves with: the launch's, with the grant's lists added as if the file that
@@ -147,9 +147,11 @@ pub fn command_policies(
         .map(|entry| {
             let runtime = match &entry.value.runtime {
                 CommandRuntime::Host => EntryRuntime::Host,
-                CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => EntryRuntime::Sandbox(Ok(widened.clone())),
+                CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => {
+                    EntryRuntime::Sandbox(Ok(Box::new(widened.clone())))
+                }
                 CommandRuntime::Sandbox(Grant::Lists(lists)) => {
-                    EntryRuntime::Sandbox(resolver.with(lists, &entry.file))
+                    EntryRuntime::Sandbox(resolver.with(lists, &entry.file).map(Box::new))
                 }
             };
             (entry.clone(), runtime)
@@ -219,7 +221,8 @@ fn all_below(policy: &Policy, credentials: Credentials, roots: &[PathBuf]) -> Po
         },
         services: Services::Every { source: source() },
         apps: Apps::Open { source: source() },
-        network: policy.network.clone(),
+        // The network isn't floor: an approved command reaches any host directly, without the gate.
+        network: Network::Open { source: source() },
         tag: policy.tag.clone(),
     }
 }
@@ -776,7 +779,9 @@ mod tests {
             keychain: false,
             services: Services::Listed { grants: Vec::new() },
             apps: Apps::Closed,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         }
     }

@@ -275,7 +275,7 @@ enum SandboxAction {
 pub enum WhyAccess {
     /// Check writing (default: reading).
     Write,
-    /// Check connecting to a Unix socket.
+    /// Check connecting: to a Unix socket (PATH), or to a host or port (`host:port`, `localhost:PORT`).
     Connect,
     /// Check creating a Unix socket.
     Bind,

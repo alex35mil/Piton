@@ -26,7 +26,7 @@ use std::{
 use super::{
     SandboxError,
     policy::{self, AgentDirWrite, Provenance, Source},
-    rules::{Access, Apps, Effect, NetworkGrant, Policy, Rule, ServiceGrant, Services, Target},
+    rules::{Access, Apps, Effect, Gate, Network, NetworkGrant, Policy, Rule, ServiceGrant, Services, Target},
 };
 use crate::{
     agent::{GitControl, canonical_target, lexical},
@@ -891,7 +891,7 @@ struct Grants {
     read: Vec<(PathBuf, Source)>,
     sockets: Vec<(PathBuf, Source)>,
     bind: Vec<(PathBuf, Source)>,
-    network: Vec<NetworkGrant>,
+    network: Network,
     services: Services,
     apps: Apps,
     presets: Vec<(Preset, Provenance)>,
@@ -1006,6 +1006,20 @@ impl Grants {
                 Connect::Network(target) => network.push(NetworkGrant { target, source }),
             }
         }
+        // `*` anywhere opens the network, named after the first entry that did; otherwise only what's listed, and the
+        // gate the launch gives it later (`Gate::None` until then).
+        let network = match network
+            .iter()
+            .find(|g| g.target == crate::config::NetworkTarget::Anywhere)
+        {
+            Some(open) => Network::Open {
+                source: open.source.clone(),
+            },
+            None => Network::Filtered {
+                grants: network,
+                gate: Gate::None,
+            },
+        };
 
         let claude_code = presets.iter().find_map(|(preset, from)| match preset {
             Preset::PiClaudeCode(options) => Some((*options, from.clone())),
@@ -1789,7 +1803,11 @@ mod tests {
             (f, r)
         };
         let profile_rules = |r: &Resolution| {
-            r.policy.rules.iter().filter(|rule| from_profile(&rule.source)).count() + r.policy.network.len()
+            let network = match &r.policy.network {
+                Network::Open { source } => usize::from(from_profile(source)),
+                Network::Filtered { grants, .. } => grants.iter().filter(|g| from_profile(&g.source)).count(),
+            };
+            r.policy.rules.iter().filter(|rule| from_profile(&rule.source)).count() + network
         };
 
         let ssh_keys = |f: &Fixture| {
@@ -1811,6 +1829,14 @@ mod tests {
         assert!(
             !allowed(p, &f.repo.join("test.sock"), Access::Bind),
             "strict binds nowhere"
+        );
+        assert_eq!(
+            p.network,
+            Network::Filtered {
+                grants: Vec::new(),
+                gate: Gate::None
+            },
+            "strict's network is filtered, with nothing listed"
         );
 
         let (f, _) = resolve("");
@@ -1852,8 +1878,16 @@ mod tests {
                 .any(|r| r.target == subpath(Path::new("/private/tmp/agent.sock")) && r.access == [Access::Connect])
         );
         assert_eq!(
-            p.network.iter().map(|g| g.target.clone()).collect::<Vec<_>>(),
-            [crate::config::NetworkTarget::Anywhere]
+            p.network,
+            Network::Open {
+                source: Source::Config {
+                    key: "sandbox.connect".into(),
+                    from: Provenance::Profile {
+                        profile: Profile::Standard
+                    },
+                }
+            },
+            "standard's `*` opens the network"
         );
         assert!(!allowed(p, &f.repo.join(".git/config"), Access::Write));
 
@@ -2689,11 +2723,18 @@ mod tests {
         let keychain = f.home.join("Library/Keychains/login.keychain-db");
         assert!(!allowed(p, &keychain, Access::Read));
         assert!(!p.keychain);
+        // The relay's `localhost:*`: under strict, the preset's entry decides a local port; another host stays closed.
+        let strict = fixture(&format!("{CLAUDE_PRESET}profile = \"strict\"\n"), "");
+        let r = resolve_env(&strict, &strict.repo, &Env::new(), &env).unwrap();
+        let relay = r
+            .policy
+            .decide_network(&crate::launch::sandbox::Destination::parse("127.0.0.1:52011").unwrap());
+        assert!(relay.allowed);
+        assert!(matches!(&relay.source, Source::Preset { preset, .. } if preset == "pi-claude-code"));
         assert!(
-            p.network
-                .iter()
-                .any(|g| g.target == crate::config::NetworkTarget::LocalAnyPort
-                    && matches!(&g.source, Source::Preset { preset, .. } if preset == "pi-claude-code"))
+            !r.policy
+                .decide_network(&crate::launch::sandbox::Destination::parse("example.com:443").unwrap())
+                .allowed
         );
         assert!(matches!(
             p.decide(&folder.join("x"), Access::Write).source,
