@@ -254,12 +254,8 @@ impl Policy {
             }
         }
         match &self.apps {
-            // nono's own default deny already refuses both, without a message: repeated here so the tag pass marks them,
-            // and a blocked `open` reaches its call in the kernel's record.
-            Apps::Closed => {
-                out.push("(deny lsopen)".to_string());
-                out.push("(deny appleevent-send)".to_string());
-            }
+            // The default refuses both; with a tag, its records carry it.
+            Apps::Closed => {}
             Apps::Open { .. } => {
                 out.push("(allow lsopen)".to_string());
                 out.push("(allow appleevent-send)".to_string());
@@ -271,9 +267,11 @@ impl Policy {
     /// The Seatbelt rules, in order. Filesystem and Mach rules first, network rules last: the library emits them in
     /// two groups (after its file allows, and after its network section), each in this order.
     ///
-    /// With a tag, every deny carries it, and a leading tagged `(deny file-write*)` labels writes outside every grant
-    /// (the library's own default deny has no message). It shadows nothing: the library grants no writes of its own
-    /// for Piton's capability set, and every grant here comes after it.
+    /// With a tag, every deny carries it, and two leading rules label what no rule decides: a tagged
+    /// `(deny default)`, which replaces the library's untagged default (a profile has one default action, and the last
+    /// one wins: docs/pi-findings.md), so a refusal of any operation reaches its call; and a tagged
+    /// `(deny file-write*)` for writes outside every grant. Neither shadows anything: the library grants no writes of its
+    /// own for Piton's capability set, and every allow comes after them.
     pub fn seatbelt(&self) -> Result<Vec<String>, String> {
         let tagged = self.seatbelt_untagged()?;
         if self.tag.is_empty() {
@@ -286,7 +284,7 @@ impl Policy {
         };
         let is_network = |rule: &String| rule.starts_with("(allow network") || rule.starts_with("(deny network");
         let (network, other): (Vec<String>, Vec<String>) = tagged.into_iter().partition(is_network);
-        let mut out = vec![tag("(deny file-write*)".into())];
+        let mut out = vec![tag("(deny default)".into()), tag("(deny file-write*)".into())];
         out.extend(other.into_iter().map(tag));
         out.extend(network.into_iter().map(tag));
         Ok(out)
@@ -607,9 +605,10 @@ mod tests {
         .seatbelt()
         .unwrap();
         let message = r#"(with message "piton-abc1")"#;
-        assert_eq!(tagged[0], format!("(deny file-write* {message})"));
+        assert_eq!(tagged[0], format!("(deny default {message})"));
+        assert_eq!(tagged[1], format!("(deny file-write* {message})"));
         assert_eq!(
-            tagged[1],
+            tagged[2],
             format!(r#"(deny file-write* (subpath "/s/\"q\"") {message})"#)
         );
         assert!(
@@ -702,17 +701,21 @@ mod tests {
                 .iter()
                 .any(|r| r == "(deny mach-lookup)" || r.contains("allow lsopen"))
         );
-        assert!(rules.contains(&"(deny lsopen)".to_string()));
-        assert!(rules.contains(&"(deny appleevent-send)".to_string()));
-        super::super::apply::capabilities(&every).expect("nono accepts the closed apps' denies");
+        assert!(!rules.iter().any(|r| r.contains("lsopen") || r.contains("appleevent")));
+        assert!(
+            !rules.iter().any(|r| r.starts_with("(deny default")),
+            "untagged: nono's default only"
+        );
+        // Tagged: the default carries the tag, so closed apps' refusals do too; nono accepts it.
         let closed = Policy {
             tag: "t".into(),
             ..every.clone()
-        }
-        .seatbelt()
-        .unwrap();
-        assert!(closed.contains(&r#"(deny lsopen (with message "piton-t"))"#.to_string()));
-        assert!(closed.contains(&r#"(deny appleevent-send (with message "piton-t"))"#.to_string()));
+        };
+        assert_eq!(
+            closed.seatbelt().unwrap()[0],
+            r#"(deny default (with message "piton-t"))"#
+        );
+        super::super::apply::capabilities(&closed).expect("nono accepts the tagged default");
         assert!(rules.contains(&r#"(allow mach-lookup (global-name "com.apple.secd"))"#.to_string()));
         assert!(every.decide_service("org.other").allowed);
         assert!(every.decide_service("com.apple.secd").allowed, "keychain read");

@@ -344,4 +344,28 @@ else
     echo "FAIL  denied  strict + apps preset: open a link" | tee -a "$scratch/out"
     printf '      %s\n' "$(tail -n 1 "$scratch/err")"
 fi
+# Every refusal reaches its call: with a tag, the default deny carries it too, so the kernel's record of a refusal no
+# rule names (a preferences write, a launch, a signal to another process) carries the launch's tag (#357).
+tag="probe$$"
+tagged_policy=$(printf '%s' "$policy" | python3 -I -c "import json,sys; p=json.load(sys.stdin); p['tag']='$tag'; print(json.dumps(p))")
+tagged_start=$(date '+%Y-%m-%d %H:%M:%S')
+# Another process of this user, outside the sandbox: the sandboxed shell sends it SIGTERM (refused; `kill -0` is refused
+# too, but leaves no record).
+sleep 300 & other=$!
+(cd "$src" && PITON_SANDBOX_POLICY="$tagged_policy" "$piton" sandbox-exec -- sh -c "
+    defaults write com.piton.probe$$ k v; open -g https://example.com; kill -TERM $other" </dev/null >/dev/null 2>&1) || true
+kill "$other" 2>/dev/null || true
+wait "$other" 2>/dev/null || true
+defaults delete "com.piton.probe$$" >/dev/null 2>&1 || true
+sleep 2
+records=$(log show --start "$tagged_start" --style ndjson \
+    --predicate "senderImagePath ENDSWITH \"/Sandbox\" AND eventMessage CONTAINS \"piton-$tag\"" 2>/dev/null)
+for want in "user-preference-write com.piton.probe$$|a preferences write" "lsopen|open a link" "signal |a signal to another process"; do
+    op=${want%%|*}; what=${want#*|}
+    if printf '%s' "$records" | rg -qF "deny(1) $op"; then
+        echo "pass  tagged  $what is recorded with the launch's tag" | tee -a "$scratch/out"
+    else
+        echo "FAIL  untagged $what is recorded with the launch's tag" | tee -a "$scratch/out"
+    fi
+done
 ! rg -q '^FAIL' "$scratch/out"

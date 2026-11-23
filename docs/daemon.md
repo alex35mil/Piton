@@ -535,14 +535,18 @@ sandboxed session can write.
 
 In a sandboxed session, the daemon runs every bash command and `!` command, each in its own sandbox with the same rules
 as pi's. When a command fails and Piton saw the sandbox block something an approval would lift, you're asked right
-away in the apps or pi.nvim, without waiting for the agent. That includes a blocked `open` or `osascript`. Piton waits
+away in the apps or pi.nvim, without waiting for the agent. That covers every kind of block: a file or socket, a
+preferences write (`defaults write`), a blocked `open` or `osascript`. Two can't be seen: `launchctl submit` (and `at`),
+and setuid programs (`ps`, `top`, `sudo`); macOS logs those without Piton's tag. Piton waits
 at most 50 ms after the failure for the kernel's record. A block it didn't see in time, or didn't see at all, is left to
 the agent, which can ask to run the command again, hinting where (the sandbox or the host). Either way the agent's
 result lists the blocks Piton recorded.
 
 Some blocks aren't asked about, only listed for the agent: credential reads (ssh opens your private keys on every SSH
-Git command and recovers), what the floor protects, and silenced paths. After you deny a question about a command, the
-agent can't ask again for the same command in that turn.
+Git command and recovers), what the floor protects (signals to other processes and `sysctl` writes included: only a
+host run passes them), and silenced paths. A few refusals programs always hit and recover from (`open`'s CPU-type
+`sysctl` write) are only logged. After you deny a question about a command, the agent can't ask again for the same
+command in that turn.
 
 The question opens in the sandbox when Piton asks, and on the agent's hint when the agent asks. You choose where it runs
 again, then answer:

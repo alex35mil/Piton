@@ -600,8 +600,23 @@ pub enum CommandBlock {
     CredentialRead,
     /// `all` still denies it: only a host run passes the floor, and the floor is never asked about by itself.
     Floor,
+    /// A refusal programs hit and recover from ([`INCIDENTAL`]): logged only, never a reason to ask.
+    Incidental,
     /// An operation or target the policy model doesn't know.
     Unsupported,
+}
+
+/// Refusals programs hit routinely and recover from, as the kernel names them (operation, target), measured on the host
+/// (docs/pi-findings.md): `open` and `osascript` write a CPU-type sysctl and connect to syslog's socket on their way to
+/// Launch Services, and carry on without them.
+pub const INCIDENTAL: [(&str, &str); 2] = [
+    ("sysctl-write", "kern.grade_cputype"),
+    ("network-outbound", "/private/var/run/syslog"),
+];
+
+/// Whether a refusal is one programs hit and recover from.
+pub fn incidental(operation: &str, target: &str) -> bool {
+    INCIDENTAL.iter().any(|(op, t)| *op == operation && *t == target)
 }
 
 /// Classifies the kernel's refusal of `operation` on `target` in a call that ran under `launch`, against `all` (the
@@ -611,7 +626,11 @@ pub fn command_block(launch: &Policy, all: &Policy, operation: &str, target: &st
         true => CommandBlock::Liftable,
         false => CommandBlock::Floor,
     };
+    if incidental(operation, target) {
+        return CommandBlock::Incidental;
+    }
     match operation {
+        // Launching apps: open when `all` opens apps.
         "lsopen" | "appleevent-send" => {
             return match all.apps {
                 Apps::Open { .. } => CommandBlock::Liftable,
@@ -619,6 +638,12 @@ pub fn command_block(launch: &Policy, all: &Policy, operation: &str, target: &st
             };
         }
         "mach-lookup" => return lifted(all.decide_service(target).allowed),
+        // cfprefsd checks the caller's write access to the domain's plist in the preferences folder, which `all` opens.
+        "user-preference-write" => return CommandBlock::Liftable,
+        // `all` opens files, sockets, services, and apps, never these: only a host run passes them. A refused
+        // `file-issue-extension` (the app-bundle extension `osascript`'s Apple Event carries) stays refused with apps
+        // open too (checked on the host).
+        "signal" | "sysctl-write" | "job-creation" | "file-issue-extension" => return CommandBlock::Floor,
         _ => {}
     }
     let path = Path::new(target);
@@ -875,6 +900,32 @@ mod tests {
             CommandBlock::Liftable
         );
         assert_eq!(block(&lifted, "system-info", "x"), CommandBlock::Unsupported);
+        // Operations only the tagged default reports.
+        assert_eq!(
+            block(&lifted, "user-preference-write", "com.foo"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(
+            block(
+                &lifted,
+                "file-issue-extension",
+                "target:/System/Applications/Utilities/Terminal.app"
+            ),
+            CommandBlock::Floor
+        );
+        assert_eq!(
+            block(&lifted, "signal", "pgrp [bash(1)] signum:15"),
+            CommandBlock::Floor
+        );
+        assert_eq!(block(&lifted, "sysctl-write", "kern.x"), CommandBlock::Floor);
+        assert_eq!(
+            block(&lifted, "sysctl-write", "kern.grade_cputype"),
+            CommandBlock::Incidental
+        );
+        assert_eq!(
+            block(&lifted, "network-outbound", "/private/var/run/syslog"),
+            CommandBlock::Incidental
+        );
     }
 
     /// nono applies the widened policy: it refuses a write grant on `/` (`platform rule must not grant root-level write

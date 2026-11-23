@@ -198,8 +198,6 @@ pub enum SessionCmd {
         request: crate::agent::RunRequest,
         /// The last look: the kernel's record had its time.
         last: bool,
-        /// The run's output showed Launch Services' refusal (`open`, `osascript`).
-        launch_refused: bool,
         reply: oneshot::Sender<crate::agent::Failed>,
     },
     /// The agent stopped waiting for a run request: settle its question if it's still pending.
@@ -833,12 +831,7 @@ impl SessionTask {
                 self.publish_view_state();
             }
             SessionCmd::RunCommand { request, reply } => self.run_command(request, reply),
-            SessionCmd::RunFailed {
-                request,
-                last,
-                launch_refused,
-                reply,
-            } => self.run_failed(request, last, launch_refused, reply),
+            SessionCmd::RunFailed { request, last, reply } => self.run_failed(request, last, reply),
             SessionCmd::SettleQuestion => {
                 self.settle_question();
                 self.ask_next_process();
@@ -1363,7 +1356,6 @@ impl SessionTask {
         &mut self,
         request: crate::agent::RunRequest,
         last: bool,
-        launch_refused: bool,
         reply: oneshot::Sender<crate::agent::Failed>,
     ) {
         use crate::agent::Failed;
@@ -1376,7 +1368,7 @@ impl SessionTask {
             });
             return;
         };
-        match commands.after_failure(&mut self.calls, &request, last, launch_refused, slot_taken) {
+        match commands.after_failure(&mut self.calls, &request, last, slot_taken) {
             commands::AfterFailure::Wait => {
                 let _ = reply.send(Failed::Wait);
             }
@@ -1578,6 +1570,11 @@ impl SessionTask {
             .process
             .first(&refusal.process, &refusal.operation, &refusal.target)
         {
+            return;
+        }
+        // A refusal programs hit and recover from: logged, never a notice or a question.
+        if grant::incidental(&refusal.operation, &refusal.target) {
+            crate::log!("session {key}: {} was blocked: {summary} (incidental)", refusal.process);
             return;
         }
         if let Some(silenced) = crate::launch::sandbox::silenced(

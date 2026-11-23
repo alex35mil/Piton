@@ -183,15 +183,6 @@ async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, response: &Response)
 const BLOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 /// How often a failed call looks for its blocks while it waits.
 const BLOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
-/// How much of a run's output is kept to look for Launch Services' refusal.
-const TAIL_KEPT: usize = 64 * 1024;
-
-/// What Launch Services prints when the sandbox refuses `open` or `osascript` (error -54): the evidence for a block
-/// that may leave no kernel record.
-fn launch_refused(output: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(output);
-    (text.contains("_LSOpen") || text.contains("sandbox_extension_issue_file")) && text.contains("-54")
-}
 
 /// Decides a bash call with its session (a grant, the user's answer), runs it when approved, and streams it back. A
 /// call that fails in the session's own sandbox on a block an approved rerun lifts is asked about, and the rerun's
@@ -249,7 +240,7 @@ async fn run_command(
         }
     };
     let session = handle.key;
-    let Some((end, tail)) = execute(&approved, session, write).await else {
+    let Some(end) = execute(&approved, session, write).await else {
         return;
     };
     let code = match (&approved.runtime, end) {
@@ -260,7 +251,6 @@ async fn run_command(
         }
     };
     // Failed in the session's own sandbox: the session decides whether to ask, after the kernel's record had its time.
-    let launch = launch_refused(&tail);
     let started = tokio::time::Instant::now();
     let failed = loop {
         let last = started.elapsed() >= BLOCK_WAIT;
@@ -268,7 +258,6 @@ async fn run_command(
         let asked = SessionCmd::RunFailed {
             request: asked_for.clone(),
             last,
-            launch_refused: launch,
             reply,
         };
         if handle.tx.send(asked).is_err() {
@@ -303,7 +292,7 @@ async fn run_command(
             }
             match decision.await {
                 Ok(RunDecision::Run(rerun)) => {
-                    if let Some((last, _)) = execute(&rerun, session, write).await {
+                    if let Some(last) = execute(&rerun, session, write).await {
                         send(write, &last).await;
                     }
                 }
@@ -324,29 +313,22 @@ async fn run_command(
 }
 
 /// Runs `approved` and streams its output: the `ran` line first when it isn't the session's own sandbox. Returns the
-/// line that ends it (not sent yet) and the tail of its output; `None` when the agent stopped listening.
+/// line that ends it (not sent yet); `None` when the agent stopped listening.
 async fn execute(
     approved: &super::Approved,
     session: crate::session::SessionKey,
     write: &mut tokio::net::unix::OwnedWriteHalf,
-) -> Option<(Response, Vec<u8>)> {
+) -> Option<Response> {
     use super::{RunEnd, RunEvent};
     let helper = match crate::launch::helper() {
         Ok(helper) => helper,
-        Err(e) => return Some((Response::Error { message: e.to_string() }, Vec::new())),
+        Err(e) => return Some(Response::Error { message: e.to_string() }),
     };
     if let Some(ran) = approved.runtime.ran()
         && !send(write, &Response::Ran(ran)).await
     {
         return None;
     }
-    let mut tail: Vec<u8> = Vec::new();
-    let mut keep = |chunk: &[u8]| {
-        tail.extend_from_slice(chunk);
-        if tail.len() > TAIL_KEPT {
-            tail.drain(..tail.len() - TAIL_KEPT);
-        }
-    };
     let (events, mut output) = tokio::sync::mpsc::unbounded_channel();
     let spec = super::RunSpec {
         helper: &helper,
@@ -363,7 +345,6 @@ async fn execute(
         tokio::select! {
             end = &mut run => break end,
             Some(RunEvent::Output(chunk)) = output.recv() => {
-                keep(&chunk);
                 if !send(write, &Response::Output { data: base64(&chunk) }).await {
                     return None;
                 }
@@ -372,7 +353,6 @@ async fn execute(
     };
     // What the command printed before it ended.
     while let Ok(RunEvent::Output(chunk)) = output.try_recv() {
-        keep(&chunk);
         if !send(write, &Response::Output { data: base64(&chunk) }).await {
             return None;
         }
@@ -391,7 +371,7 @@ async fn execute(
             Response::Error { message: reason }
         }
     };
-    Some((last, tail))
+    Some(last)
 }
 
 /// Standard base64 with padding.
@@ -475,19 +455,6 @@ mod tests {
         assert_eq!(tokens.session(&a), None);
         assert_eq!(tokens.session(&b), Some(2));
         assert_eq!(tokens.session("guess"), None);
-    }
-
-    /// Launch Services' refusals, as `open` and `osascript` print them in the sandbox (docs/pi-findings.md).
-    #[test]
-    fn reads_launch_services_refusals() {
-        assert!(launch_refused(
-            b"The application cannot be opened because _LSOpenURLsWithCompletionHandler() failed with error -54."
-        ));
-        assert!(launch_refused(b"sandbox_extension_issue_file failed ... -54"));
-        assert!(!launch_refused(b"error: could not compile"));
-        assert!(!launch_refused(
-            b"_LSOpenURLsWithCompletionHandler() failed with error -10814"
-        ));
     }
 
     #[test]

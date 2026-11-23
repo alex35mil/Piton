@@ -101,6 +101,8 @@ enum Treated {
     Asked,
     /// Not asked about, with why.
     Shown(&'static str),
+    /// A refusal programs hit and recover from: listed only when nothing else was recorded.
+    Incidental,
 }
 
 /// What the session needs to run commands: fixed at launch.
@@ -522,16 +524,8 @@ impl Commands {
 
     /// What a call that failed in the session's own sandbox gets before the agent hears of it: Piton asks the user when
     /// a block it recorded for the call is one an approved rerun lifts; otherwise the blocks are reported. `last` is the
-    /// last look (the kernel's record had its time); `launch_refused` says the run's output showed Launch Services'
-    /// refusal (`open` or `osascript`, which may leave no kernel record). `slot_taken`: another question is showing.
-    pub fn after_failure(
-        &self,
-        calls: &mut Calls,
-        request: &RunRequest,
-        last: bool,
-        launch_refused: bool,
-        slot_taken: bool,
-    ) -> AfterFailure {
+    /// last look (the kernel's record had its time). `slot_taken`: another question is showing.
+    pub fn after_failure(&self, calls: &mut Calls, request: &RunRequest, last: bool, slot_taken: bool) -> AfterFailure {
         use crate::{
             agent::open::{self, OpenCheck},
             launch::sandbox::grant::{CommandBlock, command_block},
@@ -544,34 +538,8 @@ impl Commands {
         if request.typed_by_user() || call.command != request.command || call.asked {
             return report(Vec::new(), None);
         }
-        let nodes = crate::agent::analyze(&request.command, Some(&request.cwd))
-            .map(|a| a.commands)
-            .unwrap_or_default();
-        let program = |node: &String| {
-            node.split_whitespace()
-                .next()
-                .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
-        };
-        let launches: Vec<&String> = nodes
-            .iter()
-            .filter(|n| matches!(program(n).as_deref(), Some("open" | "osascript")))
-            .collect();
-        let mut refusals = call.refusals.clone();
+        let refusals = call.refusals.clone();
         let launch_ops = |r: &CallRefusal| matches!(r.operation.as_str(), "lsopen" | "appleevent-send");
-        // Launch Services may refuse without a kernel record: the run's output is the evidence then.
-        let closed = match self.policies.launch.apps {
-            crate::launch::sandbox::Apps::Closed => true,
-            crate::launch::sandbox::Apps::Open { .. } => false,
-        };
-        if launch_refused && closed && !refusals.iter().any(launch_ops) {
-            for node in &launches {
-                refusals.push(CallRefusal {
-                    process: program(node).unwrap_or_default(),
-                    operation: "lsopen".into(),
-                    target: node.to_string(),
-                });
-            }
-        }
         if refusals.is_empty() {
             return match last {
                 true => report(Vec::new(), None),
@@ -591,16 +559,26 @@ impl Commands {
                         CommandBlock::CredentialRead => Treated::Shown("a credential read"),
                         CommandBlock::Floor => Treated::Shown("protected: no approval lifts it"),
                         CommandBlock::Unsupported => Treated::Shown("not one an approval lifts"),
+                        CommandBlock::Incidental => Treated::Incidental,
                     },
                 };
                 (r.summary(), treated)
             })
             .collect();
+        // Incidental refusals are listed only when nothing else was recorded: they never explain a failure on their
+        // own, but when they're all there is, the agent sees them rather than nothing.
+        let only_incidental = treated.iter().all(|(_, t)| *t == Treated::Incidental);
+        // An incidental refusal often comes first (`open` writes a sysctl on its way to Launch Services): keep waiting
+        // for the one that explains the failure until the last look.
+        if only_incidental && !last {
+            return AfterFailure::Wait;
+        }
         let blocks: Vec<String> = treated
             .iter()
-            .map(|(summary, treated)| match treated {
-                Treated::Asked => summary.clone(),
-                Treated::Shown(why) => format!("{summary} ({why})"),
+            .filter_map(|(summary, treated)| match treated {
+                Treated::Asked => Some(summary.clone()),
+                Treated::Shown(why) => Some(format!("{summary} ({why})")),
+                Treated::Incidental => only_incidental.then(|| format!("{summary} (incidental)")),
             })
             .collect();
         if !treated.iter().any(|(_, t)| *t == Treated::Asked) {
@@ -613,7 +591,13 @@ impl Commands {
             );
         }
         let note = match refusals.iter().any(launch_ops) {
-            true => match open::check(&nodes, &request.cwd, &self.policies.launch) {
+            true => match open::check(
+                &crate::agent::analyze(&request.command, Some(&request.cwd))
+                    .map(|a| a.commands)
+                    .unwrap_or_default(),
+                &request.cwd,
+                &self.policies.launch,
+            ) {
                 OpenCheck::Refused { reason } => return report(blocks, Some(reason)),
                 OpenCheck::Ask { note } => Some(note),
                 OpenCheck::Other => None,
@@ -622,7 +606,11 @@ impl Commands {
         };
         call.asked = true;
         AfterFailure::Ask {
-            refusals: treated.into_iter().map(|(summary, _)| summary).collect(),
+            refusals: treated
+                .into_iter()
+                .filter(|(_, t)| *t != Treated::Incidental)
+                .map(|(summary, _)| summary)
+                .collect(),
             blocks,
             tag: format!("{prefix}-{}", call.number),
             note,
@@ -905,8 +893,8 @@ mod tests {
         }
     }
 
-    fn after(c: &Commands, calls: &mut Calls, req: &RunRequest, last: bool, launch: bool) -> AfterFailure {
-        c.after_failure(calls, req, last, launch, false)
+    fn after(c: &Commands, calls: &mut Calls, req: &RunRequest, last: bool) -> AfterFailure {
+        c.after_failure(calls, req, last, false)
     }
 
     /// A failed call is asked about only for a block an approved rerun lifts, once; everything else is reported with
@@ -963,9 +951,9 @@ mod tests {
 
         // Nothing recorded: wait, then report nothing on the last look.
         let req = begin(&c, &mut calls, &dir, "1", "make");
-        assert_eq!(after(&c, &mut calls, &req, false, false), AfterFailure::Wait);
+        assert_eq!(after(&c, &mut calls, &req, false), AfterFailure::Wait);
         assert_eq!(
-            after(&c, &mut calls, &req, true, false),
+            after(&c, &mut calls, &req, true),
             AfterFailure::Report {
                 blocks: Vec::new(),
                 note: None
@@ -976,12 +964,12 @@ mod tests {
         let req = begin(&c, &mut calls, &dir, "2", "touch ~/x");
         let target = home.join("x").display().to_string();
         calls.note("2", refusal("file-write-create", &target));
-        let (blocks, refusals, tag, note) = asked(after(&c, &mut calls, &req, false, false));
+        let (blocks, refusals, tag, note) = asked(after(&c, &mut calls, &req, false));
         assert_eq!(blocks, [format!("file-write-create {target}")]);
         assert_eq!(refusals, blocks);
         assert_eq!(tag, "7-ab-2");
         assert_eq!(note, None);
-        assert_eq!(kind(&after(&c, &mut calls, &req, true, false)), "report", "asked once");
+        assert_eq!(kind(&after(&c, &mut calls, &req, true)), "report", "asked once");
 
         // The floor and a credential read: reported with why, not asked.
         let req = begin(&c, &mut calls, &dir, "3", "git push");
@@ -993,7 +981,7 @@ mod tests {
             "3",
             refusal("file-read-data", &home.join(".ssh/id").display().to_string()),
         );
-        let (blocks, note) = reported(after(&c, &mut calls, &req, false, false));
+        let (blocks, note) = reported(after(&c, &mut calls, &req, false));
         assert_eq!(note, None);
         assert!(blocks[0].ends_with("(protected: no approval lifts it)"), "{blocks:?}");
         assert!(blocks[1].ends_with("(a credential read)"), "{blocks:?}");
@@ -1009,24 +997,51 @@ mod tests {
             "4",
             refusal("file-write-create", &home.join("quiet/x").display().to_string()),
         );
-        let (blocks, _) = reported(after(&c, &mut calls, &req, true, false));
+        let (blocks, _) = reported(after(&c, &mut calls, &req, true));
         assert!(blocks[0].ends_with("(silenced)"), "{blocks:?}");
 
         // Another question showing: reported, saying why.
         let req = begin(&c, &mut calls, &dir, "5", "touch ~/y");
         calls.note("5", refusal("file-write-create", &home.join("y").display().to_string()));
-        let (_, note) = reported(c.after_failure(&mut calls, &req, false, false, true));
+        let (_, note) = reported(c.after_failure(&mut calls, &req, false, true));
         assert!(note.is_some_and(|n| n.contains("another question")));
 
         // A typed command is never asked about.
         let typed = request(&dir, "user:1", "touch ~/z", false);
-        assert_eq!(kind(&after(&c, &mut calls, &typed, true, false)), "report");
+        assert_eq!(kind(&after(&c, &mut calls, &typed, true)), "report");
+
+        // Operations only the tagged default reports: a preferences write asks; a signal is floor.
+        let req = begin(&c, &mut calls, &dir, "6", "defaults write com.foo k v");
+        calls.note("6", refusal("user-preference-write", "com.foo"));
+        let (blocks, ..) = asked(after(&c, &mut calls, &req, false));
+        assert_eq!(blocks, ["user-preference-write com.foo"]);
+        let req = begin(&c, &mut calls, &dir, "7", "kill 1");
+        calls.note("7", refusal("signal", "pgrp [bash(9)] signum:15"));
+        let (blocks, _) = reported(after(&c, &mut calls, &req, false));
+        assert!(blocks[0].ends_with("(protected: no approval lifts it)"), "{blocks:?}");
+
+        // Incidental refusals never ask. Alone, they're listed; beside a real block, left out.
+        let req = begin(&c, &mut calls, &dir, "8", "make");
+        calls.note("8", refusal("sysctl-write", "kern.grade_cputype"));
+        assert_eq!(
+            after(&c, &mut calls, &req, false),
+            AfterFailure::Wait,
+            "an incidental record alone keeps the wait going"
+        );
+        let (blocks, _) = reported(after(&c, &mut calls, &req, true));
+        assert_eq!(blocks, ["sysctl-write kern.grade_cputype (incidental)"]);
+        let req = begin(&c, &mut calls, &dir, "9", "touch ~/w");
+        calls.note("9", refusal("sysctl-write", "kern.grade_cputype"));
+        calls.note("9", refusal("file-write-create", &home.join("w").display().to_string()));
+        let (blocks, refusals, ..) = asked(after(&c, &mut calls, &req, false));
+        assert_eq!(blocks, [format!("file-write-create {}", home.join("w").display())]);
+        assert_eq!(refusals, blocks);
     }
 
-    /// A blocked `open` is asked about with what it opens, from the kernel's tagged record or, without one, Launch
-    /// Services' refusal in the output. An `open` that never ran (an earlier part failed) isn't; `osascript` is refused.
+    /// A blocked `open` or `osascript` is asked about from the kernel's tagged record, with what it opens; one that
+    /// left no record (it never ran) isn't. A target the check refuses is reported, never asked.
     #[test]
-    fn a_blocked_open_is_asked_about_from_evidence() {
+    fn a_blocked_open_is_asked_about_from_its_record() {
         let dir = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let mut c = commands(&dir, &[]);
@@ -1037,23 +1052,20 @@ mod tests {
         let mut calls = Calls::new("7-ab");
         let web = "open https://example.com";
 
-        // The kernel's tagged record.
+        // The kernel's tagged record, after the incidental sysctl write that comes first: waited for, then asked.
         let req = begin(&c, &mut calls, &dir, "1", web);
+        calls.note("1", refusal("sysctl-write", "kern.grade_cputype"));
+        assert_eq!(after(&c, &mut calls, &req, false), AfterFailure::Wait);
         calls.note("1", refusal("lsopen", ""));
-        let (_, _, _, note) = asked(after(&c, &mut calls, &req, false, false));
+        let (blocks, _, _, note) = asked(after(&c, &mut calls, &req, false));
         assert!(note.is_some_and(|n| n.contains("browser")));
+        assert_eq!(blocks, ["lsopen"], "the incidental one is left out");
 
-        // Only Launch Services' line in the output.
-        let req = begin(&c, &mut calls, &dir, "2", web);
-        let (blocks, _, _, note) = asked(after(&c, &mut calls, &req, false, true));
-        assert_eq!(blocks, [format!("lsopen {web}")]);
-        assert!(note.is_some());
-
-        // `open` never ran: no record, no line.
+        // `open` never ran: no record, nothing asked.
         let never = format!("false && {web}");
         let req = begin(&c, &mut calls, &dir, "3", &never);
         assert_eq!(
-            after(&c, &mut calls, &req, true, false),
+            after(&c, &mut calls, &req, true),
             AfterFailure::Report {
                 blocks: Vec::new(),
                 note: None
@@ -1063,8 +1075,19 @@ mod tests {
         // `osascript`: reported with the refusal, never asked.
         let script = "osascript -e 'tell application \"Terminal\" to do script \"x\"'";
         let req = begin(&c, &mut calls, &dir, "4", script);
-        let (_, note) = reported(after(&c, &mut calls, &req, false, true));
+        calls.note(
+            "4",
+            refusal(
+                "file-issue-extension",
+                "target:/System/Applications/Utilities/Terminal.app extension-class:com.apple.app-sandbox.read",
+            ),
+        );
+        calls.note("4", refusal("lsopen", ""));
+        calls.note("4", refusal("network-outbound", "/private/var/run/syslog"));
+        let (blocks, note) = reported(after(&c, &mut calls, &req, false));
         assert!(note.is_some_and(|n| n.contains("osascript")));
+        assert_eq!(blocks.len(), 2, "the incidental syslog connect is left out: {blocks:?}");
+        assert!(blocks[0].ends_with("(protected: no approval lifts it)"), "{blocks:?}");
     }
 
     /// After the user denies Piton's question, the agent's rerun of the same command in that run is refused; a new
