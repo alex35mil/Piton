@@ -36,7 +36,9 @@ cleanup_real() {
 }
 listener=
 # The listener is waited for after it's killed, so the shell doesn't report its end ("Terminated: 15").
-trap 'test -z "$listener" || { kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null; }; cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"' EXIT
+# The script's exit status is kept: the killed listener's wait (143) would replace it, and under `set -e` end the trap
+# early.
+trap 'code=$?; test -z "$listener" || { kill "$listener" 2>/dev/null; wait "$listener" 2>/dev/null || true; }; cleanup_real; chmod -R u+w "$scratch" 2>/dev/null; rm -rf "$scratch"; exit $code' EXIT
 mkdir "$linked"
 ln -s "$linked" "$src/cache"
 marker="# piton protected-file probe
@@ -307,10 +309,15 @@ gate_pid=$!
 exec 9> "$scratch/gate-in"
 for _ in $(seq 50); do test -s "$scratch/gate-policy" && break; sleep 0.1; done
 strict_policy=$(head -n 1 "$scratch/gate-policy")
+# A preset of this machine's own config can grant every local port (pi-claude-code's `localhost:*`): then any local
+# port connects.
+other_local=denied
+printf '%s' "$strict_policy" | rg -q '"kind":"local_any_port"' && other_local=ok
 listeners=""
 for port in "$local_port" "$other_port"; do
+    # Without fd 9: a listener holding the gate's FIFO open would keep the gate from ever seeing it close.
     python3 -I -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(8)
-while True: s.accept()[0].close()' "$port" >/dev/null 2>&1 &
+while True: s.accept()[0].close()' "$port" >/dev/null 2>&1 9>&- &
     listeners="$listeners $!"
 done
 cat > "$scratch/strict.sh" <<'EOF'
@@ -336,7 +343,7 @@ attempt ok     "curl http:// to a listed host (gate)"   'curl -sf -o /dev/null h
 attempt denied "curl to an unlisted host (gate)"         'curl -sf -o /dev/null --max-time 10 https://www.apple.com'
 attempt denied "TCP straight to a host, past the gate"   "python3 -I -c 'import socket; socket.create_connection((\"93.184.215.14\", 443), 5)'"
 attempt ok     "a listed local port (localhost:PORT)"   "python3 -I -c 'import socket; socket.create_connection((\"127.0.0.1\", $LOCAL_PORT), 5)'"
-attempt denied "another local port"                     "python3 -I -c 'import socket; socket.create_connection((\"127.0.0.1\", $OTHER_PORT), 5)'"
+attempt $OTHER_LOCAL "another local port"               "python3 -I -c 'import socket; socket.create_connection((\"127.0.0.1\", $OTHER_PORT), 5)'"
 attempt denied "the gate without its credential"         "curl -sf -o /dev/null --max-time 10 -x http://127.0.0.1:\${HTTPS_PROXY##*:} https://example.com"
 attempt ok     "git over SSH to a listed host (wrapper)" 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 | rg -q "successfully authenticated|Permission denied"'
 EOF
@@ -348,13 +355,15 @@ JS
 if command -v node >/dev/null 2>&1; then
     echo "attempt ok \"node fetch over HTTPS\" 'node $scratch/fetch.mjs'" >> "$scratch/strict.sh"
 fi
-(cd "$strict" && LOOKUP="$lookup" ERR="$scratch/err" LOCAL_PORT="$local_port" OTHER_PORT="$other_port" \
+(cd "$strict" && LOOKUP="$lookup" ERR="$scratch/err" LOCAL_PORT="$local_port" OTHER_PORT="$other_port" OTHER_LOCAL="$other_local" \
     PITON_SANDBOX_POLICY="$strict_policy" \
-    "$piton" sandbox-exec -- sh "$scratch/strict.sh" </dev/null >"$scratch/strict-out" 2>&1) \
+    "$piton" sandbox-exec -- sh "$scratch/strict.sh" </dev/null >"$scratch/strict-out" 2>&1 9>&-) \
     || echo "FAIL  the strict sandbox didn't start" >> "$scratch/strict-out"
+# A killed listener's wait returns 143, which `set -e` would take for a failure.
+for l in $listeners; do kill "$l" 2>/dev/null || true; wait "$l" 2>/dev/null || true; done
+# Closing the FIFO stops the gate.
 exec 9>&-
 wait "$gate_pid" 2>/dev/null || true
-for l in $listeners; do kill "$l" 2>/dev/null; wait "$l" 2>/dev/null; done
 # Shown whole, so a failed line keeps the error line below it.
 cat "$scratch/strict-out"
 cat "$scratch/strict-out" >> "$scratch/out"
