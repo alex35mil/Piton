@@ -3,6 +3,7 @@
 
 mod commands;
 mod info;
+mod network;
 mod notice;
 mod prompts;
 mod replay;
@@ -204,6 +205,18 @@ pub enum SessionCmd {
     SettleQuestion,
     /// A refusal the kernel recorded for this session's sandbox.
     Refusal(crate::daemon::Refusal),
+    /// A connection the gate holds: decided by the session, asking the user when nothing else does.
+    NetworkAsk {
+        user: crate::gate::User,
+        to: crate::launch::sandbox::Destination,
+        reply: oneshot::Sender<crate::gate::Verdict>,
+    },
+    /// A connection the gate refused.
+    GateRefused(crate::gate::Refused),
+    /// fnox's proxy URL, reported once by the helper that starts pi behind it: the gate forwards through it.
+    GateUpstream {
+        url: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -330,16 +343,75 @@ pub struct LaunchSpec {
     pub grants: Vec<crate::config::Listed<crate::config::CommandGrant>>,
     /// What the session starts with a warning about.
     pub warnings: Vec<launch::LaunchWarning>,
+    /// For a filtered network: pi's trusted hosts, and where the gate reaches hosts (`None`: behind fnox, reported once
+    /// fnox runs).
+    pub network: Option<NetworkSpec>,
 }
 
-pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
+/// What a session with a filtered network starts its gate with.
+pub struct NetworkSpec {
+    pub catalog: crate::pi_catalog::Catalog,
+    pub route: Option<crate::gate::Route>,
+    /// The `ssh` wrapper's folder, when the daemon made it.
+    pub ssh: Option<PathBuf>,
+    /// Behind fnox: the one-time token the helper reports fnox's proxy with, in the helper's own environment.
+    pub upstream_token: Option<String>,
+}
+
+/// The gate of a session with a filtered network, deciding through the session's channel.
+fn start_gate(spec: NetworkSpec, tx: &mpsc::UnboundedSender<SessionCmd>) -> Result<network::Network, LaunchError> {
+    let asks = tx.clone();
+    let decide: crate::gate::Decide = Arc::new(move |user, to| {
+        let asks = asks.clone();
+        Box::pin(async move {
+            let (reply, verdict) = oneshot::channel();
+            let gone = crate::gate::Verdict::Deny {
+                reason: "Piton's sandbox refused it: the session ended".into(),
+            };
+            if asks.send(SessionCmd::NetworkAsk { user, to, reply }).is_err() {
+                return gone;
+            }
+            verdict.await.unwrap_or(gone)
+        })
+    });
+    let (refused_tx, mut refused_rx) = mpsc::unbounded_channel();
+    let refusals = tx.clone();
+    tokio::spawn(async move {
+        while let Some(refused) = refused_rx.recv().await {
+            if refusals.send(SessionCmd::GateRefused(refused)).is_err() {
+                return;
+            }
+        }
+    });
+    let gate = crate::gate::Gate::start(decide, spec.route, refused_tx).map_err(|source| LaunchError::Spawn {
+        program: "the network gate".into(),
+        source,
+    })?;
+    Ok(network::Network::new(gate, spec.catalog, spec.ssh))
+}
+
+pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
     let helper = launch::helper()?;
     let argv = launch::command_line(&config, spec.mode, &spec.session, &helper);
     let encoding = |e: serde_json::Error| LaunchError::Spawn {
         program: "launch environment".into(),
         source: std::io::Error::other(e),
     };
+    let (tx, rx) = mpsc::unbounded_channel();
+    // A filtered network's gate, with pi's own proxy user in its policy.
     let mut extra = Env::new();
+    let mut network = match spec.network.take() {
+        Some(network) => {
+            if let Some(token) = &network.upstream_token {
+                extra.insert(crate::agent::GATE_TOKEN_ENV.into(), token.clone());
+            }
+            Some(start_gate(network, &tx)?)
+        }
+        None => None,
+    };
+    if let (Some(network), Some(policy)) = (&mut network, &mut spec.policy) {
+        network.issue(network::PI_USER, policy);
+    }
     if let Some(policy) = &spec.policy {
         extra.insert(
             launch::sandbox::POLICY_ENV.into(),
@@ -415,7 +487,6 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         has_messages: matches!(spec.session, SessionArg::Resume(_)),
         title: None,
     }));
-    let (tx, rx) = mpsc::unbounded_channel();
     let handle = SessionHandle {
         key: spec.key,
         tx,
@@ -479,6 +550,7 @@ pub fn spawn(config: Arc<DaemonConfig>, spec: LaunchSpec, hooks: Hooks) -> Resul
         sent: HashMap::new(),
         sent_order: VecDeque::new(),
         prompts: PromptQueue::default(),
+        network,
     };
     tokio::spawn(task.run(
         child,
@@ -577,6 +649,8 @@ struct SessionTask {
     sent_order: VecDeque<String>,
     /// pi gets one `prompt` at a time; see [`PromptQueue`].
     prompts: PromptQueue,
+    /// A filtered network's gate and its questions: sandboxed sessions whose network isn't open.
+    network: Option<network::Network>,
 }
 
 struct Watcher {
@@ -665,6 +739,11 @@ impl SessionTask {
         loop {
             let stop_deadline = self.stopping.as_ref().map(|(_, at)| *at);
             let question_deadline = self.question.as_ref().map(|q| q.deadline);
+            let network_deadline = self
+                .network
+                .as_ref()
+                .and_then(|n| n.asking.as_ref())
+                .map(|a| a.deadline);
             tokio::select! {
                 line = stdout.next_line(), if stdout_open => match line {
                     Ok(Some(line)) => self.on_pi_line(line),
@@ -699,6 +778,9 @@ impl SessionTask {
                 }
                 _ = sleep_until(question_deadline.unwrap_or_else(Instant::now)), if question_deadline.is_some() => {
                     self.expire_question();
+                }
+                _ = sleep_until(network_deadline.unwrap_or_else(Instant::now)), if network_deadline.is_some() => {
+                    self.expire_network_question();
                 }
                 _ = sleep_until(self.empty_deadline.unwrap_or_else(Instant::now)), if self.empty_deadline.is_some() => {
                     self.empty_deadline = None;
@@ -838,6 +920,9 @@ impl SessionTask {
                 self.publish_view_state();
             }
             SessionCmd::Refusal(refusal) => self.on_refusal(refusal),
+            SessionCmd::NetworkAsk { user, to, reply } => self.network_ask(user, to, reply),
+            SessionCmd::GateRefused(refused) => self.gate_refused(refused),
+            SessionCmd::GateUpstream { url } => self.gate_upstream(&url),
             SessionCmd::Stop { .. } => unreachable!("handled in run"),
         }
     }
@@ -1138,6 +1223,17 @@ impl SessionTask {
                     self.publish_view_state();
                     return;
                 }
+                if self
+                    .network
+                    .as_ref()
+                    .and_then(|n| n.asking.as_ref())
+                    .is_some_and(|a| a.dialog_id == id)
+                {
+                    self.answer_network(&command);
+                    self.sync_shared();
+                    self.publish_view_state();
+                    return;
+                }
                 self.writer = Some(client);
                 self.sync_shared();
                 self.send_to_pi(&Value::Object(command));
@@ -1257,7 +1353,11 @@ impl SessionTask {
             return;
         }
         let line: Arc<str> = line.into();
-        self.calls.track(&kind, &record);
+        for ended in self.calls.track(&kind, &record) {
+            if let Some(network) = &mut self.network {
+                network.forget(&ended);
+            }
+        }
         self.track(&kind, &record, &line);
         for tx in self.clients.values() {
             let _ = tx.send(Frame::Record(line.clone()));
@@ -1300,6 +1400,7 @@ impl SessionTask {
                     },
                     RunDecision::NotRun { reason } => crate::log!("session {key}: command request refused: {reason}"),
                 }
+                let decision = self.with_gate_user(decision);
                 let _ = reply.send(decision);
             }
             commands::First::Ask { refusals, tag, note } => {
@@ -1518,8 +1619,31 @@ impl SessionTask {
                 None => return,
             },
         };
+        let decision = self.with_gate_user(decision);
         let _ = pending.reply.send(decision);
         self.ask_next_process();
+    }
+
+    /// A command run in a sandbox with a filtered network gets the gate as its own proxy user, named by its tag, so the
+    /// gate decides its connections under its policy and the question names its command. Forgotten when its call ends.
+    fn with_gate_user(&mut self, decision: crate::agent::RunDecision) -> crate::agent::RunDecision {
+        use crate::agent::{RunDecision, Runtime};
+        let Some(network) = &mut self.network else {
+            return decision;
+        };
+        match decision {
+            RunDecision::Run(mut approved) => {
+                match &mut approved.runtime {
+                    Runtime::Session(policy) | Runtime::Widened { policy, .. } => {
+                        let user = policy.tag.clone();
+                        network.issue(&user, policy);
+                    }
+                    Runtime::Host { .. } => {}
+                }
+                RunDecision::Run(approved)
+            }
+            not_run @ RunDecision::NotRun { .. } => not_run,
+        }
     }
 
     /// Ends the block question when it can't be answered any more: its dialog left (the run ended) or the agent
@@ -1547,6 +1671,217 @@ impl SessionTask {
             }
         }
         self.publish_view_state();
+    }
+
+    /// A connection the gate holds: allowed or refused at once when the sandbox's entries, pi's hosts, the session's
+    /// answers, or `silence` decide it; otherwise it waits for the user, joining the question about the same
+    /// destination when one is showing.
+    fn network_ask(
+        &mut self,
+        user: crate::gate::User,
+        to: crate::launch::sandbox::Destination,
+        reply: oneshot::Sender<crate::gate::Verdict>,
+    ) {
+        let silence = self
+            .commands
+            .as_ref()
+            .map_or(&[][..], |c| c.policies.silence.as_slice());
+        let Some(network) = &mut self.network else {
+            let _ = reply.send(network::refused(&to, "this session has no gate"));
+            return;
+        };
+        let Some(waiting) = network.decide(user, to, silence, reply) else {
+            return;
+        };
+        match &mut network.asking {
+            Some(asking) if asking.to == waiting.to => asking.waiting.push(waiting),
+            Some(_) | None => {
+                network.queued.push_back(waiting);
+                self.ask_next_network();
+            }
+        }
+    }
+
+    /// Who a proxy user is, as the network question names it: pi, or the call's command.
+    fn who(&self, user: &crate::gate::User) -> String {
+        match self.calls.owner(&user.0) {
+            commands::TagOwner::Call(id) => self
+                .calls
+                .command_of(&id)
+                .map_or_else(|| "A command".to_string(), |c| format!("`{c}`")),
+            commands::TagOwner::Session
+            | commands::TagOwner::GoneCall
+            | commands::TagOwner::Typed
+            | commands::TagOwner::Other => "pi (an MCP server, an extension, or pi itself)".to_string(),
+        }
+    }
+
+    /// Shows the next network question when the session's question slot is free.
+    fn ask_next_network(&mut self) {
+        if self.asking() {
+            return;
+        }
+        let Some(network) = &mut self.network else { return };
+        if network.asking.is_some() {
+            return;
+        }
+        let Some(first) = network.queued.pop_front() else {
+            return;
+        };
+        // Every connection waiting on the same destination joins this question.
+        let (same, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut network.queued)
+            .into_iter()
+            .partition(|w| w.to == first.to);
+        network.queued = rest.into();
+        let to = first.to.clone();
+        let who = self.who(&first.user);
+        let mut waiting = vec![first];
+        waiting.extend(same);
+        self.next_internal += 1;
+        let dialog_id = format!("piton:network:{}", self.next_internal);
+        let deadline = Instant::now() + Duration::from_millis(self.config.confirmation_timeout_ms);
+        let record = crate::agent::block::network_dialog(&dialog_id, &who, &to.to_string());
+        if let Some(network) = &mut self.network {
+            network.asking = Some(network::Asking {
+                dialog_id,
+                to,
+                waiting,
+                deadline,
+            });
+        }
+        self.on_pi_line(record.to_string());
+    }
+
+    /// The user's answer to a network question.
+    fn answer_network(&mut self, answer: &Map<String, Value>) {
+        use crate::agent::block::NetworkAnswer;
+        let key = lock(&self.shared).key;
+        let Some(network) = &mut self.network else { return };
+        let Some(to) = network.asking.as_ref().map(|a| a.to.clone()) else {
+            return;
+        };
+        let verdict = match crate::agent::block::read_network_answer(answer) {
+            NetworkAnswer::AskAgain => {
+                // Shown again: the connections keep waiting under a new dialog.
+                if let Some(asking) = network.asking.take() {
+                    let mut waiting = asking.waiting.into_iter();
+                    if let Some(first) = waiting.next() {
+                        network.queued.push_front(first);
+                    }
+                    network.queued.extend(waiting);
+                }
+                self.ask_next_network();
+                return;
+            }
+            NetworkAnswer::Session => {
+                crate::log!("session {key}: the user allowed {to} for this session");
+                network.allow_for_session(to.clone());
+                crate::gate::Verdict::Allow { literal: false }
+            }
+            NetworkAnswer::Persist(scope) => {
+                let entry = crate::config::NetworkTarget::Host {
+                    host: to.host.clone(),
+                    port: Some(to.port),
+                };
+                let saved = self
+                    .commands
+                    .as_ref()
+                    .map(|c| c.persist_lift(scope, &crate::launch::sandbox::grant::Lift::Network(entry.clone())));
+                match saved {
+                    Some(Ok(file)) => {
+                        crate::log!("session {key}: saved `connect = [\"{to}\"]` in {}", file.display());
+                        let source = crate::launch::sandbox::Source::Config {
+                            key: "sandbox.connect".into(),
+                            from: crate::launch::sandbox::Provenance::File { path: file },
+                        };
+                        if let Some(network) = &mut self.network {
+                            network.add_entry(entry, source);
+                        }
+                        crate::gate::Verdict::Allow { literal: false }
+                    }
+                    Some(Err(e)) => {
+                        crate::log!("session {key}: couldn't save the entry: {e}");
+                        self.show_notice(format!(
+                            "Couldn't save the sandbox entry: {e}; allowed for this session"
+                        ));
+                        if let Some(network) = &mut self.network {
+                            network.allow_for_session(to.clone());
+                        }
+                        crate::gate::Verdict::Allow { literal: false }
+                    }
+                    None => network::refused(&to, "no configuration to save to"),
+                }
+            }
+            NetworkAnswer::Silence(scope) => {
+                let entry = crate::config::Silence {
+                    target: crate::config::SilenceTarget::Host(to.to_string()),
+                    process: None,
+                };
+                if let Some(commands) = &mut self.commands {
+                    match commands.persist_silence(scope, &entry) {
+                        Ok(file) => {
+                            if let Some(silent) = crate::launch::sandbox::Silent::named(&entry.target) {
+                                commands.policies.silence.push(crate::launch::sandbox::Silenced {
+                                    target: silent,
+                                    process: None,
+                                    source: crate::launch::sandbox::SilenceSource::File(file.clone()),
+                                });
+                            }
+                            crate::log!("session {key}: the user denied {to}: saved in {}", file.display());
+                        }
+                        Err(e) => crate::log!("session {key}: couldn't save the silence entry: {e}"),
+                    }
+                }
+                network::refused(&to, "the user denied it")
+            }
+            NetworkAnswer::NotNow => network::refused(&to, "the user didn't allow it"),
+        };
+        if let Some(network) = &mut self.network {
+            network.settle(&verdict);
+        }
+        self.ask_next_process();
+    }
+
+    /// No answer in time: the connections are refused, and the dialog closes everywhere.
+    fn expire_network_question(&mut self) {
+        let Some(network) = &mut self.network else { return };
+        let Some(asking) = &network.asking else { return };
+        let (id, to) = (asking.dialog_id.clone(), asking.to.clone());
+        network.settle(&network::refused(&to, "the user didn't answer in time"));
+        self.replay.answer_dialog(&id);
+        crate::log!("session {}: a network question timed out", lock(&self.shared).key);
+        self.ask_next_process();
+        self.sync_shared();
+        self.publish_view_state();
+    }
+
+    /// A connection the gate refused: recorded for the call that made it (its block list shows it), else logged.
+    fn gate_refused(&mut self, refused: crate::gate::Refused) {
+        let key = lock(&self.shared).key;
+        crate::log!("session {key}: the gate refused {} ({})", refused.to, refused.user.0);
+        if let commands::TagOwner::Call(id) = self.calls.owner(&refused.user.0) {
+            self.calls.note(
+                &id,
+                commands::CallRefusal {
+                    process: "gate".into(),
+                    operation: "network-outbound".into(),
+                    target: refused.to.to_string(),
+                },
+            );
+        }
+    }
+
+    /// fnox's proxy URL: the gate forwards every allowed connection through it from now on.
+    fn gate_upstream(&mut self, url: &str) {
+        let key = lock(&self.shared).key;
+        match (&self.network, crate::gate::parse_upstream(url)) {
+            (Some(network), Some(route)) => {
+                network.gate.set_route(route);
+                crate::log!("session {key}: the gate forwards through fnox's proxy");
+            }
+            (Some(_), None) => crate::log!("session {key}: fnox's proxy URL isn't one the gate can use"),
+            (None, _) => {}
+        }
     }
 
     /// A refusal the kernel recorded for this session: kept for the bash call it belongs to, or, for a process that
@@ -1672,7 +2007,26 @@ impl SessionTask {
         self.settle_protected_write();
         self.settle_question();
         self.settle_process();
-        self.protected_write.is_some() || self.question.is_some() || self.process.asking.is_some()
+        self.settle_network();
+        self.protected_write.is_some()
+            || self.question.is_some()
+            || self.process.asking.is_some()
+            || self.network.as_ref().is_some_and(|n| n.asking.is_some())
+    }
+
+    /// A network question whose dialog left unanswered (the run it showed in ended) is asked again under a new dialog;
+    /// its connections keep waiting.
+    fn settle_network(&mut self) {
+        let Some(network) = &mut self.network else { return };
+        let Some(asking) = &network.asking else { return };
+        if self.replay.has_dialog(&asking.dialog_id) {
+            return;
+        }
+        if let Some(asking) = network.asking.take() {
+            for waiting in asking.waiting.into_iter().rev() {
+                network.queued.push_front(waiting);
+            }
+        }
     }
 
     /// A process question whose dialog left unanswered (the run it showed in ended) is asked again.
@@ -1686,6 +2040,8 @@ impl SessionTask {
 
     /// Shows the next process question when nothing else is being asked. Called whenever the slot may have freed.
     fn ask_next_process(&mut self) {
+        // A held connection is waiting for an answer: its question goes first.
+        self.ask_next_network();
         if self.asking() {
             return;
         }
@@ -1723,19 +2079,21 @@ impl SessionTask {
                 let Some(commands) = &mut self.commands else { return };
                 let target = question.offer.at(grant_scope(scope)).silence_target();
                 let silent = match &target {
-                    crate::config::SilenceTarget::Path(path) => crate::launch::sandbox::Silent::Path(path.into()),
-                    crate::config::SilenceTarget::Service(name) => {
-                        crate::launch::sandbox::Silent::Service(name.clone())
+                    crate::config::SilenceTarget::Path(path) => Some(crate::launch::sandbox::Silent::Path(path.into())),
+                    named @ (crate::config::SilenceTarget::Service(_) | crate::config::SilenceTarget::Host(_)) => {
+                        crate::launch::sandbox::Silent::named(named)
                     }
                 };
                 let entry = crate::config::Silence { target, process: None };
                 let message = match commands.persist_silence(scope, &entry) {
                     Ok(file) => {
-                        commands.policies.silence.push(crate::launch::sandbox::Silenced {
-                            target: silent,
-                            process: None,
-                            source: crate::launch::sandbox::SilenceSource::File(file.clone()),
-                        });
+                        if let Some(silent) = silent {
+                            commands.policies.silence.push(crate::launch::sandbox::Silenced {
+                                target: silent,
+                                process: None,
+                                source: crate::launch::sandbox::SilenceSource::File(file.clone()),
+                            });
+                        }
                         crate::log!(
                             "session {key}: the user denied {}: saved `silence = [{}]` in {}",
                             question.process,

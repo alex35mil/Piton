@@ -30,7 +30,7 @@ pub use self::{
         Approved, Failed, PiShell, Ran, Rerun, RunDecision, RunEnd, RunEvent, RunRequest, RunSpec, Runtime, Why,
         host_env, run,
     },
-    socket::{FILE, SOCKET_ENV, TOKEN_ENV, Tokens, bind, random_hex, serve},
+    socket::{FILE, GATE_TOKEN_ENV, SOCKET_ENV, TOKEN_ENV, Tokens, bind, random_hex, serve},
     write::{
         FileMode, WriteDecision, WriteOutcome, WriteRequest, remove_file, write_approved, write_dialog, write_file,
     },

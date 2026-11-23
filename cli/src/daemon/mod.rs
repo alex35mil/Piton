@@ -547,6 +547,45 @@ impl Daemon {
             Relation::Source => String::new(),
             Relation::Worker { source, .. } => format!(", worker of {}", source.display()),
         };
+        // A filtered network gets a gate: pi's trusted hosts, and fnox's proxy as the route once it reports it.
+        let network = match policy.as_ref().map(|p| &p.network) {
+            Some(launch::sandbox::Network::Filtered { .. }) => {
+                let builtin = config
+                    .pi
+                    .command
+                    .first()
+                    .map(|pi| crate::pi_catalog::builtin_for(pi, &env))
+                    .unwrap_or_else(|| Ok(crate::pi_catalog::Builtin::default()))
+                    .unwrap_or_else(|e| {
+                        crate::log!("session {key}: pi's built-in hosts aren't trusted (asked about instead): {e}");
+                        crate::pi_catalog::Builtin::default()
+                    });
+                let files =
+                    crate::pi_catalog::Files::new(agent_dirs[1].clone(), &config.paths.global, &launch_config.levels);
+                let ssh = crate::gate::ssh::ensure(&config.state_dir());
+                if ssh.is_none() {
+                    crate::log!("session {key}: can't make the ssh wrapper: SSH won't go through the gate");
+                }
+                // Behind fnox, the helper reports fnox's proxy with a one-time token; the gate waits for it.
+                let (route, upstream_token) = match &proxy {
+                    Some(_) => {
+                        let token = self.agent_tokens.issue_gate(key).map_err(|source| LaunchError::Spawn {
+                            program: "gate token".into(),
+                            source,
+                        })?;
+                        (None, Some(token))
+                    }
+                    None => (Some(crate::gate::Route::Direct), None),
+                };
+                Some(session::NetworkSpec {
+                    ssh,
+                    catalog: crate::pi_catalog::Catalog::new(builtin, files),
+                    route,
+                    upstream_token,
+                })
+            }
+            Some(launch::sandbox::Network::Open { .. }) | None => None,
+        };
         let spec = LaunchSpec {
             key,
             workspace,
@@ -561,6 +600,7 @@ impl Daemon {
             checkout: launch_config.checkout.clone(),
             grants: launch_config.sandbox.commands.clone(),
             warnings,
+            network,
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),

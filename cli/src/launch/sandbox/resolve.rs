@@ -125,6 +125,8 @@ pub enum Silent {
     Path(PathBuf),
     /// A Mach service, by name.
     Service(String),
+    /// A network destination: a host (or `*.domain`) and a port.
+    Host(crate::config::NetworkTarget),
 }
 
 /// Where a silence entry came from.
@@ -145,6 +147,22 @@ impl std::fmt::Display for SilenceSource {
     }
 }
 
+impl Silent {
+    /// A non-path `silence` target as it matches (a path is expanded and canonicalized by the launch first); `None` for a
+    /// path.
+    pub fn named(target: &crate::config::SilenceTarget) -> Option<Self> {
+        match target {
+            crate::config::SilenceTarget::Path(_) => None,
+            crate::config::SilenceTarget::Service(name) => Some(Silent::Service(name.clone())),
+            crate::config::SilenceTarget::Host(text) => match crate::config::Connect::try_from(text.clone()) {
+                Ok(crate::config::Connect::Network(target)) => Some(Silent::Host(target)),
+                // Parsing accepted it as a host and port.
+                Ok(crate::config::Connect::Socket(_)) | Err(_) => None,
+            },
+        }
+    }
+}
+
 impl Silenced {
     /// Whether this entry matches a block: `process` refused `operation` on `target`, as the kernel names them.
     pub fn matches(&self, process: &str, operation: &str, target: &str) -> bool {
@@ -157,6 +175,11 @@ impl Silenced {
                 let path = Path::new(target);
                 operation != "mach-lookup" && path.is_absolute() && below_pattern(path, pattern)
             }
+            Silent::Host(host) => {
+                operation == "network-outbound"
+                    && !target.starts_with('/')
+                    && super::Destination::parse(target).is_some_and(|to| host.allows(&to))
+            }
         }
     }
 
@@ -166,6 +189,7 @@ impl Silenced {
             target: match &self.target {
                 Silent::Path(path) => crate::config::SilenceTarget::Path(path.display().to_string()),
                 Silent::Service(name) => crate::config::SilenceTarget::Service(name.clone()),
+                Silent::Host(host) => crate::config::SilenceTarget::Host(host.to_string()),
             },
             process: self.process.clone(),
         }
@@ -349,14 +373,20 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
                 crate::config::SilenceTarget::Path(path) => {
                     Silent::Path(canonical_pattern(&expand_grant(path, facts.home, facts.base_env)?))
                 }
-                crate::config::SilenceTarget::Service(name) => Silent::Service(name.clone()),
+                other @ (crate::config::SilenceTarget::Service(_) | crate::config::SilenceTarget::Host(_)) => {
+                    match Silent::named(other) {
+                        Some(silent) => silent,
+                        None => return Ok(None),
+                    }
+                }
             };
-            Ok(Silenced {
+            Ok(Some(Silenced {
                 target,
                 process: l.value.process.clone(),
                 source: SilenceSource::File(l.file.clone()),
-            })
+            }))
         })
+        .filter_map(Result::transpose)
         .collect::<Result<Vec<_>, SandboxError>>()?;
     if let Some(claude_code) = &claude_code {
         silence.extend(claude_code_silence(claude_code));
@@ -782,6 +812,14 @@ fn build(
         subpath(facts.logs),
         Source::Piton {
             what: "Piton's logs".into(),
+        },
+    );
+    rules.push(
+        Effect::Allow,
+        &[Access::Read],
+        subpath(&crate::gate::ssh::folder(facts.state_dir)),
+        Source::Piton {
+            what: "the ssh wrapper that tunnels SSH through the network gate".into(),
         },
     );
     rules.push(

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 pub use self::resolve::{ClaudeCode, ProfileChoice};
 #[cfg(test)]
-pub use self::rules::{Apps, Effect, Network, Rule, ServiceGrant, Services, Target};
+pub use self::rules::{Apps, Effect, Rule, ServiceGrant, Services, Target};
 pub use self::{
     apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
     policy::{Provenance, Source, WRITE_ROOTS, agent_dir_runtime, nono_version},
@@ -23,7 +23,7 @@ pub use self::{
         ClaudeCodeFolder, ClaudeCodeSockets, Facts, Resolution, SilenceSource, Silenced, Silent, agent_dir,
         never_configuration, resolve, silenced,
     },
-    rules::{Access, Destination, Policy, TAG_PREFIX},
+    rules::{Access, Destination, Gate, Network, NetworkGrant, Policy, TAG_PREFIX},
 };
 
 #[derive(Debug, thiserror::Error)]

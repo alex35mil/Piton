@@ -164,12 +164,34 @@ pub enum Network {
 pub enum Gate {
     /// No gate: named hosts are unreachable (the environment tools' sandbox, `piton sandbox show`).
     None,
-    /// Listening on `127.0.0.1:port`, for this sandbox's proxy user and credential.
+    /// Listening on `127.0.0.1:port`, for this sandbox's proxy user and credential. `ssh`: the folder holding the `ssh`
+    /// wrapper that tunnels through the gate (first on the sandbox's `PATH`), when the daemon could make it.
     Listening {
         port: u16,
         user: String,
         credential: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh: Option<PathBuf>,
     },
+}
+
+impl Network {
+    /// The proxy URL this sandbox's processes use and the `ssh` wrapper's folder, when it has a gate.
+    pub fn proxy(&self) -> Option<(String, Option<&Path>)> {
+        match self {
+            Network::Open { .. } | Network::Filtered { gate: Gate::None, .. } => None,
+            Network::Filtered {
+                gate:
+                    Gate::Listening {
+                        port,
+                        user,
+                        credential,
+                        ssh,
+                    },
+                ..
+            } => Some((crate::gate::proxy_url(*port, user, credential), ssh.as_deref())),
+        }
+    }
 }
 
 /// A destination a process connects to, as the gate or the kernel names it.
@@ -537,7 +559,7 @@ const CLOSED_SOCKETS: &str = "Unix sockets are closed: a `connect` entry opens o
 
 /// Why a connection is denied when no `connect` entry allows it: what `piton sandbox why --connect` prints for a host.
 const CLOSED_NETWORK: &str = "the network is filtered: a `connect` entry opens a host or port (global config.toml or a \
-                              config.local.toml); a sandboxed session asks about a host through Piton's gate";
+                              config.local.toml)";
 
 /// Why creating a socket is denied when no rule decides.
 const CLOSED_BIND: &str = "creating Unix sockets is closed: a `bind` entry opens a path (global config.toml or a \
@@ -923,6 +945,7 @@ mod tests {
                 port: 60001,
                 user: "pi".into(),
                 credential: "c".into(),
+                ssh: None,
             },
         });
         let rules = filtered.seatbelt().unwrap();

@@ -289,6 +289,8 @@ pub enum Lift {
     Bind(PathBuf),
     /// `services = [name]`: one Mach service.
     Service(ServiceName),
+    /// `connect = ["host:port"]`: a network destination (the gate's network question).
+    Network(crate::config::NetworkTarget),
 }
 
 impl Lift {
@@ -300,6 +302,7 @@ impl Lift {
             Lift::Connect(path) => ("connect", path.display().to_string()),
             Lift::Bind(path) => ("bind", path.display().to_string()),
             Lift::Service(name) => ("services", name.to_string()),
+            Lift::Network(target) => ("connect", target.to_string()),
         }
     }
 
@@ -310,6 +313,7 @@ impl Lift {
                 crate::config::SilenceTarget::Path(path.display().to_string())
             }
             Lift::Service(name) => crate::config::SilenceTarget::Service(name.to_string()),
+            Lift::Network(target) => crate::config::SilenceTarget::Host(target.to_string()),
         }
     }
 
@@ -324,6 +328,7 @@ impl Lift {
                 .push(crate::config::Connect::Socket(path.display().to_string())),
             Lift::Bind(path) => lists.bind.push(path.display().to_string()),
             Lift::Service(name) => lists.services.push(ServiceEntry::Name(name.clone())),
+            Lift::Network(target) => lists.connect.push(crate::config::Connect::Network(target.clone())),
         }
         lists
     }
@@ -1014,6 +1019,16 @@ mod tests {
                 }
                 return policy;
             }
+            Lift::Network(to) => {
+                let mut policy = launch.clone();
+                if let Network::Filtered { grants, .. } = &mut policy.network {
+                    grants.push(crate::launch::sandbox::NetworkGrant {
+                        target: to.clone(),
+                        source: Source::Workspace,
+                    });
+                }
+                return policy;
+            }
         };
         let mut policy = launch.clone();
         policy.rules.insert(
@@ -1042,7 +1057,7 @@ mod tests {
                     },
                 );
             }
-            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) | Lift::Service(_) => {}
+            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) | Lift::Service(_) | Lift::Network(_) => {}
         }
         policy
     }

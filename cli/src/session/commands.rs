@@ -263,9 +263,19 @@ impl Calls {
         }
     }
 
-    /// Follows `tool_execution_start` and `tool_execution_end` of bash calls.
-    pub fn track(&mut self, kind: &str, record: &Map<String, Value>) {
+    /// Follows `tool_execution_start` and `tool_execution_end` of bash calls. Returns the tags of the calls that ended.
+    pub fn track(&mut self, kind: &str, record: &Map<String, Value>) -> Vec<String> {
         let id = || record.get("toolCallId").and_then(Value::as_str).map(str::to_string);
+        let before: Vec<u64> = self.calls.values().map(|c| c.number).collect();
+        self.follow(kind, record, id);
+        before
+            .into_iter()
+            .filter(|n| !self.calls.values().any(|c| c.number == *n))
+            .map(|n| format!("{}-{n}", self.tag_prefix))
+            .collect()
+    }
+
+    fn follow(&mut self, kind: &str, record: &Map<String, Value>, id: impl Fn() -> Option<String>) {
         match kind {
             "tool_execution_start" if record.get("toolName").and_then(Value::as_str) == Some("bash") => {
                 let Some(id) = id() else { return };
@@ -353,6 +363,14 @@ impl Calls {
             call.refusals.push(refusal);
         }
         true
+    }
+
+    /// The command of the call `id`, running or recently ended.
+    pub fn command_of(&self, id: &str) -> Option<&str> {
+        self.calls
+            .get(id)
+            .or_else(|| self.ended.iter().rev().find(|(i, _)| i == id).map(|(_, c)| c))
+            .map(|c| c.command.as_str())
     }
 
     /// The user denied Piton's question about the running call `id`: a rerun the agent asks for in this run is refused.

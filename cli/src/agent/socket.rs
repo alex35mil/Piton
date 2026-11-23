@@ -36,6 +36,8 @@ pub const SOCKET_ENV: &str = "PITON_AGENT_SOCKET";
 #[derive(Debug, Default)]
 pub struct Tokens {
     by_token: Mutex<HashMap<String, SessionKey>>,
+    /// One-time tokens for reporting a session's upstream proxy (fnox's).
+    gate: Mutex<HashMap<String, SessionKey>>,
 }
 
 impl Tokens {
@@ -52,6 +54,19 @@ impl Tokens {
 
     pub fn forget(&self, key: SessionKey) {
         lock(&self.by_token).retain(|_, k| *k != key);
+        lock(&self.gate).retain(|_, k| *k != key);
+    }
+
+    /// A one-time token for reporting `key`'s upstream proxy.
+    pub fn issue_gate(&self, key: SessionKey) -> std::io::Result<String> {
+        let token = random_bytes_hex(32)?;
+        lock(&self.gate).insert(token.clone(), key);
+        Ok(token)
+    }
+
+    /// The session a gate token was issued for; the token is spent.
+    pub fn spend_gate(&self, token: &str) -> Option<SessionKey> {
+        lock(&self.gate).remove(token)
     }
 }
 
@@ -85,7 +100,13 @@ enum Request {
         #[serde(flatten)]
         request: super::RunRequest,
     },
+    /// fnox's proxy URL, reported once by the helper that starts pi behind fnox, before it applies the sandbox: the
+    /// session's gate forwards through it. The token is the launch's one-time [`GATE_TOKEN_ENV`].
+    GateUpstream { token: String, url: String },
 }
+
+/// The variable that carries a launch's one-time gate token to the helper (removed before pi starts).
+pub const GATE_TOKEN_ENV: &str = "PITON_GATE_TOKEN";
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -121,6 +142,8 @@ enum Response {
     Error {
         message: String,
     },
+    /// A gate upstream was taken.
+    Reported,
 }
 
 /// Binds the socket, owner-only and replacing a stale one.
@@ -416,6 +439,19 @@ async fn respond(daemon: &Daemon, request: Request) -> Response {
             }
         }
         Request::RunCommand { .. } => unreachable!("handled with its stream"),
+        Request::GateUpstream { token, url } => {
+            let Some(handle) = daemon
+                .agent_tokens()
+                .spend_gate(&token)
+                .and_then(|key| daemon.session(key))
+            else {
+                return unknown();
+            };
+            match handle.tx.send(SessionCmd::GateUpstream { url }) {
+                Ok(()) => Response::Reported,
+                Err(_) => unknown(),
+            }
+        }
     }
 }
 

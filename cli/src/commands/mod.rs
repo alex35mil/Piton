@@ -103,6 +103,10 @@ enum Cmd {
         #[usage(double_dash = "required")]
         command: Vec<String>,
     },
+    /// Tunnel stdin and stdout to HOST:PORT through the gate in `HTTPS_PROXY` (ssh's ProxyCommand in a sandbox with a
+    /// filtered network).
+    #[usage(name = "gate-connect", hide)]
+    GateConnect { host: String, port: u16 },
     /// Check what this host needs (the Mac app's onboarding runs this), and do the steps piton can do itself.
     Setup {
         #[usage(subcommand)]
@@ -357,6 +361,15 @@ pub fn main() -> ExitCode {
             eprintln!("piton launch-exec: {error}");
             return ExitCode::from(126);
         }
+        Cmd::GateConnect { host, port } => {
+            return match crate::gate::ssh::connect(host, *port) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(why) => {
+                    eprintln!("piton: {host}:{port}: {why}");
+                    ExitCode::from(255)
+                }
+            };
+        }
         Cmd::Tools => {
             println!(
                 "{}",
@@ -400,6 +413,7 @@ pub fn main() -> ExitCode {
         | Cmd::Config { .. }
         | Cmd::SandboxExec { .. }
         | Cmd::LaunchExec { .. }
+        | Cmd::GateConnect { .. }
         | Cmd::Tools
         | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
     };
@@ -447,6 +461,7 @@ async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
         | Cmd::Config { .. }
         | Cmd::SandboxExec { .. }
         | Cmd::LaunchExec { .. }
+        | Cmd::GateConnect { .. }
         | Cmd::Tools => {
             unreachable!("handled before the runtime starts")
         }

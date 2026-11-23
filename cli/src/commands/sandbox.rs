@@ -16,15 +16,15 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     let workspace = match &action {
         SandboxAction::Show { workspace } | SandboxAction::Why { workspace, .. } => workspace.clone(),
     };
-    let (policy, profile, silence) = match policy(config, workspace).await {
-        Ok((resolution, warnings)) => {
+    let (policy, profile, silence, catalog) = match policy(config, workspace).await {
+        Ok((resolution, warnings, catalog)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
             }
             for warning in &warnings {
                 eprintln!("piton: warning: {warning}");
             }
-            (resolution.policy, resolution.profile, resolution.silence)
+            (resolution.policy, resolution.profile, resolution.silence, catalog)
         }
         Err(message) => {
             eprintln!("piton: {message}");
@@ -41,6 +41,10 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                     .iter()
                     .map(|s| serde_json::json!({ "entry": s.entry(), "source": s.source.to_string() }))
                     .collect::<Vec<_>>(),
+                // Hosts pi reaches without asking under a filtered network, and the models pi discovered (listed,
+                // never trusted).
+                "pi_hosts": catalog.trusted(),
+                "pi_discovered_models": catalog.discovered(),
             });
             println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
             ExitCode::SUCCESS
@@ -55,10 +59,21 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                     match (text.starts_with('/'), launch::sandbox::Destination::parse(&text)) {
                         (false, Some(to)) => {
                             let decision = policy.decide_network(&to);
-                            let outcome = if decision.allowed { "allowed" } else { "denied" };
+                            let (allowed, because) = match (decision.allowed, catalog.allows(&to.host, to.port)) {
+                                (true, _) => (true, explain(&decision.source)),
+                                (false, Some(pi)) => (true, format!("pi reaches it: {}", pi.source)),
+                                (false, None) => (
+                                    false,
+                                    format!(
+                                        "{}; in a session, Piton's gate asks you first",
+                                        explain(&decision.source)
+                                    ),
+                                ),
+                            };
+                            let outcome = if allowed { "allowed" } else { "denied" };
                             println!("{outcome}: connect to {to}");
-                            println!("  because: {}", explain(&decision.source));
-                            return match decision.allowed {
+                            println!("  because: {because}");
+                            return match allowed {
                                 true => ExitCode::SUCCESS,
                                 false => ExitCode::from(4),
                             };
@@ -105,7 +120,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
 async fn policy(
     config: &DaemonConfig,
     workspace: Option<PathBuf>,
-) -> Result<(Resolution, Vec<launch::LaunchWarning>), String> {
+) -> Result<(Resolution, Vec<launch::LaunchWarning>, crate::pi_catalog::Catalog), String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -130,7 +145,22 @@ async fn policy(
         launch::ClaudeSockets::None,
     )
     .await
-    .map(|sandboxed| (sandboxed.resolution, sandboxed.warnings))
+    .map(|sandboxed| {
+        // pi's hosts, as a session's gate trusts them.
+        let builtin = config
+            .pi
+            .command
+            .first()
+            .and_then(|pi| crate::pi_catalog::builtin_for(pi, &sandboxed.env).ok())
+            .unwrap_or_default();
+        let files = crate::pi_catalog::Files::new(
+            sandboxed.resolution.agent_dirs[1].clone(),
+            &config.paths.global,
+            &resolved.levels,
+        );
+        let catalog = crate::pi_catalog::Catalog::new(builtin, files);
+        (sandboxed.resolution, sandboxed.warnings, catalog)
+    })
     .map_err(|e| e.to_string())
 }
 
