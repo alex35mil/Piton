@@ -13,6 +13,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -345,7 +346,7 @@ async fn execute(
         tokio::select! {
             end = &mut run => break end,
             Some(RunEvent::Output(chunk)) = output.recv() => {
-                if !send(write, &Response::Output { data: base64(&chunk) }).await {
+                if !send(write, &Response::Output { data: STANDARD.encode(&chunk) }).await {
                     return None;
                 }
             }
@@ -353,7 +354,14 @@ async fn execute(
     };
     // What the command printed before it ended.
     while let Ok(RunEvent::Output(chunk)) = output.try_recv() {
-        if !send(write, &Response::Output { data: base64(&chunk) }).await {
+        if !send(
+            write,
+            &Response::Output {
+                data: STANDARD.encode(&chunk),
+            },
+        )
+        .await
+        {
             return None;
         }
     }
@@ -372,25 +380,6 @@ async fn execute(
         }
     };
     Some(last)
-}
-
-/// Standard base64 with padding.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-        for i in 0..4 {
-            match i <= chunk.len() {
-                true => out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char),
-                false => out.push('='),
-            }
-        }
-    }
-    out
 }
 
 /// Resolves when the client closes its side (or sends more, which this protocol doesn't allow).
