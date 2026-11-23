@@ -5,6 +5,7 @@ mod config;
 mod daemon;
 mod launch;
 mod logging;
+mod pi;
 mod project;
 mod session;
 mod setup;
@@ -17,5 +18,10 @@ use std::process::ExitCode;
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("PITON_BUILD"), ")");
 
 fn main() -> ExitCode {
+    // Invoked as `ssh` (the link a filtered network's sandbox finds first on PATH): the real ssh, through the gate.
+    if launch::sandbox::network::ssh::invoked_as_ssh() {
+        eprintln!("piton: can't run ssh: {}", launch::sandbox::network::ssh::exec_ssh());
+        return ExitCode::from(255);
+    }
     commands::main()
 }

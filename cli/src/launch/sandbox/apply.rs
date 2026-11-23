@@ -112,6 +112,35 @@ pub fn capabilities(policy: &Policy) -> Result<CapabilitySet, ApplyError> {
     Ok(caps)
 }
 
+/// Sends fnox's proxy URL (its `HTTPS_PROXY`, set for this process) to the daemon over `agent.sock`, once. Failure only
+/// leaves the gate refusing connections, which says why.
+fn report_upstream(token: &str, env: Option<&crate::launch::Env>) {
+    let url = std::env::var("HTTPS_PROXY").ok();
+    let socket = env
+        .and_then(|e| e.get(crate::agent::SOCKET_ENV).cloned())
+        .or_else(|| std::env::var(crate::agent::SOCKET_ENV).ok());
+    let (Some(url), Some(socket)) = (url, socket) else {
+        eprintln!("piton sandbox-exec: no fnox proxy to report to the network gate");
+        return;
+    };
+    let request = serde_json::json!({ "type": "gate_upstream", "token": token, "url": url });
+    let sent = std::os::unix::net::UnixStream::connect(&socket).and_then(|mut s| {
+        use std::io::{BufRead, Write};
+        writeln!(s, "{request}")?;
+        let mut line = String::new();
+        std::io::BufReader::new(s).read_line(&mut line)?;
+        Ok(line)
+    });
+    match sent {
+        Ok(line) if line.contains("\"reported\"") => {}
+        Ok(line) => eprintln!(
+            "piton sandbox-exec: the daemon didn't take fnox's proxy: {}",
+            line.trim()
+        ),
+        Err(e) => eprintln!("piton sandbox-exec: can't report fnox's proxy to the daemon: {e}"),
+    }
+}
+
 /// `piton sandbox-exec -- <command...>`: reads the policy from the environment, sandboxes this process, and replaces
 /// it with the command. Returns only on failure.
 pub fn exec(command: &[std::ffi::OsString]) -> ApplyError {
@@ -122,19 +151,28 @@ pub fn exec(command: &[std::ffi::OsString]) -> ApplyError {
         let (program, args) = command.split_first().ok_or(ApplyError::NoCommand)?;
         // Behind fnox, pi's environment comes from the handoff (fnox itself ran with the daemon's base environment).
         let handoff = crate::launch::handoff::from_process().map_err(|e| ApplyError::Invalid(e.to_string()))?;
+        // Behind fnox with a filtered network: tell the session's gate where fnox's proxy is, before the sandbox closes
+        // the daemon's socket to anything but `agent.sock` (which stays open, but the token is spent once).
+        if let Ok(token) = std::env::var(crate::agent::GATE_TOKEN_ENV) {
+            report_upstream(&token, handoff.as_ref());
+        }
         nono::Sandbox::apply_auto(&caps).map_err(|e| ApplyError::Sandbox(e.to_string()))?;
         use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(program);
         cmd.args(args);
-        match handoff {
-            Some(env) => {
-                // With the environment replaced, the program is found through pi's PATH.
-                cmd.env_clear().envs(env).env_remove(POLICY_ENV);
-            }
-            None => {
-                cmd.env_remove(POLICY_ENV);
-            }
+        // The command's environment: the handoff's, else this process's own.
+        let mut env: crate::launch::Env = match handoff {
+            Some(env) => env,
+            None => std::env::vars().collect(),
+        };
+        env.remove(POLICY_ENV);
+        env.remove(crate::agent::GATE_TOKEN_ENV);
+        // A filtered network's processes reach hosts only through their gate, whatever the environment said.
+        if let Some((url, ssh)) = policy.network.proxy() {
+            crate::launch::sandbox::network::set_proxy_env(&mut env, &url, ssh);
         }
+        // With the environment replaced, the program is found through its PATH.
+        cmd.env_clear().envs(env);
         let source = cmd.exec();
         Err(ApplyError::Exec {
             program: program.to_string_lossy().into_owned(),

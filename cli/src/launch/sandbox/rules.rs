@@ -3,7 +3,8 @@
 //! does [`Policy::decide`], so the explanation is the rule that decided.
 //!
 //! The base, applied first: everything is readable, nothing is writable, and no Unix socket can be connected to or
-//! created. TCP stays as nono leaves it (open; #228 routes it through a proxy).
+//! created. The network is [`Network::Open`] (as nono leaves it) or [`Network::Filtered`]: only the listed ports and
+//! the gate's, Piton's proxy, which decides named hosts (`network/`).
 
 use std::path::{Path, PathBuf};
 
@@ -99,10 +100,8 @@ pub struct Policy {
     pub services: Services,
     /// Whether processes may launch apps and send Apple Events.
     pub apps: Apps,
-    /// The network destinations `connect` grants, in order: carried for `piton sandbox show` and the network filter
-    /// (#228). They decide nothing yet: TCP is open.
-    #[serde(default)]
-    pub network: Vec<NetworkGrant>,
+    /// TCP and UDP: open, or only what `connect` lists (ports in Seatbelt, named hosts through the gate).
+    pub network: Network,
     /// The launch's tag: every deny rule carries it as its message, so the kernel's record of a refusal names the
     /// session it came from (`(with message "piton-<tag>")`). Empty: untagged (`piton sandbox show`, tests).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -147,6 +146,117 @@ pub enum Apps {
 pub struct NetworkGrant {
     pub target: NetworkTarget,
     pub source: Source,
+}
+
+/// A launch's network.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Network {
+    /// Every host and port, from this entry (a `*` in `connect`): nothing is emitted, nono's network stays open.
+    Open { source: Source },
+    /// Only the listed ports (Seatbelt) and the gate's port, through which the gate decides named hosts.
+    Filtered { grants: Vec<NetworkGrant>, gate: Gate },
+}
+
+/// The gate a filtered network reaches named hosts through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Gate {
+    /// No gate: named hosts are unreachable (the environment tools' sandbox, `piton sandbox show`).
+    None,
+    /// Listening on `127.0.0.1:port`, for this sandbox's proxy user and credential. `ssh`: the folder holding the `ssh`
+    /// wrapper that tunnels through the gate (first on the sandbox's `PATH`), when the daemon could make it.
+    Listening {
+        port: u16,
+        user: String,
+        credential: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh: Option<PathBuf>,
+    },
+}
+
+impl Network {
+    /// The proxy URL this sandbox's processes use and the `ssh` wrapper's folder, when it has a gate.
+    pub fn proxy(&self) -> Option<(String, Option<&Path>)> {
+        match self {
+            Network::Open { .. } | Network::Filtered { gate: Gate::None, .. } => None,
+            Network::Filtered {
+                gate:
+                    Gate::Listening {
+                        port,
+                        user,
+                        credential,
+                        ssh,
+                    },
+                ..
+            } => Some((
+                crate::launch::sandbox::network::proxy_url(*port, user, credential),
+                ssh.as_deref(),
+            )),
+        }
+    }
+}
+
+/// A destination a process connects to, as the gate or the kernel names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    /// A host name or an IP address, lowercase, without brackets.
+    pub host: String,
+    pub port: u16,
+}
+
+impl Destination {
+    /// `host:port`, `[v6]:port`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (host, port) = text.rsplit_once(':')?;
+        let port = port.parse::<u16>().ok().filter(|p| *p != 0)?;
+        let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+        match host.is_empty() || host.contains(['/', ' ']) {
+            true => None,
+            false => Some(Self {
+                host: host.to_ascii_lowercase(),
+                port,
+            }),
+        }
+    }
+
+    /// Whether this names this Mac: `localhost`, a name under `.localhost`, or a loopback address.
+    pub fn local(&self) -> bool {
+        self.host == "localhost"
+            || self.host.ends_with(".localhost")
+            || self.host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    }
+}
+
+impl std::fmt::Display for Destination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.host.contains(':') {
+            true => write!(f, "[{}]:{}", self.host, self.port),
+            false => write!(f, "{}:{}", self.host, self.port),
+        }
+    }
+}
+
+impl NetworkTarget {
+    /// Whether this entry allows connecting to `to`.
+    pub fn allows(&self, to: &Destination) -> bool {
+        match self {
+            NetworkTarget::Anywhere => true,
+            NetworkTarget::AnyHostPort { port } => *port == to.port,
+            NetworkTarget::LocalAnyPort => to.local(),
+            NetworkTarget::LocalPort { port } => to.local() && *port == to.port,
+            NetworkTarget::Host { host, port } => {
+                let host_matches = match host.strip_prefix("*.") {
+                    Some(domain) => to
+                        .host
+                        .strip_suffix(domain)
+                        .is_some_and(|sub| sub.len() > 1 && sub.ends_with('.')),
+                    None => *host == to.host,
+                };
+                host_matches && port.is_none_or(|p| p == to.port)
+            }
+        }
+    }
 }
 
 /// Why an access is allowed or denied: the rule that decided, or the base.
@@ -197,6 +307,58 @@ impl Policy {
             }
         }
         decision
+    }
+
+    /// The decision for connecting to `to` by this policy's entries: the last `connect` entry that allows it, or the
+    /// base. A named host the entries don't allow may still pass the gate (pi's own hosts, the user's answer), which the
+    /// gate decides after this.
+    pub fn decide_network(&self, to: &Destination) -> Decision {
+        match &self.network {
+            Network::Open { source } => Decision {
+                allowed: true,
+                source: source.clone(),
+            },
+            Network::Filtered { grants, .. } => match grants.iter().rev().find(|g| g.target.allows(to)) {
+                Some(grant) => Decision {
+                    allowed: true,
+                    source: grant.source.clone(),
+                },
+                None => Decision {
+                    allowed: false,
+                    source: Source::BuiltIn {
+                        what: CLOSED_NETWORK.into(),
+                    },
+                },
+            },
+        }
+    }
+
+    /// The TCP and UDP rules of a filtered network, after the socket rules: every destination denied, then each port
+    /// entry and the gate's port allowed. Named hosts emit nothing: Seatbelt can't name a host ("host must be * or
+    /// localhost"), so only the gate reaches them.
+    fn network_rules(&self) -> Vec<String> {
+        let (grants, gate) = match &self.network {
+            Network::Open { .. } => return Vec::new(),
+            Network::Filtered { grants, gate } => (grants, gate),
+        };
+        let mut out = vec![r#"(deny network-outbound (remote ip "*:*"))"#.to_string()];
+        for grant in grants {
+            let address = match &grant.target {
+                NetworkTarget::LocalPort { port } => format!("localhost:{port}"),
+                NetworkTarget::LocalAnyPort => "localhost:*".to_string(),
+                NetworkTarget::AnyHostPort { port } => format!("*:{port}"),
+                // `Anywhere` makes the network open; a host is the gate's.
+                NetworkTarget::Anywhere | NetworkTarget::Host { .. } => continue,
+            };
+            out.push(format!(r#"(allow network-outbound (remote ip "{address}"))"#));
+        }
+        match gate {
+            Gate::None => {}
+            Gate::Listening { port, .. } => {
+                out.push(format!(r#"(allow network-outbound (remote tcp "localhost:{port}"))"#));
+            }
+        }
+        out
     }
 
     /// The decision for a lookup of the Mach service `service`, as Seatbelt makes it: the keychain's decide last.
@@ -379,7 +541,12 @@ impl Policy {
             .into_iter()
             .partition(|rule| rule.starts_with("(allow network") || rule.starts_with("(deny network"));
         let base = SOCKET_BASE.iter().map(|rule| rule.to_string());
-        Ok(other.into_iter().chain(base).chain(network).collect())
+        Ok(other
+            .into_iter()
+            .chain(base)
+            .chain(network)
+            .chain(self.network_rules())
+            .collect())
     }
 }
 
@@ -391,6 +558,10 @@ const SOCKET_BASE: [&str; 2] = [
 
 /// Why a socket connect is denied when no rule decides: what `piton sandbox why` prints.
 const CLOSED_SOCKETS: &str = "Unix sockets are closed: a `connect` entry opens one (global config.toml or a \
+                              config.local.toml)";
+
+/// Why a connection is denied when no `connect` entry allows it: what `piton sandbox why --connect` prints for a host.
+const CLOSED_NETWORK: &str = "the network is filtered: a `connect` entry opens a host or port (global config.toml or a \
                               config.local.toml)";
 
 /// Why creating a socket is denied when no rule decides.
@@ -467,7 +638,9 @@ mod tests {
                 source: crate::launch::sandbox::Source::Workspace,
             },
             apps: crate::launch::sandbox::Apps::Closed,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a);
@@ -513,7 +686,9 @@ mod tests {
                 source: crate::launch::sandbox::Source::Workspace,
             },
             apps: crate::launch::sandbox::Apps::Closed,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a).allowed;
@@ -556,7 +731,9 @@ mod tests {
                 source: crate::launch::sandbox::Source::Workspace,
             },
             apps: crate::launch::sandbox::Apps::Closed,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         };
         assert!(policy.decide(Path::new("/a/lock-1/x"), Access::Write).allowed);
@@ -648,7 +825,9 @@ mod tests {
             keychain,
             services,
             apps,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         }
     }
@@ -723,5 +902,144 @@ mod tests {
         // Tagged: the list's deny carries the tag, so a blocked lookup reaches the question.
         let tagged = Policy { tag: "t".into(), ..p }.seatbelt().unwrap();
         assert!(tagged.contains(&r#"(deny mach-lookup (with message "piton-t"))"#.to_string()));
+    }
+
+    fn grant(text: &str) -> NetworkGrant {
+        match crate::config::Connect::try_from(text.to_string()).unwrap() {
+            crate::config::Connect::Network(target) => NetworkGrant {
+                target,
+                source: Source::Workspace,
+            },
+            crate::config::Connect::Socket(_) => panic!("{text} is a socket"),
+        }
+    }
+
+    fn network_policy(network: Network) -> Policy {
+        Policy {
+            network,
+            ..services_policy(
+                Services::Every {
+                    source: Source::Workspace,
+                },
+                Apps::Closed,
+                false,
+            )
+        }
+    }
+
+    fn to(text: &str) -> Destination {
+        Destination::parse(text).unwrap_or_else(|| panic!("{text}"))
+    }
+
+    /// An open network emits nothing of its own; a filtered one denies every destination after the socket rules, then
+    /// allows each port entry and the gate's port, in order. Named hosts emit nothing: only the gate reaches them.
+    #[test]
+    fn a_filtered_network_in_seatbelt() {
+        let open = network_policy(Network::Open {
+            source: Source::Workspace,
+        });
+        assert!(!open.seatbelt().unwrap().iter().any(|r| r.contains("remote")));
+
+        let filtered = network_policy(Network::Filtered {
+            grants: ["localhost:5432", "localhost:*", "*:22", "github.com", "*.npmjs.org:443"]
+                .map(grant)
+                .to_vec(),
+            gate: Gate::Listening {
+                port: 60001,
+                user: "pi".into(),
+                credential: "c".into(),
+                ssh: None,
+            },
+        });
+        let rules = filtered.seatbelt().unwrap();
+        let remote: Vec<&str> = rules
+            .iter()
+            .filter(|r| r.contains("remote"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            remote,
+            [
+                r#"(deny network-outbound (remote ip "*:*"))"#,
+                r#"(allow network-outbound (remote ip "localhost:5432"))"#,
+                r#"(allow network-outbound (remote ip "localhost:*"))"#,
+                r#"(allow network-outbound (remote ip "*:22"))"#,
+                r#"(allow network-outbound (remote tcp "localhost:60001"))"#,
+            ]
+        );
+        let socket_base = rules.iter().position(|r| r.contains(r#"(subpath "/")"#)).unwrap();
+        let deny_all = rules.iter().position(|r| r.contains(r#"remote ip "*:*""#)).unwrap();
+        assert!(socket_base < deny_all, "after the socket rules");
+        super::super::apply::capabilities(&filtered).expect("nono accepts it");
+
+        // Tagged: the deny carries the launch's tag, so a direct connection's refusal reaches its call.
+        let tagged = Policy {
+            tag: "t".into(),
+            ..filtered
+        }
+        .seatbelt()
+        .unwrap();
+        assert!(tagged.contains(&r#"(deny network-outbound (remote ip "*:*") (with message "piton-t"))"#.to_string()));
+
+        // No gate: no gate port.
+        let none = network_policy(Network::Filtered {
+            grants: Vec::new(),
+            gate: Gate::None,
+        });
+        let rules = none.seatbelt().unwrap();
+        assert!(rules.iter().any(|r| r.contains(r#"remote ip "*:*""#)));
+        assert!(!rules.iter().any(|r| r.contains("remote tcp")));
+    }
+
+    /// `decide_network` by entry: hosts exactly or by subdomain, on any or the listed port; ports on any host; local
+    /// ports for this Mac's names and loopback addresses only.
+    #[test]
+    fn network_entries_decide_destinations() {
+        let policy = network_policy(Network::Filtered {
+            grants: ["github.com:22", "*.npmjs.org", "10.0.0.5", "*:5432", "localhost:3000"]
+                .map(grant)
+                .to_vec(),
+            gate: Gate::None,
+        });
+        let allowed = |t: &str| policy.decide_network(&to(t)).allowed;
+        assert!(allowed("github.com:22"));
+        assert!(!allowed("github.com:443"), "only the listed port");
+        assert!(!allowed("api.github.com:22"), "exact host");
+        assert!(allowed("registry.npmjs.org:443"));
+        assert!(allowed("a.b.npmjs.org:80"));
+        assert!(
+            !allowed("npmjs.org:443"),
+            "a subdomain pattern doesn't cover the domain itself"
+        );
+        assert!(!allowed("evilnpmjs.org:443"));
+        assert!(allowed("10.0.0.5:8080"));
+        assert!(allowed("db.example.com:5432"), "a port on any host");
+        assert!(allowed("localhost:3000"));
+        assert!(allowed("127.0.0.1:3000"));
+        assert!(allowed("[::1]:3000"));
+        assert!(!allowed("localhost:3001"));
+        assert!(
+            !allowed("example.com:3000"),
+            "a local port isn't a port on another host"
+        );
+        assert!(!allowed("example.com:443"));
+        assert_eq!(
+            policy.decide_network(&to("example.com:443")).source,
+            Source::BuiltIn {
+                what: CLOSED_NETWORK.into()
+            }
+        );
+
+        let open = network_policy(Network::Open {
+            source: Source::Workspace,
+        });
+        assert!(open.decide_network(&to("example.com:443")).allowed);
+
+        // Destinations as the gate and the kernel name them.
+        assert_eq!(to("GitHub.com:22").host, "github.com");
+        assert_eq!(to("[2001:db8::1]:443").to_string(), "[2001:db8::1]:443");
+        for bad in ["github.com", "github.com:0", ":443", "/tmp/x.sock", "a b:1"] {
+            assert!(Destination::parse(bad).is_none(), "{bad}");
+        }
     }
 }

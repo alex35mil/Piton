@@ -106,6 +106,11 @@ pub fn silence_entry(blocked: &Blocked, why: &NoLift, context: &Context) -> Opti
                 target: SilenceTarget::Service(blocked.target.to_string()),
                 process,
             }),
+            // A connection to a host or an address and port.
+            "network-outbound" => crate::launch::sandbox::Destination::parse(blocked.target).map(|to| Silence {
+                target: SilenceTarget::Host(to.to_string()),
+                process,
+            }),
             _ => None,
         };
     }
@@ -233,6 +238,10 @@ mod tests {
                 None => PathBuf::from(p),
             }),
             SilenceTarget::Service(s) => crate::launch::sandbox::Silent::Service(s.clone()),
+            SilenceTarget::Host(h) => match crate::config::Connect::try_from(h.clone()) {
+                Ok(crate::config::Connect::Network(t)) => crate::launch::sandbox::Silent::Host(t),
+                Ok(crate::config::Connect::Socket(_)) | Err(_) => panic!("{h}"),
+            },
         };
         let resolved = [Silenced {
             target: target_path,
@@ -432,7 +441,11 @@ mod tests {
             "1.2.3.4:443",
             "network-outbound 1.2.3.4:443",
         );
-        assert_eq!(silence_entry(&tcp, &NoLift::Unsupported, &context), None);
-        assert!(!notice(&tcp, &NoLift::Unsupported, &context).contains("silence"));
+        // A connection's notice names a host entry, which silences that destination only.
+        let entry = silence_entry(&tcp, &NoLift::Unsupported, &context).unwrap();
+        assert_eq!(entry.target, SilenceTarget::Host("1.2.3.4:443".into()));
+        assert!(notice(&tcp, &NoLift::Unsupported, &context).contains("silence"));
+        assert!(silences(&entry, &home, "node", "network-outbound", "1.2.3.4:443"));
+        assert!(!silences(&entry, &home, "node", "network-outbound", "1.2.3.4:80"));
     }
 }

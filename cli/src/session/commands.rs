@@ -49,6 +49,9 @@ pub struct BashCall {
     pub declined: bool,
 }
 
+/// The process name a gate refusal is recorded under.
+pub const GATE_PROCESS: &str = "gate";
+
 /// One refusal of a call's sandbox, as the kernel names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallRefusal {
@@ -116,6 +119,8 @@ pub struct Commands {
     pub paths: Paths,
     /// What a launch-time grant list lists, for matching.
     pub grants: Vec<crate::config::Listed<CommandGrant>>,
+    /// The configuration levels the launch read (its `.piton/` and `.agents/` folders, the global tier included).
+    pub levels: Vec<PathBuf>,
 }
 
 /// The question the user is being asked, and where the decision goes.
@@ -209,6 +214,35 @@ impl Commands {
         Ok(path)
     }
 
+    /// Whether this session's configuration reads `file`: one of the files a network question saves to (its own
+    /// project's or the global one, which exist or not), or a file in a level folder of its chain.
+    pub fn reads(&self, file: &Path) -> bool {
+        let own = [PersistScope::Project, PersistScope::Global]
+            .into_iter()
+            .filter_map(|scope| self.scope_file(scope));
+        let in_level = |dir: &Path| self.levels.iter().any(|l| l == dir);
+        own.into_iter().any(|f| f == file) || file.parent().is_some_and(in_level)
+    }
+
+    /// A saved `connect` entry joins the launch's policy and every narrowed grant's, so calls started from now on reach
+    /// it. (`all` opens the network already.)
+    pub fn add_network_entry(&mut self, target: crate::config::NetworkTarget, source: crate::launch::sandbox::Source) {
+        let grant = crate::launch::sandbox::NetworkGrant { target, source };
+        let add = |policy: &mut crate::launch::sandbox::Policy| {
+            if let crate::launch::sandbox::Network::Filtered { grants, .. } = &mut policy.network
+                && !grants.contains(&grant)
+            {
+                grants.push(grant.clone());
+            }
+        };
+        add(&mut self.policies.launch);
+        for (_, runtime) in &mut self.policies.entries {
+            if let EntryRuntime::Sandbox(Ok(policy)) = runtime {
+                add(policy);
+            }
+        }
+    }
+
     /// The file `path` would be checked as listed in when saved in `scope`: what an offer's entry is resolved with.
     pub fn scope_file(&self, scope: PersistScope) -> Option<PathBuf> {
         self.file(scope).path(&self.paths).ok()
@@ -263,9 +297,19 @@ impl Calls {
         }
     }
 
-    /// Follows `tool_execution_start` and `tool_execution_end` of bash calls.
-    pub fn track(&mut self, kind: &str, record: &Map<String, Value>) {
+    /// Follows `tool_execution_start` and `tool_execution_end` of bash calls. Returns the tags of the calls that ended.
+    pub fn track(&mut self, kind: &str, record: &Map<String, Value>) -> Vec<String> {
         let id = || record.get("toolCallId").and_then(Value::as_str).map(str::to_string);
+        let before: Vec<u64> = self.calls.values().map(|c| c.number).collect();
+        self.follow(kind, record, id);
+        before
+            .into_iter()
+            .filter(|n| !self.calls.values().any(|c| c.number == *n))
+            .map(|n| format!("{}-{n}", self.tag_prefix))
+            .collect()
+    }
+
+    fn follow(&mut self, kind: &str, record: &Map<String, Value>, id: impl Fn() -> Option<String>) {
         match kind {
             "tool_execution_start" if record.get("toolName").and_then(Value::as_str) == Some("bash") => {
                 let Some(id) = id() else { return };
@@ -353,6 +397,14 @@ impl Calls {
             call.refusals.push(refusal);
         }
         true
+    }
+
+    /// The command of the call `id`, running or recently ended.
+    pub fn command_of(&self, id: &str) -> Option<&str> {
+        self.calls
+            .get(id)
+            .or_else(|| self.ended.iter().rev().find(|(i, _)| i == id).map(|(_, c)| c))
+            .map(|c| c.command.as_str())
     }
 
     /// The user denied Piton's question about the running call `id`: a rerun the agent asks for in this run is refused.
@@ -552,15 +604,19 @@ impl Commands {
                 let silenced =
                     crate::launch::sandbox::silenced(&self.policies.silence, &r.process, &r.operation, &r.target)
                         .is_some();
-                let treated = match silenced {
-                    true => Treated::Shown("silenced"),
-                    false => match command_block(&self.policies.launch, &self.policies.all, &r.operation, &r.target) {
-                        CommandBlock::Liftable => Treated::Asked,
-                        CommandBlock::CredentialRead => Treated::Shown("a credential read"),
-                        CommandBlock::Floor => Treated::Shown("protected: no approval lifts it"),
-                        CommandBlock::Unsupported => Treated::Shown("not one an approval lifts"),
-                        CommandBlock::Incidental => Treated::Incidental,
-                    },
+                let treated = match (silenced, r.process.as_str()) {
+                    (true, _) => Treated::Shown("silenced"),
+                    // The gate already asked the user about this host, or a `silence` entry refused it.
+                    (false, GATE_PROCESS) => Treated::Shown("refused by the network gate"),
+                    (false, _) => {
+                        match command_block(&self.policies.launch, &self.policies.all, &r.operation, &r.target) {
+                            CommandBlock::Liftable => Treated::Asked,
+                            CommandBlock::CredentialRead => Treated::Shown("a credential read"),
+                            CommandBlock::Floor => Treated::Shown("protected: no approval lifts it"),
+                            CommandBlock::Unsupported => Treated::Shown("not one an approval lifts"),
+                            CommandBlock::Incidental => Treated::Incidental,
+                        }
+                    }
                 };
                 (r.summary(), treated)
             })
@@ -760,7 +816,9 @@ mod tests {
                 source: crate::launch::sandbox::Source::Workspace,
             },
             apps: crate::launch::sandbox::Apps::Closed,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         }
     }
@@ -784,7 +842,7 @@ mod tests {
                 all,
                 entries: grants
                     .iter()
-                    .map(|g| (g.clone(), EntryRuntime::Sandbox(Ok(policy()))))
+                    .map(|g| (g.clone(), EntryRuntime::Sandbox(Ok(Box::new(policy())))))
                     .collect(),
                 resolver: crate::launch::sandbox::grant::Resolver::new(
                     crate::config::LaunchConfig {
@@ -813,6 +871,7 @@ mod tests {
                 global: dir.join("g"),
             },
             grants,
+            levels: vec![dir.join("g"), dir.join(".piton")],
         }
     }
 
@@ -895,6 +954,51 @@ mod tests {
 
     fn after(c: &Commands, calls: &mut Calls, req: &RunRequest, last: bool) -> AfterFailure {
         c.after_failure(calls, req, last, false)
+    }
+
+    /// A `connect` entry saved from a network question reaches calls that start afterwards, at the session's policy and
+    /// a grant's; only a session whose configuration reads the file takes it.
+    #[test]
+    fn a_saved_network_entry_reaches_later_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let filtered = |p: &mut crate::launch::sandbox::Policy| {
+            p.network = crate::launch::sandbox::Network::Filtered {
+                grants: Vec::new(),
+                gate: crate::launch::sandbox::Gate::None,
+            };
+        };
+        let mut c = commands(dir.path(), &["vendor *"]);
+        filtered(&mut c.policies.launch);
+        for (_, runtime) in &mut c.policies.entries {
+            if let EntryRuntime::Sandbox(Ok(p)) = runtime {
+                filtered(p);
+            }
+        }
+        let to = crate::launch::sandbox::Destination::parse("api.vendor.com:443").unwrap();
+        let saved = dir.path().join(".piton/config.local.toml");
+        assert!(c.reads(&saved));
+        assert!(!c.reads(&dir.path().join("elsewhere/.piton/config.local.toml")));
+        // A project without a `.piton/` folder at launch still reads the file a question saves to.
+        c.levels.clear();
+        assert!(c.reads(&saved), "the project's own file, created by the answer");
+        assert!(c.reads(&dir.path().join("g/config.toml")), "the global file");
+        c.add_network_entry(
+            crate::config::NetworkTarget::Host {
+                host: "api.vendor.com".into(),
+                port: Some(443),
+            },
+            crate::launch::sandbox::Source::Workspace,
+        );
+        let mut calls = Calls::new("t");
+        for (id, command) in [("a", "curl x"), ("b", "vendor sync")] {
+            start(&mut calls, id, command, false);
+            let approved = run(c.decide(&mut calls, &request(dir.path(), id, command, false)));
+            let policy = match &approved.runtime {
+                Runtime::Session(p) | Runtime::Widened { policy: p, .. } => p,
+                Runtime::Host { .. } => panic!("host"),
+            };
+            assert!(policy.decide_network(&to).allowed, "{command}");
+        }
     }
 
     /// A failed call is asked about only for a block an approved rerun lifts, once; everything else is reported with

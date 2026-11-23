@@ -75,6 +75,9 @@ pub enum SilenceTarget {
     Path(String),
     /// A Mach service (`com.apple.SecurityServer`), matched exactly against a lookup of it.
     Service(String),
+    /// A network destination (`api.example.com:443`, `*.example.com:443`), matched against a refused connection to it:
+    /// the host exactly or by subdomain, and the port.
+    Host(String),
 }
 
 impl TryFrom<String> for SilenceTarget {
@@ -84,11 +87,27 @@ impl TryFrom<String> for SilenceTarget {
         if is_grant_path(&target) {
             return Ok(SilenceTarget::Path(target));
         }
+        // `host:port`: a destination. Text ending in `:<digits>` is one, or invalid: never a Mach service.
+        if let Some((_, port)) = target.rsplit_once(':')
+            && !port.is_empty()
+            && port.chars().all(|c| c.is_ascii_digit())
+        {
+            return match Connect::try_from(target.clone()) {
+                Ok(Connect::Network(NetworkTarget::Host { port: Some(_), .. })) => {
+                    Ok(SilenceTarget::Host(target.to_ascii_lowercase()))
+                }
+                Ok(_) | Err(_) => Err(format!(
+                    "silence target {target:?}: a host and port (`api.example.com:443`, `*.example.com:443`), the port \
+                     from 1 to 65535"
+                )),
+            };
+        }
         match ServiceName::valid_text(&target) && !target.contains('*') {
             true => Ok(SilenceTarget::Service(target)),
             false => Err(format!(
                 "silence target {target:?}: a path (absolute, or starting with `~/` or `$`; `*` and `**` segments \
-                 match folders) or a Mach service name (`com.apple.SecurityServer`)"
+                 match folders), a Mach service name (`com.apple.SecurityServer`), or a host and port \
+                 (`api.example.com:443`, `*.example.com:443`)"
             )),
         }
     }
@@ -97,7 +116,7 @@ impl TryFrom<String> for SilenceTarget {
 impl From<SilenceTarget> for String {
     fn from(target: SilenceTarget) -> String {
         match target {
-            SilenceTarget::Path(path) | SilenceTarget::Service(path) => path,
+            SilenceTarget::Path(path) | SilenceTarget::Service(path) | SilenceTarget::Host(path) => path,
         }
     }
 }
@@ -1303,7 +1322,21 @@ mod tests {
             parse("silence = [{ target = \"com.apple.SecurityServer\" }]").unwrap()[0].target,
             SilenceTarget::Service("com.apple.SecurityServer".into())
         );
+        // A host and port; without the port it's a Mach service name.
+        for (text, target) in [
+            ("Api.Example.com:443", SilenceTarget::Host("api.example.com:443".into())),
+            ("*.example.com:443", SilenceTarget::Host("*.example.com:443".into())),
+            ("10.0.0.5:5432", SilenceTarget::Host("10.0.0.5:5432".into())),
+            ("api.example.com", SilenceTarget::Service("api.example.com".into())),
+        ] {
+            assert_eq!(
+                parse(&format!("silence = [{{ target = \"{text}\" }}]")).unwrap()[0].target,
+                target,
+                "{text}"
+            );
+        }
         for bad in [
+            "silence = [{ target = \"example.com:0\" }]",
             "silence = [\"/a\"]",
             "silence = [{ target = \"relative/x\" }]",
             "silence = [{ target = \"**/.git/config\" }]",

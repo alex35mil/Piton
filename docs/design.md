@@ -867,7 +867,7 @@ credentials. Unlike them, Piton sandboxes the whole pi process, not each shell c
 extension and pi package, local MCP servers, and whatever they start are inside one OS boundary, where per-command
 sandboxing would leave them all with the user's access behind application-level checks (OpenCode's experimental
 whole-agent sandbox still trusts its plugins and MCP servers). The cost: pi's own credentials are readable inside,
-and the network can be closed only to everything but pi's own destinations (a proxy, #228).
+and the network can be closed only to everything but pi's own destinations (the gate, below).
 
 **The model.** The base is the floor: everything that can be closed is closed, and every grant list is empty. A
 profile (`[sandbox] profile`: `strict`, `standard` by default, `yolo`) is a fixed set of list entries
@@ -878,8 +878,8 @@ what it lists. Every list entry keeps where it came from (a profile, or the file
 rule's source (`Source::Config` and `Source::Preset` with a `Provenance`), so `piton sandbox why` names it. Each Task
 that closes more of the base (sockets #248, apps #249, the network #228) adds the entries that reopen it to the
 profiles. `connect` is typed at parse time (`Connect`: a socket path, or a `NetworkTarget`: `localhost:PORT`,
-`localhost:*`, `*:PORT`, `*`, a named host): socket entries become connect rules; network entries are carried in the policy
-(`Policy::network`) for the proxy.
+`localhost:*`, `*:PORT`, `*`, a named host): socket entries become connect rules; network entries become the policy's
+`Network`: `Open` when any entry is `*`, else `Filtered` with its grants and its `Gate` ("The network gate").
 
 **Permissions and the sandbox are separate layers.** `[permissions]` decides whether the agent may make a call,
 before it runs; the sandbox decides what a running process may touch. Neither feeds the other. Claude Code merges
@@ -892,10 +892,14 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
 
 1. **Base:** everything is readable, nothing is writable, and no Unix socket can be connected to or created
    (`(deny network-outbound (subpath "/"))` and `(deny network-bind (subpath "/"))`, first in the network rules). A
-   path filter on a network operation matches only Unix sockets, so TCP stays open (pi has to reach its model
-   provider; fetch, MCP, and installs need it too) until #228 routes it through a proxy. A running Neovim runs
-   commands sent to its socket, Docker's controls the host, and the SSH and gpg agents sign with the user's keys, so
-   every socket opens only through an entry.
+   path filter on a network operation matches only Unix sockets. A running Neovim runs commands sent to its socket,
+   Docker's controls the host, and the SSH and gpg agents sign with the user's keys, so every socket opens only
+   through an entry. TCP and UDP are decided after the socket rules: a filtered network emits a tagged
+   `(deny network-outbound (remote ip "*:*"))`, then `(allow network-outbound (remote ip "<entry>"))` for each
+   `localhost:PORT`, `localhost:*`, and `*:PORT` entry, then the gate's port (`(remote tcp "localhost:<port>")`).
+   nono's own `(allow network-outbound)` comes before Piton's platform rules, so the deny wins; listening (`bind`,
+   inbound) stays as nono leaves it (#361). Seatbelt refuses a named host ("host must be * or localhost"), so named
+   hosts are the gate's.
 2. **Grants:** writes to the workspace, `<source>/.piton/.local/`, the temp folders and `/dev`, the `presets`,
    `write`, and `write_file`; DNS (`/var/run/mDNSResponder`); and the `connect` and `bind` socket allows, placed
    before every deny so no entry (yolo's `connect = ["/"]`, standard's `bind = ["/"]`) reopens a credential, a user
@@ -1014,7 +1018,48 @@ through a symlink inside a git checkout that leads out of it; the user's own lin
 
 `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
 
-Known limits: the network isn't restricted yet, so anything readable can leave, and localhost TCP services are reachable (#228); pi's own credentials are readable, except keys behind the
+**The network gate** (`launch/sandbox/network/`, `session/network.rs`, `pi/catalog.rs`). A session whose network is filtered gets a gate:
+an HTTP proxy on 127.0.0.1 in the daemon (`CONNECT` any port, plus absolute-form plain HTTP). `piton sandbox-exec`
+sets the proxy variables to it after applying the sandbox, over whatever the environment had, with
+`NODE_USE_ENV_PROXY=1` and the `ssh` wrapper (`launch/sandbox/network/ssh.rs`: a link to `piton` in `<state>/net/bin`, readable and not
+writable from the sandbox, which runs the real `ssh` with `ProxyCommand=piton gate-connect %h %p`) first on `PATH`.
+
+- **Who asks.** Each sandbox the session starts gets a proxy user and a random credential: pi's (`pi`) at launch, and
+  each bash call's (its tag) when the daemon runs it (`Network::issue`), forgotten when the call ends. A connection
+  without a known user and its credential gets `407`. Seatbelt's port allow alone isn't enough: a `standard`
+  session's `*`, a `localhost:*` entry, or a `*:PORT` reaches any gate's port, and a gate chained to fnox would hand
+  another session that session's secrets; per-sandbox credentials also keep pi's process from borrowing a call's
+  narrowed grant.
+- **Deciding.** The gate sends the session `NetworkAsk`; `network::Network::decide` checks, in order, that sandbox's
+  policy (`Policy::decide_network`), pi's trusted hosts (`pi::catalog::Catalog`), the hosts allowed for the session,
+  and `silence` host entries; otherwise the connection waits on a question, one at a time in the session's slot,
+  connections to the same destination joining it. Answers: allow for the session; allow and save
+  (`connect = ["host:port"]`, `grant::Lift::Network`), which also joins every live sandbox's policy so it applies at
+  once (Seatbelt doesn't change, so no restart); deny and save a `silence` entry (`SilenceTarget::Host`); not now.
+  No answer in `confirmation_timeout_ms`, or no client, refuses it with `403`.
+- **pi's trusted hosts** (`pi/catalog.rs`): the hosts of every provider built into the installed pi and the sign-in hosts
+  in its OAuth code, read by running `builtin.mjs` with Node against pi's package folder (found from its launcher,
+  npm's link or aube's shim), once per package folder; `baseUrl`s in the agent directory's `models.json`; and
+  remote MCP `url`s in the user's own MCP files (the global tier's `mcp.json` and `mcp.local.json`, every level's
+  `mcp.local.json`). Never `models-store.json`: pi rewrites that cache at startup, so the sandbox can write it, and pi
+  uses its `baseUrl`s with the user's keys (#362). Files are re-read when their modification time changes. The same
+  module lists discovered models (untrusted) for the provider selector.
+- **Resolved addresses** (`launch/sandbox/network/addresses.rs`). An allowed name is resolved once and an address that's loopback,
+  unspecified, link-local, multicast, broadcast, cloud metadata, or one of this Mac's interface addresses (IPv4 inside
+  IPv6 forms judged as the IPv4) isn't dialed; an IP the user listed is exempt.
+- **Refusals** answer `403` with the reason as the status phrase and are recorded on the call (`gate`'s
+  `network-outbound host:port`), so a failed call lists them without asking again. A direct connection the sandbox
+  refused (a program that ignores the proxy variables) is the kernel's `network-outbound <ip>:<port>` record: an
+  approved rerun lifts it (`grant::all` opens the network).
+- **fnox.** Behind fnox's proxy, `piton sandbox-exec` reports fnox's `HTTPS_PROXY` over `agent.sock` with a one-time
+  token (`PITON_GATE_TOKEN`, the helper's own variable) before applying the sandbox, and the gate then forwards each
+  allowed tunnel as a `CONNECT` to fnox (`Route::Upstream`); connections wait up to 10 s for it. fnox 1.50 with
+  permissive egress tunnels any port (checked: `CONNECT github.com:22` returns the SSH banner).
+- **Git for workers** (`launch/git.rs`) gets a gate of its own while it runs, decided by the source's policy alone
+  (nobody to ask), dialing directly.
+- `piton sandbox gate` (hidden) starts a gate for a workspace's policy for the host probe.
+
+Known limits: in `standard` and `yolo` the network is open, so anything readable can leave, and localhost TCP services are reachable; a trusted provider host is reachable by anything in pi's process; pi's own credentials are readable, except keys behind the
 credential proxy ("Launching pi"); macOS only.
 
 **Protected files** are everything a later pi loads from the workspace that could widen what an agent may do without

@@ -18,6 +18,8 @@ pub struct SourceGit {
     policy: Policy,
     containment: Containment,
     helper: std::path::PathBuf,
+    /// A filtered network's gate for Git's fetches, while this lives: the policy's entries decide, with nobody to ask.
+    _gate: Option<crate::launch::sandbox::network::Gate>,
 }
 
 impl SourceGit {
@@ -37,13 +39,69 @@ impl SourceGit {
         // A credential proxy that applies here is checked against this sandbox too (no keychain, no writable fnox
         // files), so the user's hooks don't run where launches are refused. Git itself doesn't run behind the proxy.
         let sandboxed = prepare_sandbox(config, tools, &resolved, base, source, ClaudeSockets::None).await?;
+        let mut policy = sandboxed.resolution.policy;
+        let gate = gate_for(&mut policy, config, source)?;
         Ok(Self {
             env: sandboxed.env,
-            policy: sandboxed.resolution.policy,
+            policy,
             containment: containment(),
             helper: helper()?,
+            _gate: gate,
         })
     }
+}
+
+/// A gate for Git under a filtered network: the policy's `connect` entries decide; a host they don't list is refused
+/// and logged (no session to ask). Git doesn't run behind fnox, so the gate dials directly.
+fn gate_for(
+    policy: &mut Policy,
+    config: &DaemonConfig,
+    source: &Path,
+) -> Result<Option<crate::launch::sandbox::network::Gate>, LaunchError> {
+    use crate::launch::sandbox::{Gate, Network};
+    match &policy.network {
+        Network::Open { .. } => return Ok(None),
+        Network::Filtered { .. } => {}
+    }
+    let decider = policy.clone();
+    let source = source.to_path_buf();
+    let decide: crate::launch::sandbox::network::Decide = std::sync::Arc::new(move |_user, to| {
+        let verdict = match decider.decide_network(&to).allowed {
+            true => crate::launch::sandbox::network::Verdict::Allow {
+                literal: to.host.parse::<std::net::IpAddr>().is_ok(),
+            },
+            false => {
+                crate::log!(
+                    "git in {}: the network gate refused {to} (no connect entry lists it)",
+                    source.display()
+                );
+                crate::launch::sandbox::network::Verdict::Deny {
+                    reason: format!("Piton's sandbox refused {to}: no `connect` entry lists it"),
+                }
+            }
+        };
+        Box::pin(async move { verdict })
+    });
+    let (refused, _) = tokio::sync::mpsc::unbounded_channel();
+    let gate = crate::launch::sandbox::network::Gate::start(
+        decide,
+        Some(crate::launch::sandbox::network::Route::Direct),
+        refused,
+    )
+    .map_err(|source| LaunchError::Spawn {
+        program: "the network gate".into(),
+        source,
+    })?;
+    let (user, credential) = gate.issue("git");
+    if let Network::Filtered { gate: slot, .. } = &mut policy.network {
+        *slot = Gate::Listening {
+            port: gate.port,
+            user,
+            credential,
+            ssh: crate::launch::sandbox::network::ssh::ensure(&config.state_dir()),
+        };
+    }
+    Ok(Some(gate))
 }
 
 impl GitRunner for SourceGit {

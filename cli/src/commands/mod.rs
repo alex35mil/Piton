@@ -103,6 +103,10 @@ enum Cmd {
         #[usage(double_dash = "required")]
         command: Vec<String>,
     },
+    /// Tunnel stdin and stdout to HOST:PORT through the gate in `HTTPS_PROXY` (ssh's ProxyCommand in a sandbox with a
+    /// filtered network).
+    #[usage(name = "gate-connect", hide)]
+    GateConnect { host: String, port: u16 },
     /// Check what this host needs (the Mac app's onboarding runs this), and do the steps piton can do itself.
     Setup {
         #[usage(subcommand)]
@@ -267,6 +271,13 @@ enum SandboxAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
+    /// For the host probe: start the network gate of the workspace's policy, print the policy with it (one JSON line),
+    /// and serve until stdin closes. The policy's entries and pi's hosts decide; nothing is asked.
+    #[usage(hide)]
+    Gate {
+        #[usage(long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 /// The access `piton sandbox why` checks besides reading: one at most.
@@ -275,7 +286,7 @@ enum SandboxAction {
 pub enum WhyAccess {
     /// Check writing (default: reading).
     Write,
-    /// Check connecting to a Unix socket.
+    /// Check connecting: to a Unix socket (PATH), or to a host or port (`host:port`, `localhost:PORT`).
     Connect,
     /// Check creating a Unix socket.
     Bind,
@@ -357,6 +368,15 @@ pub fn main() -> ExitCode {
             eprintln!("piton launch-exec: {error}");
             return ExitCode::from(126);
         }
+        Cmd::GateConnect { host, port } => {
+            return match crate::launch::sandbox::network::ssh::connect(host, *port) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(why) => {
+                    eprintln!("piton: {host}:{port}: {why}");
+                    ExitCode::from(255)
+                }
+            };
+        }
         Cmd::Tools => {
             println!(
                 "{}",
@@ -400,6 +420,7 @@ pub fn main() -> ExitCode {
         | Cmd::Config { .. }
         | Cmd::SandboxExec { .. }
         | Cmd::LaunchExec { .. }
+        | Cmd::GateConnect { .. }
         | Cmd::Tools
         | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
     };
@@ -447,6 +468,7 @@ async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
         | Cmd::Config { .. }
         | Cmd::SandboxExec { .. }
         | Cmd::LaunchExec { .. }
+        | Cmd::GateConnect { .. }
         | Cmd::Tools => {
             unreachable!("handled before the runtime starts")
         }

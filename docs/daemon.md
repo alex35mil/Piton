@@ -302,9 +302,10 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
   writing these files is closed. The `git` preset (below) lifts it.
 - **Unix sockets:** closed, except DNS (`mDNSResponder`) and `agent.sock`: no process may connect to a socket (a
   running Neovim, Docker, the SSH and gpg agents) or create one, unless a `connect` or `bind` entry (below) opens it.
-- **Network:** TCP is open for now, localhost included. Closing it except through Piton's proxy
-  ([#228](https://github.com/alex35mil/Piton/issues/228)) makes the base strict; `connect` entries then say what
-  opens.
+- **Network:** filtered. A process reaches only DNS, the ports `connect` lists, and Piton's gate (below), which
+  decides named hosts. pi's own hosts pass without asking: the model providers built into pi and the hosts it signs in
+  through, `baseUrl`s in its `models.json`, and the remote MCP servers in your own MCP files. You're asked about any
+  other host while the connection waits. `standard` and `yolo` list `*`, which keeps the network open.
 - **Mach services:** only a built-in list (logging, user and group names, fonts, TLS checks, proxy settings,
   preferences, Launch Services lookups; `piton sandbox why --service NAME` names any one). Any app's service is a
   way to drive that app, which runs outside the sandbox: with Hammerspoon's `ipc` module loaded, `hs -c` runs shell
@@ -362,11 +363,12 @@ silence = [
   { process = "git", target = "~/Projects/**/.git/config" }, # git, that file in any checkout below ~/Projects
   { process = "ssh", target = "~/.ssh/keys" },              # ssh's reads of anything in that folder
   { process = "claude", target = "com.apple.SecurityServer" }, # a Mach service, by name
+  { target = "tracker.example.com:443" },                   # a host and port (also *.example.com:443)
 ]
 ```
 
 - `target` is a path (absolute, or starting with `~/` or `$VAR/`; a `*` segment matches one folder entry, `**` any
-  number of them) or a Mach service name. Anything else is a configuration error.
+  number of them), a Mach service name, or a host and port. Anything else is a configuration error.
 - `process` is optional and matches the blocked process's name exactly.
 - A plain string entry (the earlier form) is an error: write `{ target = "..." }`.
 - Every notice ends with the entry that quiets it; presets add their own (`piton sandbox show` lists them all with
@@ -383,9 +385,58 @@ silence = [
 | `*` | any host, any port |
 | `github.com`, `github.com:22`, `*.npmjs.org`, `10.0.0.5` | a named host or address, any port or one |
 
-Sockets and ports are enforced by the sandbox, named hosts by a proxy Piton runs. Until the network closes
-([#228](https://github.com/alex35mil/Piton/issues/228)), every host and port is reachable whatever `connect` says;
-sockets are enforced now. No `connect` entry reopens your `deny` or the daemon's state and control socket.
+Sockets and ports are enforced by the sandbox, named hosts by Piton's gate: the macOS sandbox filters by port but
+never by host. No `connect` entry reopens your `deny` or the daemon's state and control socket.
+
+### The network gate
+
+When the network is filtered (any profile or list without `*`), each session gets a gate: a proxy on 127.0.0.1 that
+the sandbox's processes reach through the proxy variables Piton sets (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+their lowercase forms, and `NODE_USE_ENV_PROXY=1` for Node's built-in `fetch`). It tunnels any port, not only
+HTTPS, and decides each connection in this order:
+
+1. the sandbox's `connect` entries (a bash call's own `[[sandbox.commands]]` grant included);
+2. pi's own hosts: the providers built into the installed pi and their sign-in hosts, `baseUrl`s in the agent
+   directory's `models.json`, and remote MCP servers' `url`s in your own MCP files (the global tier's `mcp.json` and
+   `mcp.local.json`, and every level's `mcp.local.json`; never a repository's committed `.piton/mcp.json`, which
+   travels with the repository). pi's model catalog cache (`models-store.json`) is never trusted: the sandbox can
+   write it. Files are read again when they change. A `baseUrl` on this Mac (Ollama's `http://localhost:11434`)
+   isn't the gate's: list it as `localhost:11434` in `connect`;
+3. hosts you allowed for this session;
+4. `silence` entries naming the host (`{ target = "host:port" }`): refused without asking;
+5. otherwise you're asked, in the apps and pi.nvim, while the connection waits: **Allow for this session**, **Allow in
+   this project** or **everywhere** (saves `connect = ["host:port"]` in the project's `config.local.toml` or the global
+   `config.toml`; applies at once, no restart), **Deny in this project** or **everywhere** (saves a `silence` entry),
+   or **Not now**. No answer within `confirmation_timeout_ms` refuses it.
+
+A refused connection gets `403` with the reason, which curl and most clients print, and a failed bash call lists it
+(`network-outbound host:port (refused by the network gate)`).
+
+- Before dialing an allowed name, the gate resolves it and won't connect to loopback, link-local, multicast, cloud
+  metadata, or this Mac's own addresses (LAN, tailnet): an allowed domain can't be pointed at local services. An IP
+  entry (`connect = ["127.0.0.1:3000"]`) is a choice and exempt.
+- Each sandbox (pi's, each bash call's) has its own proxy credential: a process can't use another call's grant, and
+  another session can't use this session's gate. A process that can read another process's environment (same user)
+  can still take its credential while that call runs.
+- SSH goes through the gate too: an `ssh` first on the sandbox's `PATH` (a link to `piton` in the daemon's state
+  folder) runs the real `ssh` with the gate as its `ProxyCommand`, so Git over SSH, `scp`, and `rsync` reach listed
+  hosts. It overrides a `ProxyCommand` or `ProxyJump` in `~/.ssh/config`. The SSH agent is still a socket `connect`
+  entry.
+- With fnox's credential proxy on, the gate forwards every allowed connection through fnox, so fnox still adds
+  secrets and only sees what the gate allowed; programs know only the gate.
+- Programs that ignore the proxy variables (most database clients, Java, tools with their own SSH code) are refused
+  even for a listed host: they need a port entry (`*:5432`) or an approved rerun (which opens the network). SOCKS and
+  Java support: [#359](https://github.com/alex35mil/Piton/issues/359),
+  [#360](https://github.com/alex35mil/Piton/issues/360).
+- The gate matches the host as the program names it: an IP entry doesn't cover a connection by name, or the reverse.
+- UDP and QUIC are refused, except DNS through macOS's resolver; clients fall back to TCP. Listening on TCP isn't
+  restricted yet ([#361](https://github.com/alex35mil/Piton/issues/361)).
+
+Hosts a typical `strict` setup lists besides pi's own: package registries (`registry.npmjs.org`, `*.npmjs.org`,
+`pypi.org`, `files.pythonhosted.org`, `crates.io`, `static.crates.io`, `index.crates.io`), forges (`github.com`,
+`*.githubusercontent.com`, `api.github.com`, `github.com:22` for Git over SSH), and the hosts your MCP servers that
+run locally call. `piton sandbox why --connect host:port` says what decides one; `piton sandbox show` lists pi's hosts
+(`pi_hosts`).
 
 Sockets inside a credential folder (`~/.ssh`, `~/.gnupg`, `~/.docker`, 1Password's folders, and the rest of the
 built-in list) open only when an entry names a path at or inside that folder, and then only for connecting: nothing
@@ -515,10 +566,11 @@ same warnings.
 
 `piton sandbox why PATH [--write | --connect | --bind | --service] [--workspace DIR]` says whether a sandboxed pi there
 may read, write, connect to, or create a socket at PATH, or look up the Mach service PATH names, and which rule decides:
-built in, or an entry from a profile or the file that lists it.
+built in, or an entry from a profile or the file that lists it. `--connect host:port` checks a network destination:
+the `connect` entry or pi's own host that allows it, or that the gate would ask.
 `piton sandbox show` prints the profile (and the file that chose it), the `silence` entries with their source (yours
-and the presets'), every rule with where it came from, and the
-network destinations `connect` grants.
+and the presets'), every rule with where it came from, the network (`open`, or `filtered` with its entries), pi's
+trusted hosts (`pi_hosts`), and the models pi discovered (`pi_discovered_models`, never trusted).
 
 A grant doesn't follow a symlink a sandboxed agent could have made: the path itself, or a link inside the project's
 checkout or another grant. When a granted folder (say `~/Library/Developer/Xcode/DerivedData`, or pi's `sessions/`) is a
@@ -644,8 +696,10 @@ A command the agent runs keeps the rerun question for every block, credentials a
 Known limits:
 
 - Commands the daemon runs don't go through fnox's credential proxy.
-- The network isn't restricted yet: anything the agent can read can leave the machine, and services listening on
-  localhost TCP are reachable ([#228](https://github.com/alex35mil/Piton/issues/228)).
+- In `standard` and `yolo` the network is open: anything the agent can read can leave the machine, and services
+  listening on localhost TCP are reachable. `strict` closes both. In any profile, pi's own provider hosts are
+  reachable by anything in pi's process, so an agent could send data to one with a key it supplies (as with Claude
+  Code's API host).
 - pi's own credentials (its `auth.json`, provider keys in its environment) are readable: the whole pi process is
   sandboxed, and pi needs them. Keys in its environment can be placeholders instead, with the credential proxy
   (above).

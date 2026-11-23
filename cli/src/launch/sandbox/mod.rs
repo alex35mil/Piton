@@ -1,11 +1,13 @@
 //! The one place that knows the sandbox: Piton's built-in policy (`policy`), one launch's resolved rules (`resolve`,
-//! `rules`), and applying them with the `nono` library (`apply`, through `piton sandbox-exec`).
+//! `rules`), applying them with the `nono` library (`apply`, through `piton sandbox-exec`), and the network gate that
+//! enforces a filtered network's named hosts (`network`).
 //!
 //! The daemon resolves a launch's [`Policy`] and starts `<this binary> sandbox-exec -- pi ...` with it; the helper
 //! sandboxes itself and becomes pi. The daemon is never sandboxed.
 
 mod apply;
 pub mod grant;
+pub mod network;
 mod policy;
 mod resolve;
 mod rules;
@@ -23,7 +25,7 @@ pub use self::{
         ClaudeCodeFolder, ClaudeCodeSockets, Facts, Resolution, SilenceSource, Silenced, Silent, agent_dir,
         never_configuration, resolve, silenced,
     },
-    rules::{Access, Policy, TAG_PREFIX},
+    rules::{Access, Destination, Gate, Network, NetworkGrant, Policy, TAG_PREFIX},
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -14,17 +14,19 @@ use crate::{
 
 pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     let workspace = match &action {
-        SandboxAction::Show { workspace } | SandboxAction::Why { workspace, .. } => workspace.clone(),
+        SandboxAction::Show { workspace }
+        | SandboxAction::Why { workspace, .. }
+        | SandboxAction::Gate { workspace } => workspace.clone(),
     };
-    let (policy, profile, silence) = match policy(config, workspace).await {
-        Ok((resolution, warnings)) => {
+    let (policy, profile, silence, catalog) = match policy(config, workspace).await {
+        Ok((resolution, warnings, catalog)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
             }
             for warning in &warnings {
                 eprintln!("piton: warning: {warning}");
             }
-            (resolution.policy, resolution.profile, resolution.silence)
+            (resolution.policy, resolution.profile, resolution.silence, catalog)
         }
         Err(message) => {
             eprintln!("piton: {message}");
@@ -32,6 +34,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         }
     };
     match action {
+        SandboxAction::Gate { .. } => serve_gate(policy, catalog, config).await,
         SandboxAction::Show { .. } => {
             let output = serde_json::json!({
                 "nono_deny_groups": launch::sandbox::nono_version(),
@@ -41,6 +44,10 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                     .iter()
                     .map(|s| serde_json::json!({ "entry": s.entry(), "source": s.source.to_string() }))
                     .collect::<Vec<_>>(),
+                // Hosts pi reaches without asking under a filtered network, and the models pi discovered (listed,
+                // never trusted).
+                "pi_hosts": catalog.trusted(),
+                "pi_discovered_models": catalog.discovered(),
             });
             println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
             ExitCode::SUCCESS
@@ -49,7 +56,34 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             let access = match access {
                 None => Access::Read,
                 Some(WhyAccess::Write) => Access::Write,
-                Some(WhyAccess::Connect) => Access::Connect,
+                Some(WhyAccess::Connect) => {
+                    // `host:port` is a network destination; a path is a Unix socket.
+                    let text = path.to_string_lossy().into_owned();
+                    match (text.starts_with('/'), launch::sandbox::Destination::parse(&text)) {
+                        (false, Some(to)) => {
+                            let decision = policy.decide_network(&to);
+                            let (allowed, because) = match (decision.allowed, catalog.allows(&to.host, to.port)) {
+                                (true, _) => (true, explain(&decision.source)),
+                                (false, Some(pi)) => (true, format!("pi reaches it: {}", pi.source)),
+                                (false, None) => (
+                                    false,
+                                    format!(
+                                        "{}; in a session, Piton's gate asks you first",
+                                        explain(&decision.source)
+                                    ),
+                                ),
+                            };
+                            let outcome = if allowed { "allowed" } else { "denied" };
+                            println!("{outcome}: connect to {to}");
+                            println!("  because: {because}");
+                            return match allowed {
+                                true => ExitCode::SUCCESS,
+                                false => ExitCode::from(4),
+                            };
+                        }
+                        (true, _) | (false, None) => Access::Connect,
+                    }
+                }
                 Some(WhyAccess::Bind) => Access::Bind,
                 Some(WhyAccess::Service) => {
                     let service = path.to_string_lossy().into_owned();
@@ -86,10 +120,65 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
     }
 }
 
+/// Starts a gate for `policy` that the policy's entries and pi's hosts decide, prints the policy with it, and serves until
+/// stdin closes.
+async fn serve_gate(
+    mut policy: launch::sandbox::Policy,
+    catalog: crate::pi::catalog::Catalog,
+    config: &DaemonConfig,
+) -> ExitCode {
+    use launch::sandbox::{Gate, Network};
+    let decider = policy.clone();
+    let catalog = std::sync::Arc::new(catalog);
+    let decide: crate::launch::sandbox::network::Decide = std::sync::Arc::new(move |_user, to| {
+        let literal = to.host.parse::<std::net::IpAddr>().is_ok();
+        let verdict = match decider.decide_network(&to).allowed || catalog.allows(&to.host, to.port).is_some() {
+            true => crate::launch::sandbox::network::Verdict::Allow { literal },
+            false => crate::launch::sandbox::network::Verdict::Deny {
+                reason: format!("Piton's sandbox refused {to}: no connect entry lists it"),
+            },
+        };
+        Box::pin(async move { verdict })
+    });
+    let (refused, _) = tokio::sync::mpsc::unbounded_channel();
+    let gate = match crate::launch::sandbox::network::Gate::start(
+        decide,
+        Some(crate::launch::sandbox::network::Route::Direct),
+        refused,
+    ) {
+        Ok(gate) => gate,
+        Err(e) => {
+            eprintln!("piton: can't start the gate: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let (user, credential) = gate.issue("probe");
+    match &mut policy.network {
+        Network::Open { .. } => {
+            eprintln!("piton: the network is open: no gate");
+            return ExitCode::from(3);
+        }
+        Network::Filtered { gate: slot, .. } => {
+            *slot = Gate::Listening {
+                port: gate.port,
+                user,
+                credential,
+                ssh: crate::launch::sandbox::network::ssh::ensure(&config.state_dir()),
+            };
+        }
+    }
+    println!("{}", serde_json::to_string(&policy).unwrap_or_default());
+    use tokio::io::AsyncReadExt;
+    let mut sink = Vec::new();
+    let _ = tokio::io::stdin().read_to_end(&mut sink).await;
+    drop(gate);
+    ExitCode::SUCCESS
+}
+
 async fn policy(
     config: &DaemonConfig,
     workspace: Option<PathBuf>,
-) -> Result<(Resolution, Vec<launch::LaunchWarning>), String> {
+) -> Result<(Resolution, Vec<launch::LaunchWarning>, crate::pi::catalog::Catalog), String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -114,7 +203,22 @@ async fn policy(
         launch::ClaudeSockets::None,
     )
     .await
-    .map(|sandboxed| (sandboxed.resolution, sandboxed.warnings))
+    .map(|sandboxed| {
+        // pi's hosts, as a session's gate trusts them.
+        let builtin = config
+            .pi
+            .command
+            .first()
+            .and_then(|pi| crate::pi::catalog::builtin_for(pi, &sandboxed.env).ok())
+            .unwrap_or_default();
+        let files = crate::pi::catalog::Files::new(
+            sandboxed.resolution.agent_dirs[1].clone(),
+            &config.paths.global,
+            &resolved.levels,
+        );
+        let catalog = crate::pi::catalog::Catalog::new(builtin, files);
+        (sandboxed.resolution, sandboxed.warnings, catalog)
+    })
     .map_err(|e| e.to_string())
 }
 

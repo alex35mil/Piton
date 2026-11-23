@@ -120,9 +120,115 @@ pub fn read_process_answer(answer: &serde_json::Map<String, Value>) -> ProcessAn
         .map_or(ProcessAnswer::NotNow, |(_, answer)| answer)
 }
 
+/// The question for a connection the gate holds: who asked, where to, and per answer the exact entry it saves. Allow
+/// applies at once, no restart (the gate reads the configuration again); Deny refuses it without asking from then on.
+pub fn network_dialog(id: &str, who: &str, to: &str) -> Value {
+    let entry = format!("`connect = [{}]`", toml::Value::String(to.to_string()));
+    let silence = format!(
+        "`silence = [{}]`",
+        crate::config::Silence {
+            target: crate::config::SilenceTarget::Host(to.to_string()),
+            process: None,
+        }
+        .inline()
+    );
+    let mut lines = vec!["- Allow for this session: until it ends, nothing saved".to_string()];
+    for scope in [PersistScope::Project, PersistScope::Global] {
+        lines.push(format!("- Allow {}: {entry}", scope.label()));
+    }
+    for scope in [PersistScope::Project, PersistScope::Global] {
+        lines.push(format!("- Deny {}: {silence}; refused without asking", scope.label()));
+    }
+    json!({
+        "type": "extension_ui_request",
+        "id": id,
+        "method": "select",
+        "title": format!(
+            "{who} wants to connect to {to}, which the sandbox's network doesn't list. It waits for your answer.\n\n{}",
+            lines.join("\n")
+        ),
+        "options": network_options().map(|(label, _)| label),
+    })
+}
+
+/// The answer to a network question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkAnswer {
+    /// [`CHOOSE_BELOW`]: no answer yet; the question is shown again.
+    AskAgain,
+    /// Allow this host until the session ends.
+    Session,
+    /// Save `connect = ["host:port"]`.
+    Persist(PersistScope),
+    /// Save a `silence` entry: refused without asking.
+    Silence(PersistScope),
+    /// Refuse it this time.
+    NotNow,
+}
+
+fn network_options() -> [(String, NetworkAnswer); 7] {
+    use PersistScope::{Global, Project};
+    [
+        (CHOOSE_BELOW.to_string(), NetworkAnswer::AskAgain),
+        ("Allow for this session".to_string(), NetworkAnswer::Session),
+        (format!("Allow {}", Project.label()), NetworkAnswer::Persist(Project)),
+        (format!("Allow {}", Global.label()), NetworkAnswer::Persist(Global)),
+        (format!("Deny {}", Project.label()), NetworkAnswer::Silence(Project)),
+        (format!("Deny {}", Global.label()), NetworkAnswer::Silence(Global)),
+        ("Not now".to_string(), NetworkAnswer::NotNow),
+    ]
+}
+
+/// A client's answer to a network question; a dismissal or an unknown value is "Not now".
+pub fn read_network_answer(answer: &serde_json::Map<String, Value>) -> NetworkAnswer {
+    let value = answer.get("value").and_then(Value::as_str);
+    network_options()
+        .into_iter()
+        .find(|(label, _)| Some(label.as_str()) == value)
+        .map_or(NetworkAnswer::NotNow, |(_, answer)| answer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The network question names the entries each answer saves, and every option reads back.
+    #[test]
+    fn network_answers_read_back() {
+        let d = network_dialog("n", "curl", "api.example.com:443");
+        let title = d["title"].as_str().unwrap();
+        assert!(
+            title.contains("curl wants to connect to api.example.com:443"),
+            "{title}"
+        );
+        assert!(title.contains("`connect = [\"api.example.com:443\"]`"), "{title}");
+        assert!(
+            title.contains("`silence = [{ target = \"api.example.com:443\" }]`"),
+            "{title}"
+        );
+        let answers: Vec<NetworkAnswer> = d["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| read_network_answer(json!({"value": v}).as_object().unwrap()))
+            .collect();
+        assert_eq!(
+            answers,
+            [
+                NetworkAnswer::AskAgain,
+                NetworkAnswer::Session,
+                NetworkAnswer::Persist(PersistScope::Project),
+                NetworkAnswer::Persist(PersistScope::Global),
+                NetworkAnswer::Silence(PersistScope::Project),
+                NetworkAnswer::Silence(PersistScope::Global),
+                NetworkAnswer::NotNow,
+            ]
+        );
+        assert_eq!(
+            read_network_answer(json!({"cancelled": true}).as_object().unwrap()),
+            NetworkAnswer::NotNow
+        );
+    }
 
     /// Each answer names the exact entry it saves, and reads back as its answer; a dismissal is "Not now".
     #[test]

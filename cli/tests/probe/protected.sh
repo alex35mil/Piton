@@ -295,8 +295,24 @@ test "$expect_apps" = denied || quit_calculator
 strict="$scratch/strict"
 mkdir -p "$strict/.piton/.local"
 git -C "$strict" init -q
-printf '[sandbox]\nprofile = "strict"\n' > "$strict/.piton/config.local.toml"
-strict_policy=$("$piton" sandbox show --workspace "$strict" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
+# strict's network is filtered: the hosts these checks reach are listed, plus a local port and a port on any host. The
+# gate runs for the pass (`piton sandbox gate`), deciding by these entries and pi's own hosts.
+local_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+other_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+printf '[sandbox]\nprofile = "strict"\nconnect = ["github.com", "example.com", "localhost:%s", "*:7"]\n' "$local_port" \
+    > "$strict/.piton/config.local.toml"
+mkfifo "$scratch/gate-in"
+("$piton" sandbox gate --workspace "$strict" < "$scratch/gate-in" > "$scratch/gate-policy" 2>"$scratch/gate-err") &
+gate_pid=$!
+exec 9> "$scratch/gate-in"
+for _ in $(seq 50); do test -s "$scratch/gate-policy" && break; sleep 0.1; done
+strict_policy=$(head -n 1 "$scratch/gate-policy")
+listeners=""
+for port in "$local_port" "$other_port"; do
+    python3 -I -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(8)
+while True: s.accept()[0].close()' "$port" >/dev/null 2>&1 &
+    listeners="$listeners $!"
+done
 cat > "$scratch/strict.sh" <<'EOF'
 attempt() {
     expect=$1; what=$2; shift 2
@@ -309,12 +325,20 @@ attempt() {
 attempt ok     "git status"                               'git status'
 attempt ok     "git over HTTPS (TLS)"                     'git ls-remote https://github.com/git/git HEAD'
 attempt ok     "curl over HTTPS"                          'curl -sfI https://example.com'
-attempt ok     "python TLS"                               "python3 -I -c 'import ssl,socket; ssl.create_default_context().wrap_socket(socket.create_connection((\"github.com\", 443), 10), server_hostname=\"github.com\").close()'"
+attempt ok     "python TLS (urllib, through the gate)"    "python3 -I -c 'import urllib.request; urllib.request.urlopen(\"https://github.com\", timeout=10).close()'"
 attempt ok     "user name (id)"                           'id -un'
 attempt ok     "read a preference (defaults)"            'defaults read -g AppleLocale'
 attempt ok     "look up a built-in service (logd)"       "python3 -I $LOOKUP com.apple.logd"
 attempt denied "look up the pasteboard's service"        "python3 -I $LOOKUP com.apple.pasteboard.1"
 attempt denied "open a link"                             'open -g https://example.com'
+# The filtered network: listed hosts through the gate, the rest refused; ports by the sandbox itself.
+attempt ok     "curl http:// to a listed host (gate)"   'curl -sf -o /dev/null http://example.com'
+attempt denied "curl to an unlisted host (gate)"         'curl -sf -o /dev/null --max-time 10 https://www.apple.com'
+attempt denied "TCP straight to a host, past the gate"   "python3 -I -c 'import socket; socket.create_connection((\"93.184.215.14\", 443), 5)'"
+attempt ok     "a listed local port (localhost:PORT)"   "python3 -I -c 'import socket; socket.create_connection((\"127.0.0.1\", $LOCAL_PORT), 5)'"
+attempt denied "another local port"                     "python3 -I -c 'import socket; socket.create_connection((\"127.0.0.1\", $OTHER_PORT), 5)'"
+attempt denied "the gate without its credential"         "curl -sf -o /dev/null --max-time 10 -x http://127.0.0.1:\${HTTPS_PROXY##*:} https://example.com"
+attempt ok     "git over SSH to a listed host (wrapper)" 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 | rg -q "successfully authenticated|Permission denied"'
 EOF
 # Node's TLS: a script file, so no quoting nests (`echo` treats backslashes differently across shells).
 cat > "$scratch/fetch.mjs" <<'JS'
@@ -324,9 +348,13 @@ JS
 if command -v node >/dev/null 2>&1; then
     echo "attempt ok \"node fetch over HTTPS\" 'node $scratch/fetch.mjs'" >> "$scratch/strict.sh"
 fi
-(cd "$strict" && LOOKUP="$lookup" ERR="$scratch/err" PITON_SANDBOX_POLICY="$strict_policy" \
+(cd "$strict" && LOOKUP="$lookup" ERR="$scratch/err" LOCAL_PORT="$local_port" OTHER_PORT="$other_port" \
+    PITON_SANDBOX_POLICY="$strict_policy" \
     "$piton" sandbox-exec -- sh "$scratch/strict.sh" </dev/null >"$scratch/strict-out" 2>&1) \
     || echo "FAIL  the strict sandbox didn't start" >> "$scratch/strict-out"
+exec 9>&-
+wait "$gate_pid" 2>/dev/null || true
+for l in $listeners; do kill "$l" 2>/dev/null; wait "$l" 2>/dev/null; done
 # Shown whole, so a failed line keeps the error line below it.
 cat "$scratch/strict-out"
 cat "$scratch/strict-out" >> "$scratch/out"

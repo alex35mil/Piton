@@ -542,10 +542,61 @@ impl Daemon {
             }),
             status_changed: self.status_changed.clone(),
             list_changed: self.list_changed.clone(),
+            network_entry_saved: {
+                let daemon = Arc::downgrade(self);
+                Box::new(move |target, file| {
+                    let Some(daemon) = daemon.upgrade() else { return };
+                    for session in lock(&daemon.sessions).values() {
+                        let _ = session.tx.send(session::SessionCmd::NetworkEntrySaved {
+                            target: target.clone(),
+                            file: file.clone(),
+                        });
+                    }
+                })
+            },
         };
         let relation = match &workspace.relation {
             Relation::Source => String::new(),
             Relation::Worker { source, .. } => format!(", worker of {}", source.display()),
+        };
+        // A filtered network gets a gate: pi's trusted hosts, and fnox's proxy as the route once it reports it.
+        let network = match policy.as_ref().map(|p| &p.network) {
+            Some(launch::sandbox::Network::Filtered { .. }) => {
+                let builtin = config
+                    .pi
+                    .command
+                    .first()
+                    .map(|pi| crate::pi::catalog::builtin_for(pi, &env))
+                    .unwrap_or_else(|| Ok(crate::pi::catalog::Builtin::default()))
+                    .unwrap_or_else(|e| {
+                        crate::log!("session {key}: pi's built-in hosts aren't trusted (asked about instead): {e}");
+                        crate::pi::catalog::Builtin::default()
+                    });
+                let files =
+                    crate::pi::catalog::Files::new(agent_dirs[1].clone(), &config.paths.global, &launch_config.levels);
+                let ssh = crate::launch::sandbox::network::ssh::ensure(&config.state_dir());
+                if ssh.is_none() {
+                    crate::log!("session {key}: can't make the ssh wrapper: SSH won't go through the gate");
+                }
+                // Behind fnox, the helper reports fnox's proxy with a one-time token; the gate waits for it.
+                let (route, upstream_token) = match &proxy {
+                    Some(_) => {
+                        let token = self.agent_tokens.issue_gate(key).map_err(|source| LaunchError::Spawn {
+                            program: "gate token".into(),
+                            source,
+                        })?;
+                        (None, Some(token))
+                    }
+                    None => (Some(crate::launch::sandbox::network::Route::Direct), None),
+                };
+                Some(session::NetworkSpec {
+                    ssh,
+                    catalog: crate::pi::catalog::Catalog::new(builtin, files),
+                    route,
+                    upstream_token,
+                })
+            }
+            Some(launch::sandbox::Network::Open { .. }) | None => None,
         };
         let spec = LaunchSpec {
             key,
@@ -560,7 +611,9 @@ impl Daemon {
             source: launch_config.source.clone(),
             checkout: launch_config.checkout.clone(),
             grants: launch_config.sandbox.commands.clone(),
+            levels: launch_config.levels.clone(),
             warnings,
+            network,
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),

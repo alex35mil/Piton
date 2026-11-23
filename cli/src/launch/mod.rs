@@ -644,7 +644,9 @@ mod tests {
                     source: crate::launch::sandbox::Source::Workspace,
                 },
                 apps: crate::launch::sandbox::Apps::Closed,
-                network: Vec::new(),
+                network: crate::launch::sandbox::Network::Open {
+                    source: crate::launch::sandbox::Source::Workspace,
+                },
                 tag: String::new(),
             },
             links: Vec::new(),

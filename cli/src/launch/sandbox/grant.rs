@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     policy::{self, Source},
-    rules::{Access, Apps, Effect, Policy, Rule, Services, Target},
+    rules::{Access, Apps, Effect, Network, Policy, Rule, Services, Target},
 };
 use crate::config::{
     AllGrant, CommandGrant, CommandRuntime, Grant, GrantLists, LaunchConfig, Listed, ServiceEntry, ServiceName,
@@ -105,7 +105,7 @@ pub enum EntryRuntime {
     Host,
     /// `runtime = "sandbox"`: its policy, or why it couldn't be resolved (a narrowed grant naming a `$VAR` that isn't
     /// set).
-    Sandbox(Result<Policy, String>),
+    Sandbox(Result<Box<Policy>, String>),
 }
 
 /// The configuration a narrowed grant resolves with: the launch's, with the grant's lists added as if the file that
@@ -147,9 +147,11 @@ pub fn command_policies(
         .map(|entry| {
             let runtime = match &entry.value.runtime {
                 CommandRuntime::Host => EntryRuntime::Host,
-                CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => EntryRuntime::Sandbox(Ok(widened.clone())),
+                CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => {
+                    EntryRuntime::Sandbox(Ok(Box::new(widened.clone())))
+                }
                 CommandRuntime::Sandbox(Grant::Lists(lists)) => {
-                    EntryRuntime::Sandbox(resolver.with(lists, &entry.file))
+                    EntryRuntime::Sandbox(resolver.with(lists, &entry.file).map(Box::new))
                 }
             };
             (entry.clone(), runtime)
@@ -219,7 +221,8 @@ fn all_below(policy: &Policy, credentials: Credentials, roots: &[PathBuf]) -> Po
         },
         services: Services::Every { source: source() },
         apps: Apps::Open { source: source() },
-        network: policy.network.clone(),
+        // The network isn't floor: an approved command reaches any host directly, without the gate.
+        network: Network::Open { source: source() },
         tag: policy.tag.clone(),
     }
 }
@@ -286,6 +289,8 @@ pub enum Lift {
     Bind(PathBuf),
     /// `services = [name]`: one Mach service.
     Service(ServiceName),
+    /// `connect = ["host:port"]`: a network destination (the gate's network question).
+    Network(crate::config::NetworkTarget),
 }
 
 impl Lift {
@@ -297,6 +302,7 @@ impl Lift {
             Lift::Connect(path) => ("connect", path.display().to_string()),
             Lift::Bind(path) => ("bind", path.display().to_string()),
             Lift::Service(name) => ("services", name.to_string()),
+            Lift::Network(target) => ("connect", target.to_string()),
         }
     }
 
@@ -307,6 +313,7 @@ impl Lift {
                 crate::config::SilenceTarget::Path(path.display().to_string())
             }
             Lift::Service(name) => crate::config::SilenceTarget::Service(name.to_string()),
+            Lift::Network(target) => crate::config::SilenceTarget::Host(target.to_string()),
         }
     }
 
@@ -321,6 +328,7 @@ impl Lift {
                 .push(crate::config::Connect::Socket(path.display().to_string())),
             Lift::Bind(path) => lists.bind.push(path.display().to_string()),
             Lift::Service(name) => lists.services.push(ServiceEntry::Name(name.clone())),
+            Lift::Network(target) => lists.connect.push(crate::config::Connect::Network(target.clone())),
         }
         lists
     }
@@ -647,6 +655,14 @@ pub fn command_block(launch: &Policy, all: &Policy, operation: &str, target: &st
         _ => {}
     }
     let path = Path::new(target);
+    // A TCP or UDP connection the sandbox refused directly (a program that ignores the proxy variables): an approved
+    // rerun opens the network.
+    if operation == "network-outbound"
+        && !path.is_absolute()
+        && let Some(to) = super::Destination::parse(target)
+    {
+        return lifted(all.decide_network(&to).allowed);
+    }
     if !path.is_absolute() {
         return CommandBlock::Unsupported;
     }
@@ -776,7 +792,9 @@ mod tests {
             keychain: false,
             services: Services::Listed { grants: Vec::new() },
             apps: Apps::Closed,
-            network: Vec::new(),
+            network: crate::launch::sandbox::Network::Open {
+                source: crate::launch::sandbox::Source::Workspace,
+            },
             tag: String::new(),
         }
     }
@@ -851,6 +869,13 @@ mod tests {
         let fnox = all_below(&launch, Credentials::Floor, &roots());
         let block = |all: &Policy, op: &str, target: &str| command_block(&launch, all, op, target);
         assert_eq!(block(&lifted, "file-write-create", "/h/x"), CommandBlock::Liftable);
+        // A direct connection the filtered network refused: an approved rerun opens the network.
+        assert!(matches!(lifted.network, Network::Open { .. }));
+        assert_eq!(
+            block(&lifted, "network-outbound", "140.82.112.3:443"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(block(&lifted, "network-outbound", "[::1]:5432"), CommandBlock::Liftable);
         assert_eq!(
             block(&lifted, "file-write-data", "/w/.git/hooks/pre-commit"),
             CommandBlock::Liftable
@@ -1009,6 +1034,16 @@ mod tests {
                 }
                 return policy;
             }
+            Lift::Network(to) => {
+                let mut policy = launch.clone();
+                if let Network::Filtered { grants, .. } = &mut policy.network {
+                    grants.push(crate::launch::sandbox::NetworkGrant {
+                        target: to.clone(),
+                        source: Source::Workspace,
+                    });
+                }
+                return policy;
+            }
         };
         let mut policy = launch.clone();
         policy.rules.insert(
@@ -1037,7 +1072,7 @@ mod tests {
                     },
                 );
             }
-            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) | Lift::Service(_) => {}
+            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) | Lift::Service(_) | Lift::Network(_) => {}
         }
         policy
     }
