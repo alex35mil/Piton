@@ -542,6 +542,18 @@ impl Daemon {
             }),
             status_changed: self.status_changed.clone(),
             list_changed: self.list_changed.clone(),
+            network_entry_saved: {
+                let daemon = Arc::downgrade(self);
+                Box::new(move |target, file| {
+                    let Some(daemon) = daemon.upgrade() else { return };
+                    for session in lock(&daemon.sessions).values() {
+                        let _ = session.tx.send(session::SessionCmd::NetworkEntrySaved {
+                            target: target.clone(),
+                            file: file.clone(),
+                        });
+                    }
+                })
+            },
         };
         let relation = match &workspace.relation {
             Relation::Source => String::new(),
@@ -599,6 +611,7 @@ impl Daemon {
             source: launch_config.source.clone(),
             checkout: launch_config.checkout.clone(),
             grants: launch_config.sandbox.commands.clone(),
+            levels: launch_config.levels.clone(),
             warnings,
             network,
         };

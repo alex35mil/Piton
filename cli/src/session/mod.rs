@@ -217,6 +217,12 @@ pub enum SessionCmd {
     GateUpstream {
         url: String,
     },
+    /// A `connect` entry the user saved from a network question (in any session) in `file`: a session whose
+    /// configuration reads `file` lets every sandbox reach it from now on, without a restart.
+    NetworkEntrySaved {
+        target: crate::config::NetworkTarget,
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -319,6 +325,8 @@ pub struct Hooks {
     pub status_changed: Arc<Notify>,
     /// Wakes view connections to re-send the session list (they skip unchanged lists).
     pub list_changed: tokio::sync::broadcast::Sender<()>,
+    /// A `connect` entry was saved from a network question: the daemon tells every live session.
+    pub network_entry_saved: Box<dyn Fn(crate::config::NetworkTarget, PathBuf) + Send + Sync>,
 }
 
 pub struct LaunchSpec {
@@ -341,6 +349,8 @@ pub struct LaunchSpec {
     pub checkout: PathBuf,
     /// The `[[sandbox.commands]]` the launch resolved.
     pub grants: Vec<crate::config::Listed<crate::config::CommandGrant>>,
+    /// The configuration levels the launch read.
+    pub levels: Vec<PathBuf>,
     /// What the session starts with a warning about.
     pub warnings: Vec<launch::LaunchWarning>,
     /// For a filtered network: pi's trusted hosts, and where the gate reaches hosts (`None`: behind fnox, reported once
@@ -518,6 +528,7 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         checkout: spec.checkout.clone(),
         paths: config.paths.clone(),
         grants: spec.grants.clone(),
+        levels: spec.levels.clone(),
     });
     let task = SessionTask {
         config,
@@ -923,6 +934,7 @@ impl SessionTask {
             SessionCmd::NetworkAsk { user, to, reply } => self.network_ask(user, to, reply),
             SessionCmd::GateRefused(refused) => self.gate_refused(refused),
             SessionCmd::GateUpstream { url } => self.gate_upstream(&url),
+            SessionCmd::NetworkEntrySaved { target, file } => self.network_entry_saved(target, file),
             SessionCmd::Stop { .. } => unreachable!("handled in run"),
         }
     }
@@ -1790,13 +1802,8 @@ impl SessionTask {
                 match saved {
                     Some(Ok(file)) => {
                         crate::log!("session {key}: saved `connect = [\"{to}\"]` in {}", file.display());
-                        let source = crate::launch::sandbox::Source::Config {
-                            key: "sandbox.connect".into(),
-                            from: crate::launch::sandbox::Provenance::File { path: file },
-                        };
-                        if let Some(network) = &mut self.network {
-                            network.add_entry(entry, source);
-                        }
+                        // Every live session that reads this file takes it (this one included), and new calls inherit it.
+                        (self.hooks.network_entry_saved)(entry, file);
                         crate::gate::Verdict::Allow { literal: false }
                     }
                     Some(Err(e)) => {
@@ -1869,6 +1876,23 @@ impl SessionTask {
                 },
             );
         }
+    }
+
+    /// A `connect` entry saved from a network question: when this session's configuration reads `file`, every sandbox
+    /// it has and every call it starts from now on reaches the destination, as after a restart.
+    fn network_entry_saved(&mut self, target: crate::config::NetworkTarget, file: PathBuf) {
+        let Some(network) = &mut self.network else { return };
+        let Some(commands) = &mut self.commands else { return };
+        if !commands.reads(&file) {
+            return;
+        }
+        let source = crate::launch::sandbox::Source::Config {
+            key: "sandbox.connect".into(),
+            from: crate::launch::sandbox::Provenance::File { path: file },
+        };
+        network.add_entry(target.clone(), source.clone());
+        commands.add_network_entry(target, source);
+        crate::log!("session {}: took a saved connect entry", lock(&self.shared).key);
     }
 
     /// fnox's proxy URL: the gate forwards every allowed connection through it from now on.

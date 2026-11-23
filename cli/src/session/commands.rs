@@ -119,6 +119,8 @@ pub struct Commands {
     pub paths: Paths,
     /// What a launch-time grant list lists, for matching.
     pub grants: Vec<crate::config::Listed<CommandGrant>>,
+    /// The configuration levels the launch read (its `.piton/` and `.agents/` folders, the global tier included).
+    pub levels: Vec<PathBuf>,
 }
 
 /// The question the user is being asked, and where the decision goes.
@@ -210,6 +212,32 @@ impl Commands {
         file.append_to_list(&self.paths, &format!("sandbox.{key}"), value)
             .map_err(|e| e.to_string())?;
         Ok(path)
+    }
+
+    /// Whether this session's configuration reads `file`: the global `config.toml`, or a `config.local.toml` of a level
+    /// of its chain.
+    pub fn reads(&self, file: &Path) -> bool {
+        let in_level = |dir: &Path| self.levels.iter().any(|l| l == dir);
+        file.parent().is_some_and(in_level)
+    }
+
+    /// A saved `connect` entry joins the launch's policy and every narrowed grant's, so calls started from now on reach
+    /// it. (`all` opens the network already.)
+    pub fn add_network_entry(&mut self, target: crate::config::NetworkTarget, source: crate::launch::sandbox::Source) {
+        let grant = crate::launch::sandbox::NetworkGrant { target, source };
+        let add = |policy: &mut crate::launch::sandbox::Policy| {
+            if let crate::launch::sandbox::Network::Filtered { grants, .. } = &mut policy.network
+                && !grants.contains(&grant)
+            {
+                grants.push(grant.clone());
+            }
+        };
+        add(&mut self.policies.launch);
+        for (_, runtime) in &mut self.policies.entries {
+            if let EntryRuntime::Sandbox(Ok(policy)) = runtime {
+                add(policy);
+            }
+        }
     }
 
     /// The file `path` would be checked as listed in when saved in `scope`: what an offer's entry is resolved with.
@@ -840,6 +868,7 @@ mod tests {
                 global: dir.join("g"),
             },
             grants,
+            levels: vec![dir.join("g"), dir.join(".piton")],
         }
     }
 
@@ -922,6 +951,47 @@ mod tests {
 
     fn after(c: &Commands, calls: &mut Calls, req: &RunRequest, last: bool) -> AfterFailure {
         c.after_failure(calls, req, last, false)
+    }
+
+    /// A `connect` entry saved from a network question reaches calls that start afterwards, at the session's policy and
+    /// a grant's; only a session whose configuration reads the file takes it.
+    #[test]
+    fn a_saved_network_entry_reaches_later_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let filtered = |p: &mut crate::launch::sandbox::Policy| {
+            p.network = crate::launch::sandbox::Network::Filtered {
+                grants: Vec::new(),
+                gate: crate::launch::sandbox::Gate::None,
+            };
+        };
+        let mut c = commands(dir.path(), &["vendor *"]);
+        filtered(&mut c.policies.launch);
+        for (_, runtime) in &mut c.policies.entries {
+            if let EntryRuntime::Sandbox(Ok(p)) = runtime {
+                filtered(p);
+            }
+        }
+        let to = crate::launch::sandbox::Destination::parse("api.vendor.com:443").unwrap();
+        let saved = dir.path().join(".piton/config.local.toml");
+        assert!(c.reads(&saved));
+        assert!(!c.reads(&dir.path().join("elsewhere/.piton/config.local.toml")));
+        c.add_network_entry(
+            crate::config::NetworkTarget::Host {
+                host: "api.vendor.com".into(),
+                port: Some(443),
+            },
+            crate::launch::sandbox::Source::Workspace,
+        );
+        let mut calls = Calls::new("t");
+        for (id, command) in [("a", "curl x"), ("b", "vendor sync")] {
+            start(&mut calls, id, command, false);
+            let approved = run(c.decide(&mut calls, &request(dir.path(), id, command, false)));
+            let policy = match &approved.runtime {
+                Runtime::Session(p) | Runtime::Widened { policy: p, .. } => p,
+                Runtime::Host { .. } => panic!("host"),
+            };
+            assert!(policy.decide_network(&to).allowed, "{command}");
+        }
     }
 
     /// A failed call is asked about only for a block an approved rerun lifts, once; everything else is reported with

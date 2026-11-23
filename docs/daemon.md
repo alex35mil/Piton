@@ -400,7 +400,8 @@ HTTPS, and decides each connection in this order:
    directory's `models.json`, and remote MCP servers' `url`s in your own MCP files (the global tier's `mcp.json` and
    `mcp.local.json`, and every level's `mcp.local.json`; never a repository's committed `.piton/mcp.json`, which
    travels with the repository). pi's model catalog cache (`models-store.json`) is never trusted: the sandbox can
-   write it. Files are read again when they change;
+   write it. Files are read again when they change. A `baseUrl` on this Mac (Ollama's `http://localhost:11434`)
+   isn't the gate's: list it as `localhost:11434` in `connect`;
 3. hosts you allowed for this session;
 4. `silence` entries naming the host (`{ target = "host:port" }`): refused without asking;
 5. otherwise you're asked, in the apps and pi.nvim, while the connection waits: **Allow for this session**, **Allow in

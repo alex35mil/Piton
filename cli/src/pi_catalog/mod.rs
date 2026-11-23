@@ -261,6 +261,9 @@ impl Catalog {
                 }
             }
         }
+        // A host on this Mac (a local model server) is never the gate's: the sandbox decides local ports, so it needs a
+        // `localhost:PORT` entry, and the gate wouldn't dial a local address anyway.
+        hosts.retain(|h| !local_host(&h.host));
         hosts.sort();
         hosts.dedup_by(|a, b| a.host == b.host && a.port == b.port);
         hosts
@@ -270,6 +273,13 @@ impl Catalog {
     pub fn discovered(&self) -> Vec<DiscoveredModel> {
         discovered(&self.files.agent_dir.join("models-store.json"))
     }
+}
+
+/// Whether a host names this Mac: `localhost`, a name under `.localhost`, or a loopback address.
+fn local_host(host: &str) -> bool {
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// A built-in host as pi names it (`host` or `host:port`).
@@ -439,11 +449,14 @@ mod tests {
             })
         );
         assert_eq!(allowed("platform.claude.com", 443), Some(HostSource::SignIn));
-        assert!(matches!(
-            allowed("localhost", 11434),
-            Some(HostSource::ModelsJson { .. })
-        ));
-        assert!(allowed("localhost", 11435).is_none(), "a URL's port is the only one");
+        assert!(
+            allowed("localhost", 11434).is_none(),
+            "a local server is the sandbox's to decide: it needs a localhost:PORT entry"
+        );
+        assert!(
+            allowed("gpu.example.net", 8444).is_none(),
+            "a URL's port is the only one"
+        );
         assert!(matches!(
             allowed("gpu.example.net", 8443),
             Some(HostSource::ModelsJson { .. })
