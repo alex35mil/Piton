@@ -1018,10 +1018,10 @@ through a symlink inside a git checkout that leads out of it; the user's own lin
 
 `PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
 
-**The network gate** (`gate/`, `session/network.rs`, `pi_catalog/`). A session whose network is filtered gets a gate:
+**The network gate** (`launch/sandbox/network/`, `session/network.rs`, `pi/catalog.rs`). A session whose network is filtered gets a gate:
 an HTTP proxy on 127.0.0.1 in the daemon (`CONNECT` any port, plus absolute-form plain HTTP). `piton sandbox-exec`
 sets the proxy variables to it after applying the sandbox, over whatever the environment had, with
-`NODE_USE_ENV_PROXY=1` and the `ssh` wrapper (`gate/ssh.rs`: a link to `piton` in `<state>/net/bin`, readable and not
+`NODE_USE_ENV_PROXY=1` and the `ssh` wrapper (`launch/sandbox/network/ssh.rs`: a link to `piton` in `<state>/net/bin`, readable and not
 writable from the sandbox, which runs the real `ssh` with `ProxyCommand=piton gate-connect %h %p`) first on `PATH`.
 
 - **Who asks.** Each sandbox the session starts gets a proxy user and a random credential: pi's (`pi`) at launch, and
@@ -1031,20 +1031,20 @@ writable from the sandbox, which runs the real `ssh` with `ProxyCommand=piton ga
   another session that session's secrets; per-sandbox credentials also keep pi's process from borrowing a call's
   narrowed grant.
 - **Deciding.** The gate sends the session `NetworkAsk`; `network::Network::decide` checks, in order, that sandbox's
-  policy (`Policy::decide_network`), pi's trusted hosts (`pi_catalog::Catalog`), the hosts allowed for the session,
+  policy (`Policy::decide_network`), pi's trusted hosts (`pi::catalog::Catalog`), the hosts allowed for the session,
   and `silence` host entries; otherwise the connection waits on a question, one at a time in the session's slot,
   connections to the same destination joining it. Answers: allow for the session; allow and save
   (`connect = ["host:port"]`, `grant::Lift::Network`), which also joins every live sandbox's policy so it applies at
   once (Seatbelt doesn't change, so no restart); deny and save a `silence` entry (`SilenceTarget::Host`); not now.
   No answer in `confirmation_timeout_ms`, or no client, refuses it with `403`.
-- **pi's trusted hosts** (`pi_catalog`): the hosts of every provider built into the installed pi and the sign-in hosts
+- **pi's trusted hosts** (`pi/catalog.rs`): the hosts of every provider built into the installed pi and the sign-in hosts
   in its OAuth code, read by running `builtin.mjs` with Node against pi's package folder (found from its launcher,
   npm's link or aube's shim), once per package folder; `baseUrl`s in the agent directory's `models.json`; and
   remote MCP `url`s in the user's own MCP files (the global tier's `mcp.json` and `mcp.local.json`, every level's
   `mcp.local.json`). Never `models-store.json`: pi rewrites that cache at startup, so the sandbox can write it, and pi
   uses its `baseUrl`s with the user's keys (#362). Files are re-read when their modification time changes. The same
   module lists discovered models (untrusted) for the provider selector.
-- **Resolved addresses** (`gate/addresses.rs`). An allowed name is resolved once and an address that's loopback,
+- **Resolved addresses** (`launch/sandbox/network/addresses.rs`). An allowed name is resolved once and an address that's loopback,
   unspecified, link-local, multicast, broadcast, cloud metadata, or one of this Mac's interface addresses (IPv4 inside
   IPv6 forms judged as the IPv4) isn't dialed; an IP the user listed is exempt.
 - **Refusals** answer `403` with the reason as the status phrase and are recorded on the call (`gate`'s

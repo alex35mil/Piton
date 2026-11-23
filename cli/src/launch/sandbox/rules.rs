@@ -4,7 +4,7 @@
 //!
 //! The base, applied first: everything is readable, nothing is writable, and no Unix socket can be connected to or
 //! created. The network is [`Network::Open`] (as nono leaves it) or [`Network::Filtered`]: only the listed ports and
-//! the gate's, Piton's proxy, which decides named hosts (`gate/`).
+//! the gate's, Piton's proxy, which decides named hosts (`network/`).
 
 use std::path::{Path, PathBuf};
 
@@ -189,7 +189,10 @@ impl Network {
                         ssh,
                     },
                 ..
-            } => Some((crate::gate::proxy_url(*port, user, credential), ssh.as_deref())),
+            } => Some((
+                crate::launch::sandbox::network::proxy_url(*port, user, credential),
+                ssh.as_deref(),
+            )),
         }
     }
 }

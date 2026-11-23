@@ -207,12 +207,12 @@ pub enum SessionCmd {
     Refusal(crate::daemon::Refusal),
     /// A connection the gate holds: decided by the session, asking the user when nothing else does.
     NetworkAsk {
-        user: crate::gate::User,
+        user: crate::launch::sandbox::network::User,
         to: crate::launch::sandbox::Destination,
-        reply: oneshot::Sender<crate::gate::Verdict>,
+        reply: oneshot::Sender<crate::launch::sandbox::network::Verdict>,
     },
     /// A connection the gate refused.
-    GateRefused(crate::gate::Refused),
+    GateRefused(crate::launch::sandbox::network::Refused),
     /// fnox's proxy URL, reported once by the helper that starts pi behind it: the gate forwards through it.
     GateUpstream {
         url: String,
@@ -360,8 +360,8 @@ pub struct LaunchSpec {
 
 /// What a session with a filtered network starts its gate with.
 pub struct NetworkSpec {
-    pub catalog: crate::pi_catalog::Catalog,
-    pub route: Option<crate::gate::Route>,
+    pub catalog: crate::pi::catalog::Catalog,
+    pub route: Option<crate::launch::sandbox::network::Route>,
     /// The `ssh` wrapper's folder, when the daemon made it.
     pub ssh: Option<PathBuf>,
     /// Behind fnox: the one-time token the helper reports fnox's proxy with, in the helper's own environment.
@@ -371,11 +371,11 @@ pub struct NetworkSpec {
 /// The gate of a session with a filtered network, deciding through the session's channel.
 fn start_gate(spec: NetworkSpec, tx: &mpsc::UnboundedSender<SessionCmd>) -> Result<network::Network, LaunchError> {
     let asks = tx.clone();
-    let decide: crate::gate::Decide = Arc::new(move |user, to| {
+    let decide: crate::launch::sandbox::network::Decide = Arc::new(move |user, to| {
         let asks = asks.clone();
         Box::pin(async move {
             let (reply, verdict) = oneshot::channel();
-            let gone = crate::gate::Verdict::Deny {
+            let gone = crate::launch::sandbox::network::Verdict::Deny {
                 reason: "Piton's sandbox refused it: the session ended".into(),
             };
             if asks.send(SessionCmd::NetworkAsk { user, to, reply }).is_err() {
@@ -393,9 +393,11 @@ fn start_gate(spec: NetworkSpec, tx: &mpsc::UnboundedSender<SessionCmd>) -> Resu
             }
         }
     });
-    let gate = crate::gate::Gate::start(decide, spec.route, refused_tx).map_err(|source| LaunchError::Spawn {
-        program: "the network gate".into(),
-        source,
+    let gate = crate::launch::sandbox::network::Gate::start(decide, spec.route, refused_tx).map_err(|source| {
+        LaunchError::Spawn {
+            program: "the network gate".into(),
+            source,
+        }
     })?;
     Ok(network::Network::new(gate, spec.catalog, spec.ssh))
 }
@@ -1690,9 +1692,9 @@ impl SessionTask {
     /// destination when one is showing.
     fn network_ask(
         &mut self,
-        user: crate::gate::User,
+        user: crate::launch::sandbox::network::User,
         to: crate::launch::sandbox::Destination,
-        reply: oneshot::Sender<crate::gate::Verdict>,
+        reply: oneshot::Sender<crate::launch::sandbox::network::Verdict>,
     ) {
         let silence = self
             .commands
@@ -1715,7 +1717,7 @@ impl SessionTask {
     }
 
     /// Who a proxy user is, as the network question names it: pi, or the call's command.
-    fn who(&self, user: &crate::gate::User) -> String {
+    fn who(&self, user: &crate::launch::sandbox::network::User) -> String {
         match self.calls.owner(&user.0) {
             commands::TagOwner::Call(id) => self
                 .calls
@@ -1788,7 +1790,7 @@ impl SessionTask {
             NetworkAnswer::Session => {
                 crate::log!("session {key}: the user allowed {to} for this session");
                 network.allow_for_session(to.clone());
-                crate::gate::Verdict::Allow { literal: false }
+                crate::launch::sandbox::network::Verdict::Allow { literal: false }
             }
             NetworkAnswer::Persist(scope) => {
                 let entry = crate::config::NetworkTarget::Host {
@@ -1804,7 +1806,7 @@ impl SessionTask {
                         crate::log!("session {key}: saved `connect = [\"{to}\"]` in {}", file.display());
                         // Every live session that reads this file takes it (this one included), and new calls inherit it.
                         (self.hooks.network_entry_saved)(entry, file);
-                        crate::gate::Verdict::Allow { literal: false }
+                        crate::launch::sandbox::network::Verdict::Allow { literal: false }
                     }
                     Some(Err(e)) => {
                         crate::log!("session {key}: couldn't save the entry: {e}");
@@ -1814,7 +1816,7 @@ impl SessionTask {
                         if let Some(network) = &mut self.network {
                             network.allow_for_session(to.clone());
                         }
-                        crate::gate::Verdict::Allow { literal: false }
+                        crate::launch::sandbox::network::Verdict::Allow { literal: false }
                     }
                     None => network::refused(&to, "no configuration to save to"),
                 }
@@ -1863,7 +1865,7 @@ impl SessionTask {
     }
 
     /// A connection the gate refused: recorded for the call that made it (its block list shows it), else logged.
-    fn gate_refused(&mut self, refused: crate::gate::Refused) {
+    fn gate_refused(&mut self, refused: crate::launch::sandbox::network::Refused) {
         let key = lock(&self.shared).key;
         crate::log!("session {key}: the gate refused {} ({})", refused.to, refused.user.0);
         if let commands::TagOwner::Call(id) = self.calls.owner(&refused.user.0) {
@@ -1898,7 +1900,7 @@ impl SessionTask {
     /// fnox's proxy URL: the gate forwards every allowed connection through it from now on.
     fn gate_upstream(&mut self, url: &str) {
         let key = lock(&self.shared).key;
-        match (&self.network, crate::gate::parse_upstream(url)) {
+        match (&self.network, crate::launch::sandbox::network::parse_upstream(url)) {
             (Some(network), Some(route)) => {
                 network.gate.set_route(route);
                 crate::log!("session {key}: the gate forwards through fnox's proxy");

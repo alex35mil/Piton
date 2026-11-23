@@ -369,7 +369,7 @@ pub fn main() -> ExitCode {
             return ExitCode::from(126);
         }
         Cmd::GateConnect { host, port } => {
-            return match crate::gate::ssh::connect(host, *port) {
+            return match crate::launch::sandbox::network::ssh::connect(host, *port) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(why) => {
                     eprintln!("piton: {host}:{port}: {why}");

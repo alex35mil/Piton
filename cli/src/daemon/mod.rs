@@ -566,15 +566,15 @@ impl Daemon {
                     .pi
                     .command
                     .first()
-                    .map(|pi| crate::pi_catalog::builtin_for(pi, &env))
-                    .unwrap_or_else(|| Ok(crate::pi_catalog::Builtin::default()))
+                    .map(|pi| crate::pi::catalog::builtin_for(pi, &env))
+                    .unwrap_or_else(|| Ok(crate::pi::catalog::Builtin::default()))
                     .unwrap_or_else(|e| {
                         crate::log!("session {key}: pi's built-in hosts aren't trusted (asked about instead): {e}");
-                        crate::pi_catalog::Builtin::default()
+                        crate::pi::catalog::Builtin::default()
                     });
                 let files =
-                    crate::pi_catalog::Files::new(agent_dirs[1].clone(), &config.paths.global, &launch_config.levels);
-                let ssh = crate::gate::ssh::ensure(&config.state_dir());
+                    crate::pi::catalog::Files::new(agent_dirs[1].clone(), &config.paths.global, &launch_config.levels);
+                let ssh = crate::launch::sandbox::network::ssh::ensure(&config.state_dir());
                 if ssh.is_none() {
                     crate::log!("session {key}: can't make the ssh wrapper: SSH won't go through the gate");
                 }
@@ -587,11 +587,11 @@ impl Daemon {
                         })?;
                         (None, Some(token))
                     }
-                    None => (Some(crate::gate::Route::Direct), None),
+                    None => (Some(crate::launch::sandbox::network::Route::Direct), None),
                 };
                 Some(session::NetworkSpec {
                     ssh,
-                    catalog: crate::pi_catalog::Catalog::new(builtin, files),
+                    catalog: crate::pi::catalog::Catalog::new(builtin, files),
                     route,
                     upstream_token,
                 })

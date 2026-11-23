@@ -19,7 +19,7 @@ pub struct SourceGit {
     containment: Containment,
     helper: std::path::PathBuf,
     /// A filtered network's gate for Git's fetches, while this lives: the policy's entries decide, with nobody to ask.
-    _gate: Option<crate::gate::Gate>,
+    _gate: Option<crate::launch::sandbox::network::Gate>,
 }
 
 impl SourceGit {
@@ -57,7 +57,7 @@ fn gate_for(
     policy: &mut Policy,
     config: &DaemonConfig,
     source: &Path,
-) -> Result<Option<crate::gate::Gate>, LaunchError> {
+) -> Result<Option<crate::launch::sandbox::network::Gate>, LaunchError> {
     use crate::launch::sandbox::{Gate, Network};
     match &policy.network {
         Network::Open { .. } => return Ok(None),
@@ -65,9 +65,9 @@ fn gate_for(
     }
     let decider = policy.clone();
     let source = source.to_path_buf();
-    let decide: crate::gate::Decide = std::sync::Arc::new(move |_user, to| {
+    let decide: crate::launch::sandbox::network::Decide = std::sync::Arc::new(move |_user, to| {
         let verdict = match decider.decide_network(&to).allowed {
-            true => crate::gate::Verdict::Allow {
+            true => crate::launch::sandbox::network::Verdict::Allow {
                 literal: to.host.parse::<std::net::IpAddr>().is_ok(),
             },
             false => {
@@ -75,7 +75,7 @@ fn gate_for(
                     "git in {}: the network gate refused {to} (no connect entry lists it)",
                     source.display()
                 );
-                crate::gate::Verdict::Deny {
+                crate::launch::sandbox::network::Verdict::Deny {
                     reason: format!("Piton's sandbox refused {to}: no `connect` entry lists it"),
                 }
             }
@@ -83,11 +83,14 @@ fn gate_for(
         Box::pin(async move { verdict })
     });
     let (refused, _) = tokio::sync::mpsc::unbounded_channel();
-    let gate = crate::gate::Gate::start(decide, Some(crate::gate::Route::Direct), refused).map_err(|source| {
-        LaunchError::Spawn {
-            program: "the network gate".into(),
-            source,
-        }
+    let gate = crate::launch::sandbox::network::Gate::start(
+        decide,
+        Some(crate::launch::sandbox::network::Route::Direct),
+        refused,
+    )
+    .map_err(|source| LaunchError::Spawn {
+        program: "the network gate".into(),
+        source,
     })?;
     let (user, credential) = gate.issue("git");
     if let Network::Filtered { gate: slot, .. } = &mut policy.network {
@@ -95,7 +98,7 @@ fn gate_for(
             port: gate.port,
             user,
             credential,
-            ssh: crate::gate::ssh::ensure(&config.state_dir()),
+            ssh: crate::launch::sandbox::network::ssh::ensure(&config.state_dir()),
         };
     }
     Ok(Some(gate))

@@ -124,24 +124,28 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
 /// stdin closes.
 async fn serve_gate(
     mut policy: launch::sandbox::Policy,
-    catalog: crate::pi_catalog::Catalog,
+    catalog: crate::pi::catalog::Catalog,
     config: &DaemonConfig,
 ) -> ExitCode {
     use launch::sandbox::{Gate, Network};
     let decider = policy.clone();
     let catalog = std::sync::Arc::new(catalog);
-    let decide: crate::gate::Decide = std::sync::Arc::new(move |_user, to| {
+    let decide: crate::launch::sandbox::network::Decide = std::sync::Arc::new(move |_user, to| {
         let literal = to.host.parse::<std::net::IpAddr>().is_ok();
         let verdict = match decider.decide_network(&to).allowed || catalog.allows(&to.host, to.port).is_some() {
-            true => crate::gate::Verdict::Allow { literal },
-            false => crate::gate::Verdict::Deny {
+            true => crate::launch::sandbox::network::Verdict::Allow { literal },
+            false => crate::launch::sandbox::network::Verdict::Deny {
                 reason: format!("Piton's sandbox refused {to}: no connect entry lists it"),
             },
         };
         Box::pin(async move { verdict })
     });
     let (refused, _) = tokio::sync::mpsc::unbounded_channel();
-    let gate = match crate::gate::Gate::start(decide, Some(crate::gate::Route::Direct), refused) {
+    let gate = match crate::launch::sandbox::network::Gate::start(
+        decide,
+        Some(crate::launch::sandbox::network::Route::Direct),
+        refused,
+    ) {
         Ok(gate) => gate,
         Err(e) => {
             eprintln!("piton: can't start the gate: {e}");
@@ -159,7 +163,7 @@ async fn serve_gate(
                 port: gate.port,
                 user,
                 credential,
-                ssh: crate::gate::ssh::ensure(&config.state_dir()),
+                ssh: crate::launch::sandbox::network::ssh::ensure(&config.state_dir()),
             };
         }
     }
@@ -174,7 +178,7 @@ async fn serve_gate(
 async fn policy(
     config: &DaemonConfig,
     workspace: Option<PathBuf>,
-) -> Result<(Resolution, Vec<launch::LaunchWarning>, crate::pi_catalog::Catalog), String> {
+) -> Result<(Resolution, Vec<launch::LaunchWarning>, crate::pi::catalog::Catalog), String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -205,14 +209,14 @@ async fn policy(
             .pi
             .command
             .first()
-            .and_then(|pi| crate::pi_catalog::builtin_for(pi, &sandboxed.env).ok())
+            .and_then(|pi| crate::pi::catalog::builtin_for(pi, &sandboxed.env).ok())
             .unwrap_or_default();
-        let files = crate::pi_catalog::Files::new(
+        let files = crate::pi::catalog::Files::new(
             sandboxed.resolution.agent_dirs[1].clone(),
             &config.paths.global,
             &resolved.levels,
         );
-        let catalog = crate::pi_catalog::Catalog::new(builtin, files);
+        let catalog = crate::pi::catalog::Catalog::new(builtin, files);
         (sandboxed.resolution, sandboxed.warnings, catalog)
     })
     .map_err(|e| e.to_string())

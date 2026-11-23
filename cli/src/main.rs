@@ -3,10 +3,9 @@ mod apps;
 mod commands;
 mod config;
 mod daemon;
-mod gate;
 mod launch;
 mod logging;
-mod pi_catalog;
+mod pi;
 mod project;
 mod session;
 mod setup;
@@ -20,8 +19,8 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("PITON_B
 
 fn main() -> ExitCode {
     // Invoked as `ssh` (the link a filtered network's sandbox finds first on PATH): the real ssh, through the gate.
-    if gate::ssh::invoked_as_ssh() {
-        eprintln!("piton: can't run ssh: {}", gate::ssh::exec_ssh());
+    if launch::sandbox::network::ssh::invoked_as_ssh() {
+        eprintln!("piton: can't run ssh: {}", launch::sandbox::network::ssh::exec_ssh());
         return ExitCode::from(255);
     }
     commands::main()

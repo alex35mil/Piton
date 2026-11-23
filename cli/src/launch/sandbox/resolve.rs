@@ -817,7 +817,7 @@ fn build(
     rules.push(
         Effect::Allow,
         &[Access::Read],
-        subpath(&crate::gate::ssh::folder(facts.state_dir)),
+        subpath(&crate::launch::sandbox::network::ssh::folder(facts.state_dir)),
         Source::Piton {
             what: "the ssh wrapper that tunnels SSH through the network gate".into(),
         },

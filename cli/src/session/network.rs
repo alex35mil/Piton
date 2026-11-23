@@ -1,15 +1,15 @@
 //! A sandboxed session's filtered network: its gate, the proxy user of each sandbox it runs (pi's and each bash call's),
 //! and the decision for each connection the gate holds. The decision, in order: the sandbox's `connect` entries, pi's
-//! trusted hosts (`pi_catalog`), the hosts the user allowed for this session, a `silence` entry (refused without asking),
+//! trusted hosts (`pi::catalog`), the hosts the user allowed for this session, a `silence` entry (refused without asking),
 //! else the user is asked while the connection waits, one question at a time, sharing the session's question slot.
 
 use std::collections::{HashMap, VecDeque};
 
 use tokio::sync::oneshot;
 
-use crate::{
-    gate::{self, User, Verdict},
-    launch::sandbox::{Destination, Policy},
+use crate::launch::sandbox::{
+    Destination, Policy,
+    network::{self as gate, User, Verdict},
 };
 
 /// The proxy user of pi's own sandbox.
@@ -33,7 +33,7 @@ pub struct Asking {
 /// The session's network.
 pub struct Network {
     pub gate: gate::Gate,
-    pub catalog: crate::pi_catalog::Catalog,
+    pub catalog: crate::pi::catalog::Catalog,
     /// The `ssh` wrapper's folder, when the daemon made it.
     pub ssh: Option<std::path::PathBuf>,
     /// Each sandbox's policy by proxy user: pi's, and each call's while it runs.
@@ -45,7 +45,7 @@ pub struct Network {
 }
 
 impl Network {
-    pub fn new(gate: gate::Gate, catalog: crate::pi_catalog::Catalog, ssh: Option<std::path::PathBuf>) -> Self {
+    pub fn new(gate: gate::Gate, catalog: crate::pi::catalog::Catalog, ssh: Option<std::path::PathBuf>) -> Self {
         Self {
             gate,
             catalog,
@@ -201,12 +201,12 @@ mod tests {
         let deny: gate::Decide =
             std::sync::Arc::new(|_, _| Box::pin(async { Verdict::Deny { reason: String::new() } }));
         let gate = gate::Gate::start(deny, Some(gate::Route::Direct), tx).unwrap();
-        let builtin = crate::pi_catalog::Builtin {
+        let builtin = crate::pi::catalog::Builtin {
             providers: [("anthropic".to_string(), vec!["api.anthropic.com".to_string()])].into(),
             sign_in: Vec::new(),
         };
-        let files = crate::pi_catalog::Files::new(dir.path().join("agent"), dir.path(), &[]);
-        let mut net = Network::new(gate, crate::pi_catalog::Catalog::new(builtin, files), None);
+        let files = crate::pi::catalog::Files::new(dir.path().join("agent"), dir.path(), &[]);
+        let mut net = Network::new(gate, crate::pi::catalog::Catalog::new(builtin, files), None);
         let mut pi = policy(&["github.com:22"]);
         net.issue(PI_USER, &mut pi);
         assert!(matches!(&pi.network, Net::Filtered { gate: Gate::Listening { user, .. }, .. } if user == PI_USER));

@@ -169,7 +169,7 @@ pub fn exec(command: &[std::ffi::OsString]) -> ApplyError {
         env.remove(crate::agent::GATE_TOKEN_ENV);
         // A filtered network's processes reach hosts only through their gate, whatever the environment said.
         if let Some((url, ssh)) = policy.network.proxy() {
-            crate::gate::set_proxy_env(&mut env, &url, ssh);
+            crate::launch::sandbox::network::set_proxy_env(&mut env, &url, ssh);
         }
         // With the environment replaced, the program is found through its PATH.
         cmd.env_clear().envs(env);
