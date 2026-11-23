@@ -291,6 +291,31 @@ Verified on the host with fnox 1.48.0, op 2.34.1, claude 2.1.309, pi 1.5.2 (#229
   substitute a placeholder inside Basic, so Git over HTTPS doesn't work behind it (jdx/fnox#1151 proposed it, closed
   unmerged).
 
+## The network gate (#228)
+
+Checked in a sandboxed session with nono 0.82, fnox 1.50, pi 1.5.2, Node 24 (2026-11-23). Applying the Seatbelt rules is
+checked by the host probe (sandboxes don't nest).
+
+- nono's `CapabilitySet` without a network mode is `AllowAll`: its profile allows `network-outbound`, `-inbound`,
+  `-bind`, and `system-socket`, then appends the platform network rules after that section, so a later
+  `(deny network-outbound (remote ip "*:*"))` filters TCP and UDP with Piton's allows after it.
+- `sandbox-exec -p` parses `(remote ip "*:*")`, `(remote tcp "localhost:8080")`, `(remote tcp "*:22")`,
+  `(remote udp "*:53")`, and `(remote ip "localhost:*")`, also with `(with message ...)`; a named host is refused:
+  "host must be * or localhost in network address".
+- fnox's `proxy run` (permissive egress) tunnels `CONNECT github.com:22` (the SSH banner comes back) and
+  `CONNECT <host>:443` to hosts no rule names, so the gate can forward every tunnel to it. Its URL carries a
+  per-session password; a CONNECT without it gets `407`. Inherited file descriptors reach fnox's child.
+- pi's built-in providers and their hosts come from `@earendil-works/pi-ai`'s `getBuiltinProviders()` and
+  `getAllBuiltinModels()` (`dist/providers/all.js`, reached with `findPackageJSON` from pi's package; the package's
+  `exports` are import-only). 41 providers with a plain host in 1.5.2; Google Vertex's is a template
+  (`{location}-aiplatform.googleapis.com`). Sign-in hosts are the literal `https://` hosts in `dist/auth/oauth/*.js`
+  (`platform.claude.com`, `claude.ai`, `auth.openai.com`, `auth.x.ai`, ...); GitHub Copilot's device flow builds its
+  hosts from the domain (`github.com` by default), which isn't literal.
+- `models-store.json` (pi's catalog cache) holds each discovered model's `baseUrl` (`https://chatgpt.com/backend-api` for
+  openai-codex, `process://claude-code` for the claude-code extension). pi rewrites it at startup.
+- pi's own fetch installs undici's `EnvHttpProxyAgent`; Node child processes read the proxy variables only with
+  `NODE_USE_ENV_PROXY=1`. curl reads only the lowercase `http_proxy` for `http://`.
+
 ## pi's Claude Code in the sandbox
 
 Verified with claude 2.1.309, pi 1.5.2, and pi-claude-code at `d5b5e04` (#311):
