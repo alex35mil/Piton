@@ -285,8 +285,12 @@ Verified on the host with fnox 1.48.0, op 2.34.1, claude 2.1.309, pi 1.5.2 (#229
   global config.
 - `fnox proxy rules` prints `egress:`, `audit:`, then one line per rule ending in `env=<VAR>`, the variable that holds
   its placeholder, without resolving secrets.
-- `gh` 2.96.0 (Go) on macOS 27 refuses fnox's certificate ("x509: certificate is not trusted"), with or without
-  `SSL_CERT_FILE`; `curl` with the same placeholder gets the token injected (HTTP 200).
+- `gh` 2.96.0 (Go 1.26.4) on macOS 27 refuses fnox's certificate ("x509: certificate is not trusted"), with or
+  without `SSL_CERT_FILE`; `curl` with the same placeholder gets the token injected (HTTP 200).
+- `gh` 2.105.0 (Go 1.27.4) behind fnox 1.50 in a sandboxed session: REST (`gh api user`) and GraphQL (`gh issue view`)
+  get the token injected, and a host without a rule (`example.com`) still verifies. Go 1.27 reads `SSL_CERT_FILE` on
+  macOS (`x509sslcertoverrideplatform`, on by default), and fnox's certificate file holds the system's root
+  certificates too (158). `gh` needs a placeholder to send: its own login is in the keychain, closed to the sandbox.
 - Git over HTTPS to GitHub signs in only with `Authorization: Basic`; `Bearer` and `token` get 401. fnox 1.48 can't
   substitute a placeholder inside Basic, so Git over HTTPS doesn't work behind it (jdx/fnox#1151 proposed it, closed
   unmerged).
