@@ -306,6 +306,28 @@ private let decoder = JSONDecoder()
     let send = Request.sessionSend(7, messageID: "m1", text: "hi", mode: .followUp).json(id: "y")
     #expect(send["mode"]?.string == "follow_up")
     #expect(send["message_id"]?.string == "m1")
+    let trust = Request.trustDecide(workspace: "/r", decision: .declined, grants: ["a", "b"]).json(id: "t")
+    #expect(trust["type"]?.string == "trust.decide")
+    #expect(trust["decision"]?.string == "declined")
+    #expect(trust["grants"] == .array([.string("a"), .string("b")]))
+}
+
+/// A start the daemon refused for trust: the question's contents, with the grants not trusted yet marked new.
+@Test func decodesTrustNeeded() throws {
+    let json = #"""
+        {"source":"/r","grants":["sandbox.presets \"rust\"","sandbox.presets \"swift\""],
+         "added":["sandbox.presets \"swift\""],"resources":{"pi":[".pi/extensions"],"mcp_servers":["docs"]}}
+        """#
+    let needed = try JSONDecoder().decode(TrustNeeded.self, from: Data(json.utf8))
+    #expect(needed.source == "/r")
+    #expect(needed.resources.pi == [".pi/extensions"])
+    #expect(needed.resources.mcpServers == ["docs"])
+    #expect(needed.isNew(#"sandbox.presets "swift""#))
+    #expect(!needed.isNew(#"sandbox.presets "rust""#))
+    let firstTime = TrustNeeded(source: "/r", grants: ["a"], added: ["a"], resources: .init(pi: [], mcpServers: []))
+    #expect(!firstTime.isNew("a"), "nothing is new when nothing was trusted")
+    #expect(StartOutcome.trustNeeded(needed).started == nil)
+    #expect(throws: Connection.RequestError.self) { try StartOutcome.trustNeeded(needed).session() }
 }
 
 @Test func contentBlocksAreTyped() throws {

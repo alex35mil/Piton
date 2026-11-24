@@ -808,6 +808,81 @@ public enum SendMode: String, Sendable {
     case followUp = "follow_up"
 }
 
+/// What a repository's trust lets in: the question the apps ask before its first session.
+public struct TrustNeeded: Sendable, Hashable, Decodable {
+    /// The source checkout the decision is kept for (workers share it).
+    public let source: String
+    /// Every granting entry of its committed `config.toml`, one line each.
+    public let grants: [String]
+    /// The grants the user hasn't trusted yet (all of them when never asked).
+    public let added: [String]
+    public let resources: Resources
+
+    public struct Resources: Sendable, Hashable, Decodable {
+        /// pi's project files present in the checkout (`.pi/extensions`, …).
+        public let pi: [String]
+        /// The servers of the repository's `.piton/mcp.json`.
+        public let mcpServers: [String]
+
+        private enum Keys: String, CodingKey {
+            case pi
+            case mcpServers = "mcp_servers"
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            pi = try c.decode([String].self, forKey: .pi)
+            mcpServers = try c.decode([String].self, forKey: .mcpServers)
+        }
+
+        public init(pi: [String], mcpServers: [String]) {
+            self.pi = pi
+            self.mcpServers = mcpServers
+        }
+    }
+
+    /// Whether `grant` is one the user hasn't trusted, while others were (worth marking as new).
+    public func isNew(_ grant: String) -> Bool {
+        added.count < grants.count && added.contains(grant)
+    }
+
+    public init(source: String, grants: [String], added: [String], resources: Resources) {
+        self.source = source
+        self.grants = grants
+        self.added = added
+        self.resources = resources
+    }
+}
+
+/// The user's answer to the trust question.
+public enum TrustDecision: String, Sendable {
+    case trusted
+    case declined
+}
+
+/// What starting a session came to: it started, or the repository needs the user's trust first.
+public enum StartOutcome: Sendable, Hashable {
+    case started(SessionInfo)
+    case trustNeeded(TrustNeeded)
+
+    /// The started session; throws when the repository needed trust (for callers that start only where nothing is
+    /// left to decide, such as tests in a scratch checkout).
+    public func session() throws -> SessionInfo {
+        switch self {
+        case .started(let info): info
+        case .trustNeeded(let needed): throw Connection.RequestError.refused("\(needed.source) needs your trust first")
+        }
+    }
+
+    /// The started session's key; nil when the repository needed trust.
+    public var started: SessionKey? {
+        switch self {
+        case .started(let info): info.key
+        case .trustNeeded: nil
+        }
+    }
+}
+
 /// A request on a `view` connection (without its id).
 public enum Request: Sendable, Hashable {
     case sessionsList
@@ -821,6 +896,8 @@ public enum Request: Sendable, Hashable {
     /// Folders under the daemon's roots, one level (the roots when `path` is nil).
     case workspacesBrowse(path: String?)
     case sessionStart(workspace: String, mode: LaunchMode, prompt: String?)
+    /// The user's answer to a start that came back `trustNeeded`, for the grants they were shown.
+    case trustDecide(workspace: String, decision: TrustDecision, grants: [String])
     case sessionStop(SessionKey)
     case sessionWatch(SessionKey, from: UInt64?, limit: Int?)
     case sessionUnwatch(SessionKey)
@@ -864,6 +941,11 @@ public enum Request: Sendable, Hashable {
             fields["workspace"] = .string(workspace)
             fields["mode"] = .string(mode.rawValue)
             if let prompt { fields["prompt"] = .string(prompt) }
+        case .trustDecide(let workspace, let decision, let grants):
+            fields["type"] = .string("trust.decide")
+            fields["workspace"] = .string(workspace)
+            fields["decision"] = .string(decision.rawValue)
+            fields["grants"] = .array(grants.map { .string($0) })
         case .sessionStop(let key):
             fields["type"] = .string("session.stop")
             session(key)

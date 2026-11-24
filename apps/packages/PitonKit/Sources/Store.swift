@@ -331,15 +331,21 @@ public final class Store {
         await attempt { try await self.require().stop(session) }
     }
 
-    /// Starts a session; returns its key.
-    public func startSession(workspace: String, mode: LaunchMode, prompt: String?) async -> SessionKey? {
+    /// Starts a session: its outcome (started, or the repository's trust question first), or nil when it failed
+    /// (`lastError` says why).
+    public func startSession(workspace: String, mode: LaunchMode, prompt: String?) async -> StartOutcome? {
         do {
-            let info = try await require().start(workspace: workspace, mode: mode, prompt: prompt)
-            return info.key
+            return try await require().start(workspace: workspace, mode: mode, prompt: prompt)
         } catch {
             lastError = String(describing: error)
             return nil
         }
+    }
+
+    /// Records the user's answer to the trust question, for the grants it showed. False when it failed (`lastError`
+    /// says why: for example, the grants changed since, so the question must be asked again).
+    public func decideTrust(workspace: String, _ decision: TrustDecision, grants: [String]) async -> Bool {
+        await attempt { try await self.require().decideTrust(workspace: workspace, decision, grants: grants) }
     }
 
     /// One level of the daemon's workspace roots. Throws when the daemon refuses (for example, no roots configured)
