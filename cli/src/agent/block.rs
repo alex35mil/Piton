@@ -37,10 +37,7 @@ pub const CHOOSE_BELOW: &str = "Choose an answer below";
 /// the exact entry it saves. Allow adds a `[sandbox]` entry and restarts; Deny adds a `silence` entry, so the block is
 /// only logged from then on.
 pub fn process_dialog(id: &str, process: &str, refusal: &str, offer: &Offer) -> Value {
-    let entry = |lift: &Lift| {
-        let (key, value) = lift.entry();
-        format!("`{key} = [{}]`", toml::Value::String(value))
-    };
+    let entry = |lift: &Lift| format!("`{}`", lift.entry());
     let silence = |lift: &Lift| {
         let entry = crate::config::Silence {
             target: lift.silence_target(),
@@ -298,5 +295,18 @@ mod tests {
             title.contains("`silence = [{ target = \"com.example.agent\" }]`"),
             "{title}"
         );
+    }
+
+    /// A blocked TCP listen offers `tcp_listen = "*"`, and Deny silences listening.
+    #[test]
+    fn a_listen_offer_names_the_switch() {
+        let offer = Offer {
+            project: Lift::TcpListen,
+            everywhere: Lift::TcpListen,
+        };
+        let d = process_dialog("p", "node", "network-inbound local:*:50958", &offer);
+        let title = d["title"].as_str().unwrap();
+        assert!(title.contains("`tcp_listen = \"*\"`"), "{title}");
+        assert!(title.contains("`silence = [{ target = \"tcp-listen\" }]`"), "{title}");
     }
 }

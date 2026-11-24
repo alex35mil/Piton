@@ -16,7 +16,7 @@ pub use self::{
     sandbox::{
         AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Connect, Grant,
         GrantLists, Listed, NetworkTarget, Preset, Profile, SandboxSettings, SandboxTable, ServiceEntry, ServiceName,
-        Silence, SilenceTarget,
+        Silence, SilenceTarget, TCP_LISTEN_ANY, TcpListen,
     },
     web_search::WebSearchTable,
     workers::WorkersTable,

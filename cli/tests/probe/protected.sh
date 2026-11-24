@@ -100,7 +100,10 @@ printf '#!/bin/sh\ntouch "%s"\n' "$launched" > "$src/x.command"
 chmod +x "$src/x.command"
 expect_pasteboard=$(policy_says --service com.apple.pasteboard.1)
 expect_apps=$("$piton" sandbox show --workspace "$src" | python3 -I -c 'import json,sys; print("ok" if json.load(sys.stdin)["policy"]["apps"]["kind"] == "open" else "denied")')
-expect_bind=$(policy_says --bind "$src/probe.sock")
+expect_bind=$(policy_says --unix-bind "$src/probe.sock")
+# TCP listening, as the policy decides it (the default profile and a pi-claude-code preset open it; every address alike).
+listen_of() { python3 -I -c 'import json,sys; print("ok" if json.load(sys.stdin)["listen"]["kind"] == "open" else "denied")'; }
+expect_listen=$(printf '%s' "$policy" | listen_of)
 expect_ssh_agent=$(needs "${SSH_AUTH_SOCK:-/nonexistent}" "$(policy_says --connect "${SSH_AUTH_SOCK:-/nonexistent}")")
 ssh_pub=$(ls "$HOME"/.ssh/*.pub "$HOME"/.ssh/*/*.pub 2>/dev/null | head -n 1 || true)
 expect_ssh_pub=$(needs "${ssh_pub:-/nonexistent}" "$(policy_says "${ssh_pub:-/nonexistent}")")
@@ -238,7 +241,8 @@ attempt "$EXPECT_AGENT" "connect to the agent socket"    "python3 -I $CONNECT $S
 # Unix sockets: closed unless an entry names them. TCP and DNS stay open (#228 owns the network).
 attempt ok     "look up a host name (DNS)"             "python3 -I -c 'import socket; socket.getaddrinfo(\"github.com\", 443)'"
 attempt ok     "connect over TCP"                      "python3 -I -c 'import socket; socket.create_connection((\"github.com\", 443), 10).close()'"
-attempt ok     "listen on TCP localhost"               "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); s.listen()'"
+attempt "$EXPECT_LISTEN" "listen on TCP 127.0.0.1"   "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); s.listen()'"
+attempt "$EXPECT_LISTEN" "listen on TCP 0.0.0.0"     "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"0.0.0.0\", 0)); s.listen()'"
 attempt denied "connect to a host process's socket"    "python3 -I $CONNECT $HOST_SOCK"
 attempt denied "connect to it through a hard link"     "ln $HOST_SOCK hl.sock && python3 -I $CONNECT hl.sock"
 attempt ok     "connect to a socket an entry names"    "python3 -I $CONNECT $LISTED_SOCK"
@@ -260,7 +264,7 @@ cd "$src"
 status=0
 EXPECT_SSH_KEY="$expect_ssh_key" SSH_KEY="$ssh_key" EXPECT_KEYCHAIN="$expect_keychain" KEYCHAIN="$keychain" \
 EXPECT_HISTORY="$expect_history" EXPECT_DATABASE="$expect_database" EXPECT_CONTROL="$expect_control" \
-EXPECT_AGENT="$expect_agent" CONNECT="$connect" BIND="$bind" EXPECT_BIND="$expect_bind" \
+EXPECT_AGENT="$expect_agent" CONNECT="$connect" BIND="$bind" EXPECT_BIND="$expect_bind" EXPECT_LISTEN="$expect_listen" \
 HOST_SOCK="$host_sock" LISTED_SOCK="$listed_sock" EXPECT_SSH_AGENT="$expect_ssh_agent" \
 EXPECT_SSH_PUB="$expect_ssh_pub" SSH_PUB="$ssh_pub" \
 LOOKUP="$lookup" EXPECT_PASTEBOARD="$expect_pasteboard" EXPECT_APPS="$expect_apps" LAUNCHED="$launched" \
@@ -313,6 +317,8 @@ strict_policy=$(head -n 1 "$scratch/gate-policy")
 # port connects.
 other_local=denied
 printf '%s' "$strict_policy" | rg -q '"kind":"local_any_port"' && other_local=ok
+# The same preset opens TCP listening (its relay listens): what strict's listens expect here.
+strict_listen=$(printf '%s' "$strict_policy" | listen_of)
 listeners=""
 for port in "$local_port" "$other_port"; do
     # Without fd 9: a listener holding the gate's FIFO open would keep the gate from ever seeing it close.
@@ -346,6 +352,8 @@ attempt ok     "a listed local port (localhost:PORT)"   "python3 -I -c 'import s
 attempt $OTHER_LOCAL "another local port"               "python3 -I -c 'import socket; socket.create_connection((\"127.0.0.1\", $OTHER_PORT), 5)'"
 attempt denied "the gate without its credential"         "curl -sf -o /dev/null --max-time 10 -x http://127.0.0.1:\${HTTPS_PROXY##*:} https://example.com"
 attempt ok     "git over SSH to a listed host (wrapper)" 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -T git@github.com 2>&1 | rg -q "successfully authenticated|Permission denied"'
+attempt $STRICT_LISTEN "listen on TCP 127.0.0.1"         "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); s.listen()'"
+attempt $STRICT_LISTEN "listen on TCP 0.0.0.0"           "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"0.0.0.0\", 0)); s.listen()'"
 EOF
 # Node's TLS: a script file, so no quoting nests (`echo` treats backslashes differently across shells).
 cat > "$scratch/fetch.mjs" <<'JS'
@@ -356,9 +364,38 @@ if command -v node >/dev/null 2>&1; then
     echo "attempt ok \"node fetch over HTTPS\" 'node $scratch/fetch.mjs'" >> "$scratch/strict.sh"
 fi
 (cd "$strict" && LOOKUP="$lookup" ERR="$scratch/err" LOCAL_PORT="$local_port" OTHER_PORT="$other_port" OTHER_LOCAL="$other_local" \
-    PITON_SANDBOX_POLICY="$strict_policy" \
+    STRICT_LISTEN="$strict_listen" PITON_SANDBOX_POLICY="$strict_policy" \
     "$piton" sandbox-exec -- sh "$scratch/strict.sh" </dev/null >"$scratch/strict-out" 2>&1 9>&-) \
     || echo "FAIL  the strict sandbox didn't start" >> "$scratch/strict-out"
+# Closed listening, whatever this machine's presets open: strict's policy with listening closed, and creating sockets
+# opened in temp (strict closes it) for the Unix line. Every TCP listen is refused, on loopback too; a UDP bind (DNS
+# replies), a Unix socket listen, and a TCP connect still work.
+closed_policy=$(printf '%s' "$strict_policy" | python3 -I -c '
+import json, sys
+p = json.load(sys.stdin)
+p["listen"] = {"kind": "closed"}
+p["rules"].insert(1, {"effect": "allow", "access": ["bind"], "target": {"kind": "subpath", "path": "/private/tmp"},
+                      "source": {"kind": "workspace"}})
+print(json.dumps(p))')
+cat > "$scratch/closed.sh" <<'EOF'
+attempt() {
+    expect=$1; what=$2; shift 2
+    if sh -c "$*" </dev/null >/dev/null 2>"$ERR"; then got=ok; else got=denied; fi
+    if [ "$got" = "$expect" ]; then mark=pass; else mark=FAIL; fi
+    printf '%-5s %-7s closed listening: %s\n' "$mark" "$got" "$what"
+    if [ "$mark" = FAIL ] && [ -s "$ERR" ]; then head -n 12 "$ERR" | sed 's/^/      /'; fi
+}
+attempt denied "listen on TCP 127.0.0.1"     "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\", 0)); s.listen()'"
+attempt denied "listen on TCP 0.0.0.0"       "python3 -I -c 'import socket; s=socket.socket(); s.bind((\"0.0.0.0\", 0)); s.listen()'"
+attempt denied "listen on TCP :: (dual-stack)" "python3 -I -c 'import socket; s=socket.socket(socket.AF_INET6); s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0); s.bind((\"::\", 0)); s.listen()'"
+attempt ok     "bind UDP on 0.0.0.0"         "python3 -I -c 'import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM).bind((\"0.0.0.0\", 0))'"
+attempt ok     "look up a host name (DNS)"   "python3 -I -c 'import socket; socket.getaddrinfo(\"github.com\", 443)'"
+attempt ok     "listen on a Unix socket"     "python3 -I -c 'import socket,os; p=\"/private/tmp/piton-probe-\"+str(os.getpid())+\".sock\"; s=socket.socket(socket.AF_UNIX); s.bind(p); s.listen(); os.unlink(p)'"
+attempt ok     "connect to a listed local port" "python3 -I -c 'import socket; socket.create_connection((\"127.0.0.1\", $LOCAL_PORT), 5)'"
+EOF
+(cd "$strict" && ERR="$scratch/err" LOCAL_PORT="$local_port" PITON_SANDBOX_POLICY="$closed_policy" \
+    "$piton" sandbox-exec -- sh "$scratch/closed.sh" </dev/null >>"$scratch/strict-out" 2>&1 9>&-) \
+    || echo "FAIL  the closed-listening sandbox didn't start" >> "$scratch/strict-out"
 # A killed listener's wait returns 143, which `set -e` would take for a failure.
 for l in $listeners; do kill "$l" 2>/dev/null || true; wait "$l" 2>/dev/null || true; done
 # Closing the FIFO stops the gate.

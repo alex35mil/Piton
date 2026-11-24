@@ -5,14 +5,14 @@
 //! later pi or Piton loads, so a lifted command could grant the agent more), the daemon's state and control socket, the
 //! user's own `deny`, and the credential denies while fnox is on (the sandbox could run `fnox get`). Git's hooks and
 //! configuration and the credential denies otherwise are liftable: `husky install` and Git's keychain sign-in work once
-//! approved. So are Mach services and launching apps: an approved `open https://…` opens the page (what `open` may
-//! name is checked before the question, `agent/open.rs`).
+//! approved. So are Mach services, launching apps, and TCP listening: an approved `open https://…` opens the page (what
+//! `open` may name is checked before the question, `agent/open.rs`).
 
 use std::path::{Path, PathBuf};
 
 use super::{
     policy::{self, Source},
-    rules::{Access, Apps, Effect, Network, Policy, Rule, Services, Target},
+    rules::{Access, Apps, Effect, Listen, Network, Policy, Rule, Services, Target, is_listen},
 };
 use crate::config::{
     AllGrant, CommandGrant, CommandRuntime, Grant, GrantLists, LaunchConfig, Listed, ServiceEntry, ServiceName,
@@ -118,7 +118,8 @@ pub fn widened_config(config: &LaunchConfig, lists: &GrantLists, file: &Path) ->
             write_file: lists.write_file.clone(),
             read: lists.read.clone(),
             connect: lists.connect.clone(),
-            bind: lists.bind.clone(),
+            unix_bind: lists.unix_bind.clone(),
+            tcp_listen: lists.tcp_listen,
             services: lists.services.clone(),
             presets: lists.presets.clone(),
             ..crate::config::SandboxTable::default()
@@ -223,6 +224,7 @@ fn all_below(policy: &Policy, credentials: Credentials, roots: &[PathBuf]) -> Po
         apps: Apps::Open { source: source() },
         // The network isn't floor: an approved command reaches any host directly, without the gate.
         network: Network::Open { source: source() },
+        listen: Listen::Open { source: source() },
         tag: policy.tag.clone(),
     }
 }
@@ -285,28 +287,56 @@ pub enum Lift {
     WriteFile(PathBuf),
     /// `connect = [path]`: a Unix socket.
     Connect(PathBuf),
-    /// `bind = [path]`: where a Unix socket is created.
+    /// `unix_bind = [path]`: where a Unix socket is created.
     Bind(PathBuf),
     /// `services = [name]`: one Mach service.
     Service(ServiceName),
     /// `connect = ["host:port"]`: a network destination (the gate's network question).
     Network(crate::config::NetworkTarget),
+    /// `tcp_listen = "*"`: listening on TCP, on every address.
+    TcpListen,
+}
+
+/// A [`Lift`] as written in `[sandbox]`: an item added to a list, or a key set to a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiftEntry {
+    /// `key = [value]`, added to the list.
+    ListItem { key: &'static str, value: String },
+    /// `key = value`.
+    Value { key: &'static str, value: String },
+}
+
+impl std::fmt::Display for LiftEntry {
+    /// As TOML: `write = ["/x"]`, `tcp_listen = "*"`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LiftEntry::ListItem { key, value } => {
+                write!(f, "{key} = [{}]", toml::Value::String(value.clone()))
+            }
+            LiftEntry::Value { key, value } => write!(f, "{key} = {}", toml::Value::String(value.clone())),
+        }
+    }
 }
 
 impl Lift {
-    /// The key and value as written in `[sandbox]`.
-    pub fn entry(&self) -> (&'static str, String) {
+    /// The entry as written in `[sandbox]`.
+    pub fn entry(&self) -> LiftEntry {
+        let item = |key, value: String| LiftEntry::ListItem { key, value };
         match self {
-            Lift::Write(path) => ("write", path.display().to_string()),
-            Lift::WriteFile(path) => ("write_file", path.display().to_string()),
-            Lift::Connect(path) => ("connect", path.display().to_string()),
-            Lift::Bind(path) => ("bind", path.display().to_string()),
-            Lift::Service(name) => ("services", name.to_string()),
-            Lift::Network(target) => ("connect", target.to_string()),
+            Lift::Write(path) => item("write", path.display().to_string()),
+            Lift::WriteFile(path) => item("write_file", path.display().to_string()),
+            Lift::Connect(path) => item("connect", path.display().to_string()),
+            Lift::Bind(path) => item("unix_bind", path.display().to_string()),
+            Lift::Service(name) => item("services", name.to_string()),
+            Lift::Network(target) => item("connect", target.to_string()),
+            Lift::TcpListen => LiftEntry::Value {
+                key: "tcp_listen",
+                value: crate::config::TCP_LISTEN_ANY.into(),
+            },
         }
     }
 
-    /// What a `silence` entry for the same block names: the path, or the service.
+    /// What a `silence` entry for the same block names: the path, the service, the host, or listening.
     pub fn silence_target(&self) -> crate::config::SilenceTarget {
         match self {
             Lift::Write(path) | Lift::WriteFile(path) | Lift::Connect(path) | Lift::Bind(path) => {
@@ -314,6 +344,7 @@ impl Lift {
             }
             Lift::Service(name) => crate::config::SilenceTarget::Service(name.to_string()),
             Lift::Network(target) => crate::config::SilenceTarget::Host(target.to_string()),
+            Lift::TcpListen => crate::config::SilenceTarget::TcpListen,
         }
     }
 
@@ -326,9 +357,10 @@ impl Lift {
             Lift::Connect(path) => lists
                 .connect
                 .push(crate::config::Connect::Socket(path.display().to_string())),
-            Lift::Bind(path) => lists.bind.push(path.display().to_string()),
+            Lift::Bind(path) => lists.unix_bind.push(path.display().to_string()),
             Lift::Service(name) => lists.services.push(ServiceEntry::Name(name.clone())),
             Lift::Network(target) => lists.connect.push(crate::config::Connect::Network(target.clone())),
+            Lift::TcpListen => lists.tcp_listen = Some(crate::config::TcpListen),
         }
         lists
     }
@@ -503,6 +535,17 @@ pub fn lift_for(
     let target = Path::new(refused.target);
     let absolute = target.is_absolute();
     let operation = refused.operation;
+    // A TCP listen: `tcp_listen = "*"` in both scopes, offered only when the widened policy opens it.
+    if is_listen(operation, refused.target) {
+        let opens = |scope| widened(&Lift::TcpListen, scope).is_ok_and(|p| p.decide_listen().allowed);
+        return match opens(Scope::Project) && opens(Scope::Everywhere) {
+            true => Ok(Offer {
+                project: Lift::TcpListen,
+                everywhere: Lift::TcpListen,
+            }),
+            false => Err(NoLift::Unsupported),
+        };
+    }
     let (access, project) = match operation {
         "mach-lookup" if policy::KEYCHAIN_TARGETS.contains(&refused.target) => {
             return Err(keychain(bounds.credentials));
@@ -648,6 +691,8 @@ pub fn command_block(launch: &Policy, all: &Policy, operation: &str, target: &st
         "mach-lookup" => return lifted(all.decide_service(target).allowed),
         // cfprefsd checks the caller's write access to the domain's plist in the preferences folder, which `all` opens.
         "user-preference-write" => return CommandBlock::Liftable,
+        // A TCP listen: `all` opens it.
+        op if is_listen(op, target) => return lifted(all.decide_listen().allowed),
         // `all` opens files, sockets, services, and apps, never these: only a host run passes them. A refused
         // `file-issue-extension` (the app-bundle extension `osascript`'s Apple Event carries) stays refused with apps
         // open too (checked on the host).
@@ -795,6 +840,7 @@ mod tests {
             network: crate::launch::sandbox::Network::Open {
                 source: crate::launch::sandbox::Source::Workspace,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         }
     }
@@ -807,6 +853,7 @@ mod tests {
         assert!(widened.decide_service("com.example.agent").allowed);
         assert!(widened.decide_service("com.apple.SecurityServer").allowed, "fnox off");
         assert!(matches!(widened.apps, Apps::Open { .. }));
+        assert!(widened.decide_listen().allowed, "TCP listening isn't floor");
         let floor = all_below(&launch(), Credentials::Floor, &roots());
         assert!(floor.decide_service("com.example.agent").allowed);
         assert!(!floor.decide_service("com.apple.SecurityServer").allowed, "fnox on");
@@ -951,6 +998,12 @@ mod tests {
             block(&lifted, "network-outbound", "/private/var/run/syslog"),
             CommandBlock::Incidental
         );
+        // A TCP listen: the kernel names the local address it checked.
+        assert_eq!(
+            block(&lifted, "network-inbound", "local:*:50958"),
+            CommandBlock::Liftable
+        );
+        assert_eq!(block(&launch, "network-inbound", "local:*:50958"), CommandBlock::Floor);
     }
 
     /// nono applies the widened policy: it refuses a write grant on `/` (`platform rule must not grant root-level write
@@ -1044,6 +1097,14 @@ mod tests {
                 }
                 return policy;
             }
+            Lift::TcpListen => {
+                return Policy {
+                    listen: Listen::Open {
+                        source: Source::Workspace,
+                    },
+                    ..launch.clone()
+                };
+            }
         };
         let mut policy = launch.clone();
         policy.rules.insert(
@@ -1072,7 +1133,12 @@ mod tests {
                     },
                 );
             }
-            Lift::Write(_) | Lift::WriteFile(_) | Lift::Bind(_) | Lift::Service(_) | Lift::Network(_) => {}
+            Lift::Write(_)
+            | Lift::WriteFile(_)
+            | Lift::Bind(_)
+            | Lift::Service(_)
+            | Lift::Network(_)
+            | Lift::TcpListen => {}
         }
         policy
     }
@@ -1203,6 +1269,19 @@ mod tests {
         );
         assert_eq!(lift("mach-lookup", "bad name"), Err(NoLift::Unsupported));
         assert_eq!(lift("user-preference-write", "com.x"), Err(NoLift::Unsupported));
+        // A TCP listen (pi's OAuth callback, an MCP server's): `tcp_listen = "*"` in both scopes.
+        assert_eq!(lift("network-inbound", "local:*:50958"), Ok(only(Lift::TcpListen)));
+        // An inbound refusal that isn't a listen isn't offered.
+        assert_eq!(lift("network-inbound", "remote:*:53"), Err(NoLift::Unsupported));
+    }
+
+    /// How each entry is written: a list item, or a key's value.
+    #[test]
+    fn entries_are_written_as_toml() {
+        assert_eq!(Lift::Write("/x".into()).entry().to_string(), r#"write = ["/x"]"#);
+        assert_eq!(Lift::Bind("/x".into()).entry().to_string(), r#"unix_bind = ["/x"]"#);
+        assert_eq!(Lift::TcpListen.entry().to_string(), r#"tcp_listen = "*""#);
+        assert_eq!(Lift::TcpListen.lists().tcp_listen, Some(crate::config::TcpListen));
     }
 
     /// An entry the resolved policy doesn't let through isn't offered: the deny that still decides is named.

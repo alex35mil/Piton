@@ -754,7 +754,8 @@ the line. A host or client file has one schema and is read whole.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
   - Every key that loosens the sandbox, `sandbox.profile`, `sandbox.read` (lifting a built-in credential deny),
-    `sandbox.connect`, `sandbox.bind`, `sandbox.services`, `sandbox.commands` (per-command grants), and the `git`
+    `sandbox.connect`, `sandbox.unix_bind`, `sandbox.tcp_listen`, `sandbox.services`, `sandbox.commands` (per-command
+    grants), and the `git`
     (letting agents write Git's hooks and configuration), `apps` (launching apps), and `pi-claude-code` presets: the global `config.toml` or a `config.local.toml`, never a project's `config.toml`, which
     travels with the repository, so a repository can't open the sandbox for whoever clones it.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
@@ -763,8 +764,8 @@ the line. A host or client file has one schema and is read whole.
   - `branches.username`: the same files, as a personal value.
   - Everything else, keep-awake included: either file, any level.
 - **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
-  - `[sandbox]`: the nearest `profile` wins; lists (`write`, `write_file`, `read`, `connect`, `bind`, `services`,
-    `presets`, `deny`) only add, each entry keeping the file that listed it; a preset named at several levels takes
+  - `[sandbox]`: the nearest `profile` wins; `tcp_listen = "*"` at any level keeps it (only `"*"` parses); lists
+    (`write`, `write_file`, `read`, `connect`, `unix_bind`, `services`, `presets`, `deny`) only add, each entry keeping the file that listed it; a preset named at several levels takes
     each option from the nearest level that sets it. The daemon's `launch/sandbox` module, the only code that knows the backend, resolves
     them with the base policy and the profile's entries into each launch's rules ("Agent access").
   - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
@@ -872,12 +873,12 @@ and the network can be closed only to everything but pi's own destinations (the 
 **The model.** The base is the floor: everything that can be closed is closed, and every grant list is empty. A
 profile (`[sandbox] profile`: `strict`, `standard` by default, `yolo`) is a fixed set of list entries
 (`launch/sandbox/policy.rs`, `profile_entries`), each profile holding the one before; `strict` adds nothing. The
-user's lists (`write`, `write_file`, `read`, `connect`, `bind`, `services`, `presets`, `deny`) add on top across
-levels. A profile's entry is removed only by choosing another profile: there are no negative entries, so what a level grants is always
+user's lists (`write`, `write_file`, `read`, `connect`, `unix_bind`, `services`, `presets`, `deny`) and the
+`tcp_listen` key (`"*"`, its only value) add on top across levels. A profile's entry is removed only by choosing another profile: there are no negative entries, so what a level grants is always
 what it lists. Every list entry keeps where it came from (a profile, or the file that listed it), carried in each
 rule's source (`Source::Config` and `Source::Preset` with a `Provenance`), so `piton sandbox why` names it. Each Task
-that closes more of the base (sockets #248, apps #249, the network #228) adds the entries that reopen it to the
-profiles. `connect` is typed at parse time (`Connect`: a socket path, or a `NetworkTarget`: `localhost:PORT`,
+that closes more of the base (sockets #248, apps #249, the network #228, TCP listening #361) adds the entries that
+reopen it to the profiles. `connect` is typed at parse time (`Connect`: a socket path, or a `NetworkTarget`: `localhost:PORT`,
 `localhost:*`, `*:PORT`, `*`, a named host): socket entries become connect rules; network entries become the policy's
 `Network`: `Open` when any entry is `*`, else `Filtered` with its grants and its `Gate` ("The network gate").
 
@@ -897,12 +898,16 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    through an entry. TCP and UDP are decided after the socket rules: a filtered network emits a tagged
    `(deny network-outbound (remote ip "*:*"))`, then `(allow network-outbound (remote ip "<entry>"))` for each
    `localhost:PORT`, `localhost:*`, and `*:PORT` entry, then the gate's port (`(remote tcp "localhost:<port>")`).
-   nono's own `(allow network-outbound)` comes before Piton's platform rules, so the deny wins; listening (`bind`,
-   inbound) stays as nono leaves it (#361). Seatbelt refuses a named host ("host must be * or localhost"), so named
-   hosts are the gate's.
+   nono's own `(allow network-outbound)` comes before Piton's platform rules, so the deny wins. Seatbelt refuses a
+   named host ("host must be * or localhost"), so named hosts are the gate's. TCP listening (`Listen`) is decided
+   last: closed emits a tagged `(deny network-inbound (local tcp "*:*"))`, which refuses every `listen()`; open
+   (`tcp_listen = "*"`: `standard`, `yolo`, the `pi-claude-code` preset, the user's own files) emits nothing, so
+   nono's `(allow network-inbound)` stays. Seatbelt can't limit listening to loopback or a port
+   (docs/pi-findings.md), so it's every address or none; `tcp`, not `ip`, because an `ip` deny also refuses UDP
+   replies (DNS). Inbound connections can't be filtered by peer, and a listener's replies pass a filtered network.
 2. **Grants:** writes to the workspace, `<source>/.piton/.local/`, the temp folders and `/dev`, the `presets`,
-   `write`, and `write_file`; DNS (`/var/run/mDNSResponder`); and the `connect` and `bind` socket allows, placed
-   before every deny so no entry (yolo's `connect = ["/"]`, standard's `bind = ["/"]`) reopens a credential, a user
+   `write`, and `write_file`; DNS (`/var/run/mDNSResponder`); and the `connect` and `unix_bind` socket allows, placed
+   before every deny so no entry (yolo's `connect = ["/"]`, standard's `unix_bind = ["/"]`) reopens a credential, a user
    deny, or the daemon's sockets. Not user caches (`~/.cache`, `~/Library/Caches`): host tools reuse what's in them without checking
    (the Go build cache is linked straight into host builds), so a writable cache would run sandbox-written code on
    the host. Each preset (`mise`, `rust`, `node`, `swift`) grants one toolchain's caches and state as an informed
@@ -917,11 +922,11 @@ does; `piton sandbox show` prints them and `piton sandbox why` names the one tha
    names and its `<folder>.lock`, decided like pi's agent directory (accepted from the daemon's environment or a
    file the agent can't write, else only inside the checkout; never overlapping a configuration level, the daemon's
    state, a denied path, pi's agent directory, or the interactive Claude Code's folder), its log cache
-   `~/Library/Caches/claude-cli-nodejs` (which doesn't follow `CLAUDE_CONFIG_DIR`), `connect` `localhost:*` for the
-   extension's relay, and with `login = "keychain"` a `read` of `~/Library/Keychains`. A folder it won't open, or a
+   `~/Library/Caches/claude-cli-nodejs` (which doesn't follow `CLAUDE_CONFIG_DIR`), `connect` `localhost:*` and
+   `tcp_listen` for the extension's relay, and with `login = "keychain"` a `read` of `~/Library/Keychains`. A folder it won't open, or a
    token login with no `CLAUDE_CODE_OAUTH_TOKEN` in pi's environment or fnox's rules, starts the session with a
    warning (`LaunchWarning`) instead of refusing it; resolution builds the policy without the folder first and judges
-   the setting file against that. It also opens `claude`'s socket folder for writing and `bind`, never `connect`
+   the setting file against that. It also opens `claude`'s socket folder for writing and `unix_bind`, never `connect`
    (`ClaudeCodeSockets`): the user's `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR`, judged the same way and never temp,
    a write root, home, or a folder directly in home (else a warning), or a session's own folder that
    `launch/claude_sockets.rs` picks, the daemon creates at launch and sets as `CLAUDE_CODE_TMPDIR`, and removes when
@@ -1148,7 +1153,8 @@ the folders on the way to them), the daemon's state and control socket, the user
 fnox loads, and, while fnox is on, the credential denies (the sandbox could run `fnox get`). The configuration in it
 changes only through a write the user approves ("Protected files"); the rest never. Only a command the user chose to
 run on the host passes it, since a host run has no sandbox at all. `all` is the launch's policy with everything else open: writes
-below every entry of `/` (nono refuses a write grant on `/` itself) and every socket connect and bind allowed first, then the launch's
+below every entry of `/` (nono refuses a write grant on `/` itself), every socket connect and bind allowed first, and
+TCP listening open, then the launch's
 rules with every liftable deny left out, so the floor still decides last
 (`launch/sandbox/grant.rs`, where each deny's source and target say whether it's floor, matched exhaustively). Git's
 control files and the credential denies (fnox off) aren't floor: `husky install` and Git's keychain sign-in work once
@@ -1274,8 +1280,9 @@ operation, and target once. The session asks one question at a time (protected w
 questions); a process question waits for the slot, is shown as soon as it frees, and is asked again when its dialog
 leaves unanswered with the run it showed in. It's offered as the `[sandbox]` entry that lifts it
 (`grant::lift_for`): `write` for a folder's create or a path that doesn't exist yet, `write_file` for a file,
-`connect` for a socket it connects to (one in a credential folder too, which that entry opens for connecting), `bind`
-for a socket it creates. An entry is offered only when the launch's configuration, resolved again with it listed in the
+`connect` for a socket it connects to (one in a credential folder too, which that entry opens for connecting),
+`unix_bind` for a socket it creates, `tcp_listen = "*"` for a TCP listen (`network-inbound local:*:<port>`; one value,
+so saving it sets the key instead of adding to a list, and Deny saves `{ target = "tcp-listen" }`). An entry is offered only when the launch's configuration, resolved again with it listed in the
 file its scope saves to, allows the refused access. "Everywhere" saves the folder above the path's first component
 that names the source or checkout as pi and Claude Code name per-folder state (the path with `/` made `-`), unless that
 folder is `/`, home, directly in home, or holds a project. The question names each answer's exact entry: Allow in this

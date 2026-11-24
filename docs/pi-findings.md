@@ -316,6 +316,32 @@ checked by the host probe (sandboxes don't nest).
 - pi's own fetch installs undici's `EnvHttpProxyAgent`; Node child processes read the proxy variables only with
   `NODE_USE_ENV_PROXY=1`. curl reads only the lowercase `http_proxy` for `http://`.
 
+## TCP listening in the sandbox (#361)
+
+Verified on the host with `/usr/bin/sandbox-exec`, macOS 27, a nono-shaped profile (tagged `(deny default)`, then
+unfiltered `network-bind`/`-inbound`/`-outbound` allows, candidates after), Python sockets, 2026-11-23:
+
+- An address filter's host is `*` or `localhost` only: `127.0.0.1`, `::1`, `[::1]`, and `loopback` are refused ("host
+  must be * or localhost in network address"). `ip4`, `ip6`, `tcp4`, `tcp6` parse.
+- `localhost` in a `local` filter matches the any-address too: `(deny ... (local tcp "*:*"))` followed by
+  `(allow ... (local tcp "localhost:*"))`, on `network-bind` or `network-inbound`, lets a listen on `0.0.0.0`, the
+  LAN address, and `::` through. So listening can't be limited to loopback.
+- `(remote ip "localhost:*")` on `network-inbound` changes nothing: a LAN client is accepted. `listen()` has no
+  remote, and `accept()` isn't checked per peer.
+- `(deny network-inbound (local tcp "*:*"))` refuses every TCP `listen()`, loopback included; `bind()` still passes,
+  and UDP, TCP clients, and Unix socket listens are unaffected. The kernel's record is
+  `deny(1) network-inbound local:*:<port>`, the port an ephemeral one rather than the bound one, so a port-scoped
+  allow (`(local tcp "*:18361")`) never matches either.
+- `(deny network-inbound (local ip "*:*"))` also refuses UDP replies to a client (a DNS query's answer), and a
+  `network-bind` deny refuses UDP binds: only the `tcp` form leaves DNS working.
+- A filtered network (`(deny network-outbound (remote ip "*:*"))` with `localhost:*` allowed) doesn't stop a
+  sandboxed server on `0.0.0.0`: its send on an accepted TCP connection from a LAN client passes, and a UDP server on
+  `0.0.0.0` answers a LAN peer. `(remote ip "localhost:*")` outbound also reaches this Mac's own LAN and tailnet
+  addresses.
+- Claude Code's sandbox-runtime (`allowLocalBinding`: `(local ip "*:*")`) and Codex (`allow_local_binding`:
+  `(local ip "localhost:*")`, which the above shows also matches every address) open every address when they open
+  listening; Microsoft's mxc documents inbound scoped to loopback as not expressible.
+
 ## pi's Claude Code in the sandbox
 
 Verified with claude 2.1.309, pi 1.5.2, and pi-claude-code at `d5b5e04` (#311):

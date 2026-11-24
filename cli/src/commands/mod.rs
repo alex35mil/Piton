@@ -261,8 +261,9 @@ enum SandboxAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
-    /// Whether a sandboxed pi in the workspace may read, write, connect to, or create a socket at PATH, or look up the
-    /// Mach service PATH names (`--service`), and which rule decides.
+    /// Whether a sandboxed pi in the workspace may read, write, connect to, or create a socket at PATH, look up the Mach
+    /// service PATH names (`--service`), or listen on TCP (`--listen`, PATH an address such as `127.0.0.1:3000`), and
+    /// which rule decides.
     Why {
         path: PathBuf,
         /// The access checked: one of the flags, or reading when none is given.
@@ -289,7 +290,9 @@ pub enum WhyAccess {
     /// Check connecting: to a Unix socket (PATH), or to a host or port (`host:port`, `localhost:PORT`).
     Connect,
     /// Check creating a Unix socket.
-    Bind,
+    UnixBind,
+    /// Check listening on TCP: PATH is the address (`127.0.0.1:3000`); the sandbox decides every address alike.
+    Listen,
     /// Check looking up a Mach service: PATH is the service's name.
     Service,
 }
@@ -627,9 +630,16 @@ mod tests {
         assert!(matches!(why(&[]), Ok(None)));
         assert!(matches!(why(&["--write"]), Ok(Some(WhyAccess::Write))));
         assert!(matches!(why(&["--connect"]), Ok(Some(WhyAccess::Connect))));
-        assert!(matches!(why(&["--bind"]), Ok(Some(WhyAccess::Bind))));
+        assert!(matches!(why(&["--unix-bind"]), Ok(Some(WhyAccess::UnixBind))));
+        assert!(matches!(why(&["--listen"]), Ok(Some(WhyAccess::Listen))));
         assert!(matches!(why(&["--service"]), Ok(Some(WhyAccess::Service))));
-        for pair in [["--write", "--bind"], ["--connect", "--write"], ["--bind", "--connect"]] {
+        assert!(why(&["--bind"]).is_err(), "renamed");
+        for pair in [
+            ["--write", "--unix-bind"],
+            ["--connect", "--write"],
+            ["--unix-bind", "--connect"],
+            ["--listen", "--service"],
+        ] {
             assert!(why(&pair).is_err(), "{pair:?}");
         }
     }

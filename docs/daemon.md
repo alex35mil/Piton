@@ -301,11 +301,17 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
   in that folder; check a folder an agent created before running Git there. Hooks still run in the sandbox; only
   writing these files is closed. The `git` preset (below) lifts it.
 - **Unix sockets:** closed, except DNS (`mDNSResponder`) and `agent.sock`: no process may connect to a socket (a
-  running Neovim, Docker, the SSH and gpg agents) or create one, unless a `connect` or `bind` entry (below) opens it.
+  running Neovim, Docker, the SSH and gpg agents) or create one, unless a `connect` or `unix_bind` entry (below) opens
+  it.
 - **Network:** filtered. A process reaches only DNS, the ports `connect` lists, and Piton's gate (below), which
   decides named hosts. pi's own hosts pass without asking: the model providers built into pi and the hosts it signs in
   through, `baseUrl`s in its `models.json`, and the remote MCP servers in your own MCP files. You're asked about any
   other host while the connection waits. `standard` and `yolo` list `*`, which keeps the network open.
+- **TCP listening:** closed, on every address, loopback included: a dev server or a test daemon can't listen.
+  `tcp_listen = "*"` (below) opens it, on every address: the sandbox can't limit listening to this Mac (macOS's
+  sandbox has no filter for it; Claude Code's `allowLocalBinding` and Codex's `allow_local_binding` open every address
+  too), so a listener is reachable from your LAN and tailnet, and a filtered network doesn't stop its replies. UDP
+  stays open (closing it would refuse DNS replies). `standard`, `yolo`, and the `pi-claude-code` preset open it.
 - **Mach services:** only a built-in list (logging, user and group names, fonts, TLS checks, proxy settings, DNS
   configuration, preferences, Launch Services lookups; `piton sandbox why --service NAME` names any one). Any app's service is a
   way to drive that app, which runs outside the sandbox: with Hammerspoon's `ipc` module loaded, `hs -c` runs shell
@@ -321,10 +327,11 @@ The profiles, each holding the one before it:
 # strict: nothing
 
 # standard (the default): Git over SSH through your SSH agent (keys used, never read), the network, creating
-# sockets anywhere (test servers, IPC), and every Mach service but the keychain's
+# Unix sockets anywhere and listening on TCP (test and dev servers, IPC), and every Mach service but the keychain's
 read = ["~/.ssh/config", "~/.ssh/known_hosts"]   # and every public key (*.pub) under ~/.ssh, found at launch
 connect = ["$SSH_AUTH_SOCK", "*"]
-bind = ["/"]
+unix_bind = ["/"]
+tcp_listen = "*"
 services = ["*"]
 
 # yolo: standard, plus
@@ -344,13 +351,15 @@ write = []            # writable folders: each folder and everything below it
 write_file = []       # writable files: exactly each path
 read = []             # lift a built-in credential deny for reading a path (writable with write; never connectable)
 connect = []          # sockets, ports, and hosts (below)
-bind = []             # where processes may create Unix sockets: each path and everything below it
+unix_bind = []        # where processes may create Unix sockets: each path and everything below it
+tcp_listen = "*"      # listening on TCP, on every address; "*" is the only value (the sandbox can't limit
+                      # listening to an address or a port); unset: closed unless the profile opens it
 services = []         # Mach services: a name, a prefix ("com.example.*"), or "*" for every one
 presets = []          # "mise", "rust", "node", "swift": toolchain caches and state;
                       # "git": agents may write Git's hooks and configuration (see below);
                       # "apps": launching apps and Apple Events (see below);
                       # "pi-claude-code": what pi's Claude Code needs (see below)
-deny = []             # paths closed like the credentials: no read, write, connect, or bind
+deny = []             # paths closed like the credentials: no read, write, connect, or creating a socket
 silence = []          # blocks that stay blocked without a question or a notice (below; "Deny" saves here)
 ```
 
@@ -364,11 +373,12 @@ silence = [
   { process = "ssh", target = "~/.ssh/keys" },              # ssh's reads of anything in that folder
   { process = "claude", target = "com.apple.SecurityServer" }, # a Mach service, by name
   { target = "tracker.example.com:443" },                   # a host and port (also *.example.com:443)
+  { process = "node", target = "tcp-listen" },              # node's TCP listens, on any port
 ]
 ```
 
 - `target` is a path (absolute, or starting with `~/` or `$VAR/`; a `*` segment matches one folder entry, `**` any
-  number of them), a Mach service name, or a host and port. Anything else is a configuration error.
+  number of them), a Mach service name, a host and port, or `tcp-listen`. Anything else is a configuration error.
 - `process` is optional and matches the blocked process's name exactly.
 - A plain string entry (the earlier form) is an error: write `{ target = "..." }`.
 - Every notice ends with the entry that quiets it; presets add their own (`piton sandbox show` lists them all with
@@ -470,7 +480,12 @@ runtime = "sandbox"
 grant = { connect = ["$TMPDIR"] }
 ```
 
-The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `bind`, `services`, `commands` (below),
+`unix_bind` and `tcp_listen` are separate because a Unix socket is checked by its path and a TCP listen isn't: creating
+a socket in a folder makes a new server and reaches nothing that's there, while TCP listening can only be open on every
+address or closed. Neither lets a process connect to what's already listening; that's `connect`.
+
+The keys that loosen the sandbox are yours alone: `profile`, `read`, `connect`, `unix_bind`, `tcp_listen`, `services`,
+`commands` (below),
 and the `git`, `apps`, and `pi-claude-code` presets are accepted in the global `config.toml` or any `config.local.toml`,
 never in a project's `config.toml`, which
 travels with the repository: a repository can't open the sandbox for whoever clones it. `write`, `write_file`,
@@ -532,7 +547,8 @@ signed in with a token:
 
 The preset makes writable that folder and its lock beside it (`<folder>.lock`), the log cache, and connecting to any
 port on this Mac (`localhost:*`; the extension's relay listens on a random one, and it reaches Anthropic from pi's
-process). The folder is read like pi's agent directory: from your shell's environment, a file the agent can't write,
+process). It also opens TCP listening (`tcp_listen`), for that relay: on every address, as the sandbox can't open
+only this Mac's. The folder is read like pi's agent directory: from your shell's environment, a file the agent can't write,
 or, when the workspace's own `mise.toml` sets it, only inside the checkout.
 
 It also gives pi's `claude` a socket folder of its own. Every `claude` serves a messaging socket at
@@ -564,12 +580,14 @@ and when the token login finds no `CLAUDE_CODE_OAUTH_TOKEN` in pi's environment 
 writes to a folder the preset didn't open are blocked and asked about like any other. `piton sandbox show` prints the
 same warnings.
 
-`piton sandbox why PATH [--write | --connect | --bind | --service] [--workspace DIR]` says whether a sandboxed pi there
-may read, write, connect to, or create a socket at PATH, or look up the Mach service PATH names, and which rule decides:
-built in, or an entry from a profile or the file that lists it. `--connect host:port` checks a network destination:
-the `connect` entry or pi's own host that allows it, or that the gate would ask.
+`piton sandbox why PATH [--write | --connect | --unix-bind | --listen | --service] [--workspace DIR]` says whether a
+sandboxed pi there may read, write, connect to, or create a socket at PATH, listen on TCP (`--listen 127.0.0.1:3000`;
+every address is decided alike), or look up the Mach service PATH names, and which rule decides: built in, or an entry
+from a profile or the file that lists it. `--connect host:port` checks a network destination: the `connect` entry or
+pi's own host that allows it, or that the gate would ask.
 `piton sandbox show` prints the profile (and the file that chose it), the `silence` entries with their source (yours
-and the presets'), every rule with where it came from, the network (`open`, or `filtered` with its entries), pi's
+and the presets'), every rule with where it came from, the network (`open`, or `filtered` with its entries), TCP
+listening (`listen`: `closed`, or `open` with the entry that opened it), pi's
 trusted hosts (`pi_hosts`), and the models pi discovered (`pi_discovered_models`, never trusted).
 
 A grant doesn't follow a symlink a sandboxed agent could have made: the path itself, or a link inside the project's
@@ -639,7 +657,8 @@ grant = "all"                               # everything except the floor (what 
 [[sandbox.commands]]
 match = "bash(git push *)"
 runtime = "sandbox"
-grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed by hand: write, write_file, read, connect, bind, presets
+grant = { connect = ["$SSH_AUTH_SOCK"] }    # narrowed by hand: write, write_file, read, connect, unix_bind,
+                                            # tcp_listen, services, presets
 
 [[sandbox.commands]]
 match = "bash(sh cli/tests/probe/protected.sh)"
@@ -660,11 +679,12 @@ path, one question at a time. The question names the exact entry each answer sav
 
 - **Allow in this project / everywhere, and restart:** adds the entry that lifts it: `write` for a folder it creates
   (so what it writes inside isn't blocked again), `write_file` for a file, `connect` for a socket it connects to
-  (in a credential folder too, for that socket only), `bind` for a socket it creates. "Everywhere" saves
+  (in a credential folder too, for that socket only), `unix_bind` for a socket it creates, `tcp_listen = "*"` for a
+  TCP listen (pi's OAuth sign-in callback, an MCP server's). "Everywhere" saves
   the folder above a path's per-project part (Claude Code's `~/Library/Caches/claude-cli-nodejs/<project>` saves
   `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block.
-- **Deny in this project / everywhere:** adds `{ target = "<path>" }` to `silence`: it stays blocked, and isn't asked
-  about again. `piton sandbox why <path>` says when a path is silenced.
+- **Deny in this project / everywhere:** adds `{ target = "<path>" }` to `silence` (`"tcp-listen"` for a listen): it
+  stays blocked, and isn't asked about again. `piton sandbox why <path>` says when a path is silenced.
 
 A path named after the blocked process itself (its pid is a whole number in a component: Claude Code's
 `cc-socks/64421.sock`, Neovim's `nvim.64421.0`) is never offered as that path, since the entry would never match

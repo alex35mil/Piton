@@ -111,6 +111,11 @@ pub fn silence_entry(blocked: &Blocked, why: &NoLift, context: &Context) -> Opti
                 target: SilenceTarget::Host(to.to_string()),
                 process,
             }),
+            // A TCP listen, on any port.
+            op if crate::launch::sandbox::is_listen(op, blocked.target) => Some(Silence {
+                target: SilenceTarget::TcpListen,
+                process,
+            }),
             _ => None,
         };
     }
@@ -242,6 +247,7 @@ mod tests {
                 Ok(crate::config::Connect::Network(t)) => crate::launch::sandbox::Silent::Host(t),
                 Ok(crate::config::Connect::Socket(_)) | Err(_) => panic!("{h}"),
             },
+            SilenceTarget::TcpListen => crate::launch::sandbox::Silent::TcpListen,
         };
         let resolved = [Silenced {
             target: target_path,
@@ -447,5 +453,17 @@ mod tests {
         assert!(notice(&tcp, &NoLift::Unsupported, &context).contains("silence"));
         assert!(silences(&entry, &home, "node", "network-outbound", "1.2.3.4:443"));
         assert!(!silences(&entry, &home, "node", "network-outbound", "1.2.3.4:80"));
+        // A listen's notice names `tcp-listen`, which silences that process's listens on any port.
+        let listen = blocked(
+            "node",
+            "network-inbound",
+            "local:*:50958",
+            "network-inbound local:*:50958",
+        );
+        let entry = silence_entry(&listen, &NoLift::Unsupported, &context).unwrap();
+        assert_eq!(entry.inline(), r#"{ process = "node", target = "tcp-listen" }"#);
+        assert!(silences(&entry, &home, "node", "network-inbound", "local:*:61000"));
+        assert!(!silences(&entry, &home, "python3", "network-inbound", "local:*:61000"));
+        assert!(!silences(&entry, &home, "node", "network-outbound", "1.2.3.4:443"));
     }
 }

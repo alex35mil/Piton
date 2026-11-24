@@ -196,8 +196,23 @@ impl Commands {
         scope: PersistScope,
         lift: &crate::launch::sandbox::grant::Lift,
     ) -> Result<PathBuf, String> {
-        let (key, value) = lift.entry();
-        self.append(scope, key, &serde_json::Value::String(value))
+        use crate::launch::sandbox::grant::LiftEntry;
+        match lift.entry() {
+            LiftEntry::ListItem { key, value } => self.append(scope, key, &serde_json::Value::String(value)),
+            LiftEntry::Value { key, value } => {
+                let file = self.file(scope);
+                let path = file.path(&self.paths).map_err(|e| e.to_string())?;
+                file.write(
+                    &self.paths,
+                    &[crate::config::KeyChange {
+                        key: format!("sandbox.{key}"),
+                        value: Some(serde_json::Value::String(value)),
+                    }],
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(path)
+            }
+        }
     }
 
     /// Saves `entry` in the chosen file's `[sandbox] silence`: blocks it matches are only logged from then on.
@@ -819,6 +834,7 @@ mod tests {
             network: crate::launch::sandbox::Network::Open {
                 source: crate::launch::sandbox::Source::Workspace,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         }
     }
@@ -1192,6 +1208,23 @@ mod tests {
         assert!(note.is_some_and(|n| n.contains("osascript")));
         assert_eq!(blocks.len(), 2, "the incidental syslog connect is left out: {blocks:?}");
         assert!(blocks[0].ends_with("(protected: no approval lifts it)"), "{blocks:?}");
+    }
+
+    /// A dev server's refused TCP listen is asked about: an approved rerun opens listening.
+    #[test]
+    fn a_blocked_listen_is_asked_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &[]);
+        c.policies.launch.listen = crate::launch::sandbox::Listen::Closed;
+        c.policies.all.listen = crate::launch::sandbox::Listen::Open {
+            source: crate::launch::sandbox::Source::Workspace,
+        };
+        let mut calls = Calls::new("7-ab");
+        let req = begin(&c, &mut calls, &dir, "1", "npm run dev");
+        calls.note("1", refusal("network-inbound", "local:*:50958"));
+        let (blocks, _, _, _) = asked(after(&c, &mut calls, &req, false));
+        assert_eq!(blocks, ["network-inbound local:*:50958"]);
     }
 
     /// After the user denies Piton's question, the agent's rerun of the same command in that run is refused; a new
@@ -1602,5 +1635,26 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("grant"), "{text}");
+    }
+
+    /// A process's listen, allowed in this project: `tcp_listen = "*"` is set in the checkout's `config.local.toml`,
+    /// beside the file's other entries, and saving it again leaves the file valid.
+    #[test]
+    fn persisting_listening_sets_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = commands(dir.path(), &[]);
+        let file = dir.path().join(".piton/config.local.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "[sandbox]\nwrite = [\"~/x\"]\n").unwrap();
+        let lift = crate::launch::sandbox::grant::Lift::TcpListen;
+        for _ in 0..2 {
+            let saved = c.persist_lift(PersistScope::Project, &lift).unwrap();
+            assert_eq!(saved, file);
+            let text = std::fs::read_to_string(&file).unwrap();
+            let table: toml::Table = toml::from_str(&text).unwrap();
+            let sandbox: crate::config::SandboxTable = table["sandbox"].clone().try_into().unwrap();
+            assert_eq!(sandbox.tcp_listen, Some(crate::config::TcpListen), "{text}");
+            assert_eq!(sandbox.write, ["~/x"], "the file's other entries stay");
+        }
     }
 }

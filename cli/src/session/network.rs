@@ -184,6 +184,7 @@ mod tests {
                 grants,
                 gate: Gate::None,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         }
     }
