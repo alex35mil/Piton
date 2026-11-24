@@ -152,6 +152,11 @@ pub enum ControlResponse {
         source: PathBuf,
         trust: crate::trust::TrustState,
     },
+    /// A decision refused because the repository's grants changed since they were shown: ask again with `trust`.
+    TrustChanged {
+        source: PathBuf,
+        trust: crate::trust::TrustState,
+    },
     Error {
         message: String,
     },

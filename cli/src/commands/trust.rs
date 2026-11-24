@@ -39,8 +39,12 @@ pub async fn run(action: TrustAction, config: &DaemonConfig) -> ExitCode {
                 other => report(other),
             }
         }
-        TrustAction::Allow { workspace } => decide(config, here(workspace), TrustDecisionWire::Trusted).await,
-        TrustAction::Deny { workspace } => decide(config, here(workspace), TrustDecisionWire::Declined).await,
+        TrustAction::Allow { workspace, grants } => {
+            decide(config, here(workspace), TrustDecisionWire::Trusted, grants).await
+        }
+        TrustAction::Deny { workspace, grants } => {
+            decide(config, here(workspace), TrustDecisionWire::Declined, grants).await
+        }
         TrustAction::Reset { workspace } => {
             match control(
                 &config.socket,
@@ -60,18 +64,33 @@ pub async fn run(action: TrustAction, config: &DaemonConfig) -> ExitCode {
     }
 }
 
-/// Records a decision for the grants the repository has now: what `status` shows is what's decided.
-async fn decide(config: &DaemonConfig, workspace: PathBuf, decision: TrustDecisionWire) -> ExitCode {
-    let grants = match control(
-        &config.socket,
-        ControlRequest::TrustStatus {
-            workspace: workspace.clone(),
+/// Records a decision for `shown` (a JSON list), the grants another client displayed, so the daemon refuses when they
+/// changed since; without it, for the grants as they are now (what `status` printed to the user).
+async fn decide(
+    config: &DaemonConfig,
+    workspace: PathBuf,
+    decision: TrustDecisionWire,
+    shown: Option<String>,
+) -> ExitCode {
+    let grants = match shown {
+        Some(json) => match serde_json::from_str::<crate::config::Grants>(&json) {
+            Ok(grants) => grants,
+            Err(e) => {
+                eprintln!("piton: --grants must be a JSON list of grants: {e}");
+                return ExitCode::from(2);
+            }
         },
-    )
-    .await
-    {
-        Ok(ControlResponse::Trust { trust, .. }) => grants_of(&trust),
-        other => return report(other),
+        None => match control(
+            &config.socket,
+            ControlRequest::TrustStatus {
+                workspace: workspace.clone(),
+            },
+        )
+        .await
+        {
+            Ok(ControlResponse::Trust { trust, .. }) => grants_of(&trust),
+            other => return report(other),
+        },
     };
     match control(
         &config.socket,
@@ -87,9 +106,20 @@ async fn decide(config: &DaemonConfig, workspace: PathBuf, decision: TrustDecisi
             print_state(&source, &trust);
             ExitCode::SUCCESS
         }
+        Ok(ControlResponse::TrustChanged { source, trust }) => {
+            eprintln!(
+                "piton: the grants of {} changed since they were shown; nothing was recorded",
+                source.display()
+            );
+            print_state(&source, &trust);
+            ExitCode::from(EXIT_CHANGED)
+        }
         other => report(other),
     }
 }
+
+/// Exit code of `piton trust allow|deny --grants` when the grants changed since they were shown.
+pub const EXIT_CHANGED: u8 = 4;
 
 fn grants_of(trust: &TrustState) -> crate::config::Grants {
     match trust {
@@ -198,6 +228,11 @@ pub async fn answer(config: &DaemonConfig, needed: &TrustNeeded, answer: &Answer
     .await
     {
         Ok(ControlResponse::Trust { .. }) => Ok(()),
+        // Changed while asked: the start asks again with what's there now.
+        Ok(ControlResponse::TrustChanged { source, .. }) => {
+            eprintln!("piton: the grants of {} changed while you were asked", source.display());
+            Ok(())
+        }
         other => Err(report(other)),
     }
 }

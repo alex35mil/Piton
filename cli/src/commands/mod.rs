@@ -181,10 +181,20 @@ enum TrustAction {
         #[usage(long)]
         json: bool,
     },
-    /// Trust the repository's committed grants as they are now, and let pi load its project files.
-    Allow { workspace: Option<PathBuf> },
+    /// Trust the repository's committed grants, and let pi load its project files.
+    Allow {
+        workspace: Option<PathBuf>,
+        /// The grants you were shown, as a JSON list (`trust status --json`'s `grants`): refused when they changed
+        /// since. Default: the grants as they are now.
+        #[usage(long)]
+        grants: Option<String>,
+    },
     /// Don't trust it: its restrictions still apply, its grants don't, and pi loads none of its project files.
-    Deny { workspace: Option<PathBuf> },
+    Deny {
+        workspace: Option<PathBuf>,
+        #[usage(long)]
+        grants: Option<String>,
+    },
     /// Forget the decision: the next launch asks again.
     Reset { workspace: Option<PathBuf> },
 }

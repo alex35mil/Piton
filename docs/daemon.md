@@ -822,6 +822,8 @@ reconfirm = "never"      # or "on-change"
 piton trust status [<path>] [--json]   # trusted, declined, or not decided; the grants and pi's files
 piton trust allow [<path>]             # trust the grants as they are now
 piton trust deny [<path>]              # restrictions only, and pi loads nothing of the project's
+                                       # --grants '<json list>': for the grants you were shown (status --json);
+                                       # refused, exit 4, when they changed since
 piton trust reset [<path>]             # forget it: the next launch asks
 ```
 

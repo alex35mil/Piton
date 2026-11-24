@@ -93,7 +93,13 @@ const tests = {
         assert.match(refused.err, /needs your trust before a launch/);
         const untrusted = JSON.parse((await cli(ctx, ["sandbox", "show"])).out);
         assert.ok(untrusted.untrusted.some((g) => g.includes("/source-grant")), "left out until trusted");
-        const allowed = await cli(ctx, ["trust", "allow"]);
+        // A decision for grants other than the repository's now is refused, naming the change (exit 4).
+        const stale = await cli(ctx, ["trust", "allow", "--grants", "[]"]);
+        assert.equal(stale.code, 4, stale.err);
+        assert.match(stale.err, /changed since they were shown/);
+        const status = await cli(ctx, ["trust", "status", "--json"]);
+        assert.equal(status.json.trust.state, "needed");
+        const allowed = await cli(ctx, ["trust", "allow", "--grants", JSON.stringify(status.json.trust.grants)]);
         assert.equal(allowed.code, 0, allowed.err);
         assert.match(allowed.out, /trusted/);
         const created = await cli(ctx, ["worker", "create", "Fix X", "--issue", "KID-5", "--json"]);

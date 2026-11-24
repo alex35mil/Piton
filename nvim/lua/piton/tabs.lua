@@ -51,14 +51,15 @@ local function open(agent, relative_file, draft)
 end
 
 --- Opens the agent's tab and its Pi. A repository that needs the user's trust is asked about first, so its Pi starts
---- with the decision made; a refusal (the daemon not running) opens nothing.
+--- with the decision made; cancelling the question, or a refusal (the daemon not running), opens nothing.
 ---@param agent {path: string, label: string}
 ---@param relative_file string?
 ---@param draft string? Text to pre-fill in the Pi prompt.
 function M.open(agent, relative_file, draft)
     require("piton.util").async(function()
-        require("piton.trust").ensure(agent.path)
-        open(agent, relative_file, draft)
+        if require("piton.trust").ensure(agent.path) then
+            open(agent, relative_file, draft)
+        end
     end)
 end
 

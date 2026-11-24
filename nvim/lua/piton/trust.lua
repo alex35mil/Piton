@@ -2,14 +2,15 @@
 -- daemon per source checkout (`piton trust`). Asked before an agent's tab opens, so its pi starts with it decided.
 
 local cli = require("piton.cli")
-local config = require("piton.config")
 local util = require("piton.util")
 
 local M = {}
 
+local CHOICES = { "Trust", "Don't trust", "Cancel" }
+
 --- The question's text: the grants (new ones marked) and what pi would load.
 ---@param source string
----@param trust { grants: string[], added: string[], resources: { pi: string[], mcp_servers: string[] } }
+---@param trust PitonTrust
 ---@return string
 function M.question(source, trust)
     local lines = { source .. " isn't trusted yet. Trusting it applies:" }
@@ -32,20 +33,42 @@ function M.question(source, trust)
     if #trust.resources.mcp_servers > 0 then
         lines[#lines + 1] = "MCP servers: " .. table.concat(trust.resources.mcp_servers, ", ")
     end
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "Trust it? No keeps its restrictions and leaves its grants out."
+    lines[#lines + 1] = "Don't trust keeps its restrictions and leaves its grants out."
     return table.concat(lines, "\n")
 end
 
---- Asks when the repository of `path` needs a decision, and records the answer. Runs inside `util.async`.
+--- The user's choice, with `vim.ui.select`; yields inside `util.async`. Nil when dismissed.
+---@param prompt string
+---@return "Trust" | "Don't trust" | "Cancel" | nil
+local function choose(prompt)
+    local co = coroutine.running()
+    vim.ui.select(CHOICES, { prompt = prompt }, function(choice)
+        vim.schedule(function()
+            util.resume(co, choice)
+        end)
+    end)
+    return coroutine.yield()
+end
+
+--- Asks when the repository of `path` needs a decision, and records the answer for the grants it showed. Asks again
+--- when they changed while the question was open. Runs inside `util.async`.
 ---@param path string
+---@return boolean proceed false when the user cancelled or dismissed the question: open nothing, record nothing
 function M.ensure(path)
-    local status = cli.trust_status(path)
-    if status.trust.state ~= "needed" then
-        return
+    while true do
+        local status = cli.trust_status(path)
+        if status.trust.state ~= "needed" then
+            return true
+        end
+        local choice = choose(M.question(status.source, status.trust))
+        if choice ~= "Trust" and choice ~= "Don't trust" then
+            return false
+        end
+        local decision = choice == "Trust" and "allow" or "deny"
+        if cli.trust_decide(path, decision, status.trust.grants) == "recorded" then
+            return true
+        end
     end
-    local decision = config.confirm(M.question(status.source, status.trust)) and "allow" or "deny"
-    cli.trust_decide(path, decision)
 end
 
 return M

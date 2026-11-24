@@ -301,14 +301,26 @@ function M.trust_status(path)
     }
 end
 
---- `piton trust allow|deny`: records the decision for the repository's grants as they are now.
+-- Exit code of `piton trust allow|deny --grants` when the grants changed since they were shown.
+local EXIT_TRUST_CHANGED = 4
+
+--- `piton trust allow|deny --grants`: records the decision for the grants the user was shown. "changed" when they
+--- changed since (nothing recorded: ask again).
 ---@param path string
 ---@param decision "allow" | "deny"
-function M.trust_decide(path, decision)
-    local result = util.exec({ "piton", "trust", decision, path })
-    if result.code ~= EXIT_OK then
-        util.refuse("piton trust " .. decision .. " failed:\n" .. vim.trim(result.stderr or ""))
+---@param shown string[]
+---@return "recorded" | "changed"
+function M.trust_decide(path, decision, shown)
+    -- An empty Lua table encodes as `{}`: the list must be `[]`.
+    local grants = #shown > 0 and vim.json.encode(shown) or "[]"
+    local result = util.exec({ "piton", "trust", decision, path, "--grants", grants })
+    if result.code == EXIT_OK then
+        return "recorded"
+    elseif result.code == EXIT_TRUST_CHANGED then
+        return "changed"
     end
+    util.refuse("piton trust " .. decision .. " failed:\n" .. vim.trim(result.stderr or ""))
+    error("unreachable")
 end
 
 -- Exit code of `piton config get` when the part's files are invalid.

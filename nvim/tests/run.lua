@@ -198,51 +198,118 @@ test("tab hooks run in order and already-loaded modules see new options", functi
     equal(5, #calls)
 end)
 
-test("a repository that needs trust is asked about before its agent's tab opens", function()
-    local path = directory("untrusted agent")
+-- A repository that needs trust; `grants` as shown by the daemon on each read, in turn.
+local function needing_trust(path, reads)
+    local n = 0
     replace(cli, "trust_status", function(p)
         equal(path, p)
+        n = math.min(n + 1, #reads)
         return {
             source = "/src",
             trust = {
                 state = "needed",
-                grants = { 'sandbox.presets "rust"', 'sandbox.presets "swift"' },
-                added = { 'sandbox.presets "swift"' },
+                grants = reads[n],
+                added = { reads[n][#reads[n]] },
                 resources = { pi = { ".pi/extensions" }, mcp_servers = {} },
             },
         }
     end)
-    local asked, decided = nil, {}
-    piton.setup({ confirm = function(message)
-        asked = message
-        return false
-    end })
-    replace(cli, "trust_decide", function(p, decision)
-        decided[#decided + 1] = { p, decision }
+end
+
+-- Answers each `vim.ui.select` with the next of `answers` (nil: dismissed), recording the prompts.
+local function answering(answers)
+    local prompts = {}
+    replace(vim.ui, "select", function(items, opts, on_choice)
+        equal({ "Trust", "Don't trust", "Cancel" }, items)
+        prompts[#prompts + 1] = opts.prompt
+        on_choice(table.remove(answers, 1))
+    end)
+    return prompts
+end
+
+local function wait_for(check)
+    assert(vim.wait(1000, check), "timed out")
+end
+
+test("a repository that needs trust is asked about before its agent's tab opens", function()
+    local path = directory("untrusted agent")
+    needing_trust(path, { { 'sandbox.presets "rust"', 'sandbox.presets "swift"' } })
+    local prompts = answering({ "Don't trust" })
+    local decided = {}
+    replace(cli, "trust_decide", function(p, decision, shown)
+        decided[#decided + 1] = { p, decision, shown }
+        return "recorded"
     end)
     local shown = 0
     fake_pi(function()
         shown = shown + 1
     end)
     tabs.open({ path = path, label = "Agent" })
-    assert(asked:find('sandbox.presets "swift"  (new)', 1, true), asked)
-    assert(not asked:find('"rust"  (new)', 1, true), asked)
-    assert(asked:find(".pi/extensions", 1, true), asked)
-    equal({ { path, "deny" } }, decided)
-    equal(1, shown, "declining still opens the agent, without the grants")
+    wait_for(function() return shown == 1 end)
+    assert(prompts[1]:find('sandbox.presets "swift"  (new)', 1, true), prompts[1])
+    assert(not prompts[1]:find('"rust"  (new)', 1, true), prompts[1])
+    assert(prompts[1]:find(".pi/extensions", 1, true), prompts[1])
+    equal({ { path, "deny", { 'sandbox.presets "rust"', 'sandbox.presets "swift"' } } }, decided)
+end)
+
+test("dismissing or cancelling the trust question records nothing and opens nothing", function()
+    local path = directory("dismissed agent")
+    needing_trust(path, { { 'sandbox.presets "rust"' } })
+    replace(cli, "trust_decide", function() error("must not record") end)
+    fake_pi(function() error("must not open") end)
+    for _, answer in ipairs({ "Cancel", false }) do
+        local prompts = answering({ answer or nil })
+        local tabs_before = #vim.api.nvim_list_tabpages()
+        tabs.open({ path = path, label = "Agent" })
+        wait_for(function() return #prompts == 1 end)
+        vim.wait(50)
+        equal(tabs_before, #vim.api.nvim_list_tabpages())
+    end
+end)
+
+test("grants that changed while the question was open are asked about again", function()
+    local path = directory("changed agent")
+    needing_trust(path, { { 'sandbox.presets "rust"' }, { 'sandbox.presets "rust"', 'sandbox.filesystem."~/.ssh" = "read"' } })
+    local prompts = answering({ "Trust", "Trust" })
+    local decided = {}
+    replace(cli, "trust_decide", function(_, _, shown)
+        decided[#decided + 1] = shown
+        return #decided == 1 and "changed" or "recorded"
+    end)
+    local shown = 0
+    fake_pi(function()
+        shown = shown + 1
+    end)
+    tabs.open({ path = path, label = "Agent" })
+    wait_for(function() return shown == 1 end)
+    equal(2, #prompts)
+    assert(prompts[2]:find("~/.ssh", 1, true), prompts[2])
+    equal({ { 'sandbox.presets "rust"' }, { 'sandbox.presets "rust"', 'sandbox.filesystem."~/.ssh" = "read"' } }, decided)
+end)
+
+test("trust decisions pass the shown grants and read a change from the exit code", function()
+    local calls = {}
+    replace(util, "exec", function(cmd)
+        calls[#calls + 1] = cmd
+        return { code = #calls == 1 and 0 or 4, stdout = "", stderr = "" }
+    end)
+    equal("recorded", cli.trust_decide("/r", "allow", {}))
+    equal({ "piton", "trust", "allow", "/r", "--grants", "[]" }, calls[1])
+    equal("changed", cli.trust_decide("/r", "deny", { "a" }))
+    equal('["a"]', calls[2][6])
 end)
 
 test("a decided repository opens without a question", function()
     local path = directory("trusted agent")
     replace(trust_state, "state", "trusted")
-    piton.setup({ confirm = function() error("must not ask") end })
+    replace(vim.ui, "select", function() error("must not ask") end)
     replace(cli, "trust_decide", function() error("must not record") end)
     local shown = 0
     fake_pi(function()
         shown = shown + 1
     end)
     tabs.open({ path = path, label = "Agent" })
-    equal(1, shown)
+    wait_for(function() return shown == 1 end)
 end)
 
 test("tab labels truncate Unicode at a word and source tabs don't open chat", function()

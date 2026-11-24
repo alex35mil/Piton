@@ -35,8 +35,9 @@ pub async fn start(config: &DaemonConfig, workspace: Option<PathBuf>, host: bool
         prompt: prompt.clone(),
     };
     let mut response = control(&config.socket, request()).await;
-    // Not decided yet: ask here when there's a terminal, then start again; otherwise say how to answer.
-    if let Ok(ControlResponse::TrustNeeded { needed }) = &response {
+    // Not decided yet: ask here when there's a terminal, then start again (asking again when the grants changed while
+    // asked); otherwise say how to answer.
+    while let Ok(ControlResponse::TrustNeeded { needed }) = &response {
         let Some(answer) = super::trust::ask(needed) else {
             eprintln!("piton: {needed}");
             return ExitCode::from(1);

@@ -78,6 +78,7 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
         | ControlResponse::Logging { .. }
         | ControlResponse::TrustNeeded { .. }
         | ControlResponse::Trust { .. }
+        | ControlResponse::TrustChanged { .. }
         | ControlResponse::Error { .. } => ExitCode::from(1),
     };
     if json {
@@ -133,6 +134,7 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
         | ControlResponse::Logging { .. }
         | ControlResponse::TrustNeeded { .. }
         | ControlResponse::Trust { .. }
+        | ControlResponse::TrustChanged { .. }
         | ControlResponse::Error { .. }) => return report(Ok(other)),
     }
     code

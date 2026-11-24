@@ -151,7 +151,19 @@ impl Daemon {
         let source = crate::launch::resolve_workspace(workspace).map(|ws| ws.source().to_path_buf());
         match (result, source) {
             (Ok(trust), Ok(source)) => ControlResponse::Trust { source, trust },
-            (Err(e), _) => ControlResponse::Error { message: e.to_string() },
+            (Err(super::TrustError::Decide(crate::trust::DecideError::Changed { checkout, state })), _) => {
+                ControlResponse::TrustChanged {
+                    source: checkout,
+                    trust: *state,
+                }
+            }
+            (
+                Err(
+                    e @ (super::TrustError::Workspace(_)
+                    | super::TrustError::Decide(crate::trust::DecideError::State(_))),
+                ),
+                _,
+            ) => ControlResponse::Error { message: e.to_string() },
             (Ok(_), Err(e)) => ControlResponse::Error { message: e.to_string() },
         }
     }
