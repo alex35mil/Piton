@@ -1,56 +1,52 @@
-//! `[sandbox]`: what a sandboxed pi may do beyond Piton's base policy (`launch/sandbox/`). A profile adds a fixed set of
-//! entries; the user's lists add on top, and lists only add across levels.
+//! `[sandbox]`: what a sandboxed pi may do beyond Piton's base policy (`launch/sandbox/`), one map per resource.
 //!
-//! A key that loosens a protection (`profile`, `read`, `connect`, `unix_bind`, `tcp_listen`, `services`, the `git`,
-//! `apps`, and `pi-claude-code` presets, `commands`) is accepted in the global `config.toml` or a `config.local.toml`, never a
-//! project's committed `config.toml`: a repository can't open the sandbox for whoever clones it.
+//! Each map takes a path, host, or name to an effect: `[sandbox.filesystem]` (`"read"`, `"write"`, `"deny"`),
+//! `[sandbox.network.connections]`, `[sandbox.network.unix_socket_connections]`,
+//! `[sandbox.network.unix_socket_bindings]`, and `[sandbox.macos.services]` (`"allow"`, `"deny"`). Across levels the
+//! nearest file's value wins per key; within the merged maps the most specific matching entry decides (the sandbox's
+//! business, `launch/sandbox/resolve.rs`). Three booleans cover what has nothing to list; presets are toolchain path
+//! bundles; profiles are built-in entries of the same maps.
+//!
+//! What a project's committed `config.toml` may hold: an entry that opens something (`"read"`, `"allow"`, a `true`
+//! boolean, `profile`, the `pi-claude-code` preset, `commands`) is the user's own (the global files or a
+//! `config.local.toml`); `"write"`, `"deny"`, `false`, toolchain presets, and `silence` may be set anywhere. A
+//! committed `"write"` never reopens what a credential or the user's own `"deny"` closes (`launch/sandbox/`).
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Merge, Rule, TableValue, is_grant_path, present, union};
+use super::{Merge, Rule, TableValue, is_grant_path, union};
 
 /// One file's `[sandbox]`, as written.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxTable {
-    /// Which built-in set of entries the sandbox starts from. Unset: the nearer level's, else [`Profile::Standard`].
+    /// Which built-in entries the sandbox starts from. Unset: the nearer level's, else [`Profile::Standard`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Profile>,
-    /// Writable folders: each folder and everything below it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write: Vec<String>,
-    /// Writable files: exactly each path.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write_file: Vec<String>,
-    /// Paths whose built-in credential deny is lifted for reading: readable then; writable only through `write` or
-    /// `write_file`, connectable only through `connect`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub read: Vec<String>,
-    /// Sockets, ports, and hosts the sandbox may connect to. A socket entry at or inside a credential folder opens just
-    /// that path, for connecting.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connect: Vec<Connect>,
-    /// Paths where processes may create Unix sockets (`bind`): each path and everything below it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unix_bind: Vec<String>,
-    /// `"*"`: processes may listen on TCP, on every address. `*` is the only value ([`TcpListen`]): the sandbox can't
-    /// limit listening to an address or a port.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_listen: Option<TcpListen>,
-    /// Mach services the sandbox may look up beyond the built-in list: a name, a `name.*` prefix, or `*` for every
-    /// service. The keychain's stay closed unless `read` opens the keychain.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub services: Vec<ServiceEntry>,
-    /// Named bundles: toolchain caches, `git`, `apps`, and `pi-claude-code`.
+    /// Toolchain path bundles, and `pi-claude-code`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
-    /// Paths denied like the built-in credential list: no read, write, or connect.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deny: Vec<String>,
-    /// Blocks of processes that stay blocked without asking or a notice, each described by what its notice showed:
-    /// "Deny" saved from the block question, or an entry a notice names. Changes nothing in the sandbox.
+    /// Listening on TCP, on every address (the sandbox can't limit it to an address or a port).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_tcp_listening: Option<bool>,
+    /// Writing Git's hooks and configuration, which Git on the host runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_git_control_files: Option<bool>,
+    /// Launching apps and sending Apple Events: what macOS starts runs outside the sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_launching_apps: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub filesystem: BTreeMap<PathKey, FileAccess>,
+    #[serde(default, skip_serializing_if = "NetworkTable::is_empty")]
+    pub network: NetworkTable,
+    #[serde(default, skip_serializing_if = "MacosTable::is_empty")]
+    pub macos: MacosTable,
+    /// Blocks with no path or host that stay blocked without a notice: Mach service lookups and TCP listens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub silence: Vec<Silence>,
     /// Per-command entries: a bash call that matches runs through the daemon on the host, or in the launch's sandbox
@@ -59,144 +55,284 @@ pub struct SandboxTable {
     pub commands: Vec<CommandGrant>,
 }
 
-/// One `silence` entry: `{ target = "...", process = "..." }`. It matches what a notice shows (the process and its
-/// target), never why the block happened.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+/// `[sandbox.network]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Silence {
-    pub target: SilenceTarget,
-    /// Only blocks of processes with this name (`git`, `claude`). Unset: every process.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub process: Option<String>,
+pub struct NetworkTable {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub connections: BTreeMap<NetworkTarget, Effect>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unix_socket_connections: BTreeMap<PathKey, Effect>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unix_socket_bindings: BTreeMap<PathKey, Effect>,
 }
 
-/// What a `silence` entry's `target` names.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+impl NetworkTable {
+    pub fn is_empty(&self) -> bool {
+        self.connections.is_empty() && self.unix_socket_connections.is_empty() && self.unix_socket_bindings.is_empty()
+    }
+}
+
+/// `[sandbox.macos]`: what only macOS has.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MacosTable {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub services: BTreeMap<ServiceKey, Effect>,
+}
+
+impl MacosTable {
+    pub fn is_empty(&self) -> bool {
+        self.services.is_empty()
+    }
+}
+
+/// A filesystem entry's effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileAccess {
+    /// Readable (and runnable), not writable: reopens reading inside a credential deny.
+    Read,
+    /// Readable and writable.
+    Write,
+    /// No read, write, connect, or socket creation.
+    Deny,
+}
+
+impl FileAccess {
+    pub fn name(self) -> &'static str {
+        match self {
+            FileAccess::Read => "read",
+            FileAccess::Write => "write",
+            FileAccess::Deny => "deny",
+        }
+    }
+}
+
+/// Every other entry's effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effect {
+    Allow,
+    Deny,
+}
+
+/// A path key as written: absolute, `~/…`, or `$VAR/…`; the path and everything below it. No wildcards.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
-pub enum SilenceTarget {
-    /// `/...`, `~/...`, or `$VAR/...`: the path and everything below it. A `*` segment matches one folder entry, a
-    /// `**` segment any number of them.
-    Path(String),
-    /// A Mach service (`com.apple.SecurityServer`), matched exactly against a lookup of it.
-    Service(String),
-    /// A network destination (`api.example.com:443`, `*.example.com:443`), matched against a refused connection to it:
-    /// the host exactly or by subdomain, and the port.
-    Host(String),
-    /// `tcp-listen`: a refused TCP listen, on any port (the kernel names an ephemeral one).
-    TcpListen,
-}
+pub struct PathKey(String);
 
-/// How a `silence` entry names TCP listening.
-pub const TCP_LISTEN_TARGET: &str = "tcp-listen";
-
-impl TryFrom<String> for SilenceTarget {
-    type Error = String;
-
-    fn try_from(target: String) -> Result<Self, String> {
-        if is_grant_path(&target) {
-            return Ok(SilenceTarget::Path(target));
-        }
-        if target == TCP_LISTEN_TARGET {
-            return Ok(SilenceTarget::TcpListen);
-        }
-        // `host:port`: a destination. Text ending in `:<digits>` is one, or invalid: never a Mach service.
-        if let Some((_, port)) = target.rsplit_once(':')
-            && !port.is_empty()
-            && port.chars().all(|c| c.is_ascii_digit())
-        {
-            return match Connect::try_from(target.clone()) {
-                Ok(Connect::Network(NetworkTarget::Host { port: Some(_), .. })) => {
-                    Ok(SilenceTarget::Host(target.to_ascii_lowercase()))
-                }
-                Ok(_) | Err(_) => Err(format!(
-                    "silence target {target:?}: a host and port (`api.example.com:443`, `*.example.com:443`), the port \
-                     from 1 to 65535"
-                )),
-            };
-        }
-        match ServiceName::valid_text(&target) && !target.contains('*') {
-            true => Ok(SilenceTarget::Service(target)),
+impl PathKey {
+    pub fn new(path: &str) -> Result<Self, String> {
+        match is_grant_path(path) && !path.contains('*') {
+            true => Ok(Self(path.to_string())),
             false => Err(format!(
-                "silence target {target:?}: a path (absolute, or starting with `~/` or `$`; `*` and `**` segments \
-                 match folders), a Mach service name (`com.apple.SecurityServer`), a host and port \
-                 (`api.example.com:443`, `*.example.com:443`), or `tcp-listen`"
+                "{path:?}: a path is absolute, or starts with `~/` or `$` (no wildcards: an entry covers the path and \
+                 everything below it)"
             )),
         }
     }
-}
 
-impl From<SilenceTarget> for String {
-    fn from(target: SilenceTarget) -> String {
-        match target {
-            SilenceTarget::Path(path) | SilenceTarget::Service(path) | SilenceTarget::Host(path) => path,
-            SilenceTarget::TcpListen => TCP_LISTEN_TARGET.into(),
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-impl Silence {
-    /// The entry as a TOML inline table, as a notice names it and the block question saves it.
-    pub fn inline(&self) -> String {
-        let target = String::from(self.target.clone());
-        match &self.process {
-            Some(process) => format!(
-                "{{ process = {}, target = {} }}",
-                toml_string(process),
-                toml_string(&target)
-            ),
-            None => format!("{{ target = {} }}", toml_string(&target)),
-        }
-    }
-}
-
-/// A TOML basic string.
-fn toml_string(text: &str) -> String {
-    toml::Value::String(text.to_string()).to_string()
-}
-
-/// `tcp_listen = "*"`: listening on TCP, on every address. Seatbelt can't tell a loopback listen from another or filter
-/// by port (docs/pi-findings.md), so an address names nothing it could enforce and is refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct TcpListen;
-
-/// How `tcp_listen` is written.
-pub const TCP_LISTEN_ANY: &str = "*";
-
-impl TryFrom<String> for TcpListen {
+impl TryFrom<String> for PathKey {
     type Error = String;
 
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        match value.as_str() {
-            TCP_LISTEN_ANY => Ok(TcpListen),
-            other => Err(format!(
-                "tcp_listen {other:?}: only \"*\" (every address): the sandbox can't limit listening to an address or a \
-                 port"
-            )),
+    fn try_from(path: String) -> Result<Self, String> {
+        Self::new(&path)
+    }
+}
+
+impl From<PathKey> for String {
+    fn from(key: PathKey) -> String {
+        key.0
+    }
+}
+
+impl std::fmt::Display for PathKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A `[sandbox.network.connections]` key: what a process connects to over TCP or UDP. Ports and `*` are enforced by
+/// the sandbox itself; a named host only through Piton's gate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum NetworkTarget {
+    /// `*`: any host, any port.
+    Anywhere,
+    /// `*:PORT`: a port on any host.
+    AnyHostPort { port: u16 },
+    /// `localhost:*`: every port on this Mac, every local service included.
+    LocalAnyPort,
+    /// `localhost:PORT`: a port on this Mac.
+    LocalPort { port: u16 },
+    /// A named host or IP address (`github.com`, `*.npmjs.org`, `10.0.0.5`), on one port or every port.
+    Host { host: String, port: Option<u16> },
+}
+
+impl NetworkTarget {
+    /// A named host or `*.domain`: only the gate can decide it.
+    pub fn is_named(&self) -> bool {
+        match self {
+            NetworkTarget::Host { .. } => true,
+            NetworkTarget::Anywhere
+            | NetworkTarget::AnyHostPort { .. }
+            | NetworkTarget::LocalAnyPort
+            | NetworkTarget::LocalPort { .. } => false,
+        }
+    }
+
+    /// How specific the entry is: higher decides over lower when both match. Hosts first (`*` < `localhost` <
+    /// `*.domain`, longer first < an exact host), then a port over any port.
+    pub fn specificity(&self) -> (u8, usize, u8) {
+        match self {
+            NetworkTarget::Anywhere => (0, 0, 0),
+            NetworkTarget::AnyHostPort { .. } => (0, 0, 1),
+            NetworkTarget::LocalAnyPort => (1, 0, 0),
+            NetworkTarget::LocalPort { .. } => (1, 0, 1),
+            NetworkTarget::Host { host, port } => {
+                let rank = match host.strip_prefix("*.") {
+                    Some(domain) => (2, domain.len()),
+                    None => (3, 0),
+                };
+                (rank.0, rank.1, u8::from(port.is_some()))
+            }
         }
     }
 }
 
-impl From<TcpListen> for String {
-    fn from(_: TcpListen) -> String {
-        TCP_LISTEN_ANY.into()
+impl TryFrom<String> for NetworkTarget {
+    type Error = String;
+
+    fn try_from(entry: String) -> Result<Self, String> {
+        let bad = |why: &str| format!("{entry:?}: {why}");
+        if entry == "*" {
+            return Ok(NetworkTarget::Anywhere);
+        }
+        if entry == "localhost:*" {
+            return Ok(NetworkTarget::LocalAnyPort);
+        }
+        let (host, port) = match entry.rsplit_once(':') {
+            Some((host, port)) => {
+                let port = port
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|p| *p != 0)
+                    .ok_or_else(|| bad("the port is a number from 1 to 65535"))?;
+                (host, Some(port))
+            }
+            None => (entry.as_str(), None),
+        };
+        Ok(match (host, port) {
+            ("localhost", Some(port)) => NetworkTarget::LocalPort { port },
+            ("localhost", None) => return Err(bad("name the port: `localhost:PORT`, or `localhost:*` for every port")),
+            ("*", Some(port)) => NetworkTarget::AnyHostPort { port },
+            ("*", None) => NetworkTarget::Anywhere,
+            (host, port) => {
+                let name = host.strip_prefix("*.").unwrap_or(host);
+                let valid = !name.is_empty()
+                    && name
+                        .split('.')
+                        .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+                if !valid {
+                    return Err(bad(
+                        "expected `localhost:PORT`, `localhost:*`, `*:PORT`, `*`, or a host (`github.com`, \
+                         `*.npmjs.org`, `10.0.0.5`) with an optional `:PORT`; sockets are in \
+                         `[sandbox.network.unix_socket_connections]`",
+                    ));
+                }
+                NetworkTarget::Host {
+                    host: host.to_ascii_lowercase(),
+                    port,
+                }
+            }
+        })
     }
 }
 
-/// A `services` entry: every Mach service, or a name.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+impl From<NetworkTarget> for String {
+    fn from(target: NetworkTarget) -> String {
+        target.to_string()
+    }
+}
+
+impl std::fmt::Display for NetworkTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkTarget::LocalPort { port } => write!(f, "localhost:{port}"),
+            NetworkTarget::LocalAnyPort => write!(f, "localhost:*"),
+            NetworkTarget::AnyHostPort { port } => write!(f, "*:{port}"),
+            NetworkTarget::Anywhere => write!(f, "*"),
+            NetworkTarget::Host { host, port: Some(port) } => write!(f, "{host}:{port}"),
+            NetworkTarget::Host { host, port: None } => write!(f, "{host}"),
+        }
+    }
+}
+
+/// A `[sandbox.macos.services]` key: every Mach service, or a name or prefix.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub enum ServiceEntry {
+pub enum ServiceKey {
     /// `*`: every service but the keychain's.
     Every,
     Name(ServiceName),
+}
+
+impl ServiceKey {
+    /// Whether a lookup of `service` matches.
+    pub fn matches(&self, service: &str) -> bool {
+        match self {
+            ServiceKey::Every => true,
+            ServiceKey::Name(name) => name.matches(service),
+        }
+    }
+
+    /// How specific the entry is: an exact name over a longer prefix over a shorter one over `*`.
+    pub fn specificity(&self) -> (u8, usize) {
+        match self {
+            ServiceKey::Every => (0, 0),
+            ServiceKey::Name(ServiceName::Prefix(start)) => (1, start.len()),
+            ServiceKey::Name(ServiceName::Exact(_)) => (2, 0),
+        }
+    }
+}
+
+impl TryFrom<String> for ServiceKey {
+    type Error = String;
+
+    fn try_from(entry: String) -> Result<Self, String> {
+        match entry.as_str() {
+            "*" => Ok(ServiceKey::Every),
+            text => ServiceName::parse(text).map(ServiceKey::Name),
+        }
+    }
+}
+
+impl From<ServiceKey> for String {
+    fn from(key: ServiceKey) -> String {
+        key.to_string()
+    }
+}
+
+impl std::fmt::Display for ServiceKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceKey::Every => f.write_str("*"),
+            ServiceKey::Name(name) => write!(f, "{name}"),
+        }
+    }
 }
 
 /// A Mach service's global name, or the start of one. Real names aren't all reverse-DNS
 /// (`com.apple.distributed_notifications@Uv3`, an app's plain-word port), so a name is checked only for what a Seatbelt
 /// string and a lookup need: not empty, and no quote, backslash, slash, whitespace, control character, or `*` other
 /// than a trailing `.*`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "name", rename_all = "snake_case")]
 pub enum ServiceName {
     /// Exactly this name.
@@ -253,24 +389,77 @@ impl std::fmt::Display for ServiceName {
     }
 }
 
-impl TryFrom<String> for ServiceEntry {
+/// One `silence` entry: `{ target = "...", process = "..." }`, for a block that names no path or host.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Silence {
+    pub target: SilenceTarget,
+    /// Only blocks of processes with this name (`claude`, `security`). Unset: every process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+}
+
+/// What a `silence` entry's `target` names. A path or host is decided by a map entry instead (`"deny"`: only logged).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum SilenceTarget {
+    /// A Mach service (`com.apple.SecurityServer`), matched exactly against a lookup of it.
+    Service(String),
+    /// `tcp-listen`: a refused TCP listen, on any port.
+    TcpListen,
+}
+
+/// How a `silence` entry names TCP listening.
+pub const TCP_LISTEN_TARGET: &str = "tcp-listen";
+
+impl TryFrom<String> for SilenceTarget {
     type Error = String;
 
-    fn try_from(entry: String) -> Result<Self, String> {
-        match entry.as_str() {
-            "*" => Ok(ServiceEntry::Every),
-            text => ServiceName::parse(text).map(ServiceEntry::Name),
+    fn try_from(target: String) -> Result<Self, String> {
+        if target == TCP_LISTEN_TARGET {
+            return Ok(SilenceTarget::TcpListen);
+        }
+        // A host and port (`example.com:443`) isn't a service: it's a connection entry's.
+        let host_port = target
+            .rsplit_once(':')
+            .is_some_and(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()));
+        match ServiceName::valid_text(&target) && !target.contains('*') && !is_grant_path(&target) && !host_port {
+            true => Ok(SilenceTarget::Service(target)),
+            false => Err(format!(
+                "silence target {target:?}: a Mach service name (`com.apple.SecurityServer`) or `tcp-listen`; a path \
+                 or host stays blocked without a notice with a `\"deny\"` entry in its table"
+            )),
         }
     }
 }
 
-impl From<ServiceEntry> for String {
-    fn from(entry: ServiceEntry) -> String {
-        match entry {
-            ServiceEntry::Every => "*".into(),
-            ServiceEntry::Name(name) => name.to_string(),
+impl From<SilenceTarget> for String {
+    fn from(target: SilenceTarget) -> String {
+        match target {
+            SilenceTarget::Service(name) => name,
+            SilenceTarget::TcpListen => TCP_LISTEN_TARGET.into(),
         }
     }
+}
+
+impl Silence {
+    /// The entry as a TOML inline table, as a notice names it.
+    pub fn inline(&self) -> String {
+        let target = String::from(self.target.clone());
+        match &self.process {
+            Some(process) => format!(
+                "{{ process = {}, target = {} }}",
+                toml_string(process),
+                toml_string(&target)
+            ),
+            None => format!("{{ target = {} }}", toml_string(&target)),
+        }
+    }
+}
+
+/// A TOML basic string.
+fn toml_string(text: &str) -> String {
+    toml::Value::String(text.to_string()).to_string()
 }
 
 /// `[[sandbox.commands]]`: where a matching command runs, and with what.
@@ -332,7 +521,7 @@ impl TryFrom<CommandEntry> for CommandGrant {
             (Some(RuntimeName::Sandbox), Some(grant)) => CommandRuntime::Sandbox(grant),
             (Some(RuntimeName::Sandbox), None) => {
                 return Err(format!(
-                    "sandbox.commands {rule}: `runtime = \"sandbox\"` needs `grant`: \"all\" or a table of grant lists"
+                    "sandbox.commands {rule}: `runtime = \"sandbox\"` needs `grant`: \"all\" or a table of entries"
                 ));
             }
         };
@@ -396,14 +585,14 @@ impl From<CommandPattern> for String {
 }
 
 /// What a per-command grant gives the command beyond the launch's sandbox. Never the floor: protected files,
-/// configuration levels, the daemon's state, the user's `deny`, and credentials while fnox is on (`launch/sandbox/`).
+/// configuration levels, the daemon's state, the user's `"deny"`, and credentials while fnox is on (`launch/sandbox/`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Grant {
     /// `"all"`: everything except the floor. What persisting a sandbox answer saves.
     All(AllGrant),
-    /// The `[sandbox]` grant lists, added as the user's own lists are.
-    Lists(GrantLists),
+    /// Entries in `[sandbox]`'s shape, added as if the file that lists the command held them.
+    Entries(GrantEntries),
 }
 
 /// The word `all`.
@@ -413,39 +602,53 @@ pub enum AllGrant {
     All,
 }
 
-/// A narrowed grant: the `[sandbox]` lists that widen.
+/// A narrowed grant: the `[sandbox]` keys that widen (no profile, `silence`, or commands).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GrantLists {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write_file: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub read: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connect: Vec<Connect>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unix_bind: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tcp_listen: Option<TcpListen>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub services: Vec<ServiceEntry>,
+pub struct GrantEntries {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub presets: Vec<Preset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_tcp_listening: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_git_control_files: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_launching_apps: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub filesystem: BTreeMap<PathKey, FileAccess>,
+    #[serde(default, skip_serializing_if = "NetworkTable::is_empty")]
+    pub network: NetworkTable,
+    #[serde(default, skip_serializing_if = "MacosTable::is_empty")]
+    pub macos: MacosTable,
 }
 
-/// A built-in set of entries the sandbox starts from. Profiles only add: `strict` adds nothing to the base, and a
-/// profile's entry is removed only by choosing another profile. The entries are in `launch/sandbox/policy.rs`.
+impl GrantEntries {
+    /// The grant as a `[sandbox]` table: what [`SandboxSettings::add`] folds in.
+    pub fn table(&self) -> SandboxTable {
+        SandboxTable {
+            presets: self.presets.clone(),
+            allow_tcp_listening: self.allow_tcp_listening,
+            allow_git_control_files: self.allow_git_control_files,
+            allow_launching_apps: self.allow_launching_apps,
+            filesystem: self.filesystem.clone(),
+            network: self.network.clone(),
+            macos: self.macos.clone(),
+            ..SandboxTable::default()
+        }
+    }
+}
+
+/// A built-in set of entries the sandbox starts from. The entries are in `launch/sandbox/policy.rs`; any file can
+/// close one with a `"deny"` or a `false`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
-    /// The base alone.
+    /// Nothing beyond the base.
     Strict,
     /// What most users need to try Piton without configuring anything.
     #[default]
     Standard,
-    /// Standard and more.
+    /// Standard and more: close to host mode.
     Yolo,
 }
 
@@ -462,111 +665,7 @@ impl Profile {
     }
 }
 
-/// A `connect` entry: what the sandbox may connect to, by intent. Piton enforces each the way it can: sockets and ports
-/// in the sandbox, named hosts through its proxy.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub enum Connect {
-    /// Unix sockets at and below a path, as written (`/`, `~/…`, or `$VAR/…`); `/` is every socket.
-    Socket(String),
-    /// A network destination.
-    Network(NetworkTarget),
-}
-
-/// A network destination a `connect` entry names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NetworkTarget {
-    /// `localhost:PORT`: a port on this Mac.
-    LocalPort { port: u16 },
-    /// `localhost:*`: every port on this Mac, every local service included.
-    LocalAnyPort,
-    /// `*:PORT`: a port on any host.
-    AnyHostPort { port: u16 },
-    /// `*`: any host, any port.
-    Anywhere,
-    /// A named host or IP address (`github.com`, `*.npmjs.org`, `10.0.0.5`), on one port or every port.
-    Host { host: String, port: Option<u16> },
-}
-
-impl TryFrom<String> for Connect {
-    type Error = String;
-
-    fn try_from(entry: String) -> Result<Self, String> {
-        let bad = |why: &str| format!("connect {entry:?}: {why}");
-        if entry.starts_with('/') || entry.starts_with('~') || entry.starts_with('$') {
-            return match is_grant_path(&entry) {
-                true => Ok(Connect::Socket(entry)),
-                false => Err(bad("a socket path is absolute, or starts with `~/` or `$`")),
-            };
-        }
-        if entry == "*" {
-            return Ok(Connect::Network(NetworkTarget::Anywhere));
-        }
-        if entry == "localhost:*" {
-            return Ok(Connect::Network(NetworkTarget::LocalAnyPort));
-        }
-        let (host, port) = match entry.rsplit_once(':') {
-            Some((host, port)) => {
-                let port = port
-                    .parse::<u16>()
-                    .ok()
-                    .filter(|p| *p != 0)
-                    .ok_or_else(|| bad("the port is a number from 1 to 65535"))?;
-                (host, Some(port))
-            }
-            None => (entry.as_str(), None),
-        };
-        let target = match (host, port) {
-            ("localhost", Some(port)) => NetworkTarget::LocalPort { port },
-            ("localhost", None) => return Err(bad("name the port: `localhost:PORT`, or `localhost:*` for every port")),
-            ("*", Some(port)) => NetworkTarget::AnyHostPort { port },
-            ("*", None) => NetworkTarget::Anywhere,
-            (host, port) => {
-                let name = host.strip_prefix("*.").unwrap_or(host);
-                let valid = !name.is_empty()
-                    && name
-                        .split('.')
-                        .all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
-                if !valid {
-                    return Err(bad(
-                        "expected a socket path, `localhost:PORT`, `*:PORT`, `*`, or a host (`github.com`, \
-                         `*.npmjs.org`, `10.0.0.5`) with an optional `:PORT`",
-                    ));
-                }
-                NetworkTarget::Host {
-                    host: host.to_ascii_lowercase(),
-                    port,
-                }
-            }
-        };
-        Ok(Connect::Network(target))
-    }
-}
-
-impl From<Connect> for String {
-    fn from(connect: Connect) -> String {
-        match connect {
-            Connect::Socket(path) => path,
-            Connect::Network(target) => target.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for NetworkTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            NetworkTarget::LocalPort { port } => write!(f, "localhost:{port}"),
-            NetworkTarget::LocalAnyPort => write!(f, "localhost:*"),
-            NetworkTarget::AnyHostPort { port } => write!(f, "*:{port}"),
-            NetworkTarget::Anywhere => write!(f, "*"),
-            NetworkTarget::Host { host, port: Some(port) } => write!(f, "{host}:{port}"),
-            NetworkTarget::Host { host, port: None } => write!(f, "{host}"),
-        }
-    }
-}
-
-/// A named bundle of grants. Written as its name, or as a table with the name and the preset's own options:
+/// A named bundle of path entries. Written as its name, or as a table with the name and the preset's own options:
 /// `{ name = "pi-claude-code", login = "keychain" }`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "toml::Value", into = "toml::Value")]
@@ -580,13 +679,6 @@ pub enum Preset {
     Node,
     /// SwiftPM's caches, clang's module cache, and Xcode's DerivedData.
     Swift,
-    /// Git's hooks and configuration (`.git/hooks/`, `.git/config`, `.git/commondir`, replacing `.git`) become
-    /// writable, so `husky install` and `git remote add` work in the sandbox, and the next Git command on the host may
-    /// run an agent's code (`agent/git.rs`). Hooks run in the sandbox either way.
-    Git,
-    /// Launching apps and sending Apple Events: `open`, `osascript`, and an app's own launches through Launch Services.
-    /// What macOS starts this way runs outside the sandbox, so the agent can run what it wrote on the host.
-    Apps,
     /// What the pi-claude-code extension's `claude` writes: the config folder `PI_CLAUDE_CODE_CONFIG_DIR` names (never
     /// the interactive Claude Code's, which loads hooks and plugins), and its log cache; the extension's local relay;
     /// and, with `login = "keychain"`, the keychain.
@@ -627,18 +719,16 @@ impl ClaudeLogin {
 
 impl Preset {
     #[cfg(test)]
-    pub const ALL: [Preset; 7] = [
+    pub const ALL: [Preset; 5] = [
         Preset::Mise,
         Preset::Rust,
         Preset::Node,
         Preset::Swift,
-        Preset::Git,
-        Preset::Apps,
         Preset::PiClaudeCode(ClaudeCodeOptions { login: None }),
     ];
 
     /// Every preset's name, as written.
-    pub const NAMES: [&'static str; 7] = ["mise", "rust", "node", "swift", "git", "apps", "pi-claude-code"];
+    pub const NAMES: [&'static str; 5] = ["mise", "rust", "node", "swift", "pi-claude-code"];
 
     pub fn name(&self) -> &'static str {
         match self {
@@ -646,8 +736,6 @@ impl Preset {
             Preset::Rust => "rust",
             Preset::Node => "node",
             Preset::Swift => "swift",
-            Preset::Git => "git",
-            Preset::Apps => "apps",
             Preset::PiClaudeCode(_) => "pi-claude-code",
         }
     }
@@ -656,7 +744,7 @@ impl Preset {
     pub fn has_options(&self) -> bool {
         match self {
             Preset::PiClaudeCode(options) => options.login.is_some(),
-            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::Apps => false,
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => false,
         }
     }
 
@@ -668,27 +756,15 @@ impl Preset {
                     options.login = n.login;
                 }
             }
-            (
-                Preset::Mise
-                | Preset::Rust
-                | Preset::Node
-                | Preset::Swift
-                | Preset::Git
-                | Preset::Apps
-                | Preset::PiClaudeCode(_),
-                _,
-            ) => {}
+            (Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::PiClaudeCode(_), _) => {}
         }
     }
 
-    /// The key of a preset that loosens a protection (it lets the sandbox write what the host runs, or opens what it
-    /// otherwise closes), or `None` for one any configuration file may list.
-    fn loosening(&self) -> Option<&'static str> {
+    /// Whether the preset opens more than toolchain caches: the user's own files only.
+    fn loosens(&self) -> bool {
         match self {
-            Preset::Git => Some("sandbox.presets git"),
-            Preset::Apps => Some("sandbox.presets apps"),
-            Preset::PiClaudeCode(_) => Some("sandbox.presets pi-claude-code"),
-            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => None,
+            Preset::PiClaudeCode(_) => true,
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => false,
         }
     }
 }
@@ -719,8 +795,6 @@ impl TryFrom<toml::Value> for Preset {
             "rust" => Preset::Rust,
             "node" => Preset::Node,
             "swift" => Preset::Swift,
-            "git" => Preset::Git,
-            "apps" => Preset::Apps,
             "pi-claude-code" => {
                 let login = match options.remove("login") {
                     None => None,
@@ -754,9 +828,7 @@ impl From<Preset> for toml::Value {
             | Preset::Mise
             | Preset::Rust
             | Preset::Node
-            | Preset::Swift
-            | Preset::Git
-            | Preset::Apps => {}
+            | Preset::Swift => {}
         }
         match table.is_empty() {
             true => toml::Value::String(preset.name().into()),
@@ -769,160 +841,164 @@ impl From<Preset> for toml::Value {
 }
 
 impl TableValue for SandboxTable {
-    /// Every key that loosens a protection: the global file or a `config.local.toml`, never a project's `config.toml`.
+    /// Every key that opens something: the global file or a `config.local.toml`, never a project's `config.toml`.
     fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
-        let mut keys = present(
-            Rule::USERS_OWN,
-            &[
-                ("sandbox.profile", self.profile.is_some()),
-                ("sandbox.read", !self.read.is_empty()),
-                ("sandbox.connect", !self.connect.is_empty()),
-                ("sandbox.unix_bind", !self.unix_bind.is_empty()),
-                ("sandbox.tcp_listen", self.tcp_listen.is_some()),
-                ("sandbox.services", !self.services.is_empty()),
-                ("sandbox.commands", !self.commands.is_empty()),
-            ],
-        );
-        for key in self.presets.iter().filter_map(Preset::loosening) {
-            if !keys.iter().any(|(k, _)| *k == key) {
-                keys.push((key, Rule::USERS_OWN));
-            }
-        }
-        keys
-    }
-
-    fn check(&self) -> Result<(), String> {
-        for (key, paths) in [
-            ("write", &self.write),
-            ("write_file", &self.write_file),
-            ("read", &self.read),
-            ("unix_bind", &self.unix_bind),
-            ("deny", &self.deny),
-        ] {
-            if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
-                return Err(format!(
-                    "sandbox.{key} {grant:?}: must be absolute, or start with `~/` or `$`"
-                ));
-            }
-        }
-        for command in &self.commands {
-            match &command.runtime {
-                CommandRuntime::Host | CommandRuntime::Sandbox(Grant::All(AllGrant::All)) => {}
-                CommandRuntime::Sandbox(Grant::Lists(lists)) => lists
-                    .check()
-                    .map_err(|why| format!("sandbox.commands {}: {why}", String::from(command.pattern.clone())))?,
-            }
-        }
-        Ok(())
-    }
-}
-
-impl GrantLists {
-    fn check(&self) -> Result<(), String> {
-        for (key, paths) in [
-            ("write", &self.write),
-            ("write_file", &self.write_file),
-            ("read", &self.read),
-            ("unix_bind", &self.unix_bind),
-        ] {
-            if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
-                return Err(format!(
-                    "grant {key} {grant:?}: must be absolute, or start with `~/` or `$`"
-                ));
-            }
-        }
-        Ok(())
+        let opens = [
+            ("sandbox.profile", self.profile.is_some()),
+            ("sandbox.allow_tcp_listening", self.allow_tcp_listening == Some(true)),
+            (
+                "sandbox.allow_git_control_files",
+                self.allow_git_control_files == Some(true),
+            ),
+            ("sandbox.allow_launching_apps", self.allow_launching_apps == Some(true)),
+            (
+                "sandbox.filesystem (\"read\")",
+                self.filesystem.values().any(|a| *a == FileAccess::Read),
+            ),
+            (
+                "sandbox.network.connections (\"allow\")",
+                self.network.connections.values().any(|e| *e == Effect::Allow),
+            ),
+            (
+                "sandbox.network.unix_socket_connections (\"allow\")",
+                self.network
+                    .unix_socket_connections
+                    .values()
+                    .any(|e| *e == Effect::Allow),
+            ),
+            (
+                "sandbox.network.unix_socket_bindings (\"allow\")",
+                self.network.unix_socket_bindings.values().any(|e| *e == Effect::Allow),
+            ),
+            (
+                "sandbox.macos.services (\"allow\")",
+                self.macos.services.values().any(|e| *e == Effect::Allow),
+            ),
+            (
+                "sandbox.presets pi-claude-code",
+                self.presets.iter().any(Preset::loosens),
+            ),
+            ("sandbox.commands", !self.commands.is_empty()),
+        ];
+        opens
+            .into_iter()
+            .filter(|(_, set)| *set)
+            .map(|(key, _)| (key, Rule::USERS_OWN))
+            .collect()
     }
 }
 
 impl Merge for SandboxTable {
-    /// Lists only add; a nearer level can't remove a grant or a deny. The nearest `profile` wins.
+    /// The nearest value wins per key; presets and commands add.
     fn merge(&mut self, n: Self) {
-        if n.profile.is_some() {
-            self.profile = n.profile;
-        }
-        union(&mut self.write, n.write);
-        union(&mut self.write_file, n.write_file);
-        union(&mut self.read, n.read);
-        union(&mut self.connect, n.connect);
-        union(&mut self.unix_bind, n.unix_bind);
-        self.tcp_listen = self.tcp_listen.or(n.tcp_listen);
-        union(&mut self.services, n.services);
-        for preset in n.presets {
+        let SandboxTable {
+            profile,
+            presets,
+            allow_tcp_listening,
+            allow_git_control_files,
+            allow_launching_apps,
+            filesystem,
+            network,
+            macos,
+            silence,
+            commands,
+        } = n;
+        super::nearer(&mut self.profile, profile);
+        super::nearer(&mut self.allow_tcp_listening, allow_tcp_listening);
+        super::nearer(&mut self.allow_git_control_files, allow_git_control_files);
+        super::nearer(&mut self.allow_launching_apps, allow_launching_apps);
+        for preset in presets {
             match self.presets.iter_mut().find(|p| p.name() == preset.name()) {
                 Some(existing) => existing.merge(&preset),
                 None => self.presets.push(preset),
             }
         }
-        union(&mut self.deny, n.deny);
-        union(&mut self.silence, n.silence);
-        union(&mut self.commands, n.commands);
+        self.filesystem.extend(filesystem);
+        self.network.connections.extend(network.connections);
+        self.network
+            .unix_socket_connections
+            .extend(network.unix_socket_connections);
+        self.network.unix_socket_bindings.extend(network.unix_socket_bindings);
+        self.macos.services.extend(macos.services);
+        union(&mut self.silence, silence);
+        union(&mut self.commands, commands);
     }
 }
 
-/// One entry of a list, with the file that listed it first.
+/// A value with the file that set it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listed<T> {
     pub value: T,
     pub file: PathBuf,
 }
 
+/// Which file of a level wrote an entry: decides whether a committed entry may reopen what the user closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A project's or parent folder's committed `config.toml`: travels with the repository.
+    Committed,
+    /// The global files or a `config.local.toml`: the user's own.
+    UsersOwn,
+}
+
+/// One entry of a map, with the file that set its value and whether that file is the user's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry<T> {
+    pub value: T,
+    pub file: PathBuf,
+    pub origin: Origin,
+}
+
 /// The `[sandbox]` of a launch's whole chain, every entry with the file it came from: what `piton sandbox show` and
-/// `why` name. The profile's own entries are added by the sandbox (`launch/sandbox/`).
+/// `why` name. The profile's and presets' entries are added by the sandbox (`launch/sandbox/`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SandboxSettings {
     /// The nearest file's `profile`; `None` when no file sets one.
     pub profile: Option<Listed<Profile>>,
-    pub write: Vec<Listed<String>>,
-    pub write_file: Vec<Listed<String>>,
-    pub read: Vec<Listed<String>>,
-    pub connect: Vec<Listed<Connect>>,
-    pub unix_bind: Vec<Listed<String>>,
-    /// The first file that set `tcp_listen`.
-    pub tcp_listen: Option<Listed<TcpListen>>,
-    pub services: Vec<Listed<ServiceEntry>>,
-    pub presets: Vec<Listed<Preset>>,
-    pub deny: Vec<Listed<String>>,
+    pub presets: Vec<Entry<Preset>>,
+    pub allow_tcp_listening: Option<Listed<bool>>,
+    pub allow_git_control_files: Option<Listed<bool>>,
+    pub allow_launching_apps: Option<Listed<bool>>,
+    pub filesystem: BTreeMap<PathKey, Entry<FileAccess>>,
+    pub connections: BTreeMap<NetworkTarget, Entry<Effect>>,
+    pub unix_socket_connections: BTreeMap<PathKey, Entry<Effect>>,
+    pub unix_socket_bindings: BTreeMap<PathKey, Entry<Effect>>,
+    pub services: BTreeMap<ServiceKey, Entry<Effect>>,
     pub silence: Vec<Listed<Silence>>,
     /// Per-command grants, farthest file first; the first that matches a call decides.
     pub commands: Vec<Listed<CommandGrant>>,
+    /// Entries a committed file wrote over the user's own `"deny"` for the same path, left out: what `piton sandbox
+    /// show` warns about.
+    pub ignored: Vec<Listed<String>>,
 }
 
 impl SandboxSettings {
-    /// Folds in one file's table, files farthest first.
-    pub fn add(&mut self, table: SandboxTable, file: &Path) {
+    /// Folds in one file's table, files farthest first: each value replaces a farther one.
+    pub fn add(&mut self, table: SandboxTable, file: &Path, origin: Origin) {
         let SandboxTable {
             profile,
-            write,
-            write_file,
-            read,
-            connect,
-            unix_bind,
-            tcp_listen,
-            services,
             presets,
-            deny,
+            allow_tcp_listening,
+            allow_git_control_files,
+            allow_launching_apps,
+            filesystem,
+            network,
+            macos,
             silence,
             commands,
         } = table;
         if let Some(profile) = profile {
-            self.profile = Some(Listed {
-                value: profile,
-                file: file.to_path_buf(),
-            });
+            self.profile = Some(listed(profile, file));
         }
-        add_listed(&mut self.write, write, file);
-        add_listed(&mut self.write_file, write_file, file);
-        add_listed(&mut self.read, read, file);
-        add_listed(&mut self.connect, connect, file);
-        add_listed(&mut self.unix_bind, unix_bind, file);
-        if let (None, Some(value)) = (&self.tcp_listen, tcp_listen) {
-            self.tcp_listen = Some(Listed {
-                value,
-                file: file.to_path_buf(),
-            });
+        for (slot, value) in [
+            (&mut self.allow_tcp_listening, allow_tcp_listening),
+            (&mut self.allow_git_control_files, allow_git_control_files),
+            (&mut self.allow_launching_apps, allow_launching_apps),
+        ] {
+            if let Some(value) = value {
+                *slot = Some(listed(value, file));
+            }
         }
-        add_listed(&mut self.services, services, file);
         // A preset is listed once, with the file that decided it: the nearest that sets one of its options, else the
         // first that lists it.
         for preset in presets {
@@ -931,17 +1007,65 @@ impl SandboxSettings {
                     existing.value.merge(&preset);
                     if preset.has_options() {
                         existing.file = file.to_path_buf();
+                        existing.origin = origin;
                     }
                 }
-                None => self.presets.push(Listed {
+                None => self.presets.push(Entry {
                     value: preset,
                     file: file.to_path_buf(),
+                    origin,
                 }),
             }
         }
-        add_listed(&mut self.deny, deny, file);
-        add_listed(&mut self.silence, silence, file);
-        add_listed(&mut self.commands, commands, file);
+        // A committed file never reopens a path the user's own file denies (a deeper key is the sandbox's to check).
+        for (key, access) in filesystem {
+            let reopens = self
+                .filesystem
+                .get(&key)
+                .is_some_and(|existing| existing.origin == Origin::UsersOwn && existing.value == FileAccess::Deny)
+                && origin == Origin::Committed
+                && access != FileAccess::Deny;
+            match reopens {
+                true => self.ignored.push(listed(
+                    format!("sandbox.filesystem.\"{key}\" = \"{}\"", access.name()),
+                    file,
+                )),
+                false => {
+                    self.filesystem.insert(
+                        key,
+                        Entry {
+                            value: access,
+                            file: file.to_path_buf(),
+                            origin,
+                        },
+                    );
+                }
+            }
+        }
+        add_entries(&mut self.connections, network.connections, file, origin);
+        add_entries(
+            &mut self.unix_socket_connections,
+            network.unix_socket_connections,
+            file,
+            origin,
+        );
+        add_entries(
+            &mut self.unix_socket_bindings,
+            network.unix_socket_bindings,
+            file,
+            origin,
+        );
+        add_entries(&mut self.services, macos.services, file, origin);
+        for entry in silence {
+            if !self.silence.iter().any(|l| l.value == entry) {
+                self.silence.push(listed(entry, file));
+            }
+        }
+        for command in commands {
+            if !self.commands.iter().any(|l| l.value == command) {
+                self.commands.push(listed(command, file));
+            }
+        }
     }
 
     /// The profile in effect: the nearest file's, else the default.
@@ -950,14 +1074,23 @@ impl SandboxSettings {
     }
 }
 
-fn add_listed<T: PartialEq>(list: &mut Vec<Listed<T>>, values: Vec<T>, file: &Path) {
-    for value in values {
-        if !list.iter().any(|l| l.value == value) {
-            list.push(Listed {
+fn listed<T>(value: T, file: &Path) -> Listed<T> {
+    Listed {
+        value,
+        file: file.to_path_buf(),
+    }
+}
+
+fn add_entries<K: Ord, V>(map: &mut BTreeMap<K, Entry<V>>, values: BTreeMap<K, V>, file: &Path, origin: Origin) {
+    for (key, value) in values {
+        map.insert(
+            key,
+            Entry {
                 value,
                 file: file.to_path_buf(),
-            });
-        }
+                origin,
+            },
+        );
     }
 }
 
@@ -969,48 +1102,117 @@ mod tests {
         toml::from_str(text).unwrap()
     }
 
-    #[test]
-    fn lists_only_add() {
-        let mut base = table(
-            "write = [\"/a\"]\ndeny = [\"/secret\"]\npresets = [\"rust\"]\nread = [\"~/.ssh/config\"]\nprofile = \"strict\"\n",
-        );
-        base.merge(table(
-            "write = [\"/a\", \"/b\"]\npresets = [\"swift\", \"rust\"]\nconnect = [\"*:22\"]\n",
-        ));
-        assert_eq!(base.write, ["/a", "/b"]);
-        assert_eq!(base.deny, ["/secret"], "a nearer level can't drop a deny");
-        assert_eq!(base.presets, [Preset::Rust, Preset::Swift]);
-        assert_eq!(base.read, ["~/.ssh/config"]);
-        assert_eq!(
-            base.profile,
-            Some(Profile::Strict),
-            "a level without a profile keeps it"
-        );
-        base.merge(table("profile = \"yolo\""));
-        assert_eq!(base.profile, Some(Profile::Yolo), "the nearest wins");
+    fn path(text: &str) -> PathKey {
+        PathKey::new(text).unwrap()
     }
 
-    /// Each entry keeps the first file that listed it; the nearest profile wins.
+    /// Every resource is a map of key to effect; nearer values win per key.
+    #[test]
+    fn maps_parse_and_the_nearest_value_wins() {
+        let mut base = table(
+            "profile = \"strict\"\npresets = [\"rust\"]\nallow_tcp_listening = true\n[filesystem]\n\"/a\" = \
+             \"write\"\n\"~/secret\" = \"deny\"\n[network.connections]\n\"*\" = \"allow\"\n\"github.com:22\" = \
+             \"deny\"\n[network.unix_socket_connections]\n\"$SSH_AUTH_SOCK\" = \"allow\"\n[macos.services]\n\"com.example.*\" \
+             = \"allow\"\n",
+        );
+        base.merge(table(
+            "presets = [\"swift\", \"rust\"]\nallow_tcp_listening = false\n[filesystem]\n\"/a\" = \"read\"\n\"/b\" = \
+             \"write\"\n[network.connections]\n\"*\" = \"deny\"\n",
+        ));
+        assert_eq!(base.profile, Some(Profile::Strict), "a level without it keeps it");
+        assert_eq!(base.presets, [Preset::Rust, Preset::Swift]);
+        assert_eq!(base.allow_tcp_listening, Some(false), "the nearest boolean wins");
+        assert_eq!(base.filesystem[&path("/a")], FileAccess::Read, "the nearest value wins");
+        assert_eq!(base.filesystem[&path("/b")], FileAccess::Write);
+        assert_eq!(base.filesystem[&path("~/secret")], FileAccess::Deny);
+        assert_eq!(base.network.connections[&NetworkTarget::Anywhere], Effect::Deny);
+        assert_eq!(
+            base.network.connections[&NetworkTarget::Host {
+                host: "github.com".into(),
+                port: Some(22)
+            }],
+            Effect::Deny
+        );
+        assert_eq!(
+            base.network.unix_socket_connections[&path("$SSH_AUTH_SOCK")],
+            Effect::Allow
+        );
+        assert_eq!(
+            base.macos.services[&ServiceKey::Name(ServiceName::Prefix("com.example.".into()))],
+            Effect::Allow
+        );
+        // Written back as given.
+        let text = toml::to_string(&base).unwrap();
+        assert_eq!(
+            toml::from_str::<SandboxTable>(&text).unwrap(),
+            base,
+            "round trip: {text}"
+        );
+    }
+
+    /// Each entry keeps the file that set its value, and whether that file is the user's own.
     #[test]
     fn settings_keep_where_each_entry_came_from() {
         let (global, repo) = (Path::new("/g/config.toml"), Path::new("/r/.piton/config.toml"));
         let mut s = SandboxSettings::default();
         assert_eq!(s.profile(), Profile::Standard, "the default");
         s.add(
-            table("profile = \"strict\"\nwrite = [\"/a\"]\npresets = [\"mise\"]"),
+            table("profile = \"strict\"\npresets = [\"mise\"]\n[filesystem]\n\"/a\" = \"deny\"\n\"/c\" = \"read\""),
             global,
+            Origin::UsersOwn,
         );
-        s.add(table("write = [\"/a\", \"/b\"]\npresets = [\"mise\"]"), repo);
+        s.add(
+            table("presets = [\"mise\"]\n[filesystem]\n\"/c\" = \"deny\"\n\"/b\" = \"write\""),
+            repo,
+            Origin::Committed,
+        );
         assert_eq!(s.profile(), Profile::Strict);
         assert_eq!(s.profile.as_ref().unwrap().file, global);
-        let writes: Vec<_> = s.write.iter().map(|l| (l.value.as_str(), l.file.as_path())).collect();
-        assert_eq!(writes, [("/a", global), ("/b", repo)]);
         assert_eq!(
-            s.presets,
-            [Listed {
-                value: Preset::Mise,
-                file: global.into()
-            }]
+            s.filesystem[&path("/b")],
+            Entry {
+                value: FileAccess::Write,
+                file: repo.into(),
+                origin: Origin::Committed
+            }
+        );
+        assert_eq!(s.filesystem[&path("/a")].value, FileAccess::Deny);
+        assert_eq!(
+            s.filesystem[&path("/c")].origin,
+            Origin::Committed,
+            "a committed deny replaces a read"
+        );
+        assert_eq!(s.presets.len(), 1);
+        assert_eq!(s.presets[0].file, global, "the first file that listed it");
+    }
+
+    /// A committed file can't write over the user's own `"deny"` for the same path; a local file can.
+    #[test]
+    fn a_committed_file_never_reopens_the_users_deny() {
+        let (global, repo, local) = (
+            Path::new("/g/config.toml"),
+            Path::new("/r/.piton/config.toml"),
+            Path::new("/r/.piton/config.local.toml"),
+        );
+        let mut s = SandboxSettings::default();
+        s.add(
+            table("[filesystem]\n\"~/secrets\" = \"deny\""),
+            global,
+            Origin::UsersOwn,
+        );
+        s.add(
+            table("[filesystem]\n\"~/secrets\" = \"write\""),
+            repo,
+            Origin::Committed,
+        );
+        assert_eq!(s.filesystem[&path("~/secrets")].value, FileAccess::Deny);
+        assert_eq!(s.ignored.len(), 1);
+        assert_eq!(s.ignored[0].file, repo);
+        s.add(table("[filesystem]\n\"~/secrets\" = \"read\""), local, Origin::UsersOwn);
+        assert_eq!(
+            s.filesystem[&path("~/secrets")].value,
+            FileAccess::Read,
+            "the user's own choice"
         );
     }
 
@@ -1023,44 +1225,26 @@ mod tests {
         assert!(toml::from_str::<SandboxTable>("profile = \"open\"").is_err());
     }
 
-    /// Every form a `connect` entry takes, and what isn't one.
+    /// Every form a connection key takes, and what isn't one (a socket path included).
     #[test]
-    fn connect_entries_are_typed() {
-        let parse = |text: &str| Connect::try_from(text.to_string());
-        let net = |t| Ok(Connect::Network(t));
-        assert_eq!(parse("$SSH_AUTH_SOCK"), Ok(Connect::Socket("$SSH_AUTH_SOCK".into())));
-        assert_eq!(parse("/"), Ok(Connect::Socket("/".into())));
-        assert_eq!(
-            parse("~/.orbstack/run/docker.sock"),
-            Ok(Connect::Socket("~/.orbstack/run/docker.sock".into()))
-        );
-        assert_eq!(parse("localhost:5432"), net(NetworkTarget::LocalPort { port: 5432 }));
-        assert_eq!(parse("localhost:*"), net(NetworkTarget::LocalAnyPort));
-        assert_eq!(
-            String::from(Connect::Network(NetworkTarget::LocalAnyPort)),
-            "localhost:*"
-        );
-        assert_eq!(parse("*:22"), net(NetworkTarget::AnyHostPort { port: 22 }));
-        assert_eq!(parse("*"), net(NetworkTarget::Anywhere));
+    fn connection_keys_are_typed() {
+        let parse = |text: &str| NetworkTarget::try_from(text.to_string());
+        assert_eq!(parse("localhost:5432"), Ok(NetworkTarget::LocalPort { port: 5432 }));
+        assert_eq!(parse("localhost:*"), Ok(NetworkTarget::LocalAnyPort));
+        assert_eq!(parse("*:22"), Ok(NetworkTarget::AnyHostPort { port: 22 }));
+        assert_eq!(parse("*"), Ok(NetworkTarget::Anywhere));
         assert_eq!(
             parse("GitHub.com:22"),
-            net(NetworkTarget::Host {
+            Ok(NetworkTarget::Host {
                 host: "github.com".into(),
                 port: Some(22)
             })
         );
         assert_eq!(
             parse("*.npmjs.org"),
-            net(NetworkTarget::Host {
+            Ok(NetworkTarget::Host {
                 host: "*.npmjs.org".into(),
                 port: None
-            })
-        );
-        assert_eq!(
-            parse("10.0.0.5:8080"),
-            net(NetworkTarget::Host {
-                host: "10.0.0.5".into(),
-                port: Some(8080)
             })
         );
         for bad in [
@@ -1071,25 +1255,35 @@ mod tests {
             "a..b",
             "",
             "https://github.com",
-            "~x",
+            "$SSH_AUTH_SOCK",
+            "/tmp/x.sock",
             "foo bar",
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
-        // Written back as given (hosts lowercased).
-        let value = toml::Value::try_from(table("connect = [\"*:22\", \"$SSH_AUTH_SOCK\", \"Example.com\"]")).unwrap();
-        assert_eq!(
-            value["connect"].to_string(),
-            r#"["*:22", "$SSH_AUTH_SOCK", "example.com"]"#
-        );
+        assert!(toml::from_str::<SandboxTable>("[network.connections]\n\"/tmp/x.sock\" = \"allow\"").is_err());
+        assert!(toml::from_str::<SandboxTable>("[network.connections]\n\"*\" = \"read\"").is_err());
     }
 
-    /// A `services` entry is `*`, a name, or a `name.*` prefix; real names that aren't reverse-DNS parse too.
+    /// Specificity: a host over `localhost` over `*`, a longer domain over a shorter, a port over any port.
     #[test]
-    fn service_entries_are_typed() {
-        let parse = |text: &str| ServiceEntry::try_from(text.to_string());
-        let exact = |n: &str| Ok(ServiceEntry::Name(ServiceName::Exact(n.into())));
-        assert_eq!(parse("*"), Ok(ServiceEntry::Every));
+    fn connection_specificity() {
+        let s = |text: &str| NetworkTarget::try_from(text.to_string()).unwrap().specificity();
+        assert!(s("*") < s("*:22"));
+        assert!(s("*:22") < s("localhost:*"));
+        assert!(s("localhost:*") < s("localhost:5432"));
+        assert!(s("localhost:5432") < s("*.npmjs.org"));
+        assert!(s("*.org") < s("*.npmjs.org"));
+        assert!(s("*.npmjs.org") < s("registry.npmjs.org"));
+        assert!(s("github.com") < s("github.com:22"));
+    }
+
+    /// A service key is `*`, a name, or a `name.*` prefix; real names that aren't reverse-DNS parse too.
+    #[test]
+    fn service_keys_are_typed() {
+        let parse = |text: &str| ServiceKey::try_from(text.to_string());
+        let exact = |n: &str| Ok(ServiceKey::Name(ServiceName::Exact(n.into())));
+        assert_eq!(parse("*"), Ok(ServiceKey::Every));
         assert_eq!(parse("com.apple.fonts"), exact("com.apple.fonts"));
         assert_eq!(
             parse("com.apple.distributed_notifications@Uv3"),
@@ -1098,7 +1292,7 @@ mod tests {
         assert_eq!(parse("Hammerspoon"), exact("Hammerspoon"));
         assert_eq!(
             parse("com.example.*"),
-            Ok(ServiceEntry::Name(ServiceName::Prefix("com.example.".into())))
+            Ok(ServiceKey::Name(ServiceName::Prefix("com.example.".into())))
         );
         for bad in ["", ".*", "a*b", "com.*.x", "a\"b", "a b", "a/b", "a\\b", "a\nb"] {
             assert!(parse(bad).is_err(), "{bad:?}");
@@ -1106,26 +1300,39 @@ mod tests {
         let prefix = ServiceName::Prefix("com.example.".into());
         assert!(prefix.matches("com.example.agent"));
         assert!(!prefix.matches("com.examplex"));
-        assert!(ServiceName::Exact("a.b".into()).matches("a.b"));
-        assert!(!ServiceName::Exact("a.b".into()).matches("a.b.c"));
-        // Written back as given.
-        let value = toml::Value::try_from(table("services = [\"*\", \"com.example.*\", \"x.y\"]")).unwrap();
-        assert_eq!(value["services"].to_string(), r#"["*", "com.example.*", "x.y"]"#);
-        // A silence entry names one service, never a prefix.
-        assert!(SilenceTarget::try_from("Hammerspoon".to_string()).is_ok());
-        assert!(SilenceTarget::try_from("com.example.*".to_string()).is_err());
+        let spec = |text: &str| ServiceKey::try_from(text.to_string()).unwrap().specificity();
+        assert!(spec("*") < spec("com.*"));
+        assert!(spec("com.*") < spec("com.example.*"));
+        assert!(spec("com.example.*") < spec("com.example.agent"));
     }
 
-    /// A preset is its name, or a table with its name and its own options; anything else is refused, the `mise`
-    /// preset's former `install` option included. Written back as its name when no option is set.
+    /// Path keys: absolute, `~/`, or `$VAR`; anything else is refused when the file is read.
+    #[test]
+    fn path_keys_are_checked() {
+        for good in ["/a", "~/x", "~", "$TMPDIR/x"] {
+            assert!(
+                toml::from_str::<SandboxTable>(&format!("[filesystem]\n\"{good}\" = \"write\"")).is_ok(),
+                "{good}"
+            );
+        }
+        for bad in [
+            "[filesystem]\n\"rel/x\" = \"write\"",
+            "[filesystem]\n\"~/**/x\" = \"deny\"",
+            "[filesystem]\n\"/a\" = \"allow\"",
+            "[network.unix_socket_bindings]\n\"x\" = \"allow\"",
+            "[network.unix_socket_connections]\n\"/s\" = \"write\"",
+        ] {
+            assert!(toml::from_str::<SandboxTable>(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A preset is its name, or a table with its name and its own options; `git` and `apps` became booleans.
     #[test]
     fn presets_are_names_or_tables_with_options() {
         for preset in Preset::ALL {
             let parsed = table(&format!("presets = [\"{}\"]", preset.name()));
             assert_eq!(parsed.presets, [preset]);
             assert_eq!(toml::Value::from(preset), toml::Value::String(preset.name().into()));
-            let named = table(&format!("presets = [{{ name = \"{}\" }}]", preset.name()));
-            assert_eq!(named.presets, [preset], "a table with only the name");
         }
         let claude = |login| Preset::PiClaudeCode(ClaudeCodeOptions { login });
         for (text, login) in [("token", ClaudeLogin::Token), ("keychain", ClaudeLogin::Keychain)] {
@@ -1133,135 +1340,67 @@ mod tests {
                 "presets = [{{ name = \"pi-claude-code\", login = \"{text}\" }}]"
             ));
             assert_eq!(parsed.presets, [claude(Some(login))]);
-            let back = toml::Value::from(claude(Some(login)));
-            assert_eq!(back.get("login").and_then(toml::Value::as_str), Some(text));
-            assert_eq!(back.get("name").and_then(toml::Value::as_str), Some("pi-claude-code"));
         }
-        assert_eq!(claude(None), Preset::PiClaudeCode(ClaudeCodeOptions::default()));
-        assert_eq!(
-            ClaudeCodeOptions::default().login(),
-            ClaudeLogin::Token,
-            "the default login"
-        );
+        assert_eq!(ClaudeCodeOptions::default().login(), ClaudeLogin::Token);
         for bad in [
+            "presets = [\"git\"]",
+            "presets = [\"apps\"]",
             "presets = [\"python\"]",
-            "presets = [\"claude\"]",
-            "presets = [{ name = \"mise\", install = \"ask\" }]",
             "presets = [{ name = \"rust\", login = \"token\" }]",
             "presets = [{ name = \"pi-claude-code\", login = \"oauth\" }]",
-            "presets = [{ name = \"pi-claude-code\", login = true }]",
-            "presets = [{ name = \"pi-claude-code\", config = \"~/x\" }]",
-            "presets = [{ login = \"token\" }]",
             "presets = [1]",
         ] {
             assert!(toml::from_str::<SandboxTable>(bad).is_err(), "{bad}");
         }
     }
 
-    /// One preset entry per name: a nearer level's options win one by one, and the preset's file is the one that
-    /// decided it (the nearest that sets an option, else the first that lists it).
+    /// One preset entry per name: a nearer level's options win one by one.
     #[test]
     fn preset_options_merge_per_option_and_name_their_file() {
         let claude = |login| Preset::PiClaudeCode(ClaudeCodeOptions { login });
         let mut merged = table("presets = [{ name = \"pi-claude-code\", login = \"keychain\" }]");
         merged.merge(table("presets = [\"pi-claude-code\", \"rust\"]"));
-        assert_eq!(
-            merged.presets,
-            [claude(Some(ClaudeLogin::Keychain)), Preset::Rust],
-            "a nearer entry without the option keeps it"
-        );
-        merged.merge(table("presets = [{ name = \"pi-claude-code\", login = \"token\" }]"));
-        assert_eq!(merged.presets, [claude(Some(ClaudeLogin::Token)), Preset::Rust]);
-
+        assert_eq!(merged.presets, [claude(Some(ClaudeLogin::Keychain)), Preset::Rust]);
         let (global, local) = (Path::new("/g/config.toml"), Path::new("/r/.piton/config.local.toml"));
         let mut s = SandboxSettings::default();
-        s.add(table("presets = [\"pi-claude-code\"]"), global);
-        s.add(table("presets = [\"pi-claude-code\"]"), local);
-        assert_eq!(s.presets.len(), 1);
-        assert_eq!(s.presets[0].file, global, "no option: the first file");
+        s.add(table("presets = [\"pi-claude-code\"]"), global, Origin::UsersOwn);
         s.add(
             table("presets = [{ name = \"pi-claude-code\", login = \"keychain\" }]"),
             local,
+            Origin::UsersOwn,
         );
-        assert_eq!(
-            s.presets,
-            [Listed {
-                value: claude(Some(ClaudeLogin::Keychain)),
-                file: local.into()
-            }],
-            "the file that set the login"
-        );
+        assert_eq!(s.presets[0].file, local, "the file that set the login");
     }
 
-    /// The `pi-claude-code` preset loosens the sandbox whatever its options: the user's own files only.
-    #[test]
-    fn the_claude_code_preset_is_the_users_own() {
-        for text in [
-            "presets = [\"pi-claude-code\"]",
-            "presets = [{ name = \"pi-claude-code\", login = \"token\" }]",
-            "presets = [{ name = \"pi-claude-code\", login = \"keychain\" }]",
-        ] {
-            assert_eq!(
-                table(text).ruled_keys(),
-                [("sandbox.presets pi-claude-code", Rule::USERS_OWN)],
-                "{text}"
-            );
-        }
-    }
-
-    /// `[[sandbox.commands]]`: a `bash(...)` rule, a required `runtime`, and for a sandbox entry `all` or the grant
-    /// lists.
+    /// `[[sandbox.commands]]`: a `bash(...)` rule, a required `runtime`, and for a sandbox entry `all` or a table in
+    /// `[sandbox]`'s shape.
     #[test]
     fn command_grants_parse() {
         let parsed = table(
             "[[commands]]\nmatch = \"bash(husky install *)\"\nruntime = \"sandbox\"\ngrant = \"all\"\n\n[[commands]]\nmatch \
-             = \"bash(git push *)\"\nruntime = \"sandbox\"\ngrant = { connect = [\"$SSH_AUTH_SOCK\"], write = [\"~/x\"] \
-             }\n\n[[commands]]\nmatch = \"bash(log show *)\"\nruntime = \"host\"\n",
+             = \"bash(git push *)\"\nruntime = \"sandbox\"\ngrant = { network = { unix_socket_connections = { \
+             \"$SSH_AUTH_SOCK\" = \"allow\" } }, filesystem = { \"~/x\" = \"write\" } }\n\n[[commands]]\nmatch = \
+             \"bash(log show *)\"\nruntime = \"host\"\n",
         );
         assert_eq!(parsed.commands[0].pattern.pattern(), "husky install *");
         assert_eq!(
             parsed.commands[0].runtime,
             CommandRuntime::Sandbox(Grant::All(AllGrant::All))
         );
+        let CommandRuntime::Sandbox(Grant::Entries(entries)) = &parsed.commands[1].runtime else {
+            panic!("{:?}", parsed.commands[1].runtime)
+        };
+        assert_eq!(entries.filesystem[&path("~/x")], FileAccess::Write);
         assert_eq!(
-            parsed.commands[1].runtime,
-            CommandRuntime::Sandbox(Grant::Lists(GrantLists {
-                connect: vec![Connect::Socket("$SSH_AUTH_SOCK".into())],
-                write: vec!["~/x".into()],
-                ..GrantLists::default()
-            }))
+            entries.network.unix_socket_connections[&path("$SSH_AUTH_SOCK")],
+            Effect::Allow
         );
         assert_eq!(parsed.commands[2].runtime, CommandRuntime::Host);
-        assert!(parsed.check().is_ok());
-        // Written back as given.
-        let value = toml::Value::try_from(parsed.clone()).unwrap();
-        assert_eq!(value["commands"][0]["match"].as_str(), Some("bash(husky install *)"));
-        assert_eq!(value["commands"][0]["runtime"].as_str(), Some("sandbox"));
-        assert_eq!(value["commands"][0]["grant"].as_str(), Some("all"));
-        assert_eq!(value["commands"][2]["runtime"].as_str(), Some("host"));
-        assert!(value["commands"][2].get("grant").is_none());
         let text = toml::to_string(&parsed).unwrap();
         assert_eq!(toml::from_str::<SandboxTable>(&text).unwrap(), parsed, "round trip");
         for (bad, says) in [
             ("[[commands]]\nmatch = \"git push *\"\nruntime = \"host\"", "bash(...)"),
-            ("[[commands]]\nmatch = \"read(*)\"\nruntime = \"host\"", "bash(...)"),
-            (
-                "[[commands]]\nmatch = \"bash()\"\nruntime = \"host\"",
-                "one non-empty line",
-            ),
-            (
-                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = \"everything\"",
-                "",
-            ),
-            (
-                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { deny = [\"/a\"] }",
-                "",
-            ),
             ("[[commands]]\nmatch = \"bash(x)\"", "`runtime` is required"),
-            (
-                "[[commands]]\nmatch = \"bash(x)\"\ngrant = \"all\"",
-                "`runtime` is required",
-            ),
             (
                 "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"",
                 "needs `grant`",
@@ -1270,210 +1409,103 @@ mod tests {
                 "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\"\ngrant = \"all\"",
                 "`grant` is for",
             ),
-            ("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"vm\"", ""),
             (
-                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = \"all\"\nask = true",
+                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { write = [\"/a\"] }",
+                "",
+            ),
+            (
+                "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { profile = \"yolo\" }",
                 "",
             ),
         ] {
             let err = toml::from_str::<SandboxTable>(bad).expect_err(bad).to_string();
             assert!(err.contains(says), "{bad}: {err}");
         }
-        assert!(
-            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { write = [\"rel\"] }")
-                .check()
-                .is_err()
-        );
-        // `unix_bind` in a grant: paths, checked like `write`; `tcp_listen` too.
-        let bind = table(
-            "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { unix_bind = [\"$TMPDIR\"], tcp_listen = \"*\" }",
-        );
-        assert_eq!(
-            bind.commands[0].runtime,
-            CommandRuntime::Sandbox(Grant::Lists(GrantLists {
-                unix_bind: vec!["$TMPDIR".into()],
-                tcp_listen: Some(TcpListen),
-                ..GrantLists::default()
-            }))
-        );
-        assert!(bind.check().is_ok());
-        assert!(
-            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { unix_bind = [\"rel\"] }")
-                .check()
-                .is_err()
-        );
-        assert!(table("unix_bind = [\"rel\"]").check().is_err());
     }
 
-    /// Every key that loosens a protection is the user's own: the global file or a `config.local.toml`. Writes,
-    /// toolchains, and denies may be listed anywhere.
+    /// What opens is the user's own; what closes, writes, and toolchain caches may be set anywhere.
     #[test]
-    fn loosening_keys_are_the_users_own() {
+    fn opening_keys_are_the_users_own() {
+        let keys = |text: &str| table(text).ruled_keys().into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(keys("profile = \"yolo\""), ["sandbox.profile"]);
+        assert_eq!(keys("allow_tcp_listening = true"), ["sandbox.allow_tcp_listening"]);
         assert_eq!(
-            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\"").ruled_keys(),
-            [("sandbox.commands", Rule::USERS_OWN)]
+            keys("[filesystem]\n\"~/.ssh/config\" = \"read\""),
+            ["sandbox.filesystem (\"read\")"]
         );
         assert_eq!(
-            table("presets = [\"git\", \"rust\"]").ruled_keys(),
-            [("sandbox.presets git", Rule::USERS_OWN)]
+            keys("[network.connections]\n\"*\" = \"allow\""),
+            ["sandbox.network.connections (\"allow\")"]
         );
         assert_eq!(
-            table("presets = [\"apps\"]\nservices = [\"x.y\"]").ruled_keys(),
-            [
-                ("sandbox.services", Rule::USERS_OWN),
-                ("sandbox.presets apps", Rule::USERS_OWN)
-            ]
+            keys("presets = [\"pi-claude-code\"]"),
+            ["sandbox.presets pi-claude-code"]
         );
         assert_eq!(
-            table(
-                "profile = \"yolo\"\nread = [\"~/.ssh/config\"]\nconnect = [\"*\"]\nunix_bind = [\"/\"]\ntcp_listen = \"*\""
-            )
-            .ruled_keys(),
-            [
-                ("sandbox.profile", Rule::USERS_OWN),
-                ("sandbox.read", Rule::USERS_OWN),
-                ("sandbox.connect", Rule::USERS_OWN),
-                ("sandbox.unix_bind", Rule::USERS_OWN),
-                ("sandbox.tcp_listen", Rule::USERS_OWN)
-            ]
+            keys("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\""),
+            ["sandbox.commands"]
         );
         for text in [
-            "presets = [\"mise\"]",
             "presets = [\"rust\", \"swift\"]",
-            "write = [\"/a\"]",
-            "write_file = [\"/a\"]",
-            "deny = [\"/a\"]",
-            // Changes nothing in the sandbox: any level, a project's committed `config.toml` included.
-            "silence = [{ target = \"~/Library/Caches/x\" }]",
+            "allow_tcp_listening = false",
+            "allow_git_control_files = false",
+            "[filesystem]\n\"/a\" = \"write\"\n\"/b\" = \"deny\"",
+            "[network.connections]\n\"*\" = \"deny\"\n\"evil.com\" = \"deny\"",
+            "[network.unix_socket_connections]\n\"/\" = \"deny\"",
+            "[macos.services]\n\"*\" = \"deny\"",
+            "silence = [{ target = \"com.apple.SecurityServer\" }]",
         ] {
             assert!(table(text).ruled_keys().is_empty(), "{text}");
         }
     }
 
-    /// `silence` adds across levels like every list, and each entry keeps the file that listed it.
+    /// `silence` names a Mach service or `tcp-listen`; a path or host is refused, saying to use a `"deny"`.
     #[test]
-    fn silence_lists_add() {
-        let path = |p: &str| Silence {
-            target: SilenceTarget::Path(p.into()),
-            process: None,
-        };
-        let mut base = table("silence = [{ target = \"/a\" }]");
-        base.merge(table("silence = [{ target = \"/a\" }, { target = \"/b\" }]"));
-        assert_eq!(base.silence, [path("/a"), path("/b")]);
-        let mut s = SandboxSettings::default();
-        s.add(
-            table("silence = [{ target = \"/a\" }]"),
-            Path::new("/r/.piton/config.toml"),
-        );
-        assert_eq!(s.silence[0].file, Path::new("/r/.piton/config.toml"));
-    }
-
-    /// An entry is always a table naming a path or a Mach service, and optionally a process; anything else is refused
-    /// when the file is read, so an entry can't silently match nothing.
-    #[test]
-    fn silence_entries_are_tables_of_target_and_process() {
+    fn silence_is_for_services_and_listening() {
         let parse = |text: &str| toml::from_str::<SandboxTable>(text).map(|t| t.silence);
         assert_eq!(
-            parse("silence = [{ process = \"git\", target = \"~/p/**/.git/config\" }]").unwrap(),
+            parse("silence = [{ process = \"claude\", target = \"com.apple.SecurityServer\" }]").unwrap(),
             [Silence {
-                target: SilenceTarget::Path("~/p/**/.git/config".into()),
-                process: Some("git".into()),
+                target: SilenceTarget::Service("com.apple.SecurityServer".into()),
+                process: Some("claude".into()),
             }]
         );
         assert_eq!(
-            parse("silence = [{ target = \"com.apple.SecurityServer\" }]").unwrap()[0].target,
-            SilenceTarget::Service("com.apple.SecurityServer".into())
+            parse("silence = [{ target = \"tcp-listen\" }]").unwrap()[0].target,
+            SilenceTarget::TcpListen
         );
-        // A host and port; without the port it's a Mach service name.
-        for (text, target) in [
-            ("Api.Example.com:443", SilenceTarget::Host("api.example.com:443".into())),
-            ("*.example.com:443", SilenceTarget::Host("*.example.com:443".into())),
-            ("10.0.0.5:5432", SilenceTarget::Host("10.0.0.5:5432".into())),
-            ("api.example.com", SilenceTarget::Service("api.example.com".into())),
-            ("tcp-listen", SilenceTarget::TcpListen),
-        ] {
-            assert_eq!(
-                parse(&format!("silence = [{{ target = \"{text}\" }}]")).unwrap()[0].target,
-                target,
-                "{text}"
-            );
-        }
         for bad in [
-            "silence = [{ target = \"example.com:0\" }]",
-            "silence = [\"/a\"]",
-            "silence = [{ target = \"relative/x\" }]",
-            "silence = [{ target = \"**/.git/config\" }]",
-            "silence = [{ target = \"/a\", why = \"x\" }]",
-            "silence = [{ process = \"git\" }]",
+            "silence = [{ target = \"~/x\" }]",
+            "silence = [{ target = \"/a\" }]",
+            "silence = [{ target = \"example.com:443\" }]",
+            "silence = [{ target = \"com.example.*\" }]",
+            "silence = [\"x\"]",
         ] {
-            assert!(parse(bad).is_err(), "{bad}");
+            let err = parse(bad).expect_err(bad).to_string();
+            assert!(!err.is_empty(), "{bad}");
         }
-        // The inline form a notice names parses back to the same entry.
         let entry = Silence {
-            target: SilenceTarget::Path("/p/**/.git/config".into()),
-            process: Some("git".into()),
+            target: SilenceTarget::Service("a.b".into()),
+            process: Some("x".into()),
         };
         assert_eq!(parse(&format!("silence = [{}]", entry.inline())).unwrap(), [entry]);
     }
 
-    /// `tcp_listen` is `"*"` or unset; an address or a boolean is refused, saying why. Any level keeps it, and the first
-    /// file that set it is the one named.
-    #[test]
-    fn tcp_listen_is_every_address_or_unset() {
-        assert_eq!(table("tcp_listen = \"*\"").tcp_listen, Some(TcpListen));
-        assert_eq!(table("").tcp_listen, None);
-        for bad in ["\"127.0.0.1:3000\"", "\"localhost:*\"", "\"\""] {
-            let err = toml::from_str::<SandboxTable>(&format!("tcp_listen = {bad}"))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("can't limit listening"), "{bad}: {err}");
-        }
-        for bad in ["true", "false", "[\"*\"]"] {
-            assert!(
-                toml::from_str::<SandboxTable>(&format!("tcp_listen = {bad}")).is_err(),
-                "{bad}"
-            );
-        }
-        assert_eq!(
-            toml::Value::try_from(table("tcp_listen = \"*\"")).unwrap()["tcp_listen"].as_str(),
-            Some("*"),
-            "written back as `\"*\"`"
-        );
-
-        let mut merged = table("tcp_listen = \"*\"");
-        merged.merge(table(""));
-        assert_eq!(merged.tcp_listen, Some(TcpListen), "a level without it keeps it");
-        let mut merged = table("");
-        merged.merge(table("tcp_listen = \"*\""));
-        assert_eq!(merged.tcp_listen, Some(TcpListen));
-
-        let (global, local) = (Path::new("/g/config.toml"), Path::new("/r/.piton/config.local.toml"));
-        let mut s = SandboxSettings::default();
-        s.add(table(""), global);
-        assert!(s.tcp_listen.is_none());
-        s.add(table("tcp_listen = \"*\""), global);
-        s.add(table("tcp_listen = \"*\""), local);
-        assert_eq!(s.tcp_listen.as_ref().map(|l| l.file.as_path()), Some(global));
-    }
-
-    #[test]
-    fn paths_are_checked() {
-        assert!(table("write = [\"relative/path\"]").check().is_err());
-        assert!(table("read = [\"x\"]").check().is_err());
-        assert!(table("write = [\"~/x\", \"/abs\", \"$TMPDIR/x\"]").check().is_ok());
-    }
-
-    /// Earlier keys are unknown keys, like any typo.
+    /// The earlier lists, and keys from before them, are unknown keys like any typo.
     #[test]
     fn earlier_keys_are_unknown() {
         for text in [
+            "write = [\"/a\"]",
+            "write_file = [\"/a\"]",
+            "read = [\"~/.ssh/config\"]",
+            "connect = [\"*\"]",
+            "unix_bind = [\"/\"]",
+            "tcp_listen = \"*\"",
+            "services = [\"*\"]",
+            "deny = [\"/a\"]",
             "allow = [\"/a\"]",
-            "allow_file = [\"/a\"]",
-            "expose = [\"~/.ssh/config\"]",
-            "base = \"mise-dev\"",
-            "unix_socket = [\"/s\"]",
-            "bind = [\"/\"]",
-            "[network]\n",
+            "[network]\nopen = true",
+            "[macos]\napps = true",
         ] {
             assert!(toml::from_str::<SandboxTable>(text).is_err(), "{text}");
         }

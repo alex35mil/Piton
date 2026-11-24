@@ -60,7 +60,7 @@ fn gate_for(
 ) -> Result<Option<crate::launch::sandbox::network::Gate>, LaunchError> {
     use crate::launch::sandbox::{Gate, Network};
     match &policy.network {
-        Network::Open { .. } => return Ok(None),
+        Network::Open { .. } | Network::Direct { .. } => return Ok(None),
         Network::Filtered { .. } => {}
     }
     let decider = policy.clone();

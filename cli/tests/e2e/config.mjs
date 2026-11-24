@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 /// A TOML value: strings, numbers, booleans, and arrays as JSON writes them; objects as inline tables.
 const toml = (value) =>
     value && typeof value === "object" && !Array.isArray(value)
-        ? `{ ${Object.entries(value).map(([k, v]) => `${k} = ${toml(v)}`).join(", ")} }`
+        ? `{ ${Object.entries(value).map(([k, v]) => `${JSON.stringify(k)} = ${toml(v)}`).join(", ")} }`
         : JSON.stringify(value);
 
 /// `daemon` and `host` are flat objects of TOML values for the host file; table keys (`pi`, `env`, `stop`, `tailnet`,

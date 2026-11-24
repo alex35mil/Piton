@@ -212,7 +212,8 @@ enum ConfigAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
-    /// Set KEY (dotted, like `branches.format`) in the repository's `.piton/config.toml`, the global tier's with
+    /// Set KEY (a TOML dotted key like `branches.format`; quote a part with dots or slashes:
+    /// `'sandbox.filesystem."~/.cache"'`) in the repository's `.piton/config.toml`, the global tier's with
     /// --global, or the global `config.host.toml` / `config.client.toml` with --scope host|client; the `.local` file of
     /// the pair with --local. VALUE is JSON (an object becomes a table); text that isn't JSON is a string. With
     /// --changes, KEY is instead a JSON object of keys and values written together (`null` removes a key). With

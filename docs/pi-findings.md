@@ -191,7 +191,7 @@ them to read a file as well as to write it.
 
 A session folder set with `sessionDir` (settings or a project's `.pi/settings.json`), `--session-dir`, or
 `PI_CODING_AGENT_SESSION_DIR` outside the agent directory isn't granted: a sandboxed pi can't create its session file
-there. Grant it with `[sandbox] write`.
+there. Grant it with a `"write"` entry in `[sandbox.filesystem]`.
 
 ## Sandboxes don't nest
 
@@ -214,7 +214,7 @@ Verified on the host, macOS 27.0.1, with `piton sandbox-exec` (#241's spike):
   `user-preference-write <domain>` (`defaults write`), `signal pgrp [<process>(<pid>)] signum:<n>` (a signal to another
   process), `lsopen` with an empty target (`open`, `open -a`, `open x.command`, JXA `NSWorkspace.openURL`),
   `file-issue-extension target:<app> extension-class:com.apple.app-sandbox.read` (`osascript` telling another app to
-  act; still refused with launching apps open, the `apps` preset: `System Events got an error: A privilege violation
+  act; still refused with launching apps open, `allow_launching_apps`: `System Events got an error: A privilege violation
   occurred`), `sysctl-write <name>`, `network-outbound /private/var/run/syslog`. A signal 0 (`kill -0`) is refused
   with no record.
 - Two refusals never carry the profile's message: `job-creation` (`launchctl submit`, `at`: launchd checks the caller's

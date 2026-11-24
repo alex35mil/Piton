@@ -1687,8 +1687,8 @@ impl SessionTask {
         self.publish_view_state();
     }
 
-    /// A connection the gate holds: allowed or refused at once when the sandbox's entries, pi's hosts, the session's
-    /// answers, or `silence` decide it; otherwise it waits for the user, joining the question about the same
+    /// A connection the gate holds: allowed or refused at once when the sandbox's entries, pi's hosts, or the session's
+    /// answers decide it; otherwise it waits for the user, joining the question about the same
     /// destination when one is showing.
     fn network_ask(
         &mut self,
@@ -1696,15 +1696,11 @@ impl SessionTask {
         to: crate::launch::sandbox::Destination,
         reply: oneshot::Sender<crate::launch::sandbox::network::Verdict>,
     ) {
-        let silence = self
-            .commands
-            .as_ref()
-            .map_or(&[][..], |c| c.policies.silence.as_slice());
         let Some(network) = &mut self.network else {
             let _ = reply.send(network::refused(&to, "this session has no gate"));
             return;
         };
-        let Some(waiting) = network.decide(user, to, silence, reply) else {
+        let Some(waiting) = network.decide(user, to, reply) else {
             return;
         };
         match &mut network.asking {
@@ -1803,7 +1799,11 @@ impl SessionTask {
                     .map(|c| c.persist_lift(scope, &crate::launch::sandbox::grant::Lift::Network(entry.clone())));
                 match saved {
                     Some(Ok(file)) => {
-                        crate::log!("session {key}: saved `connect = [\"{to}\"]` in {}", file.display());
+                        crate::log!(
+                            "session {key}: saved `{}` in {}",
+                            crate::launch::sandbox::grant::Lift::Network(entry.clone()).entry(),
+                            file.display()
+                        );
                         // Every live session that reads this file takes it (this one included), and new calls inherit it.
                         (self.hooks.network_entry_saved)(entry, file);
                         crate::launch::sandbox::network::Verdict::Allow { literal: false }
@@ -1820,28 +1820,6 @@ impl SessionTask {
                     }
                     None => network::refused(&to, "no configuration to save to"),
                 }
-            }
-            NetworkAnswer::Silence(scope) => {
-                let entry = crate::config::Silence {
-                    target: crate::config::SilenceTarget::Host(to.to_string()),
-                    process: None,
-                };
-                if let Some(commands) = &mut self.commands {
-                    match commands.persist_silence(scope, &entry) {
-                        Ok(file) => {
-                            if let Some(silent) = crate::launch::sandbox::Silent::named(&entry.target) {
-                                commands.policies.silence.push(crate::launch::sandbox::Silenced {
-                                    target: silent,
-                                    process: None,
-                                    source: crate::launch::sandbox::SilenceSource::File(file.clone()),
-                                });
-                            }
-                            crate::log!("session {key}: the user denied {to}: saved in {}", file.display());
-                        }
-                        Err(e) => crate::log!("session {key}: couldn't save the silence entry: {e}"),
-                    }
-                }
-                network::refused(&to, "the user denied it")
             }
             NetworkAnswer::NotNow => network::refused(&to, "the user didn't allow it"),
         };
@@ -1880,7 +1858,7 @@ impl SessionTask {
         }
     }
 
-    /// A `connect` entry saved from a network question: when this session's configuration reads `file`, every sandbox
+    /// A connection entry saved from a network question: when this session's configuration reads `file`, every sandbox
     /// it has and every call it starts from now on reaches the destination, as after a restart.
     fn network_entry_saved(&mut self, target: crate::config::NetworkTarget, file: PathBuf) {
         let Some(network) = &mut self.network else { return };
@@ -1889,12 +1867,12 @@ impl SessionTask {
             return;
         }
         let source = crate::launch::sandbox::Source::Config {
-            key: "sandbox.connect".into(),
+            key: format!("sandbox.network.connections.\"{target}\""),
             from: crate::launch::sandbox::Provenance::File { path: file },
         };
         network.add_entry(target.clone(), source.clone());
         commands.add_network_entry(target, source);
-        crate::log!("session {}: took a saved connect entry", lock(&self.shared).key);
+        crate::log!("session {}: took a saved connection entry", lock(&self.shared).key);
     }
 
     /// fnox's proxy URL: the gate forwards every allowed connection through it from now on.
@@ -1947,7 +1925,7 @@ impl SessionTask {
             crate::log!(
                 "session {key}: {} was blocked: {summary} (silenced by {}, {})",
                 refusal.process,
-                silenced.entry().inline(),
+                silenced.describe(),
                 silenced.source
             );
             return;
@@ -1961,7 +1939,7 @@ impl SessionTask {
                     Scope::Everywhere => crate::agent::block::PersistScope::Global,
                 })
                 .ok_or_else(|| "no file for that scope".to_string())?;
-            commands.policies.resolver.with(&lift.lists(), &file)
+            commands.policies.resolver.with(&lift.entries(), &file)
         };
         let refused = Refused {
             operation: &refusal.operation,
@@ -1977,6 +1955,11 @@ impl SessionTask {
         let decided = grant::lift_for(&commands.policies.launch, refused, &bounds, widened);
         let process = &refusal.process;
         let notice = match decided {
+            // An entry the user wrote decides it: only logged.
+            Err(grant::NoLift::Decided(grant::DeniedBy::UserDeny)) => {
+                crate::log!("session {key}: {process} was blocked: {summary} (your own [sandbox] entry)");
+                return;
+            }
             Ok(offer) => {
                 crate::log!("session {key}: {process} was blocked: {summary}");
                 self.next_internal += 1;
@@ -1999,7 +1982,6 @@ impl SessionTask {
                 &why,
                 &notice::Context {
                     home: &commands.paths.home,
-                    checkout: &commands.checkout,
                     claude: notice::ClaudeSignIn::of(commands.policies.claude_login),
                 },
             ),
@@ -2099,43 +2081,6 @@ impl SessionTask {
             }
             ProcessAnswer::NotNow => {
                 crate::log!("session {key}: the user left {} blocked for now", question.process);
-                self.ask_next_process();
-            }
-            ProcessAnswer::Silence(scope) => {
-                let Some(commands) = &mut self.commands else { return };
-                let target = question.offer.at(grant_scope(scope)).silence_target();
-                let silent = match &target {
-                    crate::config::SilenceTarget::Path(path) => Some(crate::launch::sandbox::Silent::Path(path.into())),
-                    named @ (crate::config::SilenceTarget::Service(_)
-                    | crate::config::SilenceTarget::Host(_)
-                    | crate::config::SilenceTarget::TcpListen) => crate::launch::sandbox::Silent::named(named),
-                };
-                let entry = crate::config::Silence { target, process: None };
-                let message = match commands.persist_silence(scope, &entry) {
-                    Ok(file) => {
-                        if let Some(silent) = silent {
-                            commands.policies.silence.push(crate::launch::sandbox::Silenced {
-                                target: silent,
-                                process: None,
-                                source: crate::launch::sandbox::SilenceSource::File(file.clone()),
-                            });
-                        }
-                        crate::log!(
-                            "session {key}: the user denied {}: saved `silence = [{}]` in {}",
-                            question.process,
-                            entry.inline(),
-                            file.display()
-                        );
-                        None
-                    }
-                    Err(e) => {
-                        crate::log!("session {key}: couldn't save the silence entry: {e}");
-                        Some(format!("Couldn't save the sandbox entry: {e}"))
-                    }
-                };
-                if let Some(message) = message {
-                    self.show_notice(message);
-                }
                 self.ask_next_process();
             }
             ProcessAnswer::Persist(scope) => {

@@ -14,9 +14,9 @@ pub use self::{
     branches::BranchesTable,
     permissions::{PermissionSettings, PermissionsTable},
     sandbox::{
-        AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Connect, Grant,
-        GrantLists, Listed, NetworkTarget, Preset, Profile, SandboxSettings, SandboxTable, ServiceEntry, ServiceName,
-        Silence, SilenceTarget, TCP_LISTEN_ANY, TcpListen,
+        AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Effect, FileAccess,
+        Grant, GrantEntries, Listed, NetworkTarget, Origin, PathKey, Preset, Profile, SandboxSettings, SandboxTable,
+        ServiceKey, ServiceName, Silence, SilenceTarget,
     },
     web_search::WebSearchTable,
     workers::WorkersTable,

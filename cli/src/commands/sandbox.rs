@@ -18,7 +18,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         | SandboxAction::Why { workspace, .. }
         | SandboxAction::Gate { workspace } => workspace.clone(),
     };
-    let (policy, profile, silence, catalog) = match policy(config, workspace).await {
+    let (policy, profile, silence, ignored, catalog) = match policy(config, workspace).await {
         Ok((resolution, warnings, catalog)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
@@ -26,7 +26,16 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             for warning in &warnings {
                 eprintln!("piton: warning: {warning}");
             }
-            (resolution.policy, resolution.profile, resolution.silence, catalog)
+            for ignored in &resolution.ignored {
+                eprintln!("piton: warning: left out {ignored}");
+            }
+            (
+                resolution.policy,
+                resolution.profile,
+                resolution.silence,
+                resolution.ignored,
+                catalog,
+            )
         }
         Err(message) => {
             eprintln!("piton: {message}");
@@ -39,11 +48,14 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             let output = serde_json::json!({
                 "nono_deny_groups": launch::sandbox::nono_version(),
                 "profile": profile,
+                "network": network_mode(&policy.network),
                 "policy": policy,
                 "silence": silence
                     .iter()
-                    .map(|s| serde_json::json!({ "entry": s.entry(), "source": s.source.to_string() }))
+                    .map(|s| serde_json::json!({ "entry": s.describe(), "source": s.source.to_string() }))
                     .collect::<Vec<_>>(),
+                // Entries a committed file wrote that would reopen what a credential or your own deny closes.
+                "ignored": ignored,
                 // Hosts pi reaches without asking under a filtered network, and the models pi discovered (listed,
                 // never trusted).
                 "pi_hosts": catalog.trusted(),
@@ -172,7 +184,7 @@ async fn serve_gate(
     };
     let (user, credential) = gate.issue("probe");
     match &mut policy.network {
-        Network::Open { .. } => {
+        Network::Open { .. } | Network::Direct { .. } => {
             eprintln!("piton: the network is open: no gate");
             return ExitCode::from(3);
         }
@@ -262,7 +274,7 @@ fn silenced_lines(silence: &[launch::sandbox::Silenced], target: &std::path::Pat
                 };
                 format!(
                     "  silenced {whose}: {} ({}): a block here is only logged",
-                    s.entry().inline(),
+                    s.describe(),
                     s.source
                 )
             })
@@ -275,8 +287,8 @@ fn explain(source: &Source) -> String {
         Source::Workspace => "the workspace is writable".into(),
         Source::BuiltIn { what } => format!("built in: {what}"),
         Source::NonoGroup { group } => format!(
-            "built-in credential deny (nono's {group}); lift it with `read` in the global config.toml or a \
-             config.local.toml"
+            "built-in credential deny (nono's {group}); `\"<path>\" = \"read\"` in [sandbox.filesystem] (global \
+             config.toml or a config.local.toml) reopens reading a path inside it"
         ),
         Source::Piton { what } => format!("Piton: {what}"),
         Source::FnoxConfig => {
@@ -287,6 +299,14 @@ fn explain(source: &Source) -> String {
         Source::AgentDir => "pi's runtime state in its agent directory".into(),
         Source::Preset { preset, from } => format!("the {preset} preset, {from}"),
         Source::Config { key, from } => format!("{key}, {from}"),
+    }
+}
+
+/// The network's mode as `show` prints it: open (no gate), or filtered through the gate.
+fn network_mode(network: &launch::sandbox::Network) -> &'static str {
+    match network {
+        launch::sandbox::Network::Open { .. } | launch::sandbox::Network::Direct { .. } => "open",
+        launch::sandbox::Network::Filtered { .. } => "filtered",
     }
 }
 

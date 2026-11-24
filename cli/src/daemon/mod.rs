@@ -596,7 +596,7 @@ impl Daemon {
                     upstream_token,
                 })
             }
-            Some(launch::sandbox::Network::Open { .. }) | None => None,
+            Some(launch::sandbox::Network::Open { .. } | launch::sandbox::Network::Direct { .. }) | None => None,
         };
         let spec = LaunchSpec {
             key,

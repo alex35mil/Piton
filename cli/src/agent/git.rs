@@ -129,17 +129,6 @@ impl GitControlEntry {
             Some(_) | None => None,
         }
     }
-
-    /// Its name inside a git directory, as a silence pattern ends: `config`, `hooks`, ...
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Config => "config",
-            Self::ConfigWorktree => "config.worktree",
-            Self::Commondir => "commondir",
-            Self::Hooks => HOOKS,
-            Self::GitDir => DOT_GIT,
-        }
-    }
 }
 
 /// Inside `checkout`: its own `.git` entry, or a control entry of any `.git` folder below it.

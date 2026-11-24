@@ -328,7 +328,7 @@ struct Planned {
 /// `piton config set`: one key of a level's `config.toml` or `config.local.toml`, written with its comments and layout
 /// kept, and refused when the file would no longer be valid.
 fn set(request: &SetRequest) -> ExitCode {
-    use crate::config::{ConfigFile, KeyChange, Sharing, WriteLevel};
+    use crate::config::{ConfigFile, KeyChange, KeyPath, Sharing, WriteLevel};
     let invalid = |message: String| print_error(ErrorBody::Invalid { message });
     let paths = Paths::current();
     let level = match (request.scope, request.global) {
@@ -352,12 +352,13 @@ fn set(request: &SetRequest) -> ExitCode {
     };
     let sharing = if request.local { Sharing::Local } else { Sharing::Shared };
     let target = ConfigFile { level, sharing };
-    // Each change: a dotted key, and its JSON value (`None`: remove it).
+    // Each change: a TOML dotted key (a part with dots or slashes quoted), and its JSON value (`None`: remove it).
+    let key = |text: &str| KeyPath::parse(text);
     let changes: Vec<KeyChange> = match (request.changes, request.unset, request.value) {
         (true, false, None) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(request.key) {
-            Ok(map) => map
-                .into_iter()
-                .map(|(key, value)| {
+            Ok(map) => {
+                let mut changes = Vec::new();
+                for (text, value) in map {
                     let value = match value {
                         serde_json::Value::Null => None,
                         other @ (serde_json::Value::Bool(_)
@@ -366,20 +367,27 @@ fn set(request: &SetRequest) -> ExitCode {
                         | serde_json::Value::Array(_)
                         | serde_json::Value::Object(_)) => Some(other),
                     };
-                    KeyChange { key, value }
-                })
-                .collect(),
+                    match key(&text) {
+                        Ok(key) => changes.push(KeyChange { key, value }),
+                        Err(e) => return invalid(e),
+                    }
+                }
+                changes
+            }
             Err(e) => return invalid(format!("--changes: a JSON object of keys and values: {e}")),
         },
-        (false, true, None) => vec![KeyChange {
-            key: request.key.to_string(),
-            value: None,
-        }],
+        (false, true, None) => match key(request.key) {
+            Ok(key) => vec![KeyChange { key, value: None }],
+            Err(e) => return invalid(e),
+        },
         // JSON, or a bare string.
-        (false, false, Some(text)) => vec![KeyChange {
-            key: request.key.to_string(),
-            value: Some(serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))),
-        }],
+        (false, false, Some(text)) => match key(request.key) {
+            Ok(key) => vec![KeyChange {
+                key,
+                value: Some(serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))),
+            }],
+            Err(e) => return invalid(e),
+        },
         (true, _, _) | (false, true, Some(_)) | (false, false, None) => {
             eprintln!("piton: give KEY VALUE, KEY --unset, or a JSON object with --changes");
             return ExitCode::from(1);

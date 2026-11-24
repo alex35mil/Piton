@@ -658,6 +658,7 @@ mod tests {
             },
             claude_code,
             silence: Vec::new(),
+            ignored: Vec::new(),
         }
     }
 

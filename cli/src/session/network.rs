@@ -77,34 +77,42 @@ impl Network {
         self.policies.remove(user);
     }
 
-    /// The decision for a connection, before any question. `silence` is the session's.
-    pub fn decide(
-        &self,
-        user: User,
-        to: Destination,
-        silence: &[crate::launch::sandbox::Silenced],
-        reply: oneshot::Sender<Verdict>,
-    ) -> Option<Waiting> {
+    /// The decision for a connection, before any question: a named-host entry decides; then pi's own hosts and the
+    /// hosts allowed for this session; then a generic entry (`*`, `*:PORT`, `localhost…`), so `"*" = "deny"` refuses
+    /// without asking but never cuts pi off from its providers; else the user is asked.
+    pub fn decide(&self, user: User, to: Destination, reply: oneshot::Sender<Verdict>) -> Option<Waiting> {
+        use crate::config::Effect;
+        let refused = |entry: &crate::launch::sandbox::NetworkGrant| Verdict::Deny {
+            reason: format!(
+                "Piton's sandbox refused {to}: `{}` = \"deny\" in [sandbox.network.connections]",
+                entry.target
+            ),
+        };
         let verdict = match self.policies.get(&user.0) {
             None => Some(Verdict::Deny {
                 reason: format!("Piton's sandbox refused {to}: the sandbox that asked has ended"),
             }),
             Some(policy) => {
-                let by_entry = policy.decide_network(&to).allowed;
                 let literal = to.host.parse::<std::net::IpAddr>().is_ok();
-                if by_entry {
-                    Some(Verdict::Allow { literal })
-                } else if self.catalog.allows(&to.host, to.port).is_some() || self.allowed.contains(&to) {
-                    Some(Verdict::Allow { literal: false })
-                } else if crate::launch::sandbox::silenced(silence, "", "network-outbound", &to.to_string()).is_some() {
-                    Some(Verdict::Deny {
-                        reason: format!(
-                            "Piton's sandbox refused {to}: denied earlier (a `silence` entry); a `connect` entry \
-                             allows it"
-                        ),
-                    })
-                } else {
-                    None
+                let entry = policy.network_entry(&to);
+                let open = matches!(policy.network, crate::launch::sandbox::Network::Open { .. });
+                match (open, entry) {
+                    (true, _) => Some(Verdict::Allow { literal }),
+                    (false, Some(entry)) if entry.target.is_named() => match entry.effect {
+                        Effect::Allow => Some(Verdict::Allow { literal }),
+                        Effect::Deny => Some(refused(entry)),
+                    },
+                    (false, entry) => {
+                        if self.catalog.allows(&to.host, to.port).is_some() || self.allowed.contains(&to) {
+                            Some(Verdict::Allow { literal: false })
+                        } else {
+                            match entry.map(|e| (e, e.effect)) {
+                                Some((_, Effect::Allow)) => Some(Verdict::Allow { literal }),
+                                Some((entry, Effect::Deny)) => Some(refused(entry)),
+                                None => None,
+                            }
+                        }
+                    }
                 }
             }
         };
@@ -129,8 +137,10 @@ impl Network {
     pub fn add_entry(&mut self, target: crate::config::NetworkTarget, source: crate::launch::sandbox::Source) {
         for policy in self.policies.values_mut() {
             if let crate::launch::sandbox::Network::Filtered { grants, .. } = &mut policy.network {
+                grants.retain(|g| g.target != target);
                 grants.push(crate::launch::sandbox::NetworkGrant {
                     target: target.clone(),
+                    effect: crate::config::Effect::Allow,
                     source: source.clone(),
                 });
             }
@@ -151,8 +161,8 @@ impl Network {
 pub fn refused(to: &Destination, why: &str) -> Verdict {
     Verdict::Deny {
         reason: format!(
-            "Piton's sandbox refused {to}: {why}; a `connect = [\"{to}\"]` entry (global config.toml or a \
-             config.local.toml) allows it"
+            "Piton's sandbox refused {to}: {why}; `\"{to}\" = \"allow\"` in [sandbox.network.connections] (global \
+             config.toml or a config.local.toml) allows it"
         ),
     }
 }
@@ -162,15 +172,13 @@ mod tests {
     use super::*;
     use crate::launch::sandbox::{Gate, Network as Net, NetworkGrant, Source};
 
-    fn policy(entries: &[&str]) -> Policy {
+    fn policy(entries: &[(&str, crate::config::Effect)]) -> Policy {
         let grants = entries
             .iter()
-            .map(|e| match crate::config::Connect::try_from(e.to_string()).unwrap() {
-                crate::config::Connect::Network(target) => NetworkGrant {
-                    target,
-                    source: Source::Workspace,
-                },
-                crate::config::Connect::Socket(_) => unreachable!(),
+            .map(|(e, effect)| NetworkGrant {
+                target: crate::config::NetworkTarget::try_from(e.to_string()).unwrap(),
+                effect: *effect,
+                source: Source::Workspace,
             })
             .collect();
         Policy {
@@ -193,10 +201,15 @@ mod tests {
         Destination::parse(text).unwrap()
     }
 
-    /// The decision order: the sandbox's entries, pi's hosts, the session's answers, `silence`, else the user. Each
+    fn allow_(literal: bool) -> Option<Verdict> {
+        Some(Verdict::Allow { literal })
+    }
+
+    /// The decision order: a named-host entry, pi's hosts, the session's answers, a generic entry, else the user. Each
     /// sandbox decides under its own policy; an unknown user is refused.
     #[tokio::test]
     async fn decides_in_order() {
+        use crate::config::Effect::{Allow, Deny};
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let deny: gate::Decide =
@@ -208,25 +221,42 @@ mod tests {
         };
         let files = crate::pi::catalog::Files::new(dir.path().join("agent"), dir.path(), &[]);
         let mut net = Network::new(gate, crate::pi::catalog::Catalog::new(builtin, files), None);
-        let mut pi = policy(&["github.com:22"]);
+        let mut pi = policy(&[("github.com:22", Allow), ("bad.example", Deny)]);
         net.issue(PI_USER, &mut pi);
         assert!(matches!(&pi.network, Net::Filtered { gate: Gate::Listening { user, .. }, .. } if user == PI_USER));
-        let mut call = policy(&["api.vendor.com"]);
+        let mut call = policy(&[("api.vendor.com", Allow)]);
         net.issue("s-1", &mut call);
-        let silence = [crate::launch::sandbox::Silenced {
-            target: crate::launch::sandbox::Silent::named(&crate::config::SilenceTarget::Host(
-                "bad.example:443".into(),
-            ))
-            .unwrap(),
-            process: None,
-            source: crate::launch::sandbox::SilenceSource::File("/g/config.toml".into()),
-        }];
+        // `*` denied: refused without asking, except pi's own hosts and a named host allowed.
+        let mut closed = policy(&[("*", Deny), ("ok.example", Allow)]);
+        net.issue("s-2", &mut closed);
+        // `*` allowed with a named host denied: the rest passes without asking.
+        let mut open = policy(&[("*", Allow), ("evil.example", Deny)]);
+        net.issue("s-3", &mut open);
         let decide = |net: &Network, user: &str, dest: &str| {
             let (reply, mut verdict) = oneshot::channel();
-            let waiting = net.decide(User(user.into()), to(dest), &silence, reply);
+            let waiting = net.decide(User(user.into()), to(dest), reply);
             (waiting.is_some(), verdict.try_recv().ok())
         };
-        let allow = |literal| Some(Verdict::Allow { literal });
+        let denied = |r: (bool, Option<Verdict>)| matches!(r, (false, Some(Verdict::Deny { .. })));
+        assert!(denied(decide(&net, "s-2", "other.example:443")), "`*` denied");
+        assert_eq!(
+            decide(&net, "s-2", "api.anthropic.com:443"),
+            (false, allow_(false)),
+            "pi's host"
+        );
+        assert_eq!(decide(&net, "s-2", "ok.example:443"), (false, allow_(false)));
+        assert!(denied(decide(&net, "s-3", "evil.example:443")), "the named deny");
+        assert_eq!(
+            decide(&net, "s-3", "other.example:443"),
+            (false, allow_(false)),
+            "`*` allowed"
+        );
+        assert_eq!(
+            decide(&net, "s-3", "api.anthropic.com:443"),
+            (false, allow_(false)),
+            "pi's host"
+        );
+        let allow = allow_;
         assert_eq!(decide(&net, PI_USER, "github.com:22"), (false, allow(false)));
         assert_eq!(
             decide(&net, PI_USER, "api.anthropic.com:443"),

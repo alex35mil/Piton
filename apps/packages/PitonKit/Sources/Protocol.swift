@@ -656,8 +656,10 @@ public enum SettingValueType: Codable, Sendable, Hashable {
     case choice(options: [String])
     /// Several of the listed options.
     case choiceList(options: [String])
+    /// A table of keys (paths, hosts, names) to one of the listed values: one row per entry.
+    case map(values: [String])
 
-    enum CodingKeys: String, CodingKey { case kind, options }
+    enum CodingKeys: String, CodingKey { case kind, options, values }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -668,6 +670,7 @@ public enum SettingValueType: Codable, Sendable, Hashable {
         case "integer": self = .integer
         case "choice": self = .choice(options: try c.decode([String].self, forKey: .options))
         case "choice_list": self = .choiceList(options: try c.decode([String].self, forKey: .options))
+        case "map": self = .map(values: try c.decode([String].self, forKey: .values))
         case let other:
             throw DecodingError.dataCorruptedError(
                 forKey: .kind, in: c, debugDescription: "unknown setting value type \(other)")
@@ -687,6 +690,9 @@ public enum SettingValueType: Codable, Sendable, Hashable {
         case .choiceList(let options):
             try c.encode("choice_list", forKey: .kind)
             try c.encode(options, forKey: .options)
+        case .map(let values):
+            try c.encode("map", forKey: .kind)
+            try c.encode(values, forKey: .values)
         }
     }
 }

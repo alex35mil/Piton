@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn tables_are_parsed_on_their_own() {
         let d = doc(
-            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\nwrite = [\"/r\"]\n",
+            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\npresets = [\"rust\"]\n",
             LevelKind::Repository,
             Sharing::Shared,
         )
@@ -287,7 +287,10 @@ mod tests {
             d.part::<PermissionsTable>(Table::Permissions).unwrap().unwrap().allow,
             ["read"]
         );
-        assert_eq!(d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().write, ["/r"]);
+        assert_eq!(
+            d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().presets,
+            [crate::config::Preset::Rust]
+        );
         assert!(d.part::<Integration>(Table::Tracker).unwrap().is_some());
         assert!(d.part::<Integration>(Table::Forge).unwrap().is_none());
     }
@@ -307,12 +310,12 @@ mod tests {
         };
         use LevelKind::{Global, Parent, Repository};
         use Sharing::{Local, Shared};
-        // Loosening the sandbox: the user's own files only, so a repository can't open it to itself.
+        // Opening the sandbox: the user's own files only, so a repository can't open it to itself.
         for loosening in [
-            "[sandbox]\nread = [\"~/.ssh/config\"]\n",
-            "[sandbox]\nconnect = [\"*\"]\n",
+            "[sandbox.filesystem]\n\"~/.ssh/config\" = \"read\"\n",
+            "[sandbox.network.connections]\n\"*\" = \"allow\"\n",
             "[sandbox]\nprofile = \"yolo\"\n",
-            "[sandbox]\npresets = [\"git\"]\n",
+            "[sandbox]\nallow_git_control_files = true\n",
             "[[sandbox.commands]]\nmatch = \"bash(husky install *)\"\nruntime = \"sandbox\"\ngrant = \"all\"\n",
             "[[sandbox.commands]]\nmatch = \"bash(log show *)\"\nruntime = \"host\"\n",
         ] {
@@ -329,7 +332,13 @@ mod tests {
             assert!(part(loosening, Global, Shared, Table::Sandbox).is_ok(), "{loosening}");
             assert!(part(loosening, Global, Local, Table::Sandbox).is_ok(), "{loosening}");
         }
-        assert!(part("[sandbox]\nwrite = [\"/r\"]\n", Repository, Shared, Table::Sandbox).is_ok());
+        for anywhere in [
+            "[sandbox.filesystem]\n\"/r\" = \"write\"\n\"/s\" = \"deny\"\n",
+            "[sandbox]\nallow_git_control_files = false\npresets = [\"swift\"]\n",
+            "[sandbox.network.connections]\n\"*\" = \"deny\"\n",
+        ] {
+            assert!(part(anywhere, Repository, Shared, Table::Sandbox).is_ok(), "{anywhere}");
+        }
         // Integrations: project only.
         for table in [Table::Tracker, Table::Forge] {
             let text = format!("[{}]\nprovider = \"github\"\n", table.name());
