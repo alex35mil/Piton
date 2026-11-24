@@ -3,7 +3,7 @@
 //!
 //! Order, the last matching rule deciding:
 //! 1. grants: writes to the workspace, the source's `.piton/.local`, temp, presets, `write`, `write_file`; DNS; and
-//!    `connect` and `bind` sockets, before every deny so none of them reopens one (the base closes every socket);
+//!    `connect` and `unix_bind` sockets, before every deny so none of them reopens one (the base closes every socket);
 //! 2. nono's credential denies; then `read`, which lifts them for reading (and reopens writes granted inside a read
 //!    path); then `connect` socket entries at or inside a credential folder, for connecting only;
 //! 3. the host agent directory is read-only; the launch's agent directory's runtime state is writable;
@@ -26,7 +26,7 @@ use std::{
 use super::{
     SandboxError,
     policy::{self, AgentDirWrite, Provenance, Source},
-    rules::{Access, Apps, Effect, Gate, Network, NetworkGrant, Policy, Rule, ServiceGrant, Services, Target},
+    rules::{Access, Apps, Effect, Gate, Listen, Network, NetworkGrant, Policy, Rule, ServiceGrant, Services, Target},
 };
 use crate::{
     agent::{GitControl, canonical_target, lexical},
@@ -127,6 +127,8 @@ pub enum Silent {
     Service(String),
     /// A network destination: a host (or `*.domain`) and a port.
     Host(crate::config::NetworkTarget),
+    /// A TCP listen, on any port.
+    TcpListen,
 }
 
 /// Where a silence entry came from.
@@ -153,6 +155,7 @@ impl Silent {
     pub fn named(target: &crate::config::SilenceTarget) -> Option<Self> {
         match target {
             crate::config::SilenceTarget::Path(_) => None,
+            crate::config::SilenceTarget::TcpListen => Some(Silent::TcpListen),
             crate::config::SilenceTarget::Service(name) => Some(Silent::Service(name.clone())),
             crate::config::SilenceTarget::Host(text) => match crate::config::Connect::try_from(text.clone()) {
                 Ok(crate::config::Connect::Network(target)) => Some(Silent::Host(target)),
@@ -175,6 +178,7 @@ impl Silenced {
                 let path = Path::new(target);
                 operation != "mach-lookup" && path.is_absolute() && below_pattern(path, pattern)
             }
+            Silent::TcpListen => super::rules::is_listen(operation, target),
             Silent::Host(host) => {
                 operation == "network-outbound"
                     && !target.starts_with('/')
@@ -190,6 +194,7 @@ impl Silenced {
                 Silent::Path(path) => crate::config::SilenceTarget::Path(path.display().to_string()),
                 Silent::Service(name) => crate::config::SilenceTarget::Service(name.clone()),
                 Silent::Host(host) => crate::config::SilenceTarget::Host(host.to_string()),
+                Silent::TcpListen => crate::config::SilenceTarget::TcpListen,
             },
             process: self.process.clone(),
         }
@@ -373,12 +378,12 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
                 crate::config::SilenceTarget::Path(path) => {
                     Silent::Path(canonical_pattern(&expand_grant(path, facts.home, facts.base_env)?))
                 }
-                other @ (crate::config::SilenceTarget::Service(_) | crate::config::SilenceTarget::Host(_)) => {
-                    match Silent::named(other) {
-                        Some(silent) => silent,
-                        None => return Ok(None),
-                    }
-                }
+                other @ (crate::config::SilenceTarget::Service(_)
+                | crate::config::SilenceTarget::Host(_)
+                | crate::config::SilenceTarget::TcpListen) => match Silent::named(other) {
+                    Some(silent) => silent,
+                    None => return Ok(None),
+                },
             };
             Ok(Some(Silenced {
                 target,
@@ -593,7 +598,7 @@ fn build(
     for (path, source) in &grants.write_file {
         rules.push(Effect::Allow, &[Access::Write], literal(path), source.clone());
     }
-    // Sockets, before every deny: a `connect` or `bind` entry (yolo's `/` too) never reopens a credential, a user
+    // Sockets, before every deny: a `connect` or `unix_bind` entry (yolo's `/` too) never reopens a credential, a user
     // deny, or the daemon's sockets. A connect entry inside a credential folder gets a second slot below.
     rules.push(
         Effect::Allow,
@@ -604,7 +609,7 @@ fn build(
     for (path, source) in &grants.sockets {
         rules.push(Effect::Allow, &[Access::Connect], subpath(path), source.clone());
     }
-    for (path, source) in &grants.bind {
+    for (path, source) in &grants.unix_bind {
         rules.push(Effect::Allow, &[Access::Bind], subpath(path), source.clone());
     }
     if let (Some(sockets), Some(source)) = (claude_sockets, &claude_source) {
@@ -851,6 +856,7 @@ fn build(
         services: grants.services.clone(),
         apps: grants.apps.clone(),
         network: grants.network.clone(),
+        listen: grants.listen.clone(),
         tag: String::new(),
     };
     Ok(Built {
@@ -928,8 +934,9 @@ struct Grants {
     write_file: Vec<(PathBuf, Source)>,
     read: Vec<(PathBuf, Source)>,
     sockets: Vec<(PathBuf, Source)>,
-    bind: Vec<(PathBuf, Source)>,
+    unix_bind: Vec<(PathBuf, Source)>,
     network: Network,
+    listen: Listen,
     services: Services,
     apps: Apps,
     presets: Vec<(Preset, Provenance)>,
@@ -1010,13 +1017,30 @@ impl Grants {
         }
         read.extend(user("read", &settings.read)?);
 
-        let mut bind = Vec::new();
-        for grant in entries.bind {
+        let mut unix_bind = Vec::new();
+        for grant in entries.unix_bind {
             if let Some(path) = from_profile_entry(grant)? {
-                bind.push((path, source("bind", from_profile.clone())));
+                unix_bind.push((path, source("unix_bind", from_profile.clone())));
             }
         }
-        bind.extend(user("bind", &settings.bind)?);
+        unix_bind.extend(user("unix_bind", &settings.unix_bind)?);
+
+        // TCP listening: open, named after the first of the profile, the presets, and the user's files that opens it.
+        let preset_listen = presets.iter().find_map(|(preset, from)| {
+            policy::preset_grants(preset).tcp_listen.then(|| Source::Preset {
+                preset: preset.name().into(),
+                from: from.clone(),
+            })
+        });
+        let profile_listen = entries.tcp_listen.then(|| source("tcp_listen", from_profile.clone()));
+        let user_listen = settings
+            .tcp_listen
+            .as_ref()
+            .map(|l| source("tcp_listen", from_file(&l.file)));
+        let listen = match profile_listen.or(preset_listen).or(user_listen) {
+            Some(source) => Listen::Open { source },
+            None => Listen::Closed,
+        };
 
         let mut sockets = Vec::new();
         let mut network = Vec::new();
@@ -1125,8 +1149,9 @@ impl Grants {
             write_file,
             read,
             sockets,
-            bind,
+            unix_bind,
             network,
+            listen,
             services,
             apps,
             presets,
@@ -1876,6 +1901,7 @@ mod tests {
             },
             "strict's network is filtered, with nothing listed"
         );
+        assert_eq!(p.listen, Listen::Closed, "strict listens on no address");
 
         let (f, _) = resolve("");
         ssh_keys(&f);
@@ -1927,6 +1953,18 @@ mod tests {
             },
             "standard's `*` opens the network"
         );
+        assert_eq!(
+            p.listen,
+            Listen::Open {
+                source: Source::Config {
+                    key: "sandbox.tcp_listen".into(),
+                    from: Provenance::Profile {
+                        profile: Profile::Standard
+                    },
+                }
+            },
+            "standard listens"
+        );
         assert!(!allowed(p, &f.repo.join(".git/config"), Access::Write));
 
         let (f, yolo) = resolve("[sandbox]\nprofile = \"yolo\"\n");
@@ -1946,6 +1984,48 @@ mod tests {
             "every socket"
         );
         assert!(allowed(p, &f.repo.join("test.sock"), Access::Bind));
+        assert!(p.decide_listen().allowed, "yolo holds standard's listening");
+    }
+
+    /// In `strict`, TCP listening opens from the `pi-claude-code` preset (its relay) or the user's `tcp_listen`, each
+    /// named; the profile names itself first when it opens it too.
+    #[test]
+    fn tcp_listening_follows_presets_and_the_users_entry() {
+        let preset = policy(&fixture(&format!("{CLAUDE_PRESET}profile = \"strict\"\n"), ""));
+        assert!(matches!(
+            &preset.listen,
+            Listen::Open { source: Source::Preset { preset, .. } } if preset == "pi-claude-code"
+        ));
+        let f = fixture("[sandbox]\nprofile = \"strict\"\ntcp_listen = \"*\"\n", "");
+        let user = policy(&f);
+        assert_eq!(
+            user.decide_listen().source,
+            Source::Config {
+                key: "sandbox.tcp_listen".into(),
+                from: Provenance::File {
+                    path: f.home.join(".config/piton/config.toml")
+                },
+            }
+        );
+        let both = policy(&fixture(CLAUDE_PRESET, ""));
+        assert!(matches!(
+            &both.listen,
+            Listen::Open {
+                source: Source::Config {
+                    from: Provenance::Profile { .. },
+                    ..
+                }
+            }
+        ));
+        let strict = policy(&fixture("[sandbox]\nprofile = \"strict\"\n", ""));
+        assert!(!strict.decide_listen().allowed);
+        assert!(
+            strict
+                .seatbelt()
+                .unwrap()
+                .contains(&r#"(deny network-inbound (local tcp "*:*"))"#.to_string())
+        );
+        super::super::apply::capabilities(&strict).expect("nono accepts it");
     }
 
     /// `standard`'s `$SSH_AUTH_SOCK` pointing at an agent inside a credential folder (1Password's) opens that socket for

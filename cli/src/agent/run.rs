@@ -409,6 +409,7 @@ mod tests {
             network: crate::launch::sandbox::Network::Open {
                 source: crate::launch::sandbox::Source::Workspace,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         }
     }

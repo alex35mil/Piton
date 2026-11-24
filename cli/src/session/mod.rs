@@ -2106,9 +2106,9 @@ impl SessionTask {
                 let target = question.offer.at(grant_scope(scope)).silence_target();
                 let silent = match &target {
                     crate::config::SilenceTarget::Path(path) => Some(crate::launch::sandbox::Silent::Path(path.into())),
-                    named @ (crate::config::SilenceTarget::Service(_) | crate::config::SilenceTarget::Host(_)) => {
-                        crate::launch::sandbox::Silent::named(named)
-                    }
+                    named @ (crate::config::SilenceTarget::Service(_)
+                    | crate::config::SilenceTarget::Host(_)
+                    | crate::config::SilenceTarget::TcpListen) => crate::launch::sandbox::Silent::named(named),
                 };
                 let entry = crate::config::Silence { target, process: None };
                 let message = match commands.persist_silence(scope, &entry) {
@@ -2143,9 +2143,9 @@ impl SessionTask {
                 let lift = question.offer.at(grant_scope(scope));
                 match commands.persist_lift(scope, lift) {
                     Ok(path) => {
-                        let (entry, value) = lift.entry();
                         crate::log!(
-                            "session {key}: saved `{entry} = [\"{value}\"]` in {}; restarting",
+                            "session {key}: saved `{}` in {}; restarting",
+                            lift.entry(),
                             path.display()
                         );
                         (self.hooks.restart)(key);

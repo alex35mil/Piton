@@ -56,7 +56,9 @@ impl std::fmt::Display for Provenance {
 pub struct ProfileEntries {
     pub read: Vec<ReadEntry>,
     pub connect: Vec<Connect>,
-    pub bind: &'static [&'static str],
+    pub unix_bind: &'static [&'static str],
+    /// `tcp_listen = "*"`: listening on TCP, on every address.
+    pub tcp_listen: bool,
     pub services: Vec<ServiceEntry>,
     pub presets: Vec<Preset>,
 }
@@ -74,8 +76,9 @@ pub enum ReadEntry {
 pub fn profile_entries(profile: Profile) -> ProfileEntries {
     let entry = |text: &str| Connect::try_from(text.to_string()).expect("a profile's connect entries are valid");
     // Git over SSH: the user's SSH agent (keys used, never read), the host names and keys SSH checks, and the public
-    // halves of the keys. Creating sockets anywhere: test servers, IPC, language servers. Every Mach service but the
-    // keychain's, as the library allows: toolchains and GUI-adjacent tools reach services no fixed list foresees.
+    // halves of the keys. Creating sockets anywhere and listening on TCP: test servers, dev servers, IPC, language
+    // servers. Every Mach service but the keychain's, as the library allows: toolchains and GUI-adjacent tools reach
+    // services no fixed list foresees.
     let standard = ProfileEntries {
         read: vec![
             ReadEntry::Path("~/.ssh/config"),
@@ -83,7 +86,8 @@ pub fn profile_entries(profile: Profile) -> ProfileEntries {
             ReadEntry::SshPublicKeys,
         ],
         connect: vec![entry("$SSH_AUTH_SOCK"), entry("*")],
-        bind: &["/"],
+        unix_bind: &["/"],
+        tcp_listen: true,
         services: vec![ServiceEntry::Every],
         presets: Vec::new(),
     };
@@ -91,7 +95,8 @@ pub fn profile_entries(profile: Profile) -> ProfileEntries {
         Profile::Strict => ProfileEntries {
             read: Vec::new(),
             connect: Vec::new(),
-            bind: &[],
+            unix_bind: &[],
+            tcp_listen: false,
             services: Vec::new(),
             presets: Vec::new(),
         },
@@ -294,6 +299,8 @@ pub struct PresetGrants {
     pub connect: Vec<Connect>,
     /// Mach services, by exact name.
     pub services: Vec<&'static str>,
+    /// Listening on TCP, on every address.
+    pub tcp_listen: bool,
 }
 
 /// The Mach services that broker keychain access (the library denies them).
@@ -374,8 +381,10 @@ pub fn preset_grants(preset: &Preset) -> PresetGrants {
         ),
         Preset::PiClaudeCode(options) => PresetGrants {
             write: vec![CLAUDE_CODE_CACHE],
-            // The extension's relay listens on 127.0.0.1 at a random port; it reaches Anthropic from pi's process.
+            // The extension's relay listens on 127.0.0.1 at a random port in pi's process (listening can't be limited to
+            // loopback: every address), and `claude` connects to it; it reaches Anthropic from pi's process.
             connect: vec![Connect::Network(crate::config::NetworkTarget::LocalAnyPort)],
+            tcp_listen: true,
             // Keychain sign-in goes through the keychain's services, not file writes: the files stay unwritable.
             read: match options.login() {
                 ClaudeLogin::Token => Vec::new(),
@@ -434,6 +443,12 @@ mod tests {
                     assert!(!grants.write.is_empty(), "{}", preset.name());
                 }
             }
+            match preset {
+                Preset::PiClaudeCode(_) => assert!(grants.tcp_listen),
+                Preset::Git | Preset::Apps | Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => {
+                    assert!(!grants.tcp_listen, "{}", preset.name());
+                }
+            }
             let paths = grants.write.iter().chain(&grants.write_file).chain(&grants.read);
             assert!(paths.into_iter().all(|p| p.starts_with("~/")));
         }
@@ -454,6 +469,7 @@ mod tests {
             assert_eq!(grants.write, [CLAUDE_CODE_CACHE]);
             assert!(grants.write_file.is_empty());
             assert_eq!(grants.connect, [Connect::try_from("localhost:*".to_string()).unwrap()]);
+            assert!(grants.tcp_listen, "its relay listens");
         }
     }
 

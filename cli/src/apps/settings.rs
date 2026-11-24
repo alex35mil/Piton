@@ -165,7 +165,10 @@ pub static CATALOG: &[Entry] = &[
     project("sandbox.write_file", TextList, empty),
     project("sandbox.read", TextList, empty),
     project("sandbox.connect", TextList, empty),
-    project("sandbox.bind", TextList, empty),
+    project("sandbox.unix_bind", TextList, empty),
+    // `"*"` or unset: the apps' text field writes `*`, and clearing it resets the key. Any other text is refused by the
+    // file's own check, which `validate` runs too.
+    project("sandbox.tcp_listen", Text, null),
     project("sandbox.services", TextList, empty),
     project("sandbox.deny", TextList, empty),
     // Not `sandbox.silence`: its entries are tables (`{ target, process }`), edited in the file; a notice names each.
@@ -526,6 +529,8 @@ mod tests {
             let sample = match entry.value_type {
                 ValueType::ChoiceList { options } => json!([options[0]]),
                 Bool => json!(default != json!(true)),
+                // `sandbox.tcp_listen` takes only `*`.
+                Text if entry.key == "sandbox.tcp_listen" => json!("*"),
                 Text => json!("/x"),
                 // `workers.skip` takes relative paths, `sandbox.services` Mach service names, `[sandbox]` absolute paths.
                 TextList if entry.key == "workers.skip" => json!(["x"]),
@@ -562,6 +567,29 @@ mod tests {
                 entry.key
             );
         }
+    }
+
+    /// `sandbox.tcp_listen`: `*` writes it, clearing it (`null`) removes it, and any other text is refused with the
+    /// file's own reason, leaving the file as it was.
+    #[test]
+    fn tcp_listen_is_set_cleared_or_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let set = |value: Value| -> Result<SettingInfo, SetError> {
+            let change = validate(Scope::Project, "sandbox.tcp_listen", &value, None)?;
+            write(&paths, &change)?;
+            let snapshot = Snapshot::new(&paths, &no_tools());
+            assert_eq!(snapshot.error, None);
+            Ok(info(&snapshot.info(), Scope::Project, "sandbox.tcp_listen").clone())
+        };
+        let on = set(json!("*")).unwrap();
+        assert_eq!(on.value, json!("*"));
+        assert_eq!(on.placement, Some(Sharing::Shared));
+        let err = set(json!("127.0.0.1:3000")).unwrap_err().to_string();
+        assert!(err.contains("can't limit listening"), "{err}");
+        let off = set(Value::Null).unwrap();
+        assert_eq!(off.value, Value::Null);
+        assert_eq!(off.placement, None, "no file sets it");
     }
 
     #[test]

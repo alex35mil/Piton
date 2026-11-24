@@ -1,8 +1,8 @@
 //! `[sandbox]`: what a sandboxed pi may do beyond Piton's base policy (`launch/sandbox/`). A profile adds a fixed set of
 //! entries; the user's lists add on top, and lists only add across levels.
 //!
-//! A key that loosens a protection (`profile`, `read`, `connect`, `bind`, `services`, the `git`, `apps`, and
-//! `pi-claude-code` presets, `commands`) is accepted in the global `config.toml` or a `config.local.toml`, never a
+//! A key that loosens a protection (`profile`, `read`, `connect`, `unix_bind`, `tcp_listen`, `services`, the `git`,
+//! `apps`, and `pi-claude-code` presets, `commands`) is accepted in the global `config.toml` or a `config.local.toml`, never a
 //! project's committed `config.toml`: a repository can't open the sandbox for whoever clones it.
 
 use std::path::{Path, PathBuf};
@@ -34,7 +34,11 @@ pub struct SandboxTable {
     pub connect: Vec<Connect>,
     /// Paths where processes may create Unix sockets (`bind`): each path and everything below it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub bind: Vec<String>,
+    pub unix_bind: Vec<String>,
+    /// `"*"`: processes may listen on TCP, on every address. `*` is the only value ([`TcpListen`]): the sandbox can't
+    /// limit listening to an address or a port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_listen: Option<TcpListen>,
     /// Mach services the sandbox may look up beyond the built-in list: a name, a `name.*` prefix, or `*` for every
     /// service. The keychain's stay closed unless `read` opens the keychain.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -78,7 +82,12 @@ pub enum SilenceTarget {
     /// A network destination (`api.example.com:443`, `*.example.com:443`), matched against a refused connection to it:
     /// the host exactly or by subdomain, and the port.
     Host(String),
+    /// `tcp-listen`: a refused TCP listen, on any port (the kernel names an ephemeral one).
+    TcpListen,
 }
+
+/// How a `silence` entry names TCP listening.
+pub const TCP_LISTEN_TARGET: &str = "tcp-listen";
 
 impl TryFrom<String> for SilenceTarget {
     type Error = String;
@@ -86,6 +95,9 @@ impl TryFrom<String> for SilenceTarget {
     fn try_from(target: String) -> Result<Self, String> {
         if is_grant_path(&target) {
             return Ok(SilenceTarget::Path(target));
+        }
+        if target == TCP_LISTEN_TARGET {
+            return Ok(SilenceTarget::TcpListen);
         }
         // `host:port`: a destination. Text ending in `:<digits>` is one, or invalid: never a Mach service.
         if let Some((_, port)) = target.rsplit_once(':')
@@ -106,8 +118,8 @@ impl TryFrom<String> for SilenceTarget {
             true => Ok(SilenceTarget::Service(target)),
             false => Err(format!(
                 "silence target {target:?}: a path (absolute, or starting with `~/` or `$`; `*` and `**` segments \
-                 match folders), a Mach service name (`com.apple.SecurityServer`), or a host and port \
-                 (`api.example.com:443`, `*.example.com:443`)"
+                 match folders), a Mach service name (`com.apple.SecurityServer`), a host and port \
+                 (`api.example.com:443`, `*.example.com:443`), or `tcp-listen`"
             )),
         }
     }
@@ -117,6 +129,7 @@ impl From<SilenceTarget> for String {
     fn from(target: SilenceTarget) -> String {
         match target {
             SilenceTarget::Path(path) | SilenceTarget::Service(path) | SilenceTarget::Host(path) => path,
+            SilenceTarget::TcpListen => TCP_LISTEN_TARGET.into(),
         }
     }
 }
@@ -139,6 +152,35 @@ impl Silence {
 /// A TOML basic string.
 fn toml_string(text: &str) -> String {
     toml::Value::String(text.to_string()).to_string()
+}
+
+/// `tcp_listen = "*"`: listening on TCP, on every address. Seatbelt can't tell a loopback listen from another or filter
+/// by port (docs/pi-findings.md), so an address names nothing it could enforce and is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TcpListen;
+
+/// How `tcp_listen` is written.
+pub const TCP_LISTEN_ANY: &str = "*";
+
+impl TryFrom<String> for TcpListen {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            TCP_LISTEN_ANY => Ok(TcpListen),
+            other => Err(format!(
+                "tcp_listen {other:?}: only \"*\" (every address): the sandbox can't limit listening to an address or a \
+                 port"
+            )),
+        }
+    }
+}
+
+impl From<TcpListen> for String {
+    fn from(_: TcpListen) -> String {
+        TCP_LISTEN_ANY.into()
+    }
 }
 
 /// A `services` entry: every Mach service, or a name.
@@ -384,7 +426,9 @@ pub struct GrantLists {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connect: Vec<Connect>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub bind: Vec<String>,
+    pub unix_bind: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_listen: Option<TcpListen>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<ServiceEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -733,7 +777,8 @@ impl TableValue for SandboxTable {
                 ("sandbox.profile", self.profile.is_some()),
                 ("sandbox.read", !self.read.is_empty()),
                 ("sandbox.connect", !self.connect.is_empty()),
-                ("sandbox.bind", !self.bind.is_empty()),
+                ("sandbox.unix_bind", !self.unix_bind.is_empty()),
+                ("sandbox.tcp_listen", self.tcp_listen.is_some()),
                 ("sandbox.services", !self.services.is_empty()),
                 ("sandbox.commands", !self.commands.is_empty()),
             ],
@@ -751,7 +796,7 @@ impl TableValue for SandboxTable {
             ("write", &self.write),
             ("write_file", &self.write_file),
             ("read", &self.read),
-            ("bind", &self.bind),
+            ("unix_bind", &self.unix_bind),
             ("deny", &self.deny),
         ] {
             if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
@@ -778,7 +823,7 @@ impl GrantLists {
             ("write", &self.write),
             ("write_file", &self.write_file),
             ("read", &self.read),
-            ("bind", &self.bind),
+            ("unix_bind", &self.unix_bind),
         ] {
             if let Some(grant) = paths.iter().find(|grant| !is_grant_path(grant)) {
                 return Err(format!(
@@ -800,7 +845,8 @@ impl Merge for SandboxTable {
         union(&mut self.write_file, n.write_file);
         union(&mut self.read, n.read);
         union(&mut self.connect, n.connect);
-        union(&mut self.bind, n.bind);
+        union(&mut self.unix_bind, n.unix_bind);
+        self.tcp_listen = self.tcp_listen.or(n.tcp_listen);
         union(&mut self.services, n.services);
         for preset in n.presets {
             match self.presets.iter_mut().find(|p| p.name() == preset.name()) {
@@ -831,7 +877,9 @@ pub struct SandboxSettings {
     pub write_file: Vec<Listed<String>>,
     pub read: Vec<Listed<String>>,
     pub connect: Vec<Listed<Connect>>,
-    pub bind: Vec<Listed<String>>,
+    pub unix_bind: Vec<Listed<String>>,
+    /// The first file that set `tcp_listen`.
+    pub tcp_listen: Option<Listed<TcpListen>>,
     pub services: Vec<Listed<ServiceEntry>>,
     pub presets: Vec<Listed<Preset>>,
     pub deny: Vec<Listed<String>>,
@@ -849,7 +897,8 @@ impl SandboxSettings {
             write_file,
             read,
             connect,
-            bind,
+            unix_bind,
+            tcp_listen,
             services,
             presets,
             deny,
@@ -866,7 +915,13 @@ impl SandboxSettings {
         add_listed(&mut self.write_file, write_file, file);
         add_listed(&mut self.read, read, file);
         add_listed(&mut self.connect, connect, file);
-        add_listed(&mut self.bind, bind, file);
+        add_listed(&mut self.unix_bind, unix_bind, file);
+        if let (None, Some(value)) = (&self.tcp_listen, tcp_listen) {
+            self.tcp_listen = Some(Listed {
+                value,
+                file: file.to_path_buf(),
+            });
+        }
         add_listed(&mut self.services, services, file);
         // A preset is listed once, with the file that decided it: the nearest that sets one of its options, else the
         // first that lists it.
@@ -1229,22 +1284,25 @@ mod tests {
                 .check()
                 .is_err()
         );
-        // `bind` in a grant: paths, checked like `write`.
-        let bind = table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { bind = [\"$TMPDIR\"] }");
+        // `unix_bind` in a grant: paths, checked like `write`; `tcp_listen` too.
+        let bind = table(
+            "[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { unix_bind = [\"$TMPDIR\"], tcp_listen = \"*\" }",
+        );
         assert_eq!(
             bind.commands[0].runtime,
             CommandRuntime::Sandbox(Grant::Lists(GrantLists {
-                bind: vec!["$TMPDIR".into()],
+                unix_bind: vec!["$TMPDIR".into()],
+                tcp_listen: Some(TcpListen),
                 ..GrantLists::default()
             }))
         );
         assert!(bind.check().is_ok());
         assert!(
-            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { bind = [\"rel\"] }")
+            table("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"sandbox\"\ngrant = { unix_bind = [\"rel\"] }")
                 .check()
                 .is_err()
         );
-        assert!(table("bind = [\"rel\"]").check().is_err());
+        assert!(table("unix_bind = [\"rel\"]").check().is_err());
     }
 
     /// Every key that loosens a protection is the user's own: the global file or a `config.local.toml`. Writes,
@@ -1267,12 +1325,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            table("profile = \"yolo\"\nread = [\"~/.ssh/config\"]\nconnect = [\"*\"]\nbind = [\"/\"]").ruled_keys(),
+            table(
+                "profile = \"yolo\"\nread = [\"~/.ssh/config\"]\nconnect = [\"*\"]\nunix_bind = [\"/\"]\ntcp_listen = \"*\""
+            )
+            .ruled_keys(),
             [
                 ("sandbox.profile", Rule::USERS_OWN),
                 ("sandbox.read", Rule::USERS_OWN),
                 ("sandbox.connect", Rule::USERS_OWN),
-                ("sandbox.bind", Rule::USERS_OWN)
+                ("sandbox.unix_bind", Rule::USERS_OWN),
+                ("sandbox.tcp_listen", Rule::USERS_OWN)
             ]
         );
         for text in [
@@ -1328,6 +1390,7 @@ mod tests {
             ("*.example.com:443", SilenceTarget::Host("*.example.com:443".into())),
             ("10.0.0.5:5432", SilenceTarget::Host("10.0.0.5:5432".into())),
             ("api.example.com", SilenceTarget::Service("api.example.com".into())),
+            ("tcp-listen", SilenceTarget::TcpListen),
         ] {
             assert_eq!(
                 parse(&format!("silence = [{{ target = \"{text}\" }}]")).unwrap()[0].target,
@@ -1353,6 +1416,46 @@ mod tests {
         assert_eq!(parse(&format!("silence = [{}]", entry.inline())).unwrap(), [entry]);
     }
 
+    /// `tcp_listen` is `"*"` or unset; an address or a boolean is refused, saying why. Any level keeps it, and the first
+    /// file that set it is the one named.
+    #[test]
+    fn tcp_listen_is_every_address_or_unset() {
+        assert_eq!(table("tcp_listen = \"*\"").tcp_listen, Some(TcpListen));
+        assert_eq!(table("").tcp_listen, None);
+        for bad in ["\"127.0.0.1:3000\"", "\"localhost:*\"", "\"\""] {
+            let err = toml::from_str::<SandboxTable>(&format!("tcp_listen = {bad}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("can't limit listening"), "{bad}: {err}");
+        }
+        for bad in ["true", "false", "[\"*\"]"] {
+            assert!(
+                toml::from_str::<SandboxTable>(&format!("tcp_listen = {bad}")).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            toml::Value::try_from(table("tcp_listen = \"*\"")).unwrap()["tcp_listen"].as_str(),
+            Some("*"),
+            "written back as `\"*\"`"
+        );
+
+        let mut merged = table("tcp_listen = \"*\"");
+        merged.merge(table(""));
+        assert_eq!(merged.tcp_listen, Some(TcpListen), "a level without it keeps it");
+        let mut merged = table("");
+        merged.merge(table("tcp_listen = \"*\""));
+        assert_eq!(merged.tcp_listen, Some(TcpListen));
+
+        let (global, local) = (Path::new("/g/config.toml"), Path::new("/r/.piton/config.local.toml"));
+        let mut s = SandboxSettings::default();
+        s.add(table(""), global);
+        assert!(s.tcp_listen.is_none());
+        s.add(table("tcp_listen = \"*\""), global);
+        s.add(table("tcp_listen = \"*\""), local);
+        assert_eq!(s.tcp_listen.as_ref().map(|l| l.file.as_path()), Some(global));
+    }
+
     #[test]
     fn paths_are_checked() {
         assert!(table("write = [\"relative/path\"]").check().is_err());
@@ -1369,6 +1472,7 @@ mod tests {
             "expose = [\"~/.ssh/config\"]",
             "base = \"mise-dev\"",
             "unix_socket = [\"/s\"]",
+            "bind = [\"/\"]",
             "[network]\n",
         ] {
             assert!(toml::from_str::<SandboxTable>(text).is_err(), "{text}");

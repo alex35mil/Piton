@@ -4,7 +4,8 @@
 //!
 //! The base, applied first: everything is readable, nothing is writable, and no Unix socket can be connected to or
 //! created. The network is [`Network::Open`] (as nono leaves it) or [`Network::Filtered`]: only the listed ports and
-//! the gate's, Piton's proxy, which decides named hosts (`network/`).
+//! the gate's, Piton's proxy, which decides named hosts (`network/`). TCP listening is [`Listen::Closed`] or open on
+//! every address: Seatbelt can't limit it to this Mac (docs/pi-findings.md).
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +27,7 @@ pub enum Access {
     Write,
     /// Connect to a Unix socket.
     Connect,
-    /// Create a Unix socket (`bind`): listen on it.
+    /// Create a Unix socket (`bind`): listen on it. TCP listening is [`Listen`].
     Bind,
 }
 
@@ -102,6 +103,8 @@ pub struct Policy {
     pub apps: Apps,
     /// TCP and UDP: open, or only what `connect` lists (ports in Seatbelt, named hosts through the gate).
     pub network: Network,
+    /// TCP listening, on every address or none.
+    pub listen: Listen,
     /// The launch's tag: every deny rule carries it as its message, so the kernel's record of a refusal names the
     /// session it came from (`(with message "piton-<tag>")`). Empty: untagged (`piton sandbox show`, tests).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -136,6 +139,19 @@ pub struct ServiceGrant {
 pub enum Apps {
     Closed,
     /// Open, from this entry.
+    Open {
+        source: Source,
+    },
+}
+
+/// TCP listening (`listen()`, Seatbelt's `network-inbound`). Seatbelt can't tell a loopback listen from an
+/// all-addresses one, or filter by port, so it's every address or none. UDP isn't covered: closing it would refuse DNS
+/// replies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Listen {
+    Closed,
+    /// Open on every address, from this entry.
     Open {
         source: Source,
     },
@@ -361,6 +377,31 @@ impl Policy {
         out
     }
 
+    /// The decision for listening on TCP.
+    pub fn decide_listen(&self) -> Decision {
+        match &self.listen {
+            Listen::Open { source } => Decision {
+                allowed: true,
+                source: source.clone(),
+            },
+            Listen::Closed => Decision {
+                allowed: false,
+                source: Source::BuiltIn {
+                    what: CLOSED_LISTEN.into(),
+                },
+            },
+        }
+    }
+
+    /// The listening rule, after every other network rule: closed refuses every TCP `listen()` (nono allows it); open
+    /// emits nothing. `tcp`, not `ip`: an `ip` filter also refuses UDP replies, DNS included (docs/pi-findings.md).
+    fn listen_rules(&self) -> Vec<String> {
+        match &self.listen {
+            Listen::Closed => vec![LISTEN_DENY.to_string()],
+            Listen::Open { .. } => Vec::new(),
+        }
+    }
+
     /// The decision for a lookup of the Mach service `service`, as Seatbelt makes it: the keychain's decide last.
     pub fn decide_service(&self, service: &str) -> Decision {
         if KEYCHAIN_SERVICES.contains(&service) {
@@ -546,8 +587,17 @@ impl Policy {
             .chain(base)
             .chain(network)
             .chain(self.network_rules())
+            .chain(self.listen_rules())
             .collect())
     }
+}
+
+/// The rule that closes TCP listening.
+const LISTEN_DENY: &str = r#"(deny network-inbound (local tcp "*:*"))"#;
+
+/// Whether the kernel's refusal of `operation` on `target` is a TCP listen: `network-inbound local:*:<port>`.
+pub fn is_listen(operation: &str, target: &str) -> bool {
+    operation == "network-inbound" && target.starts_with("local:")
 }
 
 /// The base's Unix socket rules: no socket can be connected to or created. Every socket rule of the policy follows.
@@ -565,8 +615,12 @@ const CLOSED_NETWORK: &str = "the network is filtered: a `connect` entry opens a
                               config.local.toml)";
 
 /// Why creating a socket is denied when no rule decides.
-const CLOSED_BIND: &str = "creating Unix sockets is closed: a `bind` entry opens a path (global config.toml or a \
+const CLOSED_BIND: &str = "creating Unix sockets is closed: a `unix_bind` entry opens a path (global config.toml or a \
                            config.local.toml)";
+
+/// Why listening on TCP is denied: what `piton sandbox why --listen` prints.
+const CLOSED_LISTEN: &str = "TCP listening is closed: `tcp_listen = \"*\"` opens it, on every address (global config.toml \
+                             or a config.local.toml)";
 
 /// Why a lookup of a service outside the list is denied: what `piton sandbox why --service` prints.
 const CLOSED_SERVICES: &str = "Mach services outside the built-in list are closed: a `services` entry opens one (global \
@@ -641,6 +695,7 @@ mod tests {
             network: crate::launch::sandbox::Network::Open {
                 source: crate::launch::sandbox::Source::Workspace,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a);
@@ -689,6 +744,7 @@ mod tests {
             network: crate::launch::sandbox::Network::Open {
                 source: crate::launch::sandbox::Source::Workspace,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a).allowed;
@@ -734,6 +790,7 @@ mod tests {
             network: crate::launch::sandbox::Network::Open {
                 source: crate::launch::sandbox::Source::Workspace,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         };
         assert!(policy.decide(Path::new("/a/lock-1/x"), Access::Write).allowed);
@@ -745,7 +802,7 @@ mod tests {
         assert!(rules.contains(&r#"(allow file-write* (prefix "/a/lock-"))"#.to_string()));
         let first_network = rules.iter().position(|r| r.contains("network")).unwrap();
         assert!(rules[..first_network].iter().all(|r| !r.contains("network")));
-        // The base's socket denies first, then the policy's socket rules in order.
+        // The base's socket denies first, then the policy's socket rules in order, then closed listening.
         assert_eq!(
             &rules[first_network..],
             [
@@ -754,6 +811,7 @@ mod tests {
                 r#"(deny network-outbound (subpath "/s/\"q\""))"#,
                 r#"(allow network-outbound (path "/s/agent.sock"))"#,
                 r#"(allow network-bind (subpath "/w"))"#,
+                r#"(deny network-inbound (local tcp "*:*"))"#,
             ]
         );
         assert!(policy.decide(Path::new("/w/x.sock"), Access::Bind).allowed);
@@ -828,6 +886,7 @@ mod tests {
             network: crate::launch::sandbox::Network::Open {
                 source: crate::launch::sandbox::Source::Workspace,
             },
+            listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         }
     }
@@ -925,6 +984,51 @@ mod tests {
                 false,
             )
         }
+    }
+
+    /// Closed listening denies every TCP listen after every other network rule (tagged with the launch's tag); open emits
+    /// nothing, leaving nono's allow. Only a listen's record counts as one.
+    #[test]
+    fn listening_in_seatbelt() {
+        let closed = network_policy(Network::Filtered {
+            grants: vec![grant("localhost:*")],
+            gate: Gate::None,
+        });
+        assert_eq!(closed.listen, Listen::Closed);
+        let rules = closed.seatbelt().unwrap();
+        assert_eq!(rules.last().map(String::as_str), Some(LISTEN_DENY));
+        assert!(!closed.decide_listen().allowed);
+        assert_eq!(
+            closed.decide_listen().source,
+            Source::BuiltIn {
+                what: CLOSED_LISTEN.into()
+            }
+        );
+        super::super::apply::capabilities(&closed).expect("nono accepts it");
+        let tagged = Policy {
+            tag: "t".into(),
+            ..closed.clone()
+        }
+        .seatbelt()
+        .unwrap();
+        assert_eq!(
+            tagged.last().map(String::as_str),
+            Some(r#"(deny network-inbound (local tcp "*:*") (with message "piton-t"))"#)
+        );
+
+        let open = Policy {
+            listen: Listen::Open {
+                source: Source::Workspace,
+            },
+            ..closed
+        };
+        assert!(!open.seatbelt().unwrap().iter().any(|r| r.contains("network-inbound")));
+        assert!(open.decide_listen().allowed);
+        assert_eq!(open.decide_listen().source, Source::Workspace);
+
+        assert!(is_listen("network-inbound", "local:*:50958"));
+        assert!(!is_listen("network-inbound", "remote:*:53"));
+        assert!(!is_listen("network-bind", "local:*:1"));
     }
 
     fn to(text: &str) -> Destination {

@@ -84,7 +84,25 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                         (true, _) | (false, None) => Access::Connect,
                     }
                 }
-                Some(WhyAccess::Bind) => Access::Bind,
+                Some(WhyAccess::UnixBind) => Access::Bind,
+                Some(WhyAccess::Listen) => {
+                    // Seatbelt decides every address and port alike: the address is only shown.
+                    let address = path.to_string_lossy().into_owned();
+                    let decision = policy.decide_listen();
+                    let outcome = if decision.allowed { "allowed" } else { "denied" };
+                    println!("{outcome}: listen on TCP at {address}");
+                    println!("  because: {}", explain(&decision.source));
+                    if decision.allowed {
+                        println!(
+                            "  note: the sandbox can't limit listening to this Mac: a listener on any address is \
+                             reachable from the LAN and tailnet"
+                        );
+                    }
+                    return match decision.allowed {
+                        true => ExitCode::SUCCESS,
+                        false => ExitCode::from(4),
+                    };
+                }
                 Some(WhyAccess::Service) => {
                     let service = path.to_string_lossy().into_owned();
                     let decision = policy.decide_service(&service);

@@ -25,7 +25,7 @@ pub use self::{
         tables::{
             AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Connect, Grant,
             GrantLists, Listed, NetworkTarget, PermissionSettings, Preset, Profile, SandboxTable, ServiceEntry,
-            ServiceName, Silence, SilenceTarget,
+            ServiceName, Silence, SilenceTarget, TCP_LISTEN_ANY, TcpListen,
         },
     },
     read::{
