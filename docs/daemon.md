@@ -177,6 +177,7 @@ token = { secret = "OP_SERVICE_ACCOUNT_TOKEN" }  # a service account (below)
 [secrets]
 OP_SERVICE_ACCOUNT_TOKEN = { provider = "keychain", value = "OP_SERVICE_ACCOUNT_TOKEN", env = false }
 GITHUB_PERSONAL_ACCESS_TOKEN = { provider = "op", value = "op://Agent/github-token/credential", env = false }
+GH_TOKEN = { provider = "op", value = "op://Agent/github-token/credential", env = false }   # the same token, for gh
 CLAUDE_CODE_OAUTH_TOKEN = { provider = "op", value = "op://Agent/claude-token/credential", env = false }
 
 [proxy]
@@ -186,6 +187,16 @@ egress = "permissive"   # fnox's default, "strict", refuses every host without a
 [[proxy.rules]]
 secret = "GITHUB_PERSONAL_ACCESS_TOKEN"
 domain = "api.githubcopilot.com"   # the GitHub MCP server (`Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}`)
+header = "authorization"
+
+[[proxy.rules]]
+secret = "GITHUB_PERSONAL_ACCESS_TOKEN"
+domain = "api.github.com"          # the workflows' GitHub API calls, with the MCP server's token
+header = "authorization"
+
+[[proxy.rules]]
+secret = "GH_TOKEN"
+domain = "api.github.com"          # gh
 header = "authorization"
 
 [[proxy.rules]]
@@ -203,6 +214,10 @@ placeholder = "sk-ant-oat01-placeholder"   # claude checks the token's shape
 - **Claude subscription.** `claude setup-token` makes a long-lived token for scripts; with it in
   `CLAUDE_CODE_OAUTH_TOKEN` behind the proxy, the claude binary (and pi's claude-code models) work without reading the
   keychain. In a sandboxed session, the `pi-claude-code` preset (Sandbox, below) gives pi's `claude` what it writes.
+- **`gh`.** `gh auth login` keeps its token in the keychain, which stays closed to the sandbox, so in a sandboxed
+  session `gh` goes out without a token. `gh` reads `GH_TOKEN` before its own login: declared as a secret with a rule
+  for `api.github.com` (above), it gives `gh` a placeholder, and fnox sends the real token. With `env = false` it
+  stays out of your shell, so `gh` in a terminal keeps its own login. This needs `gh` 2.104 or later (Limits, below).
 - **Move secrets out of `mise.local.toml`** and other files pi's environment comes from: a secret still set there
   reaches pi as a real value.
 - **Restart sessions after changing a secret.** fnox reads secrets when it starts a session; a running session keeps
@@ -241,9 +256,11 @@ Limits:
 
 - Credentials pi manages itself (`auth.json`: `/login` providers, MCP OAuth) aren't covered.
 - A program that ignores the proxy variables or fnox's certificate sends the placeholder, and its request fails. Go
-  programs on macOS (`gh`, `terraform`) check certificates only against the system trust store and ignore
-  `SSL_CERT_FILE`, so they refuse fnox's: `gh` behind fnox fails with "certificate is not trusted". Give such a tool
-  its token another way, or run it on the host.
+  programs on macOS read `SSL_CERT_FILE` only from Go 1.27: those built with Go 1.26 or older check certificates
+  only against the system trust store, so they refuse fnox's ("certificate is not trusted"). `gh` 2.104 and later
+  are built with Go 1.27; `go version -m "$(command -v gh)"` shows the Go version of a binary. fnox's certificate
+  file includes the system's root certificates, so hosts fnox doesn't intercept still verify. Give an older tool its
+  token another way, or run it on the host.
 - Git over HTTPS doesn't work behind fnox: Git signs in with `Authorization: Basic base64(user:token)`, and fnox 1.48
   can't find a placeholder inside base64 (a proposal to add it, jdx/fnox#1151, was closed without merging). GitHub
   refuses the token as `Bearer`. With fnox on, use SSH remotes.
