@@ -35,6 +35,10 @@ pub enum ValueType {
     ChoiceList {
         options: &'static [&'static str],
     },
+    /// A table of keys (paths, hosts, names) to one of the listed values: one row per entry.
+    Map {
+        values: &'static [&'static str],
+    },
 }
 
 #[derive(Debug)]
@@ -91,6 +95,15 @@ fn null(_: &DaemonConfig) -> Value {
 
 use Applies::{Live, Restart};
 use ValueType::{Bool, Integer, Text, TextList};
+
+/// The values of `[sandbox.filesystem]`.
+const FILE_ACCESS: &[&str] = &["read", "write", "deny"];
+/// The values of every other `[sandbox]` map.
+const EFFECTS: &[&str] = &["allow", "deny"];
+
+fn empty_map(_: &DaemonConfig) -> Value {
+    json!({})
+}
 
 pub static CATALOG: &[Entry] = &[
     host("keep_awake", Bool, Live, |c| json!(c.keep_awake)),
@@ -161,16 +174,27 @@ pub static CATALOG: &[Entry] = &[
         },
         |_| json!("standard"),
     ),
-    project("sandbox.write", TextList, empty),
-    project("sandbox.write_file", TextList, empty),
-    project("sandbox.read", TextList, empty),
-    project("sandbox.connect", TextList, empty),
-    project("sandbox.unix_bind", TextList, empty),
-    // `"*"` or unset: the apps' text field writes `*`, and clearing it resets the key. Any other text is refused by the
-    // file's own check, which `validate` runs too.
-    project("sandbox.tcp_listen", Text, null),
-    project("sandbox.services", TextList, empty),
-    project("sandbox.deny", TextList, empty),
+    // Unset (`null`): the profile's value.
+    project("sandbox.allow_tcp_listening", Bool, null),
+    project("sandbox.allow_git_control_files", Bool, null),
+    project("sandbox.allow_launching_apps", Bool, null),
+    project("sandbox.filesystem", ValueType::Map { values: FILE_ACCESS }, empty_map),
+    project(
+        "sandbox.network.connections",
+        ValueType::Map { values: EFFECTS },
+        empty_map,
+    ),
+    project(
+        "sandbox.network.unix_socket_connections",
+        ValueType::Map { values: EFFECTS },
+        empty_map,
+    ),
+    project(
+        "sandbox.network.unix_socket_bindings",
+        ValueType::Map { values: EFFECTS },
+        empty_map,
+    ),
+    project("sandbox.macos.services", ValueType::Map { values: EFFECTS }, empty_map),
     // Not `sandbox.silence`: its entries are tables (`{ target, process }`), edited in the file; a notice names each.
     project("workers.skip", TextList, empty),
 ];
@@ -298,8 +322,9 @@ impl Snapshot {
 
     /// Refuses a change to a value the apps show read-only because the file gives it options.
     pub fn check_editable(&self, change: &Change) -> Result<(), SetError> {
-        let current = self.values.get(&(change.scope, change.change.key.as_str()));
-        match (entry(change.scope, &change.change.key), current) {
+        let key = change.change.key.to_string();
+        let current = self.values.get(&(change.scope, key.as_str()));
+        match (entry(change.scope, &key), current) {
             (Some(entry), Some(value)) if has_options(value) => Err(SetError::NotEditable { key: entry.key }),
             (Some(_) | None, _) => Ok(()),
         }
@@ -417,11 +442,16 @@ pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> 
     Ok(Change {
         scope,
         change: KeyChange {
-            key: entry.key.to_string(),
+            key: catalog_key(entry.key),
             value,
         },
         placement,
     })
+}
+
+/// A catalog key as a key path: every part is bare.
+fn catalog_key(key: &str) -> crate::config::KeyPath {
+    crate::config::KeyPath::new(key.split('.').map(str::to_string).collect())
 }
 
 /// A list with an entry that isn't a name, such as `presets = [{ name = "pi-claude-code", login = "keychain" }]`: the
@@ -452,6 +482,13 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
                     .all(|item| item.as_str().is_some_and(|c| options.contains(&c)))
             }),
             "a list of the listed choices",
+        ),
+        ValueType::Map { values } => (
+            value.as_object().is_some_and(|map| {
+                map.iter()
+                    .all(|(key, v)| !key.is_empty() && v.as_str().is_some_and(|v| values.contains(&v)))
+            }),
+            "a table of keys to the listed values",
         ),
     };
     match ok {
@@ -529,13 +566,18 @@ mod tests {
             let sample = match entry.value_type {
                 ValueType::ChoiceList { options } => json!([options[0]]),
                 Bool => json!(default != json!(true)),
-                // `sandbox.tcp_listen` takes only `*`.
-                Text if entry.key == "sandbox.tcp_listen" => json!("*"),
                 Text => json!("/x"),
-                // `workers.skip` takes relative paths, `sandbox.services` Mach service names, `[sandbox]` absolute paths.
+                // `workers.skip` takes relative paths.
                 TextList if entry.key == "workers.skip" => json!(["x"]),
-                TextList if entry.key == "sandbox.services" => json!(["com.example.agent"]),
                 TextList => json!(["~/x"]),
+                // Keys by table: a host, a Mach service, or a path.
+                ValueType::Map { values } if entry.key == "sandbox.network.connections" => {
+                    json!({ "github.com:22": values[0] })
+                }
+                ValueType::Map { values } if entry.key == "sandbox.macos.services" => {
+                    json!({ "com.example.agent": values[0] })
+                }
+                ValueType::Map { values } => json!({ "~/x": values[0] }),
                 Integer => json!(default.as_u64().unwrap_or(0) + 1),
                 ValueType::Choice { options } => {
                     json!(
@@ -552,7 +594,7 @@ mod tests {
             let change = Change {
                 scope: entry.scope,
                 change: KeyChange {
-                    key: entry.key.into(),
+                    key: catalog_key(entry.key),
                     value: Some(sample.clone()),
                 },
                 placement: Placement::Current,
@@ -569,26 +611,42 @@ mod tests {
         }
     }
 
-    /// `sandbox.tcp_listen`: `*` writes it, clearing it (`null`) removes it, and any other text is refused with the
-    /// file's own reason, leaving the file as it was.
+    /// A map is written whole as its table, its keys quoted; a value outside the list, or a key the file refuses, is
+    /// refused, leaving the file as it was; clearing it (`null`) removes the table.
     #[test]
-    fn tcp_listen_is_set_cleared_or_refused() {
+    fn maps_are_set_refused_or_cleared() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
         let set = |value: Value| -> Result<SettingInfo, SetError> {
-            let change = validate(Scope::Project, "sandbox.tcp_listen", &value, None)?;
+            let change = validate(Scope::Project, "sandbox.filesystem", &value, None)?;
             write(&paths, &change)?;
             let snapshot = Snapshot::new(&paths, &no_tools());
             assert_eq!(snapshot.error, None);
-            Ok(info(&snapshot.info(), Scope::Project, "sandbox.tcp_listen").clone())
+            Ok(info(&snapshot.info(), Scope::Project, "sandbox.filesystem").clone())
         };
-        let on = set(json!("*")).unwrap();
-        assert_eq!(on.value, json!("*"));
+        let map = json!({ "~/.cache/x": "write", "~/secrets": "deny" });
+        let on = set(map.clone()).unwrap();
+        assert_eq!(on.value, map);
         assert_eq!(on.placement, Some(Sharing::Shared));
-        let err = set(json!("127.0.0.1:3000")).unwrap_err().to_string();
-        assert!(err.contains("can't limit listening"), "{err}");
+        let text = std::fs::read_to_string(paths.global.join("config.toml")).unwrap();
+        assert!(text.contains("\"~/.cache/x\" = \"write\""), "{text}");
+        assert!(matches!(
+            set(json!({ "~/x": "allow" })),
+            Err(SetError::WrongType { .. })
+        ));
+        assert!(set(json!({ "relative": "write" })).is_err(), "the file's own check");
+        assert_eq!(
+            info(
+                &Snapshot::new(&paths, &no_tools()).info(),
+                Scope::Project,
+                "sandbox.filesystem"
+            )
+            .value,
+            map,
+            "left as it was"
+        );
         let off = set(Value::Null).unwrap();
-        assert_eq!(off.value, Value::Null);
+        assert_eq!(off.value, json!({}));
         assert_eq!(off.placement, None, "no file sets it");
     }
 

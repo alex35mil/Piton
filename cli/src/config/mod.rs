@@ -17,15 +17,17 @@ mod write;
 
 use std::path::PathBuf;
 
+#[cfg(test)]
+pub use self::model::tables::SandboxTable;
 pub use self::{
     check::portability::warnings as portability_warnings,
     model::{
         daemon::{Build, DaemonConfig, TailnetConfig, ToolChoice, ToolConfig, default_socket},
         paths::{AGENTS_DIR, LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
         tables::{
-            AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Connect, Grant,
-            GrantLists, Listed, NetworkTarget, PermissionSettings, Preset, Profile, SandboxTable, ServiceEntry,
-            ServiceName, Silence, SilenceTarget, TCP_LISTEN_ANY, TcpListen,
+            AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Effect, FileAccess,
+            Grant, GrantEntries, Listed, NetworkTarget, Origin, PathKey, PermissionSettings, Preset, Profile,
+            ServiceKey, ServiceName, Silence, SilenceTarget,
         },
     },
     read::{
@@ -37,7 +39,7 @@ pub use self::{
     },
     write::{
         edit::{EditError, Placement},
-        file::{ConfigFile, KeyChange, WriteLevel, set_global},
+        file::{ConfigFile, KeyChange, KeyPath, WriteLevel, set_global},
     },
 };
 

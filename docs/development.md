@@ -158,8 +158,8 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
   agent can't widen its own sandbox. Without the `swift` preset, `mise run apps:build` fails at package resolution
   ("ManifestLoading couldn't be saved"). `piton sandbox why <path> [--write]` names the rule that decides.
 - `.piton/config.local.toml` (ignored through `/.piton/*.local.*`) holds this machine's grants, for example a
-  neighbouring checkout to write (`[sandbox]` `write = ["~/Projects/personal/tooling/pi.nvim"]`). Lists only add
-  across files and levels. Applied to sessions started after a change.
+  neighbouring checkout to write (`[sandbox.filesystem]` `"~/Projects/personal/tooling/pi.nvim" = "write"`). The
+  nearer file's value wins per entry. Applied to sessions started after a change.
 - The hidden Xcode preference `IDEPackageSupportDisableManifestSandbox` must be set on the host, once per machine:
   `defaults write com.apple.dt.Xcode IDEPackageSupportDisableManifestSandbox -bool YES`.
 - Sandboxes don't nest, so a sandboxed worker can't start a sandboxed pi: the e2e tests run pi in host mode and check

@@ -1,6 +1,6 @@
 // End-to-end tests of #228 on the host: a strict session's filtered network. A bash call connecting to a host no
-// `connect` entry lists waits while the user is asked; allowing lets it through, denying refuses it, and "allow in this
-// project" saves the entry so later calls pass without asking. A listed host passes without a question. Real pi in
+// [sandbox.network.connections] entry allows waits while the user is asked; allowing lets it through, "Not now" refuses
+// it (there's no Deny), and "allow in this project" saves the entry so later calls pass without asking. A listed host passes without a question. Real pi in
 // sandbox mode with Piton's pi package and the faux extension, as in blocks.mjs. It reaches public hosts (example.com,
 // www.iana.org) over plain HTTP: a local server wouldn't do, since the gate refuses names that resolve to this Mac.
 //
@@ -19,7 +19,11 @@ const LISTED = "example.com";
 
 /// strict, with one host listed (the user's own file: loosening keys).
 const prepare = () =>
-    setup("network", { files: { ".piton/config.local.toml": `[sandbox]\nprofile = "strict"\nconnect = ["${LISTED}"]\n` } });
+    setup("network", {
+        files: {
+            ".piton/config.local.toml": `[sandbox]\nprofile = "strict"\n[sandbox.network.connections]\n"${LISTED}" = "allow"\n`,
+        },
+    });
 
 const curl = (host) => `bash curl -s -o /dev/null -w 'code=%{http_code}' --max-time 20 http://${host}/ ; echo " exit=$?"`;
 
@@ -42,6 +46,7 @@ const tests = {
         const q = await dialog;
         assert.match(q.title, /`curl .*` wants to connect to www\.iana\.org:80/, q.title);
         assert.equal(q.options[0], "Choose an answer below");
+        assert.ok(!q.options.some((o) => o.startsWith("Deny")), q.options.join(", "));
         a.send({ type: "extension_ui_response", id: q.id, value: "Allow for this session" });
         const result = await done;
         assert.match(result, /code=(200|30\d)/, result);
@@ -71,7 +76,7 @@ const tests = {
         const allowed = await done;
         assert.match(allowed, /code=(200|30\d)/, allowed);
         const saved = readFileSync(join(ctx.ws, ".piton/config.local.toml"), "utf8");
-        assert.match(saved, /"www\.iana\.org:80"/, saved);
+        assert.match(saved, /"www\.iana\.org:80" = "allow"/, saved);
         await a.close();
     },
 };

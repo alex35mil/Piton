@@ -31,7 +31,7 @@ function setup() {
             env: { login_shell: false },
             tools: { mise: { enabled: true } },
         },
-        project: { sandbox: { deny: [guarded] } },
+        project: { sandbox: { filesystem: { [guarded]: "deny" } } },
     });
     const env = {
         ...process.env,

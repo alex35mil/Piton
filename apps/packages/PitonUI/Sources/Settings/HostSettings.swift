@@ -128,6 +128,9 @@ struct HostSettingRow: View {
             TextSettingField(
                 label: label, text: setting.valueType.text(setting.value), parse: setting.valueType.parse(_:),
                 save: save(_:))
+        case (true, .map(let values)):
+            MapSettingField(
+                label: label, rows: SettingValueType.mapRows(setting.value), values: values, save: save(_:))
         case (false, _):
             LabeledContent {
                 Text(setting.valueType.text(setting.value)).textSelection(.enabled)
@@ -168,6 +171,53 @@ struct HostSettingRow: View {
             _ = await store.setSetting(setting.scope, setting.key, to: value)
             saving = false
         }
+    }
+}
+
+/// A map edited as rows, each a key field and a value picker, with Add and Remove; saved as a whole with the Save
+/// button, so a half-typed key never reaches the host.
+struct MapSettingField: View {
+    let label: Text
+    let rows: [MapRow]
+    let values: [String]
+    let save: (JSON) -> Void
+    @State private var draft: [MapRow] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            label
+            ForEach($draft) { $row in
+                HStack {
+                    TextField("Path, host, or name", text: $row.key)
+                        .font(.callout.monospaced())
+                    Picker("", selection: $row.value) {
+                        ForEach(values, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Button(role: .destructive) {
+                        draft.removeAll { $0.id == row.id }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(row.key)")
+                }
+            }
+            HStack {
+                Button("Add") { draft.append(MapRow(key: "", value: values.first ?? "")) }
+                Spacer()
+                Button("Save", action: commit).disabled(value == nil || draft == rows)
+            }
+        }
+        .onAppear { draft = rows }
+        .onChange(of: rows) { _, new in draft = new }
+    }
+
+    private var value: JSON? { SettingValueType.mapValue(draft, values: values) }
+
+    private func commit() {
+        if let value { save(value) }
     }
 }
 

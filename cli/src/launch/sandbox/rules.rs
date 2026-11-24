@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::policy::Source;
 use crate::{
     agent::{GitControl, ProtectedRoots},
-    config::{NetworkTarget, ServiceName},
+    config::{NetworkTarget, ServiceKey, ServiceName},
 };
 
 /// What a process does to a path.
@@ -31,12 +31,8 @@ pub enum Access {
     Bind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Effect {
-    Allow,
-    Deny,
-}
+/// A rule's effect: the configuration's own (`"allow"`, `"deny"`).
+pub use crate::config::Effect;
 
 /// The paths a rule covers. Paths are absolute; [`Policy`] adds a rule's canonical form beside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,17 +115,32 @@ pub const TAG_PREFIX: &str = "piton-";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Services {
-    /// Every service but the keychain's, from this entry.
+    /// Every service but the keychain's, from this entry: what an approved command runs with.
     Every { source: Source },
-    /// Only these: the built-in list, then the presets' and the user's entries, each with where it came from.
+    /// Entries: the built-in list, the profile's and presets', and the user's. The most specific matching entry
+    /// decides (an exact name over a longer prefix over a shorter one over `*`; a deny over an allow at the same).
     Listed { grants: Vec<ServiceGrant> },
 }
 
-/// A Mach service the policy allows, and where the grant came from.
+/// A Mach service entry of the policy, its effect, and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceGrant {
-    pub name: ServiceName,
+    pub key: ServiceKey,
+    pub effect: Effect,
     pub source: Source,
+}
+
+/// The entry of `grants` that decides for `matches`: the most specific, a deny winning a tie.
+fn deciding<T, K: Ord>(grants: &[T], matches: impl Fn(&T) -> bool, rank: impl Fn(&T) -> (K, u8)) -> Option<&T> {
+    grants.iter().filter(|g| matches(g)).max_by_key(|g| rank(g))
+}
+
+/// A deny ranks over an allow at the same specificity.
+fn effect_rank(effect: Effect) -> u8 {
+    match effect {
+        Effect::Allow => 0,
+        Effect::Deny => 1,
+    }
 }
 
 /// Launching apps (`lsopen`: `open`, Launch Services) and sending Apple Events (`osascript`, scripting another app).
@@ -137,11 +148,12 @@ pub struct ServiceGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Apps {
+    /// Closed by the base: asked about.
     Closed,
     /// Open, from this entry.
-    Open {
-        source: Source,
-    },
+    Open { source: Source },
+    /// Closed by the user's `allow_launching_apps = false`: only logged.
+    Denied { source: Source },
 }
 
 /// TCP listening (`listen()`, Seatbelt's `network-inbound`). Seatbelt can't tell a loopback listen from an
@@ -150,27 +162,38 @@ pub enum Apps {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Listen {
+    /// Closed by the base: asked about.
     Closed,
     /// Open on every address, from this entry.
-    Open {
-        source: Source,
-    },
+    Open { source: Source },
+    /// Closed by the user's `allow_tcp_listening = false`: only logged.
+    Denied { source: Source },
 }
 
-/// A network destination the policy grants, and where the grant came from.
+/// A connection entry of the policy, its effect, and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkGrant {
     pub target: NetworkTarget,
+    pub effect: Effect,
     pub source: Source,
+}
+
+impl NetworkGrant {
+    fn rank(&self) -> ((u8, usize, u8), u8) {
+        (self.target.specificity(), effect_rank(self.effect))
+    }
 }
 
 /// A launch's network.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Network {
-    /// Every host and port, from this entry (a `*` in `connect`): nothing is emitted, nono's network stays open.
+    /// Every host and port, from this entry: nothing is emitted, nono's network stays open (an approved command).
     Open { source: Source },
-    /// Only the listed ports (Seatbelt) and the gate's port, through which the gate decides named hosts.
+    /// Direct connections, as the entries decide: `*` allows and no named host decides otherwise, so the sandbox's port
+    /// rules are the whole of it and no gate runs.
+    Direct { grants: Vec<NetworkGrant> },
+    /// Direct connections only to the port entries; everything else through the gate, which decides named hosts.
     Filtered { grants: Vec<NetworkGrant>, gate: Gate },
 }
 
@@ -195,7 +218,7 @@ impl Network {
     /// The proxy URL this sandbox's processes use and the `ssh` wrapper's folder, when it has a gate.
     pub fn proxy(&self) -> Option<(String, Option<&Path>)> {
         match self {
-            Network::Open { .. } | Network::Filtered { gate: Gate::None, .. } => None,
+            Network::Open { .. } | Network::Direct { .. } | Network::Filtered { gate: Gate::None, .. } => None,
             Network::Filtered {
                 gate:
                     Gate::Listening {
@@ -325,52 +348,75 @@ impl Policy {
         decision
     }
 
-    /// The decision for connecting to `to` by this policy's entries: the last `connect` entry that allows it, or the
-    /// base. A named host the entries don't allow may still pass the gate (pi's own hosts, the user's answer), which the
-    /// gate decides after this.
-    pub fn decide_network(&self, to: &Destination) -> Decision {
+    /// The connection entry that decides `to`: the most specific that matches, a deny winning a tie. `None` under an
+    /// open network, or when no entry matches.
+    pub fn network_entry(&self, to: &Destination) -> Option<&NetworkGrant> {
         match &self.network {
-            Network::Open { source } => Decision {
+            Network::Open { .. } => None,
+            Network::Direct { grants } | Network::Filtered { grants, .. } => {
+                deciding(grants, |g| g.target.allows(to), NetworkGrant::rank)
+            }
+        }
+    }
+
+    /// The decision for connecting to `to` by this policy's entries, or the base. A named host no entry allows may
+    /// still pass the gate (pi's own hosts, the user's answer), which the gate decides after this.
+    pub fn decide_network(&self, to: &Destination) -> Decision {
+        if let Network::Open { source } = &self.network {
+            return Decision {
                 allowed: true,
                 source: source.clone(),
-            },
-            Network::Filtered { grants, .. } => match grants.iter().rev().find(|g| g.target.allows(to)) {
-                Some(grant) => Decision {
-                    allowed: true,
-                    source: grant.source.clone(),
+            };
+        }
+        match self.network_entry(to) {
+            Some(grant) => Decision {
+                allowed: match grant.effect {
+                    Effect::Allow => true,
+                    Effect::Deny => false,
                 },
-                None => Decision {
-                    allowed: false,
-                    source: Source::BuiltIn {
-                        what: CLOSED_NETWORK.into(),
-                    },
+                source: grant.source.clone(),
+            },
+            None => Decision {
+                allowed: false,
+                source: Source::BuiltIn {
+                    what: CLOSED_NETWORK.into(),
                 },
             },
         }
     }
 
-    /// The TCP and UDP rules of a filtered network, after the socket rules: every destination denied, then each port
-    /// entry and the gate's port allowed. Named hosts emit nothing: Seatbelt can't name a host ("host must be * or
-    /// localhost"), so only the gate reaches them.
+    /// The TCP and UDP rules, after the socket rules. Direct: each port entry, least specific first. Filtered: every
+    /// destination denied, then each port entry, then the gate's port. Named hosts emit nothing: Seatbelt can't name a
+    /// host ("host must be * or localhost"), so only the gate decides them.
     fn network_rules(&self) -> Vec<String> {
         let (grants, gate) = match &self.network {
             Network::Open { .. } => return Vec::new(),
-            Network::Filtered { grants, gate } => (grants, gate),
+            Network::Direct { grants } => (grants, None),
+            Network::Filtered { grants, gate } => (grants, Some(gate)),
         };
-        let mut out = vec![r#"(deny network-outbound (remote ip "*:*"))"#.to_string()];
-        for grant in grants {
+        let mut out = Vec::new();
+        if gate.is_some() {
+            out.push(r#"(deny network-outbound (remote ip "*:*"))"#.to_string());
+        }
+        let mut ports: Vec<&NetworkGrant> = grants.iter().collect();
+        ports.sort_by_key(|g| g.rank());
+        for grant in ports {
             let address = match &grant.target {
                 NetworkTarget::LocalPort { port } => format!("localhost:{port}"),
                 NetworkTarget::LocalAnyPort => "localhost:*".to_string(),
                 NetworkTarget::AnyHostPort { port } => format!("*:{port}"),
-                // `Anywhere` makes the network open; a host is the gate's.
+                // `*` is the mode itself; a host is the gate's.
                 NetworkTarget::Anywhere | NetworkTarget::Host { .. } => continue,
             };
-            out.push(format!(r#"(allow network-outbound (remote ip "{address}"))"#));
+            let effect = match grant.effect {
+                Effect::Allow => "allow",
+                Effect::Deny => "deny",
+            };
+            out.push(format!(r#"({effect} network-outbound (remote ip "{address}"))"#));
         }
         match gate {
-            Gate::None => {}
-            Gate::Listening { port, .. } => {
+            None | Some(Gate::None) => {}
+            Some(Gate::Listening { port, .. }) => {
                 out.push(format!(r#"(allow network-outbound (remote tcp "localhost:{port}"))"#));
             }
         }
@@ -382,6 +428,10 @@ impl Policy {
         match &self.listen {
             Listen::Open { source } => Decision {
                 allowed: true,
+                source: source.clone(),
+            },
+            Listen::Denied { source } => Decision {
+                allowed: false,
                 source: source.clone(),
             },
             Listen::Closed => Decision {
@@ -397,7 +447,7 @@ impl Policy {
     /// emits nothing. `tcp`, not `ip`: an `ip` filter also refuses UDP replies, DNS included (docs/pi-findings.md).
     fn listen_rules(&self) -> Vec<String> {
         match &self.listen {
-            Listen::Closed => vec![LISTEN_DENY.to_string()],
+            Listen::Closed | Listen::Denied { .. } => vec![LISTEN_DENY.to_string()],
             Listen::Open { .. } => Vec::new(),
         }
     }
@@ -425,9 +475,16 @@ impl Policy {
                 allowed: true,
                 source: source.clone(),
             },
-            Services::Listed { grants } => match grants.iter().rev().find(|g| g.name.matches(service)) {
+            Services::Listed { grants } => match deciding(
+                grants,
+                |g| g.key.matches(service),
+                |g| (g.key.specificity(), effect_rank(g.effect)),
+            ) {
                 Some(grant) => Decision {
-                    allowed: true,
+                    allowed: match grant.effect {
+                        Effect::Allow => true,
+                        Effect::Deny => false,
+                    },
                     source: grant.source.clone(),
                 },
                 None => Decision {
@@ -447,18 +504,30 @@ impl Policy {
         match &self.services {
             Services::Every { .. } => {}
             Services::Listed { grants } => {
+                // Least specific first: Seatbelt's last match decides, as `decide_service` does.
                 out.push("(deny mach-lookup)".to_string());
-                for grant in grants {
-                    out.push(match &grant.name {
-                        ServiceName::Exact(name) => format!("(allow mach-lookup (global-name \"{name}\"))"),
-                        ServiceName::Prefix(start) => format!("(allow mach-lookup (global-name-prefix \"{start}\"))"),
+                let mut sorted: Vec<&ServiceGrant> = grants.iter().collect();
+                sorted.sort_by_key(|g| (g.key.specificity(), effect_rank(g.effect)));
+                for grant in sorted {
+                    let effect = match grant.effect {
+                        Effect::Allow => "allow",
+                        Effect::Deny => "deny",
+                    };
+                    out.push(match &grant.key {
+                        ServiceKey::Every => format!("({effect} mach-lookup)"),
+                        ServiceKey::Name(ServiceName::Exact(name)) => {
+                            format!("({effect} mach-lookup (global-name \"{name}\"))")
+                        }
+                        ServiceKey::Name(ServiceName::Prefix(start)) => {
+                            format!("({effect} mach-lookup (global-name-prefix \"{start}\"))")
+                        }
                     });
                 }
             }
         }
         match &self.apps {
             // The default refuses both; with a tag, its records carry it.
-            Apps::Closed => {}
+            Apps::Closed | Apps::Denied { .. } => {}
             Apps::Open { .. } => {
                 out.push("(allow lsopen)".to_string());
                 out.push("(allow appleevent-send)".to_string());
@@ -607,27 +676,28 @@ const SOCKET_BASE: [&str; 2] = [
 ];
 
 /// Why a socket connect is denied when no rule decides: what `piton sandbox why` prints.
-const CLOSED_SOCKETS: &str = "Unix sockets are closed: a `connect` entry opens one (global config.toml or a \
-                              config.local.toml)";
+const CLOSED_SOCKETS: &str = "Unix sockets are closed: a [sandbox.network.unix_socket_connections] entry opens one \
+                              (global config.toml or a config.local.toml)";
 
-/// Why a connection is denied when no `connect` entry allows it: what `piton sandbox why --connect` prints for a host.
-const CLOSED_NETWORK: &str = "the network is filtered: a `connect` entry opens a host or port (global config.toml or a \
-                              config.local.toml)";
+/// Why a connection is denied when no entry allows it: what `piton sandbox why --connect` prints for a host.
+const CLOSED_NETWORK: &str = "the network is filtered: a [sandbox.network.connections] entry opens a host or port \
+                              (global config.toml or a config.local.toml)";
 
 /// Why creating a socket is denied when no rule decides.
-const CLOSED_BIND: &str = "creating Unix sockets is closed: a `unix_bind` entry opens a path (global config.toml or a \
-                           config.local.toml)";
+const CLOSED_BIND: &str = "creating Unix sockets is closed: a [sandbox.network.unix_socket_bindings] entry opens a path \
+                           (global config.toml or a config.local.toml)";
 
 /// Why listening on TCP is denied: what `piton sandbox why --listen` prints.
-const CLOSED_LISTEN: &str = "TCP listening is closed: `tcp_listen = \"*\"` opens it, on every address (global config.toml \
-                             or a config.local.toml)";
+const CLOSED_LISTEN: &str = "TCP listening is closed: `allow_tcp_listening = true` opens it, on every address (global \
+                             config.toml or a config.local.toml)";
 
 /// Why a lookup of a service outside the list is denied: what `piton sandbox why --service` prints.
-const CLOSED_SERVICES: &str = "Mach services outside the built-in list are closed: a `services` entry opens one (global \
-                               config.toml or a config.local.toml)";
+const CLOSED_SERVICES: &str = "Mach services outside the built-in list are closed: a [sandbox.macos.services] entry \
+                               opens one (global config.toml or a config.local.toml)";
 
 /// Why a lookup of a keychain service is denied.
-const CLOSED_KEYCHAIN: &str = "the keychain is closed: a `read` of ~/Library/Keychains opens it";
+const CLOSED_KEYCHAIN: &str = "the keychain is closed: `\"~/Library/Keychains\" = \"read\"` in [sandbox.filesystem] \
+                               opens it";
 
 /// The Mach services that broker keychain access, which the library always denies. Reopened only when the user exposes
 /// their keychains (nono's CLI does the same).
@@ -870,7 +940,8 @@ mod tests {
             grants: names
                 .iter()
                 .map(|name| ServiceGrant {
-                    name: name.clone(),
+                    key: ServiceKey::Name(name.clone()),
+                    effect: Effect::Allow,
                     source: Source::Workspace,
                 })
                 .collect(),
@@ -964,13 +1035,95 @@ mod tests {
     }
 
     fn grant(text: &str) -> NetworkGrant {
-        match crate::config::Connect::try_from(text.to_string()).unwrap() {
-            crate::config::Connect::Network(target) => NetworkGrant {
-                target,
-                source: Source::Workspace,
-            },
-            crate::config::Connect::Socket(_) => panic!("{text} is a socket"),
+        effect_grant(text, Effect::Allow)
+    }
+
+    fn effect_grant(text: &str, effect: Effect) -> NetworkGrant {
+        NetworkGrant {
+            target: NetworkTarget::try_from(text.to_string()).unwrap(),
+            effect,
+            source: Source::Workspace,
         }
+    }
+
+    /// The most specific entry decides, a deny winning a tie; a direct network emits only its port entries, least
+    /// specific first, so Seatbelt's last match agrees.
+    #[test]
+    fn the_most_specific_connection_entry_decides() {
+        let direct = network_policy(Network::Direct {
+            grants: vec![
+                effect_grant("*", Effect::Allow),
+                effect_grant("*:22", Effect::Deny),
+                effect_grant("localhost:*", Effect::Allow),
+            ],
+        });
+        let allowed = |p: &Policy, t: &str| p.decide_network(&to(t)).allowed;
+        assert!(allowed(&direct, "example.com:443"));
+        assert!(!allowed(&direct, "example.com:22"));
+        assert!(
+            allowed(&direct, "localhost:22"),
+            "localhost:* is more specific than *:22"
+        );
+        let remote: Vec<String> = direct
+            .seatbelt()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.contains("remote"))
+            .collect();
+        assert_eq!(
+            remote,
+            [
+                r#"(deny network-outbound (remote ip "*:22"))"#,
+                r#"(allow network-outbound (remote ip "localhost:*"))"#,
+            ]
+        );
+        super::super::apply::capabilities(&direct).expect("nono accepts it");
+
+        let named = network_policy(Network::Filtered {
+            grants: vec![
+                effect_grant("*.example.com", Effect::Allow),
+                effect_grant("bad.example.com", Effect::Deny),
+                effect_grant("github.com", Effect::Allow),
+                effect_grant("github.com:22", Effect::Deny),
+            ],
+            gate: Gate::None,
+        });
+        assert!(allowed(&named, "a.example.com:443"));
+        assert!(!allowed(&named, "bad.example.com:443"));
+        assert!(allowed(&named, "github.com:443"));
+        assert!(!allowed(&named, "github.com:22"));
+    }
+
+    /// Services: an exact name over a prefix over `*`, a deny winning a tie; Seatbelt gets them least specific first.
+    #[test]
+    fn the_most_specific_service_entry_decides() {
+        let entry = |key: &str, effect| ServiceGrant {
+            key: ServiceKey::try_from(key.to_string()).unwrap(),
+            effect,
+            source: Source::Workspace,
+        };
+        let p = services_policy(
+            Services::Listed {
+                grants: vec![
+                    entry("com.example.agent", Effect::Allow),
+                    entry("*", Effect::Allow),
+                    entry("com.example.*", Effect::Deny),
+                ],
+            },
+            Apps::Closed,
+            false,
+        );
+        assert!(p.decide_service("org.other").allowed);
+        assert!(!p.decide_service("com.example.x").allowed);
+        assert!(p.decide_service("com.example.agent").allowed);
+        let rules = p.seatbelt().unwrap();
+        let at = |r: &str| rules.iter().position(|x| x == r).unwrap_or_else(|| panic!("{r}"));
+        assert!(at("(allow mach-lookup)") < at(r#"(deny mach-lookup (global-name-prefix "com.example."))"#));
+        assert!(
+            at(r#"(deny mach-lookup (global-name-prefix "com.example."))"#)
+                < at(r#"(allow mach-lookup (global-name "com.example.agent"))"#)
+        );
+        super::super::apply::capabilities(&p).expect("nono accepts it");
     }
 
     fn network_policy(network: Network) -> Policy {
@@ -1065,9 +1218,10 @@ mod tests {
             remote,
             [
                 r#"(deny network-outbound (remote ip "*:*"))"#,
-                r#"(allow network-outbound (remote ip "localhost:5432"))"#,
-                r#"(allow network-outbound (remote ip "localhost:*"))"#,
+                // Least specific first.
                 r#"(allow network-outbound (remote ip "*:22"))"#,
+                r#"(allow network-outbound (remote ip "localhost:*"))"#,
+                r#"(allow network-outbound (remote ip "localhost:5432"))"#,
                 r#"(allow network-outbound (remote tcp "localhost:60001"))"#,
             ]
         );

@@ -10,7 +10,7 @@
 //
 // macOS may not report a process's first sandbox refusals for some seconds (docs/pi-findings.md), so the faux tool
 // that blocks pi's own process keeps trying for 10 s until the kernel's record reaches the daemon.
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 
@@ -157,10 +157,11 @@ const tests = {
         );
         a.send({ type: "prompt", message: `write ${target}` });
         const req = await offered;
-        // A file that doesn't exist yet may be a folder's create: offered as `write` on it.
-        assert.ok(req.title.includes(`= [\"${target}\"]`), req.title);
+        // Offered as `"<path>" = "write"` in [sandbox.filesystem]; no answer saves a denial.
+        assert.ok(req.title.includes(`filesystem."${target}" = "write"`), req.title);
         assert.equal(req.options[0], "Choose an answer below");
         assert.ok(req.options.includes("Not now"));
+        assert.ok(!req.options.some((o) => o.startsWith("Deny")), req.options.join(", "));
         // The run ends before an answer: the question is asked again, not lost. Both waits start now: the repeat can
         // arrive in the same chunk as `agent_settled`.
         const settled = a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
@@ -190,7 +191,7 @@ const tests = {
         await a.close();
     },
 
-    async "git's control files are reported, not asked; deny everywhere silences a path"(ctx) {
+    async "git's control files are reported, not asked; the user's own deny is only logged"(ctx) {
         const a = attach(ctx);
         // pi's own process writes the workspace's .git/config: no entry lifts it, so a notice, never a question.
         const notice = a.waitNew(
@@ -207,18 +208,11 @@ const tests = {
             "no question",
         );
 
-        // Deny everywhere: saved as `silence`, so a new session doesn't ask.
-        const target = `${ctx.outside}-silenced`;
-        const offered = a.waitNew((r) => r.type === "extension_ui_request" && r.method === "select" && (r.title ?? "").includes(target), 30000);
-        a.send({ type: "prompt", message: `write ${target}` });
-        const req = await offered;
-        a.send({ type: "extension_ui_response", id: req.id, value: "Deny everywhere" });
-        await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
-        const saved = readFileSync(join(ctx.config, "config.toml"), "utf8");
-        assert.match(saved, /\[\[sandbox\.silence\]\]/);
-        assert.ok(saved.includes(`target = "${target}"`), saved);
         await a.close();
 
+        // A `"deny"` the user wrote: the block is only logged, never asked about or noticed.
+        const target = `${ctx.outside}-silenced`;
+        writeFileSync(join(ctx.config, "config.toml"), `[sandbox.filesystem]\n"${target}" = "deny"\n`);
         const b = attach(ctx);
         b.send({ type: "prompt", message: `write ${target}` });
         await b.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
@@ -228,7 +222,10 @@ const tests = {
             "a silenced path is only logged",
         );
         const log = readFileSync(join(ctx.dir, "piton.log"), "utf8");
-        assert.ok(log.split("\n").some((l) => l.includes(target) && l.includes("silenced by")), "the daemon logged it");
+        assert.ok(
+            log.split("\n").some((l) => l.includes(target) && l.includes("your own [sandbox] entry")),
+            "the daemon logged it",
+        );
         await b.close();
     },
 };

@@ -1,14 +1,14 @@
-//! One launch's [`Policy`]: Piton's base policy, the profile's entries, the `[sandbox]` chain's lists, and the launch's
-//! facts (workspace, agent directory, the daemon's state folder), as an ordered list of literal rules.
+//! One launch's [`Policy`]: Piton's base policy, the profile's and presets' entries, the `[sandbox]` chain's maps, and
+//! the launch's facts (workspace, agent directory, the daemon's state folder), as an ordered list of literal rules.
 //!
 //! Order, the last matching rule deciding:
-//! 1. grants: writes to the workspace, the source's `.piton/.local`, temp, presets, `write`, `write_file`; DNS; and
-//!    `connect` and `unix_bind` sockets, before every deny so none of them reopens one (the base closes every socket);
-//! 2. nono's credential denies; then `read`, which lifts them for reading (and reopens writes granted inside a read
-//!    path); then `connect` socket entries at or inside a credential folder, for connecting only;
+//! 1. the base write roots (the workspace, the source's `.piton/.local`, temp) and DNS;
+//! 2. the entry layer, merged with 1 by path depth, least specific first, so the most specific entry decides (a deny
+//!    after an allow at the same depth): nono's credential denies, the profile's and presets' entries, the files'
+//!    filesystem, socket, and binding entries, and the `pi-claude-code` preset's folders. A committed file's opening
+//!    entry inside a credential or the user's own deny is left out;
 //! 3. the host agent directory is read-only; the launch's agent directory's runtime state is writable;
-//! 4. the user's `deny`; the files fnox loads; each socket a `connect` entry names, and the folders on its way, kept
-//!    in place;
+//! 4. the files fnox loads; each socket an entry allows, and the folders on its way, kept in place;
 //! 5. every configuration level, and what its entries link to, is read-only; protected files are read-only; so are
 //!    Git's hooks and configuration in the launch's checkouts;
 //! 6. the daemon's state folder is closed (reads, writes, connects) except its logs and the agent socket, and its
@@ -31,8 +31,8 @@ use super::{
 use crate::{
     agent::{GitControl, canonical_target, lexical},
     config::{
-        ClaudeCodeOptions, ClaudeLogin, Connect, LOCAL_DIR, LaunchConfig, Listed, Preset, Profile, ServiceEntry,
-        ServiceName, expand_home,
+        ClaudeCodeOptions, ClaudeLogin, FileAccess, LOCAL_DIR, LaunchConfig, Listed, NetworkTarget,
+        Origin as ConfigOrigin, Preset, Profile, ServiceKey, ServiceName, expand_home,
     },
     launch::{
         Env,
@@ -80,12 +80,12 @@ const FIXED_FOLDER_DENY: &str = "a folder on the way to configuration: renaming 
                                  user approves (what's in it follows the other rules)";
 
 /// Why Git's hooks and configuration are closed, and how to open them: what `piton sandbox why` prints.
-const GIT_CONTROL_DENY: &str = "Git's hooks and configuration: Git on the host runs what they name; the git preset \
-                                opens them (global config.toml or a config.local.toml)";
+const GIT_CONTROL_DENY: &str = "Git's hooks and configuration: Git on the host runs what they name; \
+                                `allow_git_control_files = true` opens them (global config.toml or a config.local.toml)";
 
 /// Why a socket a `connect` entry names, or a folder on its way, can't be written.
-const SOCKET_PATH_DENY: &str = "a socket a connect entry names, or a folder on its way: kept in place so no other \
-                                socket can be moved there";
+const SOCKET_PATH_DENY: &str = "a socket an entry allows, or a folder on its way: kept in place so no other socket can \
+                                be moved there";
 
 /// The socket macOS resolves names through.
 const DNS_SOCKET: &str = "/var/run/mDNSResponder";
@@ -107,6 +107,8 @@ pub struct Resolution {
     /// pi's agent directories the policy closes, as named: the host's and the launch's (the same folder when the
     /// launch uses the host's). Protected files in them are changed through a write the user approves.
     pub agent_dirs: [PathBuf; 2],
+    /// Entries a committed file wrote that would reopen what a credential or the user's own deny closes, left out.
+    pub ignored: Vec<String>,
 }
 
 /// One `silence` entry, expanded, and where it came from.
@@ -118,15 +120,14 @@ pub struct Silenced {
     pub source: SilenceSource,
 }
 
-/// What a silence entry matches, expanded.
+/// What a silence entry matches, expanded. A path is a preset's own (its socket folder); the user's paths are decided
+/// by `"deny"` entries instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Silent {
     /// A path and everything below it, absolute and canonical; `*` and `**` components are wildcards.
     Path(PathBuf),
     /// A Mach service, by name.
     Service(String),
-    /// A network destination: a host (or `*.domain`) and a port.
-    Host(crate::config::NetworkTarget),
     /// A TCP listen, on any port.
     TcpListen,
 }
@@ -150,18 +151,11 @@ impl std::fmt::Display for SilenceSource {
 }
 
 impl Silent {
-    /// A non-path `silence` target as it matches (a path is expanded and canonicalized by the launch first); `None` for a
-    /// path.
-    pub fn named(target: &crate::config::SilenceTarget) -> Option<Self> {
+    /// A `silence` target as it matches.
+    pub fn named(target: &crate::config::SilenceTarget) -> Self {
         match target {
-            crate::config::SilenceTarget::Path(_) => None,
-            crate::config::SilenceTarget::TcpListen => Some(Silent::TcpListen),
-            crate::config::SilenceTarget::Service(name) => Some(Silent::Service(name.clone())),
-            crate::config::SilenceTarget::Host(text) => match crate::config::Connect::try_from(text.clone()) {
-                Ok(crate::config::Connect::Network(target)) => Some(Silent::Host(target)),
-                // Parsing accepted it as a host and port.
-                Ok(crate::config::Connect::Socket(_)) | Err(_) => None,
-            },
+            crate::config::SilenceTarget::TcpListen => Silent::TcpListen,
+            crate::config::SilenceTarget::Service(name) => Silent::Service(name.clone()),
         }
     }
 }
@@ -179,24 +173,23 @@ impl Silenced {
                 operation != "mach-lookup" && path.is_absolute() && below_pattern(path, pattern)
             }
             Silent::TcpListen => super::rules::is_listen(operation, target),
-            Silent::Host(host) => {
-                operation == "network-outbound"
-                    && !target.starts_with('/')
-                    && super::Destination::parse(target).is_some_and(|to| host.allows(&to))
-            }
         }
     }
 
-    /// The entry as written in `[sandbox] silence`.
-    pub fn entry(&self) -> crate::config::Silence {
-        crate::config::Silence {
-            target: match &self.target {
-                Silent::Path(path) => crate::config::SilenceTarget::Path(path.display().to_string()),
-                Silent::Service(name) => crate::config::SilenceTarget::Service(name.clone()),
-                Silent::Host(host) => crate::config::SilenceTarget::Host(host.to_string()),
-                Silent::TcpListen => crate::config::SilenceTarget::TcpListen,
-            },
-            process: self.process.clone(),
+    /// The entry as `[sandbox] silence` writes it (a preset's path as its inline table, for display only).
+    pub fn describe(&self) -> String {
+        let target = match &self.target {
+            Silent::Path(path) => path.display().to_string(),
+            Silent::Service(name) => name.clone(),
+            Silent::TcpListen => crate::config::SilenceTarget::TcpListen.into(),
+        };
+        let target = toml::Value::String(target).to_string();
+        match &self.process {
+            Some(process) => format!(
+                "{{ process = {}, target = {target} }}",
+                toml::Value::String(process.clone())
+            ),
+            None => format!("{{ target = {target} }}"),
         }
     }
 }
@@ -369,30 +362,16 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         name: config.sandbox.profile(),
         set_in: config.sandbox.profile.as_ref().map(|p| p.file.clone()),
     };
-    let mut silence = config
+    let mut silence: Vec<Silenced> = config
         .sandbox
         .silence
         .iter()
-        .map(|l| {
-            let target = match &l.value.target {
-                crate::config::SilenceTarget::Path(path) => {
-                    Silent::Path(canonical_pattern(&expand_grant(path, facts.home, facts.base_env)?))
-                }
-                other @ (crate::config::SilenceTarget::Service(_)
-                | crate::config::SilenceTarget::Host(_)
-                | crate::config::SilenceTarget::TcpListen) => match Silent::named(other) {
-                    Some(silent) => silent,
-                    None => return Ok(None),
-                },
-            };
-            Ok(Some(Silenced {
-                target,
-                process: l.value.process.clone(),
-                source: SilenceSource::File(l.file.clone()),
-            }))
+        .map(|l| Silenced {
+            target: Silent::named(&l.value.target),
+            process: l.value.process.clone(),
+            source: SilenceSource::File(l.file.clone()),
         })
-        .filter_map(Result::transpose)
-        .collect::<Result<Vec<_>, SandboxError>>()?;
+        .collect();
     if let Some(claude_code) = &claude_code {
         silence.extend(claude_code_silence(claude_code));
     }
@@ -403,21 +382,8 @@ pub fn resolve(config: &LaunchConfig, facts: &Facts) -> Result<Resolution, Sandb
         profile,
         claude_code,
         agent_dirs: [built.host_agent, built.agent],
+        ignored: grants.ignored,
     })
-}
-
-/// A silence pattern's real-path form: the components before the first wildcard canonicalized, as Seatbelt reports
-/// real paths; the rest as written.
-fn canonical_pattern(path: &Path) -> PathBuf {
-    let components: Vec<Component> = path.components().collect();
-    let wild = components
-        .iter()
-        .position(|c| matches!(c.as_os_str().to_str(), Some("*" | "**")))
-        .unwrap_or(components.len());
-    let literal: PathBuf = components[..wild].iter().collect();
-    components[wild..]
-        .iter()
-        .fold(canonical_target(&literal), |path, c| path.join(c))
 }
 
 /// The blocks the `pi-claude-code` preset expects, only logged. With the token login, `claude` looks for a stored login
@@ -577,80 +543,159 @@ fn build(
         preset: CLAUDE_CODE_PRESET.into(),
         from: c.from.clone(),
     });
-    if let (Some(folder), Some(source)) = (claude_code.and_then(|c| c.folder), &claude_source) {
-        rules.push(Effect::Allow, &[Access::Write], subpath(folder), source.clone());
-        // `claude` locks the folder itself with `proper-lockfile`: an empty `<folder>.lock` folder beside it.
-        rules.push(
-            Effect::Allow,
-            &[Access::Write],
-            subpath(&lock_of(folder)),
-            source.clone(),
-        );
-    }
-    let claude_sockets = claude_code.and_then(|c| c.sockets);
-    if let (Some(sockets), Some(source)) = (claude_sockets, &claude_source) {
-        // Its temp files and sockets; connecting stays closed (see `ClaudeCodeSockets`).
-        rules.push(Effect::Allow, &[Access::Write], subpath(sockets), source.clone());
-    }
-    for (path, source) in &grants.write {
-        rules.push(Effect::Allow, &[Access::Write], subpath(path), source.clone());
-    }
-    for (path, source) in &grants.write_file {
-        rules.push(Effect::Allow, &[Access::Write], literal(path), source.clone());
-    }
-    // Sockets, before every deny: a `connect` or `unix_bind` entry (yolo's `/` too) never reopens a credential, a user
-    // deny, or the daemon's sockets. A connect entry inside a credential folder gets a second slot below.
+    // DNS, before the entries: an entry can close it.
     rules.push(
         Effect::Allow,
         &[Access::Connect],
         literal(Path::new(DNS_SOCKET)),
         Source::BuiltIn { what: "DNS".into() },
     );
-    for (path, source) in &grants.sockets {
-        rules.push(Effect::Allow, &[Access::Connect], subpath(path), source.clone());
-    }
-    for (path, source) in &grants.unix_bind {
-        rules.push(Effect::Allow, &[Access::Bind], subpath(path), source.clone());
-    }
-    if let (Some(sockets), Some(source)) = (claude_sockets, &claude_source) {
-        rules.push(Effect::Allow, &[Access::Bind], subpath(sockets), source.clone());
-    }
 
-    // 2. Credentials, what `read` lifts of them (reading only), and the sockets named inside them.
+    // 2. The entry layer: credential denies, the profile's and presets' entries, the user's, and the preset's folders,
+    // emitted least specific first so the most specific decides (Seatbelt's last match), a deny after an allow at the
+    // same depth. The base roots above take part by depth too: an entry inside the workspace applies, a broader one
+    // above it doesn't close it.
+    // At the same depth, in order: the base roots, built-in denies, base-layer entries, the user's (an allow, then a
+    // deny): the user's own entry for a path decides over a built-in one for the same path.
+    const ROOT: u8 = 0;
+    const BUILT_IN: u8 = 1;
+    const BASE: u8 = 2;
+    const USER_ALLOW: u8 = 3;
+    const USER_DENY: u8 = 4;
     let all = [Access::Read, Access::Write, Access::Connect, Access::Bind];
+    let mut layer: Vec<(PathBuf, u8, Effect, Vec<Access>, Source)> = Vec::new();
     let mut denied = Vec::new();
-    let mut credentials = Vec::new();
     for (path, source) in policy::nono_denies() {
         let path = expand(&path)?;
-        rules.push(Effect::Deny, &all, subpath(&path), source);
-        denied.push(path.clone());
-        credentials.push(path);
+        layer.push((path.clone(), BUILT_IN, Effect::Deny, all.to_vec(), source));
+        denied.push(path);
     }
-    for (path, source) in &grants.read {
-        rules.push(Effect::Allow, &[Access::Read], subpath(path), source.clone());
-    }
-    // A `connect` entry at or inside a credential folder (Docker Desktop's socket, gpg-agent, 1Password's SSH agent)
-    // opens just that path, for connecting: nothing there becomes readable. A broader entry (`/`, `~`) stays below the
-    // credential denies.
-    let inside = |path: &Path| {
-        let real = canonical_target(path);
-        credentials.iter().any(|c| {
-            let root = subpath(c);
-            let real_root = subpath(&canonical_target(c));
-            root.covers(path) || real_root.covers(&real)
-        })
+    let rank = |source: &Source, effect: Effect| match (source, effect) {
+        (
+            Source::Config {
+                from: Provenance::File { .. },
+                ..
+            },
+            Effect::Allow,
+        ) => USER_ALLOW,
+        (
+            Source::Config {
+                from: Provenance::File { .. },
+                ..
+            },
+            Effect::Deny,
+        ) => USER_DENY,
+        (
+            Source::Config { .. }
+            | Source::Preset { .. }
+            | Source::Workspace
+            | Source::BuiltIn { .. }
+            | Source::NonoGroup { .. }
+            | Source::Piton { .. }
+            | Source::FnoxConfig
+            | Source::AgentDir,
+            _,
+        ) => BASE,
     };
-    for (path, source) in grants.sockets.iter().filter(|(p, _)| inside(p)) {
-        rules.push(Effect::Allow, &[Access::Connect], subpath(path), source.clone());
+    for entry in &grants.filesystem {
+        let (effect, access) = match entry.value {
+            FileAccess::Read => (Effect::Allow, vec![Access::Read]),
+            FileAccess::Write => (Effect::Allow, vec![Access::Read, Access::Write]),
+            FileAccess::Deny => (Effect::Deny, all.to_vec()),
+        };
+        if entry.value == FileAccess::Deny {
+            denied.push(entry.path.clone());
+        }
+        let at = rank(&entry.source, effect);
+        layer.push((entry.path.clone(), at, effect, access, entry.source.clone()));
+        // The user's own read entry also closes writes inside it (a read-only folder in the workspace): their choice, so
+        // only logged and floor. A profile's or preset's read is inside a credential, whose own deny keeps deciding
+        // writes there as a built-in block (a notice, liftable by an approved command while fnox is off).
+        let users_own = matches!(
+            entry.source,
+            Source::Config {
+                from: Provenance::File { .. },
+                ..
+            }
+        );
+        if entry.value == FileAccess::Read && users_own {
+            layer.push((
+                entry.path.clone(),
+                at,
+                Effect::Deny,
+                vec![Access::Write],
+                entry.source.clone(),
+            ));
+        }
     }
-    let lifted = |p: &Path| grants.read.iter().any(|(r, _)| p.starts_with(r));
-    for (path, source) in grants.write.iter().filter(|(p, _)| lifted(p)) {
-        rules.push(Effect::Allow, &[Access::Write], subpath(path), source.clone());
+    for entry in &grants.sockets {
+        let at = rank(&entry.source, entry.value);
+        layer.push((
+            entry.path.clone(),
+            at,
+            entry.value,
+            vec![Access::Connect],
+            entry.source.clone(),
+        ));
     }
-    for (path, source) in grants.write_file.iter().filter(|(p, _)| lifted(p)) {
-        rules.push(Effect::Allow, &[Access::Write], literal(path), source.clone());
+    for entry in &grants.bindings {
+        let at = rank(&entry.source, entry.value);
+        layer.push((
+            entry.path.clone(),
+            at,
+            entry.value,
+            vec![Access::Bind],
+            entry.source.clone(),
+        ));
     }
-    denied.extend(grants.deny.iter().map(|(p, _)| p.clone()));
+    if let (Some(folder), Some(source)) = (claude_code.and_then(|c| c.folder), &claude_source) {
+        layer.push((folder.clone(), BASE, Effect::Allow, vec![Access::Write], source.clone()));
+        // `claude` locks the folder itself with `proper-lockfile`: an empty `<folder>.lock` folder beside it.
+        layer.push((
+            lock_of(folder),
+            BASE,
+            Effect::Allow,
+            vec![Access::Write],
+            source.clone(),
+        ));
+    }
+    let claude_sockets = claude_code.and_then(|c| c.sockets);
+    if let (Some(sockets), Some(source)) = (claude_sockets, &claude_source) {
+        // Its temp files and sockets; connecting stays closed (see `ClaudeCodeSockets`).
+        layer.push((
+            sockets.to_path_buf(),
+            BASE,
+            Effect::Allow,
+            vec![Access::Write, Access::Bind],
+            source.clone(),
+        ));
+    }
+    // The rules so far are the base roots and DNS. A write root reopens reading too, so a broader deny above it doesn't
+    // close it; each sits under any entry of the same depth.
+    let mut ordered: Vec<(usize, u8, usize, Rule)> = Vec::new();
+    for (index, mut rule) in std::mem::take(&mut rules.rules).into_iter().enumerate() {
+        let depth = rule_path(&rule.target).map_or(0, |p| p.components().count());
+        if rule.access == [Access::Write] {
+            rule.access = vec![Access::Read, Access::Write];
+        }
+        ordered.push((depth, ROOT, index, rule));
+    }
+    let offset = ordered.len();
+    for (index, (path, rank, effect, access, source)) in layer.into_iter().enumerate() {
+        ordered.push((
+            path.components().count(),
+            rank,
+            offset + index,
+            Rule {
+                effect,
+                access,
+                target: subpath(&path),
+                source,
+            },
+        ));
+    }
+    ordered.sort_by_key(|(depth, rank, index, _)| (*depth, *rank, *index));
+    rules.rules = ordered.into_iter().map(|(_, _, _, rule)| rule).collect();
 
     // 3. pi's agent directories: as named, so the runtime grants below resolve like every other grant.
     let host_agent = agent_dir(
@@ -700,11 +745,6 @@ fn build(
         rules.push(Effect::Allow, &[Access::Write], target, Source::AgentDir);
     }
 
-    // 4. The user's denies.
-    for (path, source) in &grants.deny {
-        rules.push(Effect::Deny, &all, subpath(path), source.clone());
-    }
-
     // 4b. What fnox loads: each file, and each folder entry on its path (renamed, removed, or replaced, a folder would
     // let the file be changed under another name). Denies follow links when finished, so the real path's are denied
     // too. What's in those folders stays as the other rules decide.
@@ -718,7 +758,8 @@ fn build(
     let named: Vec<PathBuf> = grants
         .sockets
         .iter()
-        .map(|(p, _)| p.clone())
+        .filter(|e| e.value == Effect::Allow)
+        .map(|e| e.path.clone())
         .filter(|p| p.parent().is_some())
         .collect();
     for entry in crate::agent::fixed_entries(&named) {
@@ -788,8 +829,8 @@ fn build(
             what: "a protected file (.piton/ or .pi/): changed only with the user's approval".into(),
         },
     );
-    // The `git` preset (the user's own choice, or yolo's) leaves this rule out.
-    if !grants.presets.iter().any(|(p, _)| matches!(p, Preset::Git)) {
+    // `allow_git_control_files = true` (the user's own choice, or yolo's) leaves this rule out.
+    if grants.git_control.is_none() {
         rules.push(
             Effect::Deny,
             &[Access::Write],
@@ -846,16 +887,18 @@ fn build(
 
     let keychains = facts.home.join("Library/Keychains");
     let keychain = grants
-        .read
+        .filesystem
         .iter()
-        .any(|(r, _)| keychains.starts_with(r) || r.starts_with(&keychains));
+        .any(|e| e.value != FileAccess::Deny && (keychains.starts_with(&e.path) || e.path.starts_with(&keychains)));
     let (rules, links) = rules.finish(&[&config.checkout, &config.source]);
     let policy = Policy {
         rules,
         keychain,
-        services: grants.services.clone(),
+        services: Services::Listed {
+            grants: grants.services.clone(),
+        },
         apps: grants.apps.clone(),
-        network: grants.network.clone(),
+        network: grants.network(),
         listen: grants.listen.clone(),
         tag: String::new(),
     };
@@ -927,237 +970,443 @@ fn lock_of(folder: &Path) -> PathBuf {
 /// The interactive Claude Code's config folder, when it isn't `~/.claude`.
 const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 
-/// The `[sandbox]` lists in effect: the profile's entries, then the user's, expanded to absolute paths, each with the
-/// rule source that names where it came from.
+/// One entry of the merged maps, expanded, with where it came from.
+#[derive(Debug, Clone)]
+struct PathEntry<V> {
+    path: PathBuf,
+    value: V,
+    source: Source,
+    /// A committed `config.toml` wrote it: it never reopens what a credential or the user's own deny closes.
+    committed: bool,
+}
+
+/// The `[sandbox]` maps in effect, the base layer (profile, presets) under the files, expanded to absolute paths, each
+/// entry with the rule source that names where it came from.
 struct Grants {
-    write: Vec<(PathBuf, Source)>,
-    write_file: Vec<(PathBuf, Source)>,
-    read: Vec<(PathBuf, Source)>,
-    sockets: Vec<(PathBuf, Source)>,
-    unix_bind: Vec<(PathBuf, Source)>,
-    network: Network,
+    filesystem: Vec<PathEntry<FileAccess>>,
+    sockets: Vec<PathEntry<Effect>>,
+    bindings: Vec<PathEntry<Effect>>,
+    network: Vec<NetworkGrant>,
     listen: Listen,
-    services: Services,
+    services: Vec<ServiceGrant>,
     apps: Apps,
-    presets: Vec<(Preset, Provenance)>,
-    deny: Vec<(PathBuf, Source)>,
+    git_control: Option<Source>,
+    /// What a committed file left out: a write inside a credential or the user's own deny.
+    ignored: Vec<String>,
     /// The `pi-claude-code` preset, when it's on: its options and where they came from. Its config folder is decided
     /// from the launch's environment ([`claude_code_folder`]).
     claude_code: Option<(ClaudeCodeOptions, Provenance)>,
 }
 
+/// A boolean's value in effect: the nearest file's, else `true` when the base layer opens it.
+fn boolean(file: &Option<Listed<bool>>, key: &str, base: Option<Source>) -> Option<(bool, Source)> {
+    match file {
+        Some(listed) => Some((
+            listed.value,
+            Source::Config {
+                key: format!("sandbox.{key}"),
+                from: Provenance::File {
+                    path: listed.file.clone(),
+                },
+            },
+        )),
+        None => base.map(|source| (true, source)),
+    }
+}
+
 impl Grants {
-    /// A profile's entry whose variable isn't set (no `$SSH_AUTH_SOCK`) is left out; the user's own refuses the launch.
+    /// A base entry whose variable isn't set (no `$SSH_AUTH_SOCK`) is left out; the user's own refuses the launch.
     fn of(config: &LaunchConfig, facts: &Facts) -> Result<Self, SandboxError> {
         let settings = &config.sandbox;
         let profile = settings.profile();
         let entries = policy::profile_entries(profile);
         let from_profile = Provenance::Profile { profile };
-        let from_file = |file: &Path| Provenance::File {
-            path: file.to_path_buf(),
-        };
-        let source = |key: &str, from: Provenance| Source::Config {
-            key: format!("sandbox.{key}"),
-            from,
-        };
         let expand = |grant: &str| expand_grant(grant, facts.home, facts.base_env);
-        let from_profile_entry = |grant: &str| match expand(grant) {
+        let optional = |grant: &str| match expand(grant) {
             Ok(path) => Ok(Some(path)),
             Err(SandboxError::UnsetVariable { .. }) => Ok(None),
             Err(other) => Err(other),
         };
-        let user = |key: &str, list: &[Listed<String>]| -> Result<Vec<(PathBuf, Source)>, SandboxError> {
-            list.iter()
-                .map(|l| Ok((expand(&l.value)?, source(key, from_file(&l.file)))))
-                .collect()
+        let config_source = |key: String, from: Provenance| Source::Config { key, from };
+        let profile_source = |key: &str| config_source(format!("sandbox.{key}"), from_profile.clone());
+
+        let presets: Vec<(Preset, Provenance)> = settings
+            .presets
+            .iter()
+            .map(|e| (e.value, Provenance::File { path: e.file.clone() }))
+            .collect();
+        let preset_source = |preset: &Preset, from: &Provenance| Source::Preset {
+            preset: preset.name().into(),
+            from: from.clone(),
         };
 
-        // A preset both list keeps the profile as its source.
-        let mut presets: Vec<(Preset, Provenance)> =
-            entries.presets.into_iter().map(|p| (p, from_profile.clone())).collect();
-        for listed in &settings.presets {
-            if !presets.iter().any(|(p, _)| p.name() == listed.value.name()) {
-                presets.push((listed.value, from_file(&listed.file)));
-            }
-        }
-
-        // Each preset's entries come first in their lists, named after the preset.
-        let mut write = Vec::new();
-        let mut write_file = Vec::new();
-        let mut read = Vec::new();
-        let mut preset_connects = Vec::new();
-        for (preset, from) in &presets {
-            let granted = policy::preset_grants(preset);
-            let source = Source::Preset {
-                preset: preset.name().into(),
-                from: from.clone(),
-            };
-            for path in granted.write {
-                write.push((expand(path)?, source.clone()));
-            }
-            for path in granted.write_file {
-                write_file.push((expand(path)?, source.clone()));
-            }
-            for path in granted.read {
-                read.push((expand(path)?, source.clone()));
-            }
-            preset_connects.extend(granted.connect.into_iter().map(|c| (c, source.clone())));
-        }
-        write.extend(user("write", &settings.write)?);
-        write_file.extend(user("write_file", &settings.write_file)?);
-
+        // Filesystem: the profile's reads, the presets' entries, then the files (nearest wins per key, as merged).
+        let mut filesystem: Vec<PathEntry<FileAccess>> = Vec::new();
+        let base = |filesystem: &mut Vec<PathEntry<FileAccess>>, path: PathBuf, value, source| {
+            filesystem.retain(|e| e.path != path);
+            filesystem.push(PathEntry {
+                path,
+                value,
+                source,
+                committed: false,
+            });
+        };
         for entry in entries.read {
             let paths = match entry {
-                policy::ReadEntry::Path(grant) => from_profile_entry(grant)?.into_iter().collect(),
+                policy::ReadEntry::Path(grant) => optional(grant)?.into_iter().collect(),
                 policy::ReadEntry::SshPublicKeys => ssh_public_keys(&facts.home.join(".ssh")),
             };
             for path in paths {
-                read.push((path, source("read", from_profile.clone())));
+                base(&mut filesystem, path, FileAccess::Read, profile_source("filesystem"));
             }
         }
-        read.extend(user("read", &settings.read)?);
-
-        let mut unix_bind = Vec::new();
-        for grant in entries.unix_bind {
-            if let Some(path) = from_profile_entry(grant)? {
-                unix_bind.push((path, source("unix_bind", from_profile.clone())));
+        for (preset, from) in &presets {
+            let granted = policy::preset_grants(preset);
+            for path in granted.write {
+                base(
+                    &mut filesystem,
+                    expand(path)?,
+                    FileAccess::Write,
+                    preset_source(preset, from),
+                );
+            }
+            for path in granted.read {
+                base(
+                    &mut filesystem,
+                    expand(path)?,
+                    FileAccess::Read,
+                    preset_source(preset, from),
+                );
             }
         }
-        unix_bind.extend(user("unix_bind", &settings.unix_bind)?);
-
-        // TCP listening: open, named after the first of the profile, the presets, and the user's files that opens it.
-        let preset_listen = presets.iter().find_map(|(preset, from)| {
-            policy::preset_grants(preset).tcp_listen.then(|| Source::Preset {
-                preset: preset.name().into(),
-                from: from.clone(),
-            })
-        });
-        let profile_listen = entries.tcp_listen.then(|| source("tcp_listen", from_profile.clone()));
-        let user_listen = settings
-            .tcp_listen
-            .as_ref()
-            .map(|l| source("tcp_listen", from_file(&l.file)));
-        let listen = match profile_listen.or(preset_listen).or(user_listen) {
-            Some(source) => Listen::Open { source },
-            None => Listen::Closed,
+        let user_source = |table: &str, key: &dyn std::fmt::Display, file: &Path| {
+            config_source(
+                format!("sandbox.{table}.\"{key}\""),
+                Provenance::File {
+                    path: file.to_path_buf(),
+                },
+            )
         };
-
-        let mut sockets = Vec::new();
-        let mut network = Vec::new();
-        let connects = entries
-            .connect
+        // The files' entries by expanded path: keys spelled differently (`~/x`, `$HOME/x`) are one entry. The user's own
+        // deny for a path is kept over anything a committed file says for it; otherwise deny over write over read.
+        let mut ignored: Vec<String> = settings
+            .ignored
             .iter()
-            .map(|c| (c.clone(), from_profile.clone()))
-            .chain(settings.connect.iter().map(|l| (l.value.clone(), from_file(&l.file))))
-            .map(|(c, from)| {
-                let is_profile = matches!(from, Provenance::Profile { .. });
-                (c, is_profile, source("connect", from))
-            })
-            .chain(preset_connects.into_iter().map(|(c, source)| (c, true, source)));
-        for (connect, optional, source) in connects {
-            match connect {
-                Connect::Socket(grant) => {
-                    let path = match optional {
-                        true => from_profile_entry(&grant)?,
-                        false => Some(expand(&grant)?),
+            .map(|l| format!("{} in {}: it would reopen your own deny", l.value, l.file.display()))
+            .collect();
+        let rank = |value: FileAccess| match value {
+            FileAccess::Read => 0,
+            FileAccess::Write => 1,
+            FileAccess::Deny => 2,
+        };
+        let mut users: Vec<PathEntry<FileAccess>> = Vec::new();
+        for (key, entry) in &settings.filesystem {
+            let new = PathEntry {
+                path: expand(key.as_str())?,
+                value: entry.value,
+                source: user_source("filesystem", key, &entry.file),
+                committed: entry.origin == ConfigOrigin::Committed,
+            };
+            match users.iter().position(|e| e.path == new.path) {
+                None => users.push(new),
+                Some(at) => {
+                    let old = &users[at];
+                    let users_deny = |e: &PathEntry<FileAccess>| !e.committed && e.value == FileAccess::Deny;
+                    let reopens = |e: &PathEntry<FileAccess>| e.committed && e.value != FileAccess::Deny;
+                    let keep_old = match (users_deny(old) && reopens(&new), users_deny(&new) && reopens(old)) {
+                        (true, _) => true,
+                        (false, true) => false,
+                        (false, false) => rank(old.value) >= rank(new.value),
                     };
-                    if let Some(path) = path {
-                        sockets.push((path, source));
+                    let dropped = match keep_old {
+                        true => new,
+                        false => std::mem::replace(&mut users[at], new),
+                    };
+                    if reopens(&dropped) {
+                        ignored.push(format!(
+                            "{}: it would reopen {}, which your own deny closes",
+                            explain_source(&dropped.source),
+                            dropped.path.display()
+                        ));
                     }
                 }
-                Connect::Network(target) => network.push(NetworkGrant { target, source }),
             }
         }
-        // `*` anywhere opens the network, named after the first entry that did; otherwise only what's listed, and the
-        // gate the launch gives it later (`Gate::None` until then).
-        let network = match network
-            .iter()
-            .find(|g| g.target == crate::config::NetworkTarget::Anywhere)
-        {
-            Some(open) => Network::Open {
-                source: open.source.clone(),
-            },
-            None => Network::Filtered {
-                grants: network,
-                gate: Gate::None,
-            },
-        };
+        for entry in users {
+            filesystem.retain(|e| e.path != entry.path);
+            filesystem.push(entry);
+        }
 
-        let claude_code = presets.iter().find_map(|(preset, from)| match preset {
-            Preset::PiClaudeCode(options) => Some((*options, from.clone())),
-            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::Apps => None,
+        // A committed opening entry at or below a credential deny, or below the user's own deny, is left out.
+        let credentials: Vec<PathBuf> = policy::nono_denies()
+            .into_iter()
+            .filter_map(|(path, _)| expand(&path).ok())
+            .collect();
+        let users_denies: Vec<PathBuf> = filesystem
+            .iter()
+            .filter(|e| !e.committed && e.value == FileAccess::Deny)
+            .map(|e| e.path.clone())
+            .collect();
+        filesystem.retain(|e| {
+            let opens = e.committed && e.value != FileAccess::Deny;
+            let closed = credentials
+                .iter()
+                .chain(&users_denies)
+                .find(|d| e.path.starts_with(d) && **d != e.path || credentials.contains(&e.path));
+            match (opens, closed) {
+                (true, Some(by)) => {
+                    ignored.push(format!(
+                        "{}: it would reopen {}, which a credential or your own deny closes",
+                        explain_source(&e.source),
+                        by.display()
+                    ));
+                    false
+                }
+                (true, None) | (false, _) => true,
+            }
         });
 
-        // Mach services: the built-in list, then the presets', the profile's, and the user's; `*` anywhere opens every
-        // service, named after the first entry that did.
-        let mut grants: Vec<ServiceGrant> = policy::BASE_SERVICES
-            .iter()
-            .map(|(name, why)| ServiceGrant {
-                name: ServiceName::Exact((*name).to_string()),
-                source: Source::BuiltIn {
-                    what: format!("a service every launch may look up: {why}"),
-                },
-            })
-            .collect();
-        let mut every = None;
-        for (preset, from) in &presets {
-            for name in policy::preset_grants(preset).services {
-                grants.push(ServiceGrant {
-                    name: ServiceName::Exact(name.to_string()),
-                    source: Source::Preset {
-                        preset: preset.name().into(),
-                        from: from.clone(),
-                    },
+        // Sockets and bindings.
+        let mut sockets: Vec<PathEntry<Effect>> = Vec::new();
+        for grant in entries.unix_socket_connections {
+            if let Some(path) = optional(grant)? {
+                sockets.retain(|e| e.path != path);
+                sockets.push(PathEntry {
+                    path,
+                    value: Effect::Allow,
+                    source: profile_source("network.unix_socket_connections"),
+                    committed: false,
                 });
             }
         }
-        let entries_listed = entries
-            .services
-            .into_iter()
-            .map(|e| (e, from_profile.clone()))
-            .chain(settings.services.iter().map(|l| (l.value.clone(), from_file(&l.file))));
-        for (entry, from) in entries_listed {
-            let source = source("services", from);
-            match entry {
-                ServiceEntry::Every => {
-                    every.get_or_insert(source);
-                }
-                ServiceEntry::Name(name) => grants.push(ServiceGrant { name, source }),
+        for (key, entry) in &settings.unix_socket_connections {
+            let path = expand(key.as_str())?;
+            sockets.retain(|e| e.path != path);
+            sockets.push(PathEntry {
+                path,
+                value: entry.value,
+                source: user_source("network.unix_socket_connections", key, &entry.file),
+                committed: entry.origin == ConfigOrigin::Committed,
+            });
+        }
+        let mut bindings: Vec<PathEntry<Effect>> = Vec::new();
+        for grant in entries.unix_socket_bindings {
+            if let Some(path) = optional(grant)? {
+                bindings.push(PathEntry {
+                    path,
+                    value: Effect::Allow,
+                    source: profile_source("network.unix_socket_bindings"),
+                    committed: false,
+                });
             }
         }
-        let services = match every {
-            Some(source) => Services::Every { source },
-            None => Services::Listed { grants },
+        for (key, entry) in &settings.unix_socket_bindings {
+            let path = expand(key.as_str())?;
+            bindings.retain(|e| e.path != path);
+            bindings.push(PathEntry {
+                path,
+                value: entry.value,
+                source: user_source("network.unix_socket_bindings", key, &entry.file),
+                committed: entry.origin == ConfigOrigin::Committed,
+            });
+        }
+
+        // Connections: the profile's, the presets', then the files'.
+        let mut network: Vec<NetworkGrant> = Vec::new();
+        let put = |network: &mut Vec<NetworkGrant>, target: NetworkTarget, effect, source| {
+            network.retain(|g| g.target != target);
+            network.push(NetworkGrant { target, effect, source });
         };
-        let apps = presets
-            .iter()
-            .find_map(|(preset, from)| match preset {
-                Preset::Apps => Some(Apps::Open {
-                    source: Source::Preset {
-                        preset: preset.name().into(),
-                        from: from.clone(),
-                    },
-                }),
-                Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::Git | Preset::PiClaudeCode(_) => {
-                    None
-                }
-            })
-            .unwrap_or(Apps::Closed);
+        for target in entries.connections {
+            put(
+                &mut network,
+                target,
+                Effect::Allow,
+                profile_source("network.connections"),
+            );
+        }
+        for (preset, from) in &presets {
+            for target in policy::preset_grants(preset).connections {
+                put(&mut network, target, Effect::Allow, preset_source(preset, from));
+            }
+        }
+        for (target, entry) in &settings.connections {
+            put(
+                &mut network,
+                target.clone(),
+                entry.value,
+                user_source("network.connections", target, &entry.file),
+            );
+        }
+
+        // Booleans: the nearest file's value, else the base layer's `true`.
+        let preset_listen = presets.iter().find_map(|(preset, from)| {
+            policy::preset_grants(preset)
+                .allow_tcp_listening
+                .then(|| preset_source(preset, from))
+        });
+        let base_listen = entries
+            .allow_tcp_listening
+            .then(|| profile_source("allow_tcp_listening"))
+            .or(preset_listen);
+        let listen = match boolean(&settings.allow_tcp_listening, "allow_tcp_listening", base_listen) {
+            Some((true, source)) => Listen::Open { source },
+            Some((false, source)) => Listen::Denied { source },
+            None => Listen::Closed,
+        };
+        let base_apps = entries
+            .allow_launching_apps
+            .then(|| profile_source("allow_launching_apps"));
+        let (apps, apps_open) = match boolean(&settings.allow_launching_apps, "allow_launching_apps", base_apps) {
+            Some((true, source)) => (Apps::Open { source: source.clone() }, Some(source)),
+            Some((false, source)) => (Apps::Denied { source }, None),
+            None => (Apps::Closed, None),
+        };
+        let base_git = entries
+            .allow_git_control_files
+            .then(|| profile_source("allow_git_control_files"));
+        let git_control = match boolean(&settings.allow_git_control_files, "allow_git_control_files", base_git) {
+            Some((true, source)) => Some(source),
+            Some((false, _)) | None => None,
+        };
+
+        // Mach services: the built-in list, the services launching apps needs, the profile's, then the files'.
+        let mut services: Vec<ServiceGrant> = Vec::new();
+        let put_service = |services: &mut Vec<ServiceGrant>, key: ServiceKey, effect, source| {
+            services.retain(|g| g.key != key);
+            services.push(ServiceGrant { key, effect, source });
+        };
+        for (name, why) in policy::BASE_SERVICES {
+            put_service(
+                &mut services,
+                ServiceKey::Name(ServiceName::Exact((*name).to_string())),
+                Effect::Allow,
+                Source::BuiltIn {
+                    what: format!("a service every launch may look up: {why}"),
+                },
+            );
+        }
+        if let Some(source) = apps_open {
+            for name in policy::APP_SERVICES {
+                put_service(
+                    &mut services,
+                    ServiceKey::Name(ServiceName::Exact((*name).to_string())),
+                    Effect::Allow,
+                    source.clone(),
+                );
+            }
+        }
+        for key in entries.services {
+            put_service(&mut services, key, Effect::Allow, profile_source("macos.services"));
+        }
+        for (key, entry) in &settings.services {
+            put_service(
+                &mut services,
+                key.clone(),
+                entry.value,
+                user_source("macos.services", key, &entry.file),
+            );
+        }
+
+        let claude_code = presets.iter().find_map(|(preset, from)| match preset {
+            Preset::PiClaudeCode(options) => Some((*options, from.clone())),
+            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => None,
+        });
 
         Ok(Self {
-            write,
-            write_file,
-            read,
+            filesystem,
             sockets,
-            unix_bind,
+            bindings,
             network,
             listen,
             services,
             apps,
-            presets,
-            deny: user("deny", &settings.deny)?,
+            git_control,
+            ignored,
             claude_code,
         })
+    }
+
+    /// The network's mode: open with no gate when `*` decides allow and the sandbox's port rules can enforce every
+    /// entry (no named host decides differently from the entry that decides for it in Seatbelt); otherwise filtered,
+    /// keeping this Mac direct when `*` allows.
+    fn network(&self) -> Network {
+        let star = self
+            .network
+            .iter()
+            .find(|g| g.target == NetworkTarget::Anywhere)
+            .map(|g| g.effect);
+        let named_differs = self.network.iter().any(|g| match (&g.target, g.effect) {
+            (NetworkTarget::Host { .. }, Effect::Deny) => true,
+            // A host allow is enforceable directly only when every port it covers is allowed there anyway.
+            (NetworkTarget::Host { port, .. }, Effect::Allow) => self.network.iter().any(|p| {
+                p.effect == Effect::Deny
+                    && match (&p.target, port) {
+                        (NetworkTarget::AnyHostPort { port: denied }, Some(port)) => denied == port,
+                        (NetworkTarget::AnyHostPort { .. }, None) => true,
+                        (
+                            NetworkTarget::Anywhere
+                            | NetworkTarget::LocalAnyPort
+                            | NetworkTarget::LocalPort { .. }
+                            | NetworkTarget::Host { .. },
+                            _,
+                        ) => false,
+                    }
+            }),
+            (
+                NetworkTarget::Anywhere
+                | NetworkTarget::AnyHostPort { .. }
+                | NetworkTarget::LocalAnyPort
+                | NetworkTarget::LocalPort { .. },
+                _,
+            ) => false,
+        });
+        match (star, named_differs) {
+            (Some(Effect::Allow), false) => Network::Direct {
+                grants: self.network.clone(),
+            },
+            (Some(Effect::Allow), true) => {
+                // This Mac stays direct, unless an entry says otherwise.
+                let mut grants = self.network.clone();
+                if !grants.iter().any(|g| g.target == NetworkTarget::LocalAnyPort) {
+                    let source = self
+                        .network
+                        .iter()
+                        .find(|g| g.target == NetworkTarget::Anywhere)
+                        .map(|g| g.source.clone())
+                        .unwrap_or(Source::BuiltIn {
+                            what: "the network".into(),
+                        });
+                    grants.push(NetworkGrant {
+                        target: NetworkTarget::LocalAnyPort,
+                        effect: Effect::Allow,
+                        source,
+                    });
+                }
+                Network::Filtered {
+                    grants,
+                    gate: Gate::None,
+                }
+            }
+            (Some(Effect::Deny) | None, _) => Network::Filtered {
+                grants: self.network.clone(),
+                gate: Gate::None,
+            },
+        }
+    }
+}
+
+/// How a rule source reads in a warning.
+fn explain_source(source: &Source) -> String {
+    match source {
+        Source::Config { key, from } => format!("{key}, {from}"),
+        Source::Preset { preset, from } => format!("the {preset} preset, {from}"),
+        Source::Workspace
+        | Source::BuiltIn { .. }
+        | Source::NonoGroup { .. }
+        | Source::Piton { .. }
+        | Source::FnoxConfig
+        | Source::AgentDir => format!("{source:?}"),
     }
 }
 
@@ -1536,14 +1785,20 @@ fn closed_reason(dir: &Path, config: &LaunchConfig, facts: &Facts, denied: &[Pat
     None
 }
 
-/// What's never configuration, for any launch in `config`'s workspace: the credential denies and the user's `[sandbox]
-/// deny`, expanded (an entry naming an unset variable is left out: the sandbox refuses that launch anyway). No protected
-/// area outside the checkout reaches them (`agent/protected.rs`).
+/// What's never configuration, for any launch in `config`'s workspace: the credential denies and every filesystem
+/// `"deny"` entry, expanded (an entry naming an unset variable is left out: the sandbox refuses that launch anyway). No
+/// protected area outside the checkout reaches them (`agent/protected.rs`).
 pub fn never_configuration(config: &LaunchConfig, home: &Path, base_env: &Env) -> Vec<PathBuf> {
+    let denies = config
+        .sandbox
+        .filesystem
+        .iter()
+        .filter(|(_, e)| e.value == FileAccess::Deny)
+        .map(|(key, _)| key.as_str().to_string());
     policy::nono_denies()
         .into_iter()
         .map(|(path, _)| path)
-        .chain(config.sandbox.deny.iter().map(|l| l.value.clone()))
+        .chain(denies)
         .filter_map(|path| expand_grant(&path, home, base_env).ok())
         .collect()
 }
@@ -1792,11 +2047,13 @@ mod tests {
         assert!(!p.keychain);
     }
 
+    /// Presets' writes, the user's writes (a folder or a file alike), and a user deny inside the workspace, which wins
+    /// over the workspace's write because it's more specific.
     #[test]
     fn presets_writes_and_denies() {
         let f = fixture(
-            "",
-            "[sandbox]\npresets = [\"rust\"]\nwrite = [\"~/out\"]\nwrite_file = [\"~/f\"]\ndeny = [\"~/p/repo/secret\"]\n",
+            "[sandbox.filesystem]\n\"~/p/repo/docs\" = \"read\"\n",
+            "[sandbox]\npresets = [\"rust\"]\n[sandbox.filesystem]\n\"~/out\" = \"write\"\n\"~/f\" = \"write\"\n\"~/p/repo/secret\" = \"deny\"\n",
         );
         assert_eq!(launch_config(&f).sandbox.presets[0].value, Preset::Rust);
         let p = policy(&f);
@@ -1807,13 +2064,16 @@ mod tests {
         assert!(allowed(&p, &h.join("out/x"), Access::Write));
         assert!(allowed(&p, &h.join("f"), Access::Write));
         assert!(!allowed(&p, &h.join("f2"), Access::Write));
-        // A user deny beats the workspace grant.
+        // A user deny beats the workspace grant; a `"read"` inside it closes writing there.
         assert!(!allowed(&p, &f.repo.join("secret/k"), Access::Read));
         assert!(!allowed(&p, &f.repo.join("secret/k"), Access::Write));
+        assert!(allowed(&p, &f.repo.join("docs/a.md"), Access::Read));
+        assert!(!allowed(&p, &f.repo.join("docs/a.md"), Access::Write));
+        assert!(allowed(&p, &f.repo.join("src/main.rs"), Access::Write));
         assert_eq!(
             p.decide(&f.repo.join("secret/k"), Access::Read).source,
             Source::Config {
-                key: "sandbox.deny".into(),
+                key: "sandbox.filesystem.\"~/p/repo/secret\"".into(),
                 from: Provenance::File {
                     path: f.repo.join(".piton/config.toml")
                 },
@@ -1830,33 +2090,108 @@ mod tests {
         );
     }
 
-    /// `write` alone doesn't reopen a credential; `read` (global only) does, and makes it writable with `write`.
+    /// The user's own `"read"` or `"write"` inside a credential reopens it, the most specific entry deciding; the same
+    /// entry from a committed file is left out, and so is a committed write inside the user's own deny.
     #[test]
-    fn read_lifts_a_built_in_deny() {
+    fn entries_inside_a_credential() {
         let f = fixture(
-            "[sandbox]\nprofile = \"strict\"\nread = [\"~/.ssh/config\", \"~/Library/Keychains\"]\nwrite = [\"~/Library/Keychains\", \"~/.aws\"]\n",
-            "",
+            "[sandbox]\nprofile = \"strict\"\n[sandbox.filesystem]\n\"~/.ssh/config\" = \"read\"\n\"~/Library/Keychains\" = \"write\"\n\"~/secrets\" = \"deny\"\n",
+            "[sandbox.filesystem]\n\"~/.aws\" = \"write\"\n\"~/secrets/keys\" = \"write\"\n\"~/.gnupg\" = \"deny\"\n",
         );
-        let p = policy(&f);
+        let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
+        let p = &r.policy;
         let h = &f.home;
-        assert!(allowed(&p, &h.join(".ssh/config"), Access::Read));
-        assert!(!allowed(&p, &h.join(".ssh/config"), Access::Write));
-        assert!(!allowed(&p, &h.join(".ssh/id_ed25519"), Access::Read));
+        assert!(allowed(p, &h.join(".ssh/config"), Access::Read));
+        assert!(!allowed(p, &h.join(".ssh/config"), Access::Write));
+        assert!(!allowed(p, &h.join(".ssh/id_ed25519"), Access::Read));
         assert!(allowed(
-            &p,
+            p,
             &h.join("Library/Keychains/login.keychain-db"),
             Access::Write
         ));
-        assert!(
-            !allowed(&p, &h.join(".aws/credentials"), Access::Read),
-            "write doesn't lift a deny"
-        );
-        assert!(!allowed(&p, &h.join(".aws/credentials"), Access::Write));
         assert!(p.keychain);
+        // Committed: left out, each with a warning.
+        assert!(!allowed(p, &h.join(".aws/credentials"), Access::Read));
+        assert!(!allowed(p, &h.join(".aws/credentials"), Access::Write));
+        assert!(!allowed(p, &h.join("secrets/keys/k"), Access::Read));
+        assert!(!allowed(p, &h.join("secrets/keys/k"), Access::Write));
+        assert_eq!(r.ignored.len(), 2, "{:?}", r.ignored);
+        // A committed deny applies.
+        assert!(!allowed(p, &h.join(".gnupg/x"), Access::Read));
+    }
+
+    /// Keys spelled differently for one path are one entry: a committed write never replaces the user's own deny, in
+    /// either sort order, and is listed as left out; between the user's own, deny wins over write.
+    #[test]
+    fn the_same_path_spelled_differently() {
+        for (global, project) in [("$HOME/secrets", "~/secrets"), ("~/secrets", "$HOME/secrets")] {
+            let f = fixture(
+                &format!("[sandbox.filesystem]\n\"{global}\" = \"deny\"\n"),
+                &format!("[sandbox.filesystem]\n\"{project}\" = \"write\"\n"),
+            );
+            let base = env(&[("HOME", f.home.to_str().unwrap())]);
+            let r = resolve_in(&f, &f.repo, &base, &Env::new()).unwrap();
+            let secret = f.home.join("secrets/k");
+            assert!(!allowed(&r.policy, &secret, Access::Read), "{global} / {project}");
+            assert!(!allowed(&r.policy, &secret, Access::Write), "{global} / {project}");
+            assert_eq!(r.ignored.len(), 1, "{:?}", r.ignored);
+        }
+        let f = fixture(
+            "[sandbox.filesystem]\n\"$HOME/x\" = \"write\"\n\"~/x\" = \"deny\"\n",
+            "",
+        );
+        let base = env(&[("HOME", f.home.to_str().unwrap())]);
+        let p = policy_with(&f, &base, &Env::new()).unwrap();
+        assert!(!allowed(&p, &f.home.join("x/y"), Access::Write), "deny over write");
+    }
+
+    /// A profile's read inside a credential (standard's `~/.ssh/known_hosts`) stays a built-in block for writes: the
+    /// credential deny decides, so a notice explains it and an approved command lifts it while fnox is off. The user's
+    /// own read entry closes writes as their choice: only logged, and floor.
+    #[test]
+    fn a_profiles_read_leaves_writes_to_the_credential() {
+        use super::super::grant::{Credentials, all};
+        let f = fixture("[sandbox.filesystem]\n\"~/docs\" = \"read\"\n", "");
+        let p = policy(&f);
+        let known = f.home.join(".ssh/known_hosts");
+        assert!(allowed(&p, &known, Access::Read));
+        assert!(!allowed(&p, &known, Access::Write));
+        assert!(matches!(
+            p.decide(&known, Access::Write).source,
+            Source::NonoGroup { .. }
+        ));
+        let widened = all(&p, Credentials::Liftable);
+        assert!(allowed(&widened, &known, Access::Write), "an approved command lifts it");
+        assert!(
+            !allowed(&all(&p, Credentials::Floor), &known, Access::Write),
+            "not behind fnox"
+        );
+        let docs = f.home.join("docs/a");
+        assert!(matches!(
+            p.decide(&docs, Access::Write).source,
+            Source::Config {
+                from: Provenance::File { .. },
+                ..
+            }
+        ));
+        assert!(
+            !allowed(&widened, &docs, Access::Write),
+            "the user's own read stays floor"
+        );
+    }
+
+    /// A broader deny above the workspace leaves the workspace below it as it was: the most specific decides.
+    #[test]
+    fn a_broader_deny_doesnt_close_the_workspace() {
+        let f = fixture("[sandbox.filesystem]\n\"~/p\" = \"deny\"\n", "");
+        let p = policy(&f);
+        assert!(allowed(&p, &f.repo.join("src/main.rs"), Access::Write));
+        assert!(allowed(&p, &f.repo.join("src/main.rs"), Access::Read));
+        assert!(!allowed(&p, &f.home.join("p/other/x"), Access::Read));
     }
 
     /// `strict` is the base: no profile entry. `standard` (the default) reads SSH's host files, connects to the SSH agent
-    /// and the network; `yolo` adds every socket and the `git` preset. Each entry names its profile.
+    /// and the network; `yolo` adds every socket and Git's control files. Each entry names its profile.
     #[test]
     fn profiles_only_add() {
         let agent = env(&[("SSH_AUTH_SOCK", "/private/tmp/agent.sock")]);
@@ -1868,7 +2203,9 @@ mod tests {
         let profile_rules = |r: &Resolution| {
             let network = match &r.policy.network {
                 Network::Open { source } => usize::from(from_profile(source)),
-                Network::Filtered { grants, .. } => grants.iter().filter(|g| from_profile(&g.source)).count(),
+                Network::Direct { grants } | Network::Filtered { grants, .. } => {
+                    grants.iter().filter(|g| from_profile(&g.source)).count()
+                }
             };
             r.policy.rules.iter().filter(|rule| from_profile(&rule.source)).count() + network
         };
@@ -1927,41 +2264,31 @@ mod tests {
         assert!(allowed(p, &f.repo.join("test.sock"), Access::Bind));
         assert!(allowed(p, Path::new("/private/tmp/x.sock"), Access::Bind));
         assert!(!allowed(p, Path::new("/private/tmp/x.sock"), Access::Connect));
+        let from_standard = |key: &str| Source::Config {
+            key: key.into(),
+            from: Provenance::Profile {
+                profile: Profile::Standard,
+            },
+        };
         assert_eq!(
             p.decide(&f.home.join(".ssh/config"), Access::Read).source,
-            Source::Config {
-                key: "sandbox.read".into(),
-                from: Provenance::Profile {
-                    profile: Profile::Standard
-                },
-            }
+            from_standard("sandbox.filesystem")
         );
         assert!(
             p.rules
                 .iter()
                 .any(|r| r.target == subpath(Path::new("/private/tmp/agent.sock")) && r.access == [Access::Connect])
         );
-        assert_eq!(
-            p.network,
-            Network::Open {
-                source: Source::Config {
-                    key: "sandbox.connect".into(),
-                    from: Provenance::Profile {
-                        profile: Profile::Standard
-                    },
-                }
-            },
-            "standard's `*` opens the network"
+        assert!(
+            matches!(&p.network, Network::Direct { grants } if grants.iter().any(|g| g.target == crate::config::NetworkTarget::Anywhere)),
+            "standard's `*` keeps the network open: {:?}",
+            p.network
         );
+        assert!(p.network.proxy().is_none(), "no gate");
         assert_eq!(
             p.listen,
             Listen::Open {
-                source: Source::Config {
-                    key: "sandbox.tcp_listen".into(),
-                    from: Provenance::Profile {
-                        profile: Profile::Standard
-                    },
-                }
+                source: from_standard("sandbox.allow_tcp_listening")
             },
             "standard listens"
         );
@@ -1973,7 +2300,11 @@ mod tests {
             allowed(p, &f.home.join(".ssh/config"), Access::Read),
             "yolo holds standard"
         );
-        assert!(allowed(p, &f.repo.join(".git/config"), Access::Write), "the git preset");
+        assert!(
+            allowed(p, &f.repo.join(".git/config"), Access::Write),
+            "Git's control files"
+        );
+        assert!(matches!(p.apps, Apps::Open { .. }), "launching apps");
         assert!(
             p.rules
                 .iter()
@@ -1987,8 +2318,8 @@ mod tests {
         assert!(p.decide_listen().allowed, "yolo holds standard's listening");
     }
 
-    /// In `strict`, TCP listening opens from the `pi-claude-code` preset (its relay) or the user's `tcp_listen`, each
-    /// named; the profile names itself first when it opens it too.
+    /// In `strict`, TCP listening opens from the `pi-claude-code` preset (its relay) or the user's `true`, each named;
+    /// the profile names itself first when it opens it too; the user's `false` closes it over both, only logged.
     #[test]
     fn tcp_listening_follows_presets_and_the_users_entry() {
         let preset = policy(&fixture(&format!("{CLAUDE_PRESET}profile = \"strict\"\n"), ""));
@@ -1996,17 +2327,23 @@ mod tests {
             &preset.listen,
             Listen::Open { source: Source::Preset { preset, .. } } if preset == "pi-claude-code"
         ));
-        let f = fixture("[sandbox]\nprofile = \"strict\"\ntcp_listen = \"*\"\n", "");
+        let f = fixture("[sandbox]\nprofile = \"strict\"\nallow_tcp_listening = true\n", "");
         let user = policy(&f);
         assert_eq!(
             user.decide_listen().source,
             Source::Config {
-                key: "sandbox.tcp_listen".into(),
+                key: "sandbox.allow_tcp_listening".into(),
                 from: Provenance::File {
                     path: f.home.join(".config/piton/config.toml")
                 },
             }
         );
+        let closed = policy(&fixture(&format!("{CLAUDE_PRESET}allow_tcp_listening = false\n"), ""));
+        assert!(
+            matches!(closed.listen, Listen::Denied { .. }),
+            "false wins over profile and preset"
+        );
+        assert!(!closed.decide_listen().allowed);
         let both = policy(&fixture(CLAUDE_PRESET, ""));
         assert!(matches!(
             &both.listen,
@@ -2060,12 +2397,12 @@ mod tests {
         }
     }
 
-    /// A broad `connect` entry (yolo's `/`) never reopens a credential folder, and no entry reopens the user's `deny`
-    /// or the daemon's sockets. An entry at or inside a credential folder opens just that path, for connecting.
+    /// A broad socket entry (yolo's `/`) never reopens a credential folder or the user's deny: the more specific deny
+    /// decides. An entry at or inside one opens just that path, for connecting; the daemon's sockets stay floor.
     #[test]
-    fn connect_never_reopens_a_deny() {
+    fn socket_entries_and_denies_by_specificity() {
         let f = fixture(
-            "[sandbox]\nprofile = \"yolo\"\nconnect = [\"~/secret\"]\ndeny = [\"~/secret\"]\n",
+            "[sandbox]\nprofile = \"yolo\"\n[sandbox.filesystem]\n\"~/secret\" = \"deny\"\n",
             "",
         );
         let p = policy(&f);
@@ -2082,8 +2419,9 @@ mod tests {
 
         // Named: just that socket opens, for connecting; the folder's files and other sockets stay closed.
         let g = fixture(
-            "[sandbox]\nprofile = \"yolo\"\nconnect = [\"~/.docker/run/docker.sock\", \"~/.gnupg/S.gpg-agent\", \
-             \"~/secret/s.sock\"]\ndeny = [\"~/secret\"]\n",
+            "[sandbox]\nprofile = \"yolo\"\n[sandbox.filesystem]\n\"~/secret\" = \"deny\"\n\"~/other\" = \"deny\"\n\
+             [sandbox.network.unix_socket_connections]\n\"~/.docker/run/docker.sock\" = \"allow\"\n\
+             \"~/.gnupg/S.gpg-agent\" = \"allow\"\n\"~/secret/s.sock\" = \"allow\"\n\"/private/tmp/x\" = \"deny\"\n",
             "",
         );
         let p = policy(&g);
@@ -2096,21 +2434,30 @@ mod tests {
         assert!(!allowed(&p, &g.home.join(".docker/run/other.sock"), Access::Connect));
         assert!(!allowed(&p, &g.home.join(".gnupg/S.gpg-agent.ssh"), Access::Connect));
         assert!(
-            !allowed(&p, &g.home.join("secret/s.sock"), Access::Connect),
-            "the user's deny"
+            allowed(&p, &g.home.join("secret/s.sock"), Access::Connect),
+            "a socket allow inside the user's own deny opens that socket"
+        );
+        assert!(!allowed(&p, &g.home.join("secret/s.sock"), Access::Read));
+        assert!(
+            !allowed(&p, &g.home.join("other/o.sock"), Access::Connect),
+            "the deny, over yolo's `/`"
+        );
+        assert!(
+            !allowed(&p, Path::new("/private/tmp/x/y.sock"), Access::Connect),
+            "a socket deny"
         );
         assert_eq!(
             p.decide(&docker, Access::Connect).source,
             Source::Config {
-                key: "sandbox.connect".into(),
+                key: "sandbox.network.unix_socket_connections.\"~/.docker/run/docker.sock\"".into(),
                 from: Provenance::File {
                     path: g.home.join(".config/piton/config.toml")
                 },
             }
         );
 
-        // `read` reads only: a socket it covers stays closed.
-        let h = fixture("[sandbox]\nread = [\"~/.gnupg/S.gpg-agent\"]\n", "");
+        // `"read"` reads only: a socket it covers stays closed.
+        let h = fixture("[sandbox.filesystem]\n\"~/.gnupg/S.gpg-agent\" = \"read\"\n", "");
         let p = policy(&h);
         assert!(allowed(&p, &h.home.join(".gnupg/S.gpg-agent"), Access::Read));
         assert!(!allowed(&p, &h.home.join(".gnupg/S.gpg-agent"), Access::Connect));
@@ -2122,7 +2469,7 @@ mod tests {
     #[test]
     fn a_named_socket_stays_in_place() {
         let tmp = "/private/tmp/piton-test-launchd";
-        let f = fixture(&format!("[sandbox]\nwrite = [\"{tmp}\"]\n"), "");
+        let f = fixture(&format!("[sandbox.filesystem]\n\"{tmp}\" = \"write\"\n"), "");
         let launchd = Path::new(tmp).join("com.apple.launchd.x");
         let agent = launchd.join("Listeners");
         let r = resolve_in(
@@ -2147,9 +2494,12 @@ mod tests {
         let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
         assert!(!r.policy.rules.iter().any(|rule| matches!(
             &rule.source,
-            Source::Config { key, .. } if key == "sandbox.connect"
+            Source::Config { key, .. } if key == "sandbox.network.unix_socket_connections"
         ) && rule.access == [Access::Connect]));
-        let g = fixture("[sandbox]\nconnect = [\"$NOPE/s.sock\"]\n", "");
+        let g = fixture(
+            "[sandbox.network.unix_socket_connections]\n\"$NOPE/s.sock\" = \"allow\"\n",
+            "",
+        );
         assert!(matches!(
             resolve_in(&g, &g.repo, &Env::new(), &Env::new()),
             Err(SandboxError::UnsetVariable { .. })
@@ -2158,7 +2508,7 @@ mod tests {
 
     #[test]
     fn grants_expand_from_the_daemons_environment() {
-        let f = fixture("[sandbox]\nwrite = [\"$CACHE/x\"]\n", "");
+        let f = fixture("[sandbox.filesystem]\n\"$CACHE/x\" = \"write\"\n", "");
         let p = policy_with(
             &f,
             &env(&[("CACHE", "/private/tmp/c")]),
@@ -2338,7 +2688,7 @@ mod tests {
 
     #[test]
     fn an_allow_replaced_with_a_link_grants_nothing() {
-        let f = fixture("[sandbox]\nwrite = [\"~/d/cache\"]\n", "");
+        let f = fixture("[sandbox.filesystem]\n\"~/d/cache\" = \"write\"\n", "");
         mkdir(&f.home.join("victim"));
         link(&f.home.join("victim"), &f.home.join("d/cache"));
         let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
@@ -2347,7 +2697,7 @@ mod tests {
         assert_eq!(
             r.links[0].source,
             Source::Config {
-                key: "sandbox.write".into(),
+                key: "sandbox.filesystem.\"~/d/cache\"".into(),
                 from: Provenance::File {
                     path: f.home.join(".config/piton/config.toml")
                 },
@@ -2358,7 +2708,7 @@ mod tests {
     /// A link the sandbox can't replace is followed: the user's own (a folder moved to another disk), like `/var`.
     #[test]
     fn a_link_above_every_grant_is_followed() {
-        let f = fixture("[sandbox]\nwrite = [\"~/ln/cache\"]\n", "");
+        let f = fixture("[sandbox.filesystem]\n\"~/ln/cache\" = \"write\"\n", "");
         mkdir(&f.home.join("real/cache"));
         link(&f.home.join("real"), &f.home.join("ln"));
         let r = resolve_in(&f, &f.repo, &Env::new(), &Env::new()).unwrap();
@@ -2411,7 +2761,10 @@ mod tests {
     /// A resolved grant can make an entry replaceable that another grant's path goes through.
     #[test]
     fn what_resolved_grants_cover_is_replaceable_too() {
-        let f = fixture("[sandbox]\nwrite = [\"~/l/b\", \"~/x/b/c/d\"]\n", "");
+        let f = fixture(
+            "[sandbox.filesystem]\n\"~/l/b\" = \"write\"\n\"~/x/b/c/d\" = \"write\"\n",
+            "",
+        );
         mkdir(&f.home.join("x/b"));
         mkdir(&f.home.join("victim/d"));
         link(&f.home.join("x"), &f.home.join("l"));
@@ -2425,7 +2778,7 @@ mod tests {
     /// Denies follow every link: a deny named by a link closes its target.
     #[test]
     fn a_deny_closes_what_its_link_points_to() {
-        let f = fixture("[sandbox]\ndeny = [\"~/p/repo/secret\"]\n", "");
+        let f = fixture("[sandbox.filesystem]\n\"~/p/repo/secret\" = \"deny\"\n", "");
         let secret = f.home.join("secret");
         mkdir(&secret);
         link(&secret, &f.repo.join("secret"));
@@ -2451,7 +2804,7 @@ mod tests {
         // `piton sandbox why` names the opt-in.
         let source = p.decide(&f.repo.join(".git/config"), Access::Write).source;
         assert!(
-            matches!(&source, Source::Piton { what } if what.contains("git preset")),
+            matches!(&source, Source::Piton { what } if what.contains("allow_git_control_files")),
             "{source:?}"
         );
         for open in [
@@ -2464,12 +2817,14 @@ mod tests {
         }
         assert!(allowed(&p, &f.repo.join(".git/config"), Access::Read));
 
-        // The `git` preset in the global configuration lifts them.
-        let g = fixture("[sandbox]\npresets = [\"git\"]\n", "");
+        // `allow_git_control_files = true` in the global configuration lifts them; a `false` closes yolo's.
+        let g = fixture("[sandbox]\nallow_git_control_files = true\n", "");
         let p = policy(&g);
         for open in [".git/config", ".git/hooks/post-merge", ".git/commondir"] {
             assert!(allowed(&p, &g.repo.join(open), Access::Write), "{open}");
         }
+        let y = fixture("[sandbox]\nprofile = \"yolo\"\nallow_git_control_files = false\n", "");
+        assert!(!allowed(&policy(&y), &y.repo.join(".git/config"), Access::Write));
     }
 
     /// Every rule is valid Seatbelt the library accepts.
@@ -2479,7 +2834,11 @@ mod tests {
         for profile in Profile::ALL {
             let f = fixture(
                 &format!(
-                    "[sandbox]\nprofile = \"{}\"\nread = [\"~/Library/Keychains\"]\npresets = [\"mise\", \"rust\", \"node\", \"swift\"]\nconnect = [\"~/s.sock\", \"localhost:5432\"]\n",
+                    "[sandbox]\nprofile = \"{}\"\npresets = [\"mise\", \"rust\", \"node\", \"swift\"]\n\
+                     [sandbox.filesystem]\n\"~/Library/Keychains\" = \"read\"\n\"~/p/repo/secret\" = \"deny\"\n\
+                     [sandbox.network.unix_socket_connections]\n\"~/s.sock\" = \"allow\"\n\
+                     [sandbox.network.connections]\n\"localhost:5432\" = \"allow\"\n\"*:22\" = \"deny\"\n\"evil.example\" = \"deny\"\n\
+                     [sandbox.macos.services]\n\"com.example.*\" = \"deny\"\n",
                     profile.name()
                 ),
                 "",
@@ -2490,18 +2849,21 @@ mod tests {
             assert!(rules.iter().any(|r| r.contains("piton.sock")), "{}", profile.name());
             let every_socket = rules.iter().any(|r| r == r#"(allow network-outbound (subpath "/"))"#);
             let ssh_agent = rules.iter().any(|r| r.contains("/private/tmp/agent.sock"));
-            let services_listed = rules.iter().any(|r| r == "(deny mach-lookup)");
+            let every_service = rules.iter().any(|r| r == "(allow mach-lookup)");
             let apps = rules.iter().any(|r| r == "(allow lsopen)");
             match profile {
-                Profile::Strict => assert!(!every_socket && !ssh_agent && services_listed && !apps),
-                Profile::Standard => assert!(!every_socket && ssh_agent && !services_listed && !apps),
-                Profile::Yolo => assert!(every_socket && ssh_agent && !services_listed && apps),
+                Profile::Strict => assert!(!every_socket && !ssh_agent && !every_service && !apps),
+                Profile::Standard => assert!(!every_socket && ssh_agent && every_service && !apps),
+                Profile::Yolo => assert!(every_socket && ssh_agent && every_service && apps),
             }
+            // A named host denied: filtered through the gate in every profile.
+            assert!(matches!(p.network, Network::Filtered { .. }), "{}", profile.name());
         }
     }
 
     /// Mach services: `strict` allows only the built-in list, `standard` and `yolo` every service but the keychain's;
-    /// the user's own `services` and the `apps` preset add to `strict`, each named where it came from.
+    /// the user's own entries and `allow_launching_apps` add to `strict`, each named where it came from; a deny closes
+    /// what `*` opens, the most specific entry deciding.
     #[test]
     fn services_and_apps_follow_the_profile() {
         let f = fixture("[sandbox]\nprofile = \"strict\"\n", "");
@@ -2516,7 +2878,7 @@ mod tests {
         let standard = policy(&fixture("", ""));
         assert!(standard.decide_service("Hammerspoon").allowed);
         assert!(
-            matches!(&standard.decide_service("x").source, Source::Config { key, from: Provenance::Profile { profile: Profile::Standard } } if key == "sandbox.services")
+            matches!(&standard.decide_service("x").source, Source::Config { key, from: Provenance::Profile { profile: Profile::Standard } } if key == "sandbox.macos.services")
         );
         assert!(
             !standard.decide_service("com.apple.secd").allowed,
@@ -2525,11 +2887,20 @@ mod tests {
         assert_eq!(standard.apps, Apps::Closed);
 
         let yolo = policy(&fixture("[sandbox]\nprofile = \"yolo\"\n", ""));
-        assert!(matches!(&yolo.apps, Apps::Open { source: Source::Preset { preset, .. } } if preset == "apps"));
+        assert!(
+            matches!(&yolo.apps, Apps::Open { source: Source::Config { key, .. } } if key == "sandbox.allow_launching_apps")
+        );
         assert!(yolo.decide_service("com.apple.coreservices.appleevents").allowed);
 
+        let closed = policy(&fixture("[sandbox.macos.services]\n\"com.example.*\" = \"deny\"\n", ""));
+        assert!(
+            !closed.decide_service("com.example.agent").allowed,
+            "a deny closes what `*` opens"
+        );
+        assert!(closed.decide_service("Hammerspoon").allowed);
+
         let listed = fixture(
-            "[sandbox]\nprofile = \"strict\"\nservices = [\"com.example.*\"]\npresets = [\"apps\"]\n",
+            "[sandbox]\nprofile = \"strict\"\nallow_launching_apps = true\n[sandbox.macos.services]\n\"com.example.*\" = \"allow\"\n",
             "",
         );
         let p = policy(&listed);
@@ -2544,21 +2915,22 @@ mod tests {
         ));
         assert!(
             p.decide_service("com.apple.coreservices.appleevents").allowed,
-            "the apps preset"
+            "launching apps"
         );
         assert!(matches!(p.apps, Apps::Open { .. }));
         assert!(!p.decide_service("com.apple.pasteboard.1").allowed);
         super::super::apply::capabilities(&p).expect("nono accepts it");
 
         // A user `*` opens every service in `strict` too, named after that file.
-        let every = policy(&fixture("[sandbox]\nprofile = \"strict\"\nservices = [\"*\"]\n", ""));
+        let every = policy(&fixture(
+            "[sandbox]\nprofile = \"strict\"\n[sandbox.macos.services]\n\"*\" = \"allow\"\n",
+            "",
+        ));
         assert!(matches!(
-            every.services,
-            Services::Every {
-                source: Source::Config {
-                    from: Provenance::File { .. },
-                    ..
-                }
+            every.decide_service("org.other").source,
+            Source::Config {
+                from: Provenance::File { .. },
+                ..
             }
         ));
     }
@@ -2625,7 +2997,7 @@ mod tests {
         assert!(resolve_env(&f, &f.repo, &Env::new(), &daemon).is_ok());
 
         // A file the launch's grants cover is writable wherever it is.
-        let g = fixture("[sandbox]\nwrite = [\"~/shared\"]\n", "");
+        let g = fixture("[sandbox.filesystem]\n\"~/shared\" = \"write\"\n", "");
         let granted = agent_from("~/elsewhere", from_file(&g.home.join("shared/mise.toml")));
         assert!(matches!(
             resolve_env(&g, &g.repo, &Env::new(), &granted),
@@ -2670,7 +3042,7 @@ mod tests {
         let launch = policy(&f);
         let file = f.home.join(".config/piton/config.toml");
         let widened = |lift: &Lift, _: Scope| {
-            let config = super::super::grant::widened_config(&config, &lift.lists(), &file);
+            let config = super::super::grant::widened_config(&config, &lift.entries(), &file);
             resolve_full(&f, &config, &f.repo, &Env::new(), &SandboxEnv::daemon(&Env::new()), &[])
                 .map(|r| r.policy)
                 .map_err(|e| e.to_string())
@@ -2774,7 +3146,7 @@ mod tests {
                 .check_sandbox(&built_in, &f.home)
                 .is_ok()
         );
-        let exposed = fixture("[sandbox]\nread = [\"~/Library/Keychains\"]\n", "");
+        let exposed = fixture("[sandbox.filesystem]\n\"~/Library/Keychains\" = \"read\"\n", "");
         assert!(matches!(
             proxy(vec![]).check_sandbox(&policy(&exposed), &exposed.home),
             Err(FnoxError::Keychain {
@@ -2784,7 +3156,7 @@ mod tests {
             })
         ));
         // Exposing the whole Library opens the keychains too.
-        let library = fixture("[sandbox]\nread = [\"~/Library\"]\n", "");
+        let library = fixture("[sandbox.filesystem]\n\"~/Library\" = \"read\"\n", "");
         assert!(matches!(
             proxy(vec![]).check_sandbox(&policy(&library), &library.home),
             Err(FnoxError::Keychain { .. })
@@ -2945,7 +3317,7 @@ mod tests {
     #[test]
     fn silence_entries_match_target_and_process() {
         let user = "[sandbox]\npresets = [\"pi-claude-code\"]\nsilence = [\
-                    { process = \"git\", target = \"~/p/**/.git/config\" }, { target = \"~/Library/Caches/tool\" }]\n";
+                    { process = \"node\", target = \"tcp-listen\" }, { target = \"com.example.agent\" }]\n";
         let f = fixture(user, "");
         let r = resolve_env(&f, &f.repo, &Env::new(), &SandboxEnv::daemon(&Env::new())).unwrap();
         let hit = |process: &str, operation: &str, target: &str| silenced(&r.silence, process, operation, target);
@@ -2955,18 +3327,10 @@ mod tests {
         }
         assert!(hit("node", "mach-lookup", "com.apple.SecurityServer").is_none());
         assert!(hit("claude", "mach-lookup", "com.apple.diagnosticd").is_none());
-        let home = f.home.to_string_lossy();
-        for worker in ["p/Piton/.git/config", "p/Piton--1-x/.git/config", "p/a/b/.git/config"] {
-            assert!(
-                hit("git", "file-write-create", &format!("{home}/{worker}")).is_some(),
-                "{worker}"
-            );
-        }
-        assert!(hit("git", "file-write-create", &format!("{home}/p/Piton/.git/config.bak")).is_none());
-        assert!(hit("node", "file-write-create", &format!("{home}/p/Piton/.git/config")).is_none());
-        assert!(hit("any", "file-write-create", &format!("{home}/Library/Caches/tool/x")).is_some());
-        // A path entry never matches a service lookup of the same text.
-        assert!(hit("any", "mach-lookup", &format!("{home}/Library/Caches/tool")).is_none());
+        assert!(hit("node", "network-inbound", "local:*:50958").is_some());
+        assert!(hit("python3", "network-inbound", "local:*:50958").is_none());
+        assert!(hit("any", "mach-lookup", "com.example.agent").is_some());
+        assert!(hit("any", "mach-lookup", "com.example.other").is_none());
 
         let keychain = fixture(
             "[sandbox]\npresets = [{ name = \"pi-claude-code\", login = \"keychain\" }]\n",

@@ -299,7 +299,7 @@ const only = process.argv.slice(2);
 let failed = 0;
 const suites = [
     [tests, {}],
-    [keychainExposed, { project: { sandbox: { read: ["~/Library/Keychains"] } } }],
+    [keychainExposed, { project: { sandbox: { filesystem: { "~/Library/Keychains": "read" } } } }],
     [
         workspaceEnvironment,
         { mise: true, files: { "mise.toml": '[env]\nPITON_WORKSPACE_MARKER = "from-mise"\nFNOX_PROFILE = "repo"\n' } },

@@ -53,15 +53,15 @@ trap 'code=$?; test -z "$listener" || { kill "$listener" 2>/dev/null; wait "$lis
 mkdir "$linked"
 ln -s "$linked" "$src/cache"
 marker="# piton protected-file probe
-[sandbox]
-write = [\"$src/cache\"]"
+[sandbox.filesystem]
+\"$src/cache\" = \"write\""
 printf '%s\n' "$marker" > "$src/.piton/config.toml"
 # Unix sockets the host listens on, in the scratch folder (temp, which the sandbox writes): one no entry names, and one
 # the checkout's own config.local.toml lists, which must stay in place.
 mkdir -p "$scratch/host" "$scratch/listed"
 host_sock="$scratch/host/listen.sock"
 listed_sock="$scratch/listed/ok.sock"
-printf '[sandbox]\nconnect = ["%s"]\n' "$listed_sock" > "$src/.piton/config.local.toml"
+printf '[sandbox.network.unix_socket_connections]\n"%s" = "allow"\n' "$listed_sock" > "$src/.piton/config.local.toml"
 python3 -I -c '
 import signal, socket, sys, threading
 def serve(path):
@@ -316,7 +316,7 @@ git -C "$strict" init -q
 # gate runs for the pass (`piton sandbox gate`), deciding by these entries and pi's own hosts.
 local_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 other_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
-printf '[sandbox]\nprofile = "strict"\nconnect = ["github.com", "example.com", "localhost:%s", "*:7"]\n' "$local_port" \
+printf '[sandbox]\nprofile = "strict"\n[sandbox.network.connections]\n"github.com" = "allow"\n"example.com" = "allow"\n"localhost:%s" = "allow"\n"*:7" = "allow"\n' "$local_port" \
     > "$strict/.piton/config.local.toml"
 mkfifo "$scratch/gate-in"
 ("$piton" sandbox gate --workspace "$strict" < "$scratch/gate-in" > "$scratch/gate-policy" 2>"$scratch/gate-err") &

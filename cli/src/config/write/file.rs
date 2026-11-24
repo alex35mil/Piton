@@ -62,12 +62,48 @@ impl WriteLevel {
     }
 }
 
-/// One key set to a value, or removed (`None`, back to its default). The key is dotted (`branches.format`); the value
-/// is JSON, written as a person would (an object becomes a `[table]`).
+/// One key set to a value, or removed (`None`, back to its default). The value is JSON, written as a person would (an
+/// object becomes a `[table]`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyChange {
-    pub key: String,
+    pub key: KeyPath,
     pub value: Option<serde_json::Value>,
+}
+
+/// A key from the top of a file, as its parts: written as a TOML dotted key, with a part quoted when it isn't bare
+/// (`branches.format`, `sandbox.filesystem."~/.cache"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyPath(Vec<String>);
+
+impl KeyPath {
+    pub fn new(parts: Vec<String>) -> Self {
+        Self(parts)
+    }
+
+    /// A TOML dotted key: bare parts, or quoted ones (`a."b.c"`).
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let parts = toml_edit::Key::parse(text).map_err(|e| format!("invalid key {text:?}: {e}"))?;
+        match parts.iter().any(|part| part.get().is_empty()) || parts.is_empty() {
+            true => Err(format!("invalid key {text:?}")),
+            false => Ok(Self(parts.iter().map(|part| part.get().to_string()).collect())),
+        }
+    }
+
+    pub fn parts(&self) -> &[String] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for KeyPath {
+    /// As a TOML dotted key.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let parts: Vec<String> = self
+            .0
+            .iter()
+            .map(|part| toml_edit::Key::new(part.as_str()).display_repr().into_owned())
+            .collect();
+        f.write_str(&parts.join("."))
+    }
 }
 
 /// One file of a level's pair.
@@ -125,49 +161,6 @@ impl ConfigFile {
         })
     }
 
-    /// Adds `value` to the list at `key` (`sandbox.write_file`) in this file, keeping its entries; nothing when it's
-    /// already there. A value is a string (a path) or a table (a `silence` entry).
-    pub fn append_to_list(&self, paths: &Paths, key: &str, value: &serde_json::Value) -> Result<(), EditError> {
-        let path = self.path(paths)?;
-        let current = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(source) => return Err(EditError::Io { path, source }),
-        };
-        let table: toml::Table = toml::from_str(&current).map_err(|e| EditError::Parse {
-            path: path.clone(),
-            reason: e.to_string(),
-        })?;
-        let mut item = Some(&toml::Value::Table(table));
-        for part in key.split('.') {
-            item = item.and_then(|v| v.get(part));
-        }
-        let mut list: Vec<serde_json::Value> = match item {
-            Some(toml::Value::Array(items)) => items
-                .iter()
-                .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
-                .collect(),
-            Some(_) => {
-                return Err(EditError::Value {
-                    path,
-                    reason: format!("{key} isn't a list"),
-                });
-            }
-            None => Vec::new(),
-        };
-        if list.contains(value) {
-            return Ok(());
-        }
-        list.push(value.clone());
-        self.write(
-            paths,
-            &[KeyChange {
-                key: key.to_string(),
-                value: Some(serde_json::Value::Array(list)),
-            }],
-        )
-    }
-
     /// Writes `changes`, keeping comments and layout.
     pub fn write(&self, paths: &Paths, changes: &[KeyChange]) -> Result<(), EditError> {
         let path = self.path(paths)?;
@@ -198,11 +191,11 @@ impl<'a> Items<'a> {
     fn new(changes: &'a [KeyChange], path: &Path) -> Result<Self, EditError> {
         let mut items = Vec::new();
         for change in changes {
-            let parts: Vec<&str> = change.key.split('.').collect();
-            if parts.iter().any(|part| part.is_empty()) {
+            let parts: Vec<&str> = change.key.parts().iter().map(String::as_str).collect();
+            if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
                 return Err(EditError::Value {
                     path: path.to_path_buf(),
-                    reason: format!("invalid key {:?}", change.key),
+                    reason: format!("invalid key {}", change.key),
                 });
             }
             let item = match &change.value {
@@ -252,7 +245,7 @@ mod tests {
         };
         let path = global.path(&paths).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "# mine\n[sandbox]\nwrite = [\"/a\"]\n").unwrap();
+        std::fs::write(&path, "# mine\n[sandbox]\npresets = [\"rust\"]\n").unwrap();
         global.append_command_grant(&paths, &grant("husky install *")).unwrap();
         global
             .append_command_grant(
@@ -264,7 +257,7 @@ mod tests {
             )
             .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("# mine\n[sandbox]\nwrite = [\"/a\"]\n"), "{text}");
+        assert!(text.starts_with("# mine\n[sandbox]\npresets = [\"rust\"]\n"), "{text}");
         let parsed: toml::Table = toml::from_str(&text).unwrap();
         let commands = parsed["sandbox"]["commands"].as_array().unwrap();
         assert_eq!(commands.len(), 2);
@@ -294,25 +287,42 @@ mod tests {
         let local = std::fs::read_to_string(source.join(".piton/config.local.toml")).unwrap();
         assert!(local.contains("[[sandbox.commands]]"), "{local}");
 
-        // A process block's entry: added to the list once, keeping what's there.
-        let text = |s: &str| serde_json::json!(s);
-        global
-            .append_to_list(&paths, "sandbox.write_file", &text("/h/x"))
-            .unwrap();
-        global
-            .append_to_list(&paths, "sandbox.write_file", &text("/h/x"))
-            .unwrap();
-        global.append_to_list(&paths, "sandbox.write", &text("/b")).unwrap();
-        // A silence entry is a table: added once too, and read back as the configuration reads it.
-        let silence = serde_json::json!({ "process": "git", "target": "/p/**/.git/config" });
-        global.append_to_list(&paths, "sandbox.silence", &silence).unwrap();
-        global.append_to_list(&paths, "sandbox.silence", &silence).unwrap();
+        // A process block's entry: one key of a map, the path quoted, keeping what's there.
+        for key in ["sandbox.filesystem.\"~/.cache/x\"", "sandbox.filesystem.\"/b\""] {
+            global
+                .write(
+                    &paths,
+                    &[KeyChange {
+                        key: KeyPath::parse(key).unwrap(),
+                        value: Some(serde_json::json!("write")),
+                    }],
+                )
+                .unwrap();
+        }
         let written = std::fs::read_to_string(&path).unwrap();
         let parsed: toml::Table = toml::from_str(&written).unwrap();
-        assert_eq!(parsed["sandbox"]["write_file"].as_array().unwrap().len(), 1);
-        assert_eq!(parsed["sandbox"]["write"].as_array().unwrap().len(), 2, "/a and /b");
+        assert_eq!(
+            parsed["sandbox"]["filesystem"]["~/.cache/x"].as_str(),
+            Some("write"),
+            "{written}"
+        );
+        assert_eq!(parsed["sandbox"]["filesystem"]["/b"].as_str(), Some("write"));
         assert_eq!(parsed["sandbox"]["commands"].as_array().unwrap().len(), 2, "kept");
-        let table: crate::config::SandboxTable = parsed["sandbox"].clone().try_into().unwrap();
-        assert_eq!(table.silence.len(), 1, "{written}");
+        assert!(written.contains("\"~/.cache/x\" = \"write\""), "{written}");
+    }
+
+    /// A key is a TOML dotted key: bare parts, or quoted ones holding dots and slashes.
+    #[test]
+    fn key_paths_parse_and_print() {
+        let key = KeyPath::parse("sandbox.filesystem.\"~/.ssh/config\"").unwrap();
+        assert_eq!(key.parts(), ["sandbox", "filesystem", "~/.ssh/config"]);
+        assert_eq!(key.to_string(), "sandbox.filesystem.\"~/.ssh/config\"");
+        assert_eq!(
+            KeyPath::parse("branches.format").unwrap().parts(),
+            ["branches", "format"]
+        );
+        for bad in ["", "a..b", "a.", "sandbox.filesystem.~/x"] {
+            assert!(KeyPath::parse(bad).is_err(), "{bad}");
+        }
     }
 }
