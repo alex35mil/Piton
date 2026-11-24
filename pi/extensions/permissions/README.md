@@ -12,6 +12,8 @@ Settings: `[tools.permissions]` and `[tools.permissions.<runtime>]` of `config.t
 
 Only the current runtime's table loads. Each file contributes `[tools.permissions]`, then its runtime table; `config.local.toml` comes after `config.toml`, and nearer levels later. `allow`, `ask`, and `deny` lists from every loaded table are combined, and deny or ask beats allow wherever it comes from. `default_mode` and `skill_grants` come from the nearest table that sets them.
 
+A repository's committed `<repo-root>/.piton/config.toml` always restricts (`ask`, `deny`, `default_mode = "ask"` or `"deny"`), but its grants (`allow`, `default_mode = "allow"`, `skill_grants = true`) apply only once the user trusts the repository (Piton's "Repository trust", `piton trust`). `piton config resolve` leaves the untrusted ones out; inside a Piton session it keeps exactly what the session's launch kept.
+
 For example, a global `[tools.permissions.sandbox]` with `default_mode = "allow"` relaxes confirmations in every worker, unless a project's `[tools.permissions]` sets its own `default_mode`. Project setup's `configure_permissions` writes only `[tools.permissions]` of the project or local file; runtime tables are edited by hand.
 
 `/permissions-settings` shows the runtime and the files that were loaded.

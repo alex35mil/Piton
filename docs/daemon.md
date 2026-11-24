@@ -9,6 +9,7 @@ cli/target/debug/piton start ~/Projects/foo  # new session in the sandbox
 cli/target/debug/piton start ~/Projects/foo --host --prompt "hello"
 cli/target/debug/piton ls
 cli/target/debug/piton stop --session <pi session id | session file | piton key>
+cli/target/debug/piton trust status ~/Projects/foo  # whether its committed grants apply (Repository trust, below)
 
 mise run cli:install                         # stable binary in ~/.cargo/bin + launchd agent (host only)
 piton service status | piton service uninstall
@@ -542,12 +543,9 @@ Socket bindings and TCP listening are separate because a Unix socket is checked 
 creating a socket in a folder makes a new server and reaches nothing that's there, while TCP listening can only be open
 on every address or closed. Neither lets a process connect to what's already listening; that's the connection tables.
 
-What a repository's committed `config.toml` may hold (it travels with the repository: a repository can't open the
-sandbox for whoever clones it): `"write"`, every `"deny"`, `false` switches, toolchain presets, and `silence`.
-Everything that opens more is yours alone, in the global `config.toml` or any `config.local.toml`: `profile`, `"read"`,
-`"allow"` in any network or services table, `true` switches, the `pi-claude-code` preset, and `commands` (below). A
-committed `"write"` never reopens a credential folder or a path your own files deny; `piton sandbox show` lists each
-one it left out.
+A repository's committed `config.toml` travels with the repository, so what it grants applies only once you trust the
+repository ("Repository trust", below); its restrictions always apply. A committed `"write"` never reopens a
+credential folder or a path your own files deny, trusted or not; `piton sandbox show` lists each one it left out.
 
 `allow_git_control_files = true` lets agents write Git's hooks and configuration, so `husky install`, `git remote add`,
 and `git submodule update --init` work in the sandbox, and the next Git command on the host may run an agent's code.
@@ -644,7 +642,8 @@ entry that decides (`sandbox.filesystem."~/x"`, from a profile, a preset, or the
 host:port` checks a network destination: the entry or pi's own host that decides it, or that the gate would ask.
 `piton sandbox show` prints the profile (and the file that chose it), the network's mode (`open` or `filtered`), the
 `silence` entries with their source (yours and the presets'), every rule with where it came from, TCP listening, the
-committed entries it left out (`ignored`, each with why), pi's trusted hosts (`pi_hosts`), and the models pi
+committed entries it left out (`ignored`, each with why), the repository's grants left out because you haven't trusted
+them (`untrusted`), pi's trusted hosts (`pi_hosts`), and the models pi
 discovered (`pi_discovered_models`, never trusted).
 
 A grant doesn't follow a symlink a sandboxed agent could have made: the path itself, or a link inside the project's
@@ -703,8 +702,8 @@ and is refused when no app handles it or the app is one the sandbox could have w
 process that isn't a command (an MCP server, an extension) is asked about with `"<name>" = "allow"` in
 `[sandbox.macos.services]`.
 
-Per-command entries, in the global `config.toml` or a `config.local.toml`. `runtime` is required: `"sandbox"` with a
-`grant`, or `"host"` without one.
+Per-command entries, in any `config.toml` or `config.local.toml` (a repository's committed one only once you trust it).
+`runtime` is required: `"sandbox"` with a `grant`, or `"host"` without one.
 
 ```toml
 [[sandbox.commands]]
@@ -788,10 +787,65 @@ Known limits:
   (above).
 - macOS only.
 
+### Repository trust
+
+A repository's committed `.piton/config.toml` is written by whoever commits to it. Its **restrictions always apply**:
+`"deny"` entries, `false` switches, `silence`, and tool-permission `ask`, `deny`, and `default_mode = "ask"`/`"deny"`.
+Its **grants apply only once you trust the repository**: `"read"`, `"write"`, and `"allow"` entries, `true` switches,
+presets, `profile`, `[[sandbox.commands]]`, and tool-permission `allow`, `default_mode = "allow"`, and
+`skill_grants = true`. Parent folders' files, the global files, and every `config.local.toml` are your own and never
+gated.
+
+The same decision tells pi whether to load the repository's own files: its `.pi/` extensions, settings, skills,
+prompts, themes, and MCP servers, `.agents/skills`, and the servers in `.piton/mcp.json`. Piton passes pi
+`--approve` or `--no-approve` on every launch, so pi never asks itself and `~/.pi/agent/trust.json` doesn't matter in
+Piton's sessions.
+
+**When you're asked.** Before the first session in a repository that has grants or such files: the apps show the
+question when you start a session, the Neovim plugin before it opens an agent's tab, and `piton start` in the terminal
+(or, with no terminal, it fails and names `piton trust allow`). `piton attach` (pi.nvim on its own) can't ask: it fails
+with the same message. The question lists every grant and what pi would load; the answer is kept for the grants it
+showed, per source checkout, so workers share it. Until you answer, nothing launches; if you don't trust it, sessions
+start with its restrictions only.
+
+```toml
+[trust]                  # your own files only: the global config.toml, a config.local.toml, a parent folder
+reconfirm = "never"      # or "on-change"
+```
+
+- `"never"` (the default, as in Claude Code and Codex): a trusted repository stays trusted, whatever its grants
+  become, until you change it.
+- `"on-change"`: only the grants you trusted apply; when the committed file gains one, the next launch asks again and
+  marks the new ones. Removing a grant or adding a restriction never asks.
+
+```sh
+piton trust status [<path>] [--json]   # trusted, declined, or not decided; the grants and pi's files
+piton trust allow [<path>]             # trust the grants as they are now
+piton trust deny [<path>]              # restrictions only, and pi loads nothing of the project's
+piton trust reset [<path>]             # forget it: the next launch asks
+```
+
+`piton config check` says whether the repository is trusted and lists the grants left out; `piton sandbox show` lists
+them as `untrusted`.
+
+**What trust lets in, and what it doesn't check:**
+
+- Every committed grant: paths the sandbox may read or write, hosts and sockets it may reach, toolchain presets,
+  commands that run on the host or widened (`[[sandbox.commands]]`), and tool calls the agent makes without asking.
+- pi's project files: `.pi/` extensions run code in pi's process, outside any tool-permission rule; `.pi/settings.json`
+  can add packages (more extensions); skills and prompts instruct the agent; MCP servers start programs.
+- After you trust a repository, a pull can change its `.pi/` files and skills without a question, in either mode:
+  only the grant entries are compared. In a session, an agent can't change them without your approval (they're
+  protected files), but a commit you pull can.
+- With `"never"`, a pull can also add grants without a question.
+- Declining keeps the repository's restrictions and the rest of your configuration; context files (`AGENTS.md`) still
+  load, as in pi.
+
 ### State
 
 Facts about this host, as opposed to what you decide, are in the daemon's SQLite database next to its socket
-(`~/.local/state/piton/piton.db`): this host's identity (`host_id`), and later sessions and drafts. It holds no
+(`~/.local/state/piton/piton.db`): this host's identity (`host_id`), your trust decision per repository (above), and
+later sessions and drafts. It holds no
 preferences. Deleting it resets this host's state; configuration is unaffected. A database newer than the binary
 refuses to start; an older one is migrated after a `.v<N>.bak` copy.
 

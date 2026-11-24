@@ -20,6 +20,9 @@ delete process.env[RUNTIME_ENV]
 // A session under piton has its own channel to the daemon; tests that need one set up a fake.
 delete process.env.PITON_AGENT_SOCKET
 delete process.env.PITON_SESSION_TOKEN
+// As in a session of a trusted repository: fixtures' committed grants apply (`piton config resolve` keeps what the
+// session's launch kept). Never the runner's own session's filter.
+process.env.PITON_TRUST = JSON.stringify({ kind: "all" })
 
 // Always this checkout's build: a session's PITON_BIN is the installed piton, which may be older than the code tested.
 const built = path.resolve(import.meta.dirname, "../../cli/target/debug/piton")

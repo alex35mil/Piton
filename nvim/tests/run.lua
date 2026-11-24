@@ -70,6 +70,12 @@ local function fake_picker(open)
     replace(package.loaded, "snacks", { picker = open })
 end
 
+-- Every tab asks the daemon about trust first: a repository with nothing to trust unless a test says otherwise.
+local trust_state = { state = "nothing_to_trust", grants = {}, added = {}, resources = { pi = {}, mcp_servers = {} } }
+cli.trust_status = function(path)
+    return { source = path, trust = trust_state }
+end
+
 test("every module loads without dependencies, globals, or mappings", function()
     local files = vim.fn.globpath(plugin .. "/lua", "**/*.lua", false, true)
     assert(#files > 0)
@@ -190,6 +196,53 @@ test("tab hooks run in order and already-loaded modules see new options", functi
     equal(source, vim.fn.getcwd())
     equal(count, #vim.api.nvim_list_tabpages())
     equal(5, #calls)
+end)
+
+test("a repository that needs trust is asked about before its agent's tab opens", function()
+    local path = directory("untrusted agent")
+    replace(cli, "trust_status", function(p)
+        equal(path, p)
+        return {
+            source = "/src",
+            trust = {
+                state = "needed",
+                grants = { 'sandbox.presets "rust"', 'sandbox.presets "swift"' },
+                added = { 'sandbox.presets "swift"' },
+                resources = { pi = { ".pi/extensions" }, mcp_servers = {} },
+            },
+        }
+    end)
+    local asked, decided = nil, {}
+    piton.setup({ confirm = function(message)
+        asked = message
+        return false
+    end })
+    replace(cli, "trust_decide", function(p, decision)
+        decided[#decided + 1] = { p, decision }
+    end)
+    local shown = 0
+    fake_pi(function()
+        shown = shown + 1
+    end)
+    tabs.open({ path = path, label = "Agent" })
+    assert(asked:find('sandbox.presets "swift"  (new)', 1, true), asked)
+    assert(not asked:find('"rust"  (new)', 1, true), asked)
+    assert(asked:find(".pi/extensions", 1, true), asked)
+    equal({ { path, "deny" } }, decided)
+    equal(1, shown, "declining still opens the agent, without the grants")
+end)
+
+test("a decided repository opens without a question", function()
+    local path = directory("trusted agent")
+    replace(trust_state, "state", "trusted")
+    piton.setup({ confirm = function() error("must not ask") end })
+    replace(cli, "trust_decide", function() error("must not record") end)
+    local shown = 0
+    fake_pi(function()
+        shown = shown + 1
+    end)
+    tabs.open({ path = path, label = "Agent" })
+    equal(1, shown)
 end)
 
 test("tab labels truncate Unicode at a word and source tabs don't open chat", function()

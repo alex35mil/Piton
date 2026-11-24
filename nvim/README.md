@@ -67,6 +67,10 @@ them. All notifications use `vim.notify` with title `Piton`.
   - Without a forge, or with a forge other than GitHub, there is no pull-request section; tracker work still loads.
 - **`pick()`** lists the current repository's source and workers, with live pi status. Selecting an existing tab focuses
   it; otherwise it opens a tab. With no selection, typed text can create a named worker.
+- **Trust.** Before an agent's tab opens, a repository that needs the user's trust (committed grants or pi project
+  files, never decided) is asked about with the `confirm` hook: the grants (new ones marked) and what pi would load.
+  Yes runs `piton trust allow`, no `piton trust deny` (its restrictions still apply); the tab opens either way. pi.nvim
+  started on its own in such a repository can't ask: its attach fails naming `piton trust allow`.
 - **`get(path)`** returns the agent containing a path, or nil. The record has `path`, `source`, `label`, and optional
   `issue`. Use this from your own tab-close action to distinguish workers from ordinary tabs.
 - **`close_tab(agent)`** offers “Close tab” or “Delete agent”. Closing only closes the editor tab: the daemon's pi keeps

@@ -254,6 +254,63 @@ function M.preview_folder(source_path, name)
     return vim.fs.basename(source_path) .. "--" .. normalized
 end
 
+---@alias PitonTrustState "nothing_to_trust" | "trusted" | "declined" | "needed"
+
+---@class PitonTrust
+---@field state PitonTrustState
+---@field grants string[]
+---@field added string[]
+---@field resources { pi: string[], mcp_servers: string[] }
+
+local TRUST_STATES = { nothing_to_trust = true, trusted = true, declined = true, needed = true }
+
+---@param value any
+---@return string[]
+local function strings(value)
+    local result = {}
+    for _, item in ipairs(type(value) == "table" and value or {}) do
+        if type(item) == "string" then
+            result[#result + 1] = item
+        end
+    end
+    return result
+end
+
+--- `piton trust status --json`: the repository's source checkout and its trust state.
+---@param path string
+---@return { source: string, trust: PitonTrust }
+function M.trust_status(path)
+    local result = util.exec({ "piton", "trust", "status", path, "--json" })
+    local ok, value = pcall(vim.json.decode, result.stdout or "", { luanil = { object = true, array = true } })
+    if result.code ~= EXIT_OK or not ok or type(value) ~= "table" or type(value.trust) ~= "table" then
+        util.refuse("piton trust status failed (exit " .. result.code .. "):\n" .. vim.trim(result.stderr or ""))
+    end
+    local trust = value.trust
+    if not TRUST_STATES[trust.state] or type(value.source) ~= "string" then
+        util.refuse("Unexpected trust state from piton: " .. vim.inspect(value))
+    end
+    local resources = type(trust.resources) == "table" and trust.resources or {}
+    return {
+        source = value.source,
+        trust = {
+            state = trust.state,
+            grants = strings(trust.grants),
+            added = strings(trust.added),
+            resources = { pi = strings(resources.pi), mcp_servers = strings(resources.mcp_servers) },
+        },
+    }
+end
+
+--- `piton trust allow|deny`: records the decision for the repository's grants as they are now.
+---@param path string
+---@param decision "allow" | "deny"
+function M.trust_decide(path, decision)
+    local result = util.exec({ "piton", "trust", decision, path })
+    if result.code ~= EXIT_OK then
+        util.refuse("piton trust " .. decision .. " failed:\n" .. vim.trim(result.stderr or ""))
+    end
+end
+
 -- Exit code of `piton config get` when the part's files are invalid.
 local EXIT_INVALID_CONFIG = 3
 
