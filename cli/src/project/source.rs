@@ -125,8 +125,8 @@ pub enum UpdateError {
     Blocked(Box<Blocked>),
     /// The user's `piton(git-pull)` deny rule refuses an update that changes protected files.
     #[error(
-        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [permissions] refuses \
-         it; update the source by hand",
+        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [tools.permissions] \
+         refuses it; update the source by hand",
         files.join(", ")
     )]
     Denied { checkout: PathBuf, files: Vec<String> },
@@ -158,7 +158,7 @@ pub enum Requested<'a> {
 }
 
 /// What the user's permission rules say about an update that changes protected files: `piton(git-pull)` in the source
-/// checkout's `[permissions]`, matched as the permissions extension matches a tool name.
+/// checkout's `[tools.permissions]`, matched as the permissions extension matches a tool name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullRule {
     /// Apply the changed protected files without asking.

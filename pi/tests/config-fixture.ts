@@ -13,7 +13,7 @@ export interface ProjectConfigFixture {
     tracker?: unknown
     forge?: unknown
     permissions?: PermissionsFixture
-    /** `[permissions.sandbox]` / `[permissions.host]`. */
+    /** `[tools.permissions.sandbox]` / `[tools.permissions.host]`. */
     runtimePermissions?: { host?: PermissionsFixture; sandbox?: PermissionsFixture }
 }
 
@@ -33,10 +33,10 @@ function changes(config: ProjectConfigFixture): { shared: Record<string, unknown
     if (config.username !== undefined) local["branches.username"] = config.username
     if (config.tracker !== undefined) shared.tracker = integrationsToFile(config.tracker)
     if (config.forge !== undefined) shared.forge = integrationsToFile(config.forge)
-    if (config.permissions !== undefined) shared.permissions = permissionsTable(config.permissions)
+    if (config.permissions !== undefined) shared["tools.permissions"] = permissionsTable(config.permissions)
     for (const runtime of ["host", "sandbox"] as const) {
         const rules = config.runtimePermissions?.[runtime]
-        if (rules !== undefined) shared[`permissions.${runtime}`] = permissionsTable(rules)
+        if (rules !== undefined) shared[`tools.permissions.${runtime}`] = permissionsTable(rules)
     }
     return { shared, local }
 }
@@ -51,12 +51,12 @@ export function permissionsTable(rules: PermissionsFixture): Record<string, unkn
 }
 
 /**
- * Writes `[permissions]` of `root` (`"global"`: the test's global tier) from the object the permissions extension uses.
+ * Writes `[tools.permissions]` of `root` (`"global"`: the test's global tier) from the object the permissions extension uses.
  * Replaces the table whole. A value the file can't hold (a number where rules go) is written as is, for tests of
  * invalid settings.
  */
 export function writePermissions(root: string, rules: PermissionsFixture, local = false): string {
-    return writeConfig(root, { permissions: permissionsTable(rules) }, local)
+    return writeConfig(root, { "tools.permissions": permissionsTable(rules) }, local)
 }
 
 /** Writes `root`'s configuration (`"global"`: the test's global tier). Returns the shared file. */

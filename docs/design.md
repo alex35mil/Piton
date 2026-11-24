@@ -134,7 +134,7 @@ type only the sandboxed runner builds, carrying the file each value came from (m
 (direnv, Nix) can't skip the sandbox or the provenance check below.
 
 **pi's environment is visible to the agent** and to every command it runs, in either mode: the login shell's, the
-workspace's mise environment, provider keys. In sandboxed sessions the `[permissions]` rules steer the agent but
+workspace's mise environment, provider keys. In sandboxed sessions the `[tools.permissions]` rules steer the agent but
 aren't the boundary: a rule that hides `mise.local.toml` doesn't stop another command from printing the environment.
 Keep secrets out of the mise environment; with the credential proxy (below), pi holds placeholders instead.
 
@@ -240,7 +240,7 @@ with `.piton/.local` linked to the source's.
     hook can't write any other protected file (`.piton/config.local.toml`, which no diff shows). A symlink or
     submodule among them refuses (change it by hand); a merge that fails puts the paths back from `HEAD`.
   - The user's permission rules can answer before anyone is asked: `piton(git-pull)` in the source checkout's
-    `[permissions]` (the host's rules: `[permissions]` and `[permissions.host]`). `allow` applies the update's
+    `[tools.permissions]` (the host's rules: `[tools.permissions]` and `[tools.permissions.host]`). `allow` applies the update's
     protected files without asking, through the same approval path; `deny` refuses creation (`update_denied`) and, on
     deletion, deletes the worker and leaves the source as it is, with a warning; `ask` or no rule asks. A deny or ask
     rule wins over an allow, and `*` counts.
@@ -718,7 +718,7 @@ $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
 <ancestor>/.piton/, .agents/     # shared by every repository below
 <repo>/
   .piton/
-    config.toml                  # committed: [sandbox] [workers] [permissions] [branches] [tracker] [forge]
+    config.toml                  # committed: [sandbox] [workers] [tools] [branches] [tracker] [forge]
     config.local.toml            # not committed: the same tables, plus [branches] username and [web_search] api_key
     mcp[.local].json, policies.md
     .local/                      # workflow artifacts (gitignored); a worker links its source's
@@ -770,8 +770,8 @@ the line. A host or client file has one schema and is read whole.
     set it and whether that file is the user's own (`Origin`); the nearest `profile` and `allow_*` switch win;
     presets add, a preset named at several levels taking each option from the nearest level that sets it. The daemon's `launch/sandbox` module, the only code that knows the backend, resolves
     them with the base policy and the profile's entries into each launch's rules ("Agent access").
-  - `[permissions]`, then the runtime's `[permissions.host]` or `[permissions.sandbox]`, per file: rules union, deny
-    and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
+  - `[tools.permissions]`, then the runtime's `[tools.permissions.host]` or `[tools.permissions.sandbox]`, per file:
+    rules union, deny and ask beat allow; `default_mode` and `skill_grants` from the nearest table that sets them.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
   - `[branches]`, `[web_search]`, the host file's keys: the nearer value per key.
   - `[tracker]` and `[forge]`: each the nearest table, whole. Both are optional; `provider = "none"` turns one off,
@@ -826,7 +826,7 @@ the line. A host or client file has one schema and is read whole.
   apps may change it. `settings.set {scope, key, value, local?}` writes it. The daemon edits with `toml_edit`, keeping
   comments and order, writes through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. The
   apps edit the host file's keys (`socket` shown read-only), the client file, and the global `[sandbox]` and
-  `[workers]`; `[development]`, `[permissions]`, `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited
+  `[workers]`; `[development]`, `[tools.permissions]`, `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited
   in the file. The apps never write repository or parent-folder files. A change is checked against the schema before
   it's written. The daemon watches the global folder (and a symlink's target folder): edits apply at once; `log`,
   `[env]`, `[tailnet]`, and `[tools]` wait for a restart and show as pending; a file that can't be used keeps its last good
@@ -890,7 +890,7 @@ so `piton sandbox why` names it. Three states follow: an opening entry opens; no
 about; the user's own `"deny"`, a `"read"` written to, or a `false` switch is closed and only logged
 (`DeniedBy::UserDeny`).
 
-**Permissions and the sandbox are separate layers.** `[permissions]` decides whether the agent may make a call,
+**Permissions and the sandbox are separate layers.** `[tools.permissions]` decides whether the agent may make a call,
 before it runs; the sandbox decides what a running process may touch. Neither feeds the other. Claude Code merges
 `Read`/`Edit` denies into its sandbox, but its sandbox wraps only shell commands; Piton's wraps pi itself, its MCP
 servers, and the daemon's `mise env`, so a permission deny made a sandbox deny would hide pi's own `auth.json` from
@@ -1094,9 +1094,9 @@ config files (`fnox.toml`, `.fnox.toml`, `.config/fnox.toml`, and their `.local`
 which decide where secrets go and which commands fnox runs to fetch them. Both are protected at any depth in the
 workspace's checkout, since a session (and fnox) can start in a subfolder. `AGENTS.md`, rules, and
 `.agents/skills/` aren't protected: they change what the agent is told, not what it may do. A skill's `allowed-tools`
-grants nothing unless the user opts in with `skill_grants = true` in `[permissions]`; with it on, an agent that edits a
+grants nothing unless the user opts in with `skill_grants = true` in `[tools.permissions]`; with it on, an agent that edits a
 skill can grant itself the tools it lists. Without protection, a sandboxed agent in the source checkout could add `allow = ["bash(*)"]` to
-`[permissions.host]` in `.piton/config.toml`, and a host session in the same checkout would run any command without asking from its
+`[tools.permissions.host]` in `.piton/config.toml`, and a host session in the same checkout would run any command without asking from its
 next tool call.
 
 Outside the checkout, every configuration file the user edits by hand is protected the same way, so an agent can help

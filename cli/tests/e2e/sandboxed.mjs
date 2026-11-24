@@ -39,7 +39,7 @@ function sweepAway() {
 }
 
 /// A scratch folder: a workspace (`ws/`, a Git checkout), pi's agent directory with Piton's pi package, the daemon's
-/// state folder, and the global configuration (sandbox attach mode, `[permissions] default_mode = "allow"` so the
+/// state folder, and the global configuration (sandbox attach mode, `[tools.permissions] default_mode = "allow"` so the
 /// permissions extension doesn't ask before each call). `settings` adds to the agent directory's `settings.json`;
 /// `files` writes workspace files (relative path to contents), such as `.piton/config.local.toml`.
 export function setup(prefix, { settings = {}, files = {} } = {}) {
@@ -65,7 +65,7 @@ export function setup(prefix, { settings = {}, files = {} } = {}) {
             stop: { grace_ms: 3000, term_grace_ms: 1000 },
         },
         host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
-        project: { permissions: { default_mode: "allow" } },
+        project: { tools: { permissions: { default_mode: "allow" } } },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
     return { dir, ws, agent, config, env };

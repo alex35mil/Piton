@@ -138,12 +138,12 @@ describe("shared settings contract", () => {
         const h = fixture()
         try {
             writeConfig("global", {
-                permissions: permissionsTable({ defaultMode: "ask", allow: ["read"] }),
-                "permissions.sandbox": permissionsTable({ defaultMode: "allow", allow: ["bash(npm *)"] }),
-                "permissions.host": permissionsTable({ deny: ["bash(host-only *)"] }),
+                "tools.permissions": permissionsTable({ defaultMode: "ask", allow: ["read"] }),
+                "tools.permissions.sandbox": permissionsTable({ defaultMode: "allow", allow: ["bash(npm *)"] }),
+                "tools.permissions.host": permissionsTable({ deny: ["bash(host-only *)"] }),
             })
-            writeConfig(h.repositoryRoot, { permissions: permissionsTable({ defaultMode: "deny" }) })
-            writeConfig(h.repositoryRoot, { "permissions.sandbox.ask": ["bash(git push *)"] }, true)
+            writeConfig(h.repositoryRoot, { "tools.permissions": permissionsTable({ defaultMode: "deny" }) })
+            writeConfig(h.repositoryRoot, { "tools.permissions.sandbox.ask": ["bash(git push *)"] }, true)
 
             const sandbox = inspectPersistentPermissions(h.nested, "sandbox")
             assert.equal(sandbox.runtime, "sandbox")
@@ -172,12 +172,12 @@ describe("shared settings contract", () => {
     it("fails only the part whose table is broken", async () => {
         const h = fixture()
         try {
-            writeConfig(h.repositoryRoot, { "permissions.allow": ["read"] })
+            writeConfig(h.repositoryRoot, { "tools.permissions.allow": ["read"] })
             fs.appendFileSync(path.join(h.piton, "config.toml"), "[branches]\nformat = 1\n")
             clearSettingsCache()
             const resolved = resolveSettings(h.nested, "host")
             assert.throws(() => section(resolved.branches), /config\.toml/)
-            assert.deepEqual(section(resolved.permissions).merged.allow, ["read"])
+            assert.deepEqual(section(resolved.tools).permissions.merged.allow, ["read"])
             assert.doesNotThrow(() => section(resolved.mcp))
         } finally {
             await h.cleanup()

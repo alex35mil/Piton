@@ -16,7 +16,7 @@ use crate::config::{
         level::LevelKind,
         paths::{Scope, Sharing},
         tables::{
-            BranchesTable, Files, Integration, Levels, PermissionsTable, Rule, SandboxTable, Table, TableValue,
+            BranchesTable, Files, Integration, Levels, Rule, SandboxTable, Table, TableValue, ToolsTable,
             WebSearchTable, WorkersTable,
         },
     },
@@ -93,7 +93,7 @@ impl ConfigDoc {
         // `[tracker]` and `[forge]` are project only as a whole.
         let table_rule = match table {
             Table::Tracker | Table::Forge => vec![(name, Rule::PROJECT)],
-            Table::Sandbox | Table::Workers | Table::Permissions | Table::Branches | Table::WebSearch => Vec::new(),
+            Table::Sandbox | Table::Workers | Table::Tools | Table::Branches | Table::WebSearch => Vec::new(),
         };
         for (key, rule) in table_rule.into_iter().chain(value.ruled_keys()) {
             self.check_rule(key, rule)?;
@@ -136,7 +136,7 @@ impl ConfigDoc {
             match table {
                 Table::Sandbox => self.part::<SandboxTable>(table).map(drop_value)?,
                 Table::Workers => self.part::<WorkersTable>(table).map(drop_value)?,
-                Table::Permissions => self.part::<PermissionsTable>(table).map(drop_value)?,
+                Table::Tools => self.part::<ToolsTable>(table).map(drop_value)?,
                 Table::Branches => self.part::<BranchesTable>(table).map(drop_value)?,
                 Table::Tracker | Table::Forge => self.part::<Integration>(table).map(drop_value)?,
                 Table::WebSearch => self.part::<WebSearchTable>(table).map(drop_value)?,
@@ -244,8 +244,8 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_refused() {
-        let err = doc("[permisions]\nallow = []\n", LevelKind::Repository, Sharing::Shared).unwrap_err();
-        assert!(err.to_string().contains("permisions"), "{err}");
+        let err = doc("[tols]\nallow = []\n", LevelKind::Repository, Sharing::Shared).unwrap_err();
+        assert!(err.to_string().contains("tols"), "{err}");
         let d = doc("[sandbox]\nallw = []\n", LevelKind::Repository, Sharing::Shared).unwrap();
         let err = d.part::<SandboxTable>(Table::Sandbox).unwrap_err();
         assert!(err.to_string().contains("allw"), "{err}");
@@ -256,19 +256,26 @@ mod tests {
             "[tailnet]\nport = 1\n",
             "socket = \"/s\"\n",
             "[development]\nsession_analysis = true\n",
+            // Tool rules moved to `[tools.permissions]`; the old table is just an unknown key.
+            "[permissions]\nallow = [\"read\"]\n",
         ] {
             assert!(doc(text, LevelKind::Global, Sharing::Shared).is_err(), "{text}");
         }
+        let err = doc("[permissions]\n", LevelKind::Repository, Sharing::Shared).unwrap_err();
+        assert!(err.to_string().contains("unknown key `permissions`"), "{err}");
         let d = doc(
-            "[permissions.keybindings]\nauto_accept_edits = \"ctrl+a\"\n",
+            "[tools.permissions.keybindings]\nauto_accept_edits = \"ctrl+a\"\n",
             LevelKind::Global,
             Sharing::Shared,
         )
         .unwrap();
-        assert!(d.part::<PermissionsTable>(Table::Permissions).is_err());
-        // A table key holding anything else, even an empty list (which serde reads as an empty table), is refused.
-        let d = doc("permissions = []\n", LevelKind::Repository, Sharing::Shared).unwrap();
-        assert!(d.part::<PermissionsTable>(Table::Permissions).is_err());
+        assert!(d.part::<ToolsTable>(Table::Tools).is_err());
+        // A table key holding anything else, even an empty list (which serde reads as an empty table), is refused, at
+        // the top and inside `[tools]`.
+        for text in ["tools = []\n", "[tools]\npermissions = []\n"] {
+            let d = doc(text, LevelKind::Repository, Sharing::Shared).unwrap();
+            assert!(d.part::<ToolsTable>(Table::Tools).is_err(), "{text}");
+        }
         let d = doc("tracker = 1\n", LevelKind::Repository, Sharing::Shared).unwrap();
         assert!(d.part::<Integration>(Table::Tracker).is_err());
     }
@@ -277,14 +284,14 @@ mod tests {
     #[test]
     fn tables_are_parsed_on_their_own() {
         let d = doc(
-            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[permissions]\nallow = [\"read\"]\n[sandbox]\npresets = [\"rust\"]\n",
+            "[tracker]\nprovider = 1\n[branches]\nformt = \"x\"\n[tools.permissions]\nallow = [\"read\"]\n[sandbox]\npresets = [\"rust\"]\n",
             LevelKind::Repository,
             Sharing::Shared,
         )
         .unwrap();
         assert!(d.part::<BranchesTable>(Table::Branches).is_err());
         assert_eq!(
-            d.part::<PermissionsTable>(Table::Permissions).unwrap().unwrap().allow,
+            d.part::<ToolsTable>(Table::Tools).unwrap().unwrap().permissions.allow,
             ["read"]
         );
         assert_eq!(
@@ -305,7 +312,7 @@ mod tests {
                 Table::Branches => d.part::<BranchesTable>(table).map(drop),
                 Table::WebSearch => d.part::<WebSearchTable>(table).map(drop),
                 Table::Tracker | Table::Forge => d.part::<Integration>(table).map(drop),
-                Table::Workers | Table::Permissions => Ok(()),
+                Table::Workers | Table::Tools => Ok(()),
             }
         };
         use LevelKind::{Global, Parent, Repository};

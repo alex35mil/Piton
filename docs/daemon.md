@@ -43,7 +43,7 @@ commit itself, and the rest of the update, with your hooks, still runs in the sa
 other protected file. Declined, nothing changes (when deleting, you can delete without updating the source). The
 Neovim plugin asks; `piton worker` refuses and prints the flag that answers it (`--approve-source-update <sha>`, or
 `--skip-source-update` when deleting). To answer once for all updates, add `piton(git-pull)` to the source's
-`[permissions]`: in `allow`, the files are applied without asking; in `deny`, creating a worker is refused and deleting
+`[tools.permissions]`: in `allow`, the files are applied without asking; in `deny`, creating a worker is refused and deleting
 one leaves the source as it is.
 
 ## pi.nvim
@@ -136,7 +136,7 @@ For a sandboxed launch, `mise env` runs inside the launch's sandbox, so whatever
 runs (`exec(op read …)`) fails there and the launch is refused with mise's error; keep secrets out of the mise
 environment and use the credential proxy (below).
 
-Everything in pi's environment is visible to the agent and every command it runs. `[permissions]` rules steer the
+Everything in pi's environment is visible to the agent and every command it runs. `[tools.permissions]` rules steer the
 agent; in sandboxed sessions they aren't the boundary, the sandbox is.
 ### External tools
 
@@ -279,7 +279,7 @@ A sandboxed pi works with no configuration. The sandbox is built in layers:
 The nearest file's value wins per entry, and the most specific matching entry decides, so any entry can close what a
 profile or a broader entry opens (`"*" = "deny"` closes `standard`'s network). Host mode is the no-sandbox option.
 
-**Two layers, separate.** `[permissions]` rules decide whether the agent may make a call (run it, ask first, or refuse)
+**Two layers, separate.** `[tools.permissions]` rules decide whether the agent may make a call (run it, ask first, or refuse)
 before it runs; the sandbox decides what a running process may touch. Neither changes the other. The whole pi process
 is sandboxed (pi, its extensions, MCP servers, `mise env`), so a permission rule like `read(*.env)` stops pi's `read`
 tool, not `cat .env` in bash, and turning it into a sandbox rule would block pi and your tools too. A path no process
@@ -728,9 +728,9 @@ runs (a script, a Makefile, a package script, a `mise` task) or into a file that
 too, and no question shows the variables first. Claude Code's docs say the same about `excludedCommands`. Prefer a
 sandbox entry, narrowed if you can, and save a host entry only for a command whose files the agent can't change.
 
-A matching command runs where its entry says from the start, matched as `[permissions]` rules match (every part of a
-compound command must match the same entry; a command that writes a file with `>` gets none). Your `[permissions]`
-rules still decide first whether it runs at all.
+A matching command runs where its entry says from the start, matched as `[tools.permissions]` rules match (every part
+of a compound command must match the same entry; a command that writes a file with `>` gets none). Your
+`[tools.permissions]` rules still decide first whether it runs at all.
 
 When something other than a command is blocked (an MCP server, an extension, pi), you're asked once per process and
 path, one question at a time. The question names the exact entry each answer saves:

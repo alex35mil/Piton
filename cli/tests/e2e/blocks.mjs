@@ -3,7 +3,7 @@
 // runs the next matching call without asking; a blocked process that isn't a bash call is offered as a sandbox entry.
 // Real pi in sandbox mode, loading Piton's pi package (`pi/`, whose permissions extension sends bash to the daemon;
 // its dependencies come from `mise run pi:install`) and the faux extension (the scripted model and its test tools).
-// The test's `[permissions] default_mode = "allow"` keeps the extension from asking before each call.
+// The test's `[tools.permissions] default_mode = "allow"` keeps the extension from asking before each call.
 //
 // Usage (in cli/): cargo build && node tests/e2e/blocks.mjs, or `mise run cli:test`. Sandboxes don't nest and `log`
 // refuses inside one, so in a sandboxed session (PITON_RUNTIME=sandbox) every test is skipped.

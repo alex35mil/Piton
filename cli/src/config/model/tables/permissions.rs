@@ -1,10 +1,11 @@
-//! `[permissions]`: pi's tool rules, with `[permissions.host]` / `[permissions.sandbox]` for one launch mode. Each file
-//! contributes `[permissions]` and then the current runtime's table; rule lists combine across levels (deny and ask
-//! beat allow when evaluated), and `default_mode` and `skill_grants` come from the nearest table that sets them.
+//! `[tools.permissions]`: pi's tool rules, with `[tools.permissions.host]` / `[tools.permissions.sandbox]` for one launch
+//! mode. Each file contributes `[tools.permissions]` and then the current runtime's table; rule lists combine across
+//! levels (deny and ask beat allow when evaluated), and `default_mode` and `skill_grants` come from the nearest table
+//! that sets them.
 
 use serde::{Deserialize, Serialize};
 
-use super::{TableValue, nearer};
+use super::nearer;
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -56,9 +57,13 @@ impl PermissionRules {
     }
 }
 
-impl TableValue for PermissionsTable {}
+impl PermissionsTable {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
 
-/// The rules in effect for one runtime: `[permissions]` and `[permissions.<runtime>]` of every file, merged.
+/// The rules in effect for one runtime: `[tools.permissions]` and `[tools.permissions.<runtime>]` of every file, merged.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct PermissionSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,7 +86,7 @@ impl PermissionSettings {
         self.deny.extend(n.deny);
     }
 
-    /// A file's `[permissions]`, without its runtime tables.
+    /// A file's `[tools.permissions]`, without its runtime tables.
     pub fn shared(table: &PermissionsTable) -> Self {
         Self {
             default_mode: table.default_mode,

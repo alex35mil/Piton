@@ -12,7 +12,7 @@ use super::ConfigAction;
 use crate::config::{ConfigError, Paths, Resolved, Runtime};
 
 /// Version of `piton config resolve --json`. Clients refuse a version they don't know.
-pub const RESOLVE_FORMAT: u32 = 3;
+pub const RESOLVE_FORMAT: u32 = 1;
 
 /// Exit code for invalid configuration, so callers can tell it from a failure to run.
 const EXIT_INVALID: u8 = 3;
@@ -439,7 +439,7 @@ mod tests {
         std::fs::create_dir_all(repo.join(".piton")).unwrap();
         std::fs::write(
             repo.join(".piton/config.toml"),
-            "[permissions]\nallow = [\"read\"]\n[branches]\nformat = 1\n",
+            "[tools.permissions]\nallow = [\"read\"]\n[branches]\nformat = 1\n",
         )
         .unwrap();
         let paths = Paths {
@@ -460,7 +460,12 @@ mod tests {
         assert_eq!(json["format"], RESOLVE_FORMAT);
         assert_eq!(json["runtime"], "sandbox");
         // Each part is `{ok}` or `{error: {message}}`.
-        assert_eq!(json["permissions"]["ok"]["merged"]["allow"][0], "read");
+        assert_eq!(json["tools"]["ok"]["permissions"]["merged"]["allow"][0], "read");
+        assert!(json.get("permissions").is_none());
+        assert_eq!(
+            get(&resolved, "tools").unwrap().unwrap()["permissions"]["merged"]["allow"][0],
+            "read"
+        );
         assert!(json["tracker"]["ok"].is_null());
         assert_eq!(get(&resolved, "tracker").unwrap().unwrap(), serde_json::Value::Null);
         assert!(get(&resolved, "branches").unwrap().is_err());

@@ -205,7 +205,7 @@ enum ConfigAction {
         #[usage(long)]
         global: bool,
     },
-    /// Print one resolved part as JSON, by its name in `config resolve`: a table (sandbox, workers, permissions,
+    /// Print one resolved part as JSON, by its name in `config resolve`: a table (sandbox, workers, tools,
     /// branches, tracker, forge, web_search), mcp, mcp_global, policies, or instructions.
     Get {
         part: String,

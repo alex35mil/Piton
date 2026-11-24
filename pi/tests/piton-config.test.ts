@@ -42,7 +42,7 @@ function resolved(watch: string[]) {
         checkout: "/w",
         global: "/g",
         runtime: "host",
-        permissions: { ok: { merged: { allow: ["read"], ask: [], deny: [] }, sources: [] } },
+        tools: { ok: { permissions: { merged: { allow: ["read"], ask: [], deny: [] }, sources: [] } } },
         mcp: { ok: { servers: [] } },
         mcp_global: { ok: { servers: [] } },
         web_search: { ok: {} },
@@ -65,7 +65,7 @@ describe("piton config resolve client", () => {
             fs.writeFileSync(path.join(s.dir, "out.json"), JSON.stringify(resolved([watched])))
             const cwd = s.dir
             // A broken part fails only its readers.
-            assert.deepEqual(section(resolveSettings(cwd, "host").permissions).merged.allow, ["read"])
+            assert.deepEqual(section(resolveSettings(cwd, "host").tools).permissions.merged.allow, ["read"])
             assert.throws(() => section(resolveSettings(cwd, "host").branches), /config\.toml/)
             resolveSettings(cwd, "host")
             assert.equal(s.calls().length, 1)
