@@ -852,6 +852,7 @@ mod tests {
                         source: dir.to_path_buf(),
                         checkout: dir.to_path_buf(),
                         levels: Vec::new(),
+                        untrusted: Vec::new(),
                     },
                     |_| Ok(policy()),
                 ),

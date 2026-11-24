@@ -7,9 +7,9 @@
 //! business, `launch/sandbox/resolve.rs`). Three booleans cover what has nothing to list; presets are toolchain path
 //! bundles; profiles are built-in entries of the same maps.
 //!
-//! What a project's committed `config.toml` may hold: an entry that opens something (`"read"`, `"allow"`, a `true`
-//! boolean, `profile`, the `pi-claude-code` preset, `commands`) is the user's own (the global files or a
-//! `config.local.toml`); `"write"`, `"deny"`, `false`, toolchain presets, and `silence` may be set anywhere. A
+//! Every key may be set in any file. In a repository's committed `config.toml`, an entry that opens something
+//! ([`SandboxTable::grants`]: `"read"`, `"write"`, `"allow"`, a `true` switch, a preset, `profile`, `commands`) applies
+//! only once the user trusts the repository (`crate::trust`); `"deny"`, `false`, and `silence` always apply. A
 //! committed `"write"` never reopens what a credential or the user's own `"deny"` closes (`launch/sandbox/`).
 
 use std::{
@@ -19,7 +19,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{Merge, Rule, TableValue, is_grant_path, union};
+use super::{Merge, TableValue, is_grant_path, union};
+use crate::config::model::grants::{GrantEntry, GrantFilter, Grants};
 
 /// One file's `[sandbox]`, as written.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -759,14 +760,6 @@ impl Preset {
             (Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::PiClaudeCode(_), _) => {}
         }
     }
-
-    /// Whether the preset opens more than toolchain caches: the user's own files only.
-    fn loosens(&self) -> bool {
-        match self {
-            Preset::PiClaudeCode(_) => true,
-            Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => false,
-        }
-    }
 }
 
 impl TryFrom<toml::Value> for Preset {
@@ -841,51 +834,137 @@ impl From<Preset> for toml::Value {
 }
 
 impl TableValue for SandboxTable {
-    /// Every key that opens something: the global file or a `config.local.toml`, never a project's `config.toml`.
-    fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
-        let opens = [
-            ("sandbox.profile", self.profile.is_some()),
-            ("sandbox.allow_tcp_listening", self.allow_tcp_listening == Some(true)),
-            (
-                "sandbox.allow_git_control_files",
-                self.allow_git_control_files == Some(true),
-            ),
-            ("sandbox.allow_launching_apps", self.allow_launching_apps == Some(true)),
-            (
-                "sandbox.filesystem (\"read\")",
-                self.filesystem.values().any(|a| *a == FileAccess::Read),
-            ),
-            (
-                "sandbox.network.connections (\"allow\")",
-                self.network.connections.values().any(|e| *e == Effect::Allow),
-            ),
-            (
-                "sandbox.network.unix_socket_connections (\"allow\")",
-                self.network
-                    .unix_socket_connections
-                    .values()
-                    .any(|e| *e == Effect::Allow),
-            ),
-            (
-                "sandbox.network.unix_socket_bindings (\"allow\")",
-                self.network.unix_socket_bindings.values().any(|e| *e == Effect::Allow),
-            ),
-            (
-                "sandbox.macos.services (\"allow\")",
-                self.macos.services.values().any(|e| *e == Effect::Allow),
-            ),
-            (
-                "sandbox.presets pi-claude-code",
-                self.presets.iter().any(Preset::loosens),
-            ),
-            ("sandbox.commands", !self.commands.is_empty()),
-        ];
-        opens
-            .into_iter()
-            .filter(|(_, set)| *set)
-            .map(|(key, _)| (key, Rule::USERS_OWN))
-            .collect()
+    fn grants(&self) -> Grants {
+        SandboxTable::grants(self)
     }
+    fn gated(self, filter: &GrantFilter) -> (Self, Vec<GrantEntry>) {
+        self.filtered(filter)
+    }
+}
+
+/// A boolean switch as a grant: `true` opens, `false` only closes.
+fn switch_grant(key: &str, value: bool) -> Option<GrantEntry> {
+    match value {
+        true => Some(GrantEntry::set(key, true)),
+        false => None,
+    }
+}
+
+fn file_grant(key: &PathKey, access: FileAccess) -> Option<GrantEntry> {
+    match access {
+        FileAccess::Read | FileAccess::Write => {
+            Some(GrantEntry::entry("sandbox.filesystem", key.as_str(), access.name()))
+        }
+        FileAccess::Deny => None,
+    }
+}
+
+fn effect_grant(table: &str, key: &str, effect: Effect) -> Option<GrantEntry> {
+    match effect {
+        Effect::Allow => Some(GrantEntry::entry(table, key, "allow")),
+        Effect::Deny => None,
+    }
+}
+
+fn preset_grant(preset: &Preset) -> GrantEntry {
+    GrantEntry::item("sandbox.presets", toml::Value::from(*preset))
+}
+
+fn command_grant(command: &CommandGrant) -> GrantEntry {
+    let value =
+        toml::Value::try_from(command.clone()).unwrap_or_else(|_| toml::Value::String(command.pattern.clone().into()));
+    GrantEntry::item("sandbox.commands", value)
+}
+
+impl SandboxTable {
+    /// Every entry that opens something: what the file grants. `"deny"` entries, `false` switches, and `silence` only
+    /// close, so they're never grants.
+    pub fn grants(&self) -> Grants {
+        let mut grants = Grants::new();
+        if let Some(profile) = self.profile {
+            grants.insert(GrantEntry::set("sandbox.profile", profile.name()));
+        }
+        for (key, value) in [
+            ("sandbox.allow_tcp_listening", self.allow_tcp_listening),
+            ("sandbox.allow_git_control_files", self.allow_git_control_files),
+            ("sandbox.allow_launching_apps", self.allow_launching_apps),
+        ] {
+            grants.extend(value.and_then(|value| switch_grant(key, value)));
+        }
+        grants.extend(self.presets.iter().map(preset_grant));
+        grants.extend(self.filesystem.iter().filter_map(|(k, a)| file_grant(k, *a)));
+        let maps = [
+            ("sandbox.network.connections", effects(&self.network.connections)),
+            (
+                "sandbox.network.unix_socket_connections",
+                effects(&self.network.unix_socket_connections),
+            ),
+            (
+                "sandbox.network.unix_socket_bindings",
+                effects(&self.network.unix_socket_bindings),
+            ),
+            ("sandbox.macos.services", effects(&self.macos.services)),
+        ];
+        for (table, entries) in maps {
+            grants.extend(entries.into_iter().filter_map(|(k, e)| effect_grant(table, &k, e)));
+        }
+        grants.extend(self.commands.iter().map(command_grant));
+        grants
+    }
+
+    /// The table with only the grants `filter` keeps; restrictions stay. Returns the grants left out.
+    pub fn filtered(mut self, filter: &GrantFilter) -> (Self, Vec<GrantEntry>) {
+        let mut out = Vec::new();
+        filter.retain_option(
+            &mut self.profile,
+            |p| Some(GrantEntry::set("sandbox.profile", p.name())),
+            &mut out,
+        );
+        filter.retain_option(
+            &mut self.allow_tcp_listening,
+            |v| switch_grant("sandbox.allow_tcp_listening", *v),
+            &mut out,
+        );
+        filter.retain_option(
+            &mut self.allow_git_control_files,
+            |v| switch_grant("sandbox.allow_git_control_files", *v),
+            &mut out,
+        );
+        filter.retain_option(
+            &mut self.allow_launching_apps,
+            |v| switch_grant("sandbox.allow_launching_apps", *v),
+            &mut out,
+        );
+        filter.retain(&mut self.presets, preset_grant, &mut out);
+        filter.retain_map(&mut self.filesystem, |k, a| file_grant(k, *a), &mut out);
+        filter.retain_map(
+            &mut self.network.connections,
+            |k, e| effect_grant("sandbox.network.connections", &k.to_string(), *e),
+            &mut out,
+        );
+        filter.retain_map(
+            &mut self.network.unix_socket_connections,
+            |k, e| effect_grant("sandbox.network.unix_socket_connections", k.as_str(), *e),
+            &mut out,
+        );
+        filter.retain_map(
+            &mut self.network.unix_socket_bindings,
+            |k, e| effect_grant("sandbox.network.unix_socket_bindings", k.as_str(), *e),
+            &mut out,
+        );
+        filter.retain_map(
+            &mut self.macos.services,
+            |k, e| effect_grant("sandbox.macos.services", &k.to_string(), *e),
+            &mut out,
+        );
+        filter.retain(&mut self.commands, command_grant, &mut out);
+        (self, out)
+    }
+}
+
+/// A map's entries by their key as written.
+fn effects<K: std::fmt::Display>(map: &BTreeMap<K, Effect>) -> Vec<(String, Effect)> {
+    map.iter().map(|(k, e)| (k.to_string(), *e)).collect()
 }
 
 impl Merge for SandboxTable {
@@ -1423,40 +1502,79 @@ mod tests {
         }
     }
 
-    /// What opens is the user's own; what closes, writes, and toolchain caches may be set anywhere.
+    /// Every entry that opens is a grant, one stable line each; what only closes isn't.
     #[test]
-    fn opening_keys_are_the_users_own() {
-        let keys = |text: &str| table(text).ruled_keys().into_iter().map(|(k, _)| k).collect::<Vec<_>>();
-        assert_eq!(keys("profile = \"yolo\""), ["sandbox.profile"]);
-        assert_eq!(keys("allow_tcp_listening = true"), ["sandbox.allow_tcp_listening"]);
+    fn grants_are_what_opens() {
+        let grants = |text: &str| {
+            table(text)
+                .grants()
+                .into_iter()
+                .map(|g| g.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(grants("profile = \"yolo\""), ["sandbox.profile = \"yolo\""]);
         assert_eq!(
-            keys("[filesystem]\n\"~/.ssh/config\" = \"read\""),
-            ["sandbox.filesystem (\"read\")"]
+            grants("allow_tcp_listening = true"),
+            ["sandbox.allow_tcp_listening = true"]
         );
         assert_eq!(
-            keys("[network.connections]\n\"*\" = \"allow\""),
-            ["sandbox.network.connections (\"allow\")"]
+            grants("[filesystem]\n\"~/.ssh/config\" = \"read\"\n\"/a\" = \"write\""),
+            [
+                "sandbox.filesystem.\"/a\" = \"write\"",
+                "sandbox.filesystem.\"~/.ssh/config\" = \"read\""
+            ]
         );
         assert_eq!(
-            keys("presets = [\"pi-claude-code\"]"),
-            ["sandbox.presets pi-claude-code"]
+            grants("[network.connections]\n\"*\" = \"allow\""),
+            ["sandbox.network.connections.\"*\" = \"allow\""]
         );
         assert_eq!(
-            keys("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\""),
-            ["sandbox.commands"]
+            grants("presets = [\"rust\", { name = \"pi-claude-code\", login = \"keychain\" }]"),
+            [
+                "sandbox.presets \"rust\"",
+                "sandbox.presets { login = \"keychain\", name = \"pi-claude-code\" }"
+            ]
+        );
+        assert_eq!(
+            grants("[[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\""),
+            ["sandbox.commands { match = \"bash(x)\", runtime = \"host\" }"]
         );
         for text in [
-            "presets = [\"rust\", \"swift\"]",
             "allow_tcp_listening = false",
             "allow_git_control_files = false",
-            "[filesystem]\n\"/a\" = \"write\"\n\"/b\" = \"deny\"",
+            "[filesystem]\n\"/b\" = \"deny\"",
             "[network.connections]\n\"*\" = \"deny\"\n\"evil.com\" = \"deny\"",
             "[network.unix_socket_connections]\n\"/\" = \"deny\"",
             "[macos.services]\n\"*\" = \"deny\"",
             "silence = [{ target = \"com.apple.SecurityServer\" }]",
         ] {
-            assert!(table(text).ruled_keys().is_empty(), "{text}");
+            assert!(table(text).grants().is_empty(), "{text}");
         }
+    }
+
+    /// A filter keeps the grants it names and every restriction.
+    #[test]
+    fn filtering_keeps_restrictions() {
+        let all = table(
+            "profile = \"yolo\"\npresets = [\"rust\", \"swift\"]\nallow_tcp_listening = true\n\
+             allow_git_control_files = false\n[filesystem]\n\"/a\" = \"write\"\n\"/b\" = \"deny\"\n\
+             [network.connections]\n\"*\" = \"deny\"\n\"github.com\" = \"allow\"\n\
+             [[commands]]\nmatch = \"bash(x)\"\nruntime = \"host\"",
+        );
+        let (none, out) = all.clone().filtered(&GrantFilter::None);
+        assert_eq!(out.len(), all.grants().len());
+        assert_eq!(none.profile, None);
+        assert!(none.presets.is_empty() && none.commands.is_empty());
+        assert_eq!(none.allow_tcp_listening, None);
+        assert_eq!(none.allow_git_control_files, Some(false), "a false switch closes");
+        assert_eq!(none.filesystem.len(), 1);
+        assert_eq!(none.filesystem[&path("/b")], FileAccess::Deny);
+        assert_eq!(none.network.connections.len(), 1);
+        assert_eq!(none.network.connections[&NetworkTarget::Anywhere], Effect::Deny);
+        let rust = GrantEntry::item("sandbox.presets", "rust");
+        let (only, _) = all.clone().filtered(&GrantFilter::Only([rust].into()));
+        assert_eq!(only.presets, [Preset::Rust]);
+        assert_eq!(all.clone().filtered(&GrantFilter::All).0, all);
     }
 
     /// `silence` names a Mach service or `tcp-listen`; a path or host is refused, saying to use a `"deny"`.

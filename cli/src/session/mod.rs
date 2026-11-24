@@ -356,6 +356,8 @@ pub struct LaunchSpec {
     /// For a filtered network: pi's trusted hosts, and where the gate reaches hosts (`None`: behind fnox, reported once
     /// fnox runs).
     pub network: Option<NetworkSpec>,
+    /// Whether pi loads the project's own resources (`--approve`), from the user's trust decision.
+    pub project_trusted: bool,
 }
 
 /// What a session with a filtered network starts its gate with.
@@ -404,7 +406,7 @@ fn start_gate(spec: NetworkSpec, tx: &mpsc::UnboundedSender<SessionCmd>) -> Resu
 
 pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> Result<SessionHandle, LaunchError> {
     let helper = launch::helper()?;
-    let argv = launch::command_line(&config, spec.mode, &spec.session, &helper);
+    let argv = launch::command_line(&config, spec.mode, &spec.session, spec.project_trusted, &helper);
     let encoding = |e: serde_json::Error| LaunchError::Spawn {
         program: "launch environment".into(),
         source: std::io::Error::other(e),

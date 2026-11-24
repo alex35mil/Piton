@@ -57,6 +57,11 @@ pub enum LaunchError {
     Sandbox(#[from] crate::launch::sandbox::SandboxError),
     #[error(transparent)]
     Fnox(#[from] fnox::FnoxError),
+    /// The user must decide whether to trust the repository first: the client asks, records it, and launches again.
+    #[error("{0}")]
+    TrustNeeded(Box<crate::trust::TrustNeeded>),
+    #[error("state database: {0}")]
+    State(crate::state::StateError),
 }
 
 /// Which session pi starts with.
@@ -431,18 +436,36 @@ fn with_piton_vars(config: &DaemonConfig, mut env: Env, mode: LaunchMode) -> Env
     env
 }
 
-/// The launch's configuration: `[sandbox]` and `[workers]` of the workspace's chain, refusing them when they're invalid.
-/// The pi package checks its own parts when pi starts.
-pub fn resolve_config(config: &DaemonConfig, workspace: &Workspace) -> Result<LaunchConfig, LaunchError> {
-    Ok(crate::config::resolve_launch(workspace, &config.paths)?)
+/// The launch's configuration: `[sandbox]` and `[workers]` of the workspace's chain, the repository's committed grants
+/// kept as `filter` says, refusing them when they're invalid. The pi package checks its own parts when pi starts.
+pub fn resolve_config(
+    config: &DaemonConfig,
+    workspace: &Workspace,
+    filter: &crate::config::GrantFilter,
+) -> Result<LaunchConfig, LaunchError> {
+    Ok(crate::config::resolve_launch(workspace, &config.paths, filter)?)
 }
 
 /// The full argument vector for pi in `mode`. A sandboxed pi starts through `helper sandbox-exec` (this binary), which
-/// applies the policy in [`sandbox::POLICY_ENV`] and then runs pi.
-pub fn command_line(config: &DaemonConfig, mode: LaunchMode, session: &SessionArg, helper: &Path) -> Vec<String> {
+/// applies the policy in [`sandbox::POLICY_ENV`] and then runs pi. pi's project trust is Piton's decision, never asked
+/// or saved by pi: `--approve` or `--no-approve` (after the user's own arguments, so it wins).
+pub fn command_line(
+    config: &DaemonConfig,
+    mode: LaunchMode,
+    session: &SessionArg,
+    project_trusted: bool,
+    helper: &Path,
+) -> Vec<String> {
     let mut pi: Vec<String> = config.pi.command.clone();
     pi.extend(["--mode".into(), "rpc".into()]);
     pi.extend(config.pi.args.iter().cloned());
+    pi.push(
+        match project_trusted {
+            true => "--approve",
+            false => "--no-approve",
+        }
+        .into(),
+    );
     match session {
         SessionArg::New => {}
         SessionArg::Resume(file) => {
@@ -567,6 +590,7 @@ mod tests {
             &config,
             LaunchMode::Sandbox,
             &SessionArg::Resume("/s.jsonl".into()),
+            false,
             Path::new("/app/piton"),
         );
         assert_eq!(
@@ -578,6 +602,7 @@ mod tests {
                 "pi",
                 "--mode",
                 "rpc",
+                "--no-approve",
                 "--session",
                 "/s.jsonl"
             ]
@@ -795,8 +820,14 @@ mod tests {
     #[test]
     fn host_runs_pi_directly() {
         let config = DaemonConfig::for_tests();
-        let argv = command_line(&config, LaunchMode::Host, &SessionArg::New, Path::new("/app/piton"));
-        assert_eq!(argv, ["pi", "--mode", "rpc"]);
+        let argv = command_line(
+            &config,
+            LaunchMode::Host,
+            &SessionArg::New,
+            true,
+            Path::new("/app/piton"),
+        );
+        assert_eq!(argv, ["pi", "--mode", "rpc", "--approve"]);
     }
 
     #[test]

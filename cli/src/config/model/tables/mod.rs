@@ -8,6 +8,7 @@ pub mod branches;
 pub mod permissions;
 pub mod sandbox;
 pub mod tools;
+pub mod trust;
 pub mod web_search;
 pub mod workers;
 
@@ -20,6 +21,7 @@ pub use self::{
         ServiceKey, ServiceName, Silence, SilenceTarget,
     },
     tools::ToolsTable,
+    trust::{Reconfirm, TrustTable},
     web_search::WebSearchTable,
     workers::WorkersTable,
 };
@@ -34,10 +36,11 @@ pub enum Table {
     Tracker,
     Forge,
     WebSearch,
+    Trust,
 }
 
 impl Table {
-    pub const ALL: [Table; 7] = [
+    pub const ALL: [Table; 8] = [
         Table::Sandbox,
         Table::Workers,
         Table::Tools,
@@ -45,6 +48,7 @@ impl Table {
         Table::Tracker,
         Table::Forge,
         Table::WebSearch,
+        Table::Trust,
     ];
 
     /// The table's name in the file.
@@ -57,6 +61,7 @@ impl Table {
             Table::Tracker => "tracker",
             Table::Forge => "forge",
             Table::WebSearch => "web_search",
+            Table::Trust => "trust",
         }
     }
 
@@ -74,9 +79,10 @@ pub enum Levels {
     Project,
 }
 
-/// Which file of a level's pair (`config.toml`, `config.local.toml`) may hold a key. A project's `config.toml` is
-/// committed, so it's written by whoever commits to the repository; its `config.local.toml`, and both files of the
-/// global tier, are the user's own.
+/// Which file of a level's pair (`config.toml`, `config.local.toml`) may hold a key. A repository's `config.toml` is
+/// committed, so it's written by whoever commits to the repository; its `config.local.toml`, parent folders' files, and
+/// both files of the global tier are the user's own. (What a committed file grants is gated by trust, not by these
+/// rules: `crate::trust`.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Files {
     /// Either file, at every level.
@@ -84,9 +90,8 @@ pub enum Files {
     /// `config.local.toml` only, at every level, the global tier included: a secret, kept out of any file that might
     /// be shared or synced (`web_search.api_key`).
     Local,
-    /// Any file but a project's committed `config.toml`: a value only the user may choose for themselves, which
-    /// needn't be secret (`branches.username`, and every knob that loosens the sandbox: a repository can't open it for
-    /// whoever clones it).
+    /// Any file but a repository's committed `config.toml`: a value only the user may choose for themselves, which
+    /// needn't be secret (`branches.username`, `trust.reconfirm`).
     UsersOwn,
 }
 
@@ -122,6 +127,17 @@ pub trait TableValue: serde::de::DeserializeOwned {
     /// Values the schema accepts but piton can't use.
     fn check(&self) -> Result<(), String> {
         Ok(())
+    }
+    /// What this table grants, in a repository's committed file. Tables that grant nothing have none.
+    fn grants(&self) -> crate::config::model::grants::Grants {
+        crate::config::model::grants::Grants::new()
+    }
+    /// The table with only the grants `filter` keeps, and the grants left out.
+    fn gated(
+        self,
+        _filter: &crate::config::model::grants::GrantFilter,
+    ) -> (Self, Vec<crate::config::model::grants::GrantEntry>) {
+        (self, Vec::new())
     }
 }
 

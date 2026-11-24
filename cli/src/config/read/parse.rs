@@ -16,7 +16,7 @@ use crate::config::{
         level::LevelKind,
         paths::{Scope, Sharing},
         tables::{
-            BranchesTable, Files, Integration, Levels, Rule, SandboxTable, Table, TableValue, ToolsTable,
+            BranchesTable, Files, Integration, Levels, Rule, SandboxTable, Table, TableValue, ToolsTable, TrustTable,
             WebSearchTable, WorkersTable,
         },
     },
@@ -93,7 +93,9 @@ impl ConfigDoc {
         // `[tracker]` and `[forge]` are project only as a whole.
         let table_rule = match table {
             Table::Tracker | Table::Forge => vec![(name, Rule::PROJECT)],
-            Table::Sandbox | Table::Workers | Table::Tools | Table::Branches | Table::WebSearch => Vec::new(),
+            Table::Sandbox | Table::Workers | Table::Tools | Table::Branches | Table::WebSearch | Table::Trust => {
+                Vec::new()
+            }
         };
         for (key, rule) in table_rule.into_iter().chain(value.ruled_keys()) {
             self.check_rule(key, rule)?;
@@ -119,13 +121,13 @@ impl ConfigDoc {
                 path,
                 key: key.to_string(),
             }),
-            (Files::UsersOwn, Parent | Repository, Sharing::Shared) => Err(ConfigError::NotInProjectConfig {
+            (Files::UsersOwn, Repository, Sharing::Shared) => Err(ConfigError::NotInProjectConfig {
                 path,
                 key: key.to_string(),
             }),
             (Files::Either, Global | Parent | Repository, Sharing::Shared | Sharing::Local)
             | (Files::Local | Files::UsersOwn, Global | Parent | Repository, Sharing::Local)
-            | (Files::UsersOwn, Global, Sharing::Shared) => Ok(()),
+            | (Files::UsersOwn, Global | Parent, Sharing::Shared) => Ok(()),
         }
     }
 
@@ -140,6 +142,7 @@ impl ConfigDoc {
                 Table::Branches => self.part::<BranchesTable>(table).map(drop_value)?,
                 Table::Tracker | Table::Forge => self.part::<Integration>(table).map(drop_value)?,
                 Table::WebSearch => self.part::<WebSearchTable>(table).map(drop_value)?,
+                Table::Trust => self.part::<TrustTable>(table).map(drop_value)?,
             }
         }
         Ok(())
@@ -312,39 +315,33 @@ mod tests {
                 Table::Branches => d.part::<BranchesTable>(table).map(drop),
                 Table::WebSearch => d.part::<WebSearchTable>(table).map(drop),
                 Table::Tracker | Table::Forge => d.part::<Integration>(table).map(drop),
+                Table::Trust => d.part::<TrustTable>(table).map(drop),
                 Table::Workers | Table::Tools => Ok(()),
             }
         };
         use LevelKind::{Global, Parent, Repository};
         use Sharing::{Local, Shared};
-        // Opening the sandbox: the user's own files only, so a repository can't open it to itself.
-        for loosening in [
-            "[sandbox.filesystem]\n\"~/.ssh/config\" = \"read\"\n",
+        // Every sandbox key, in any file: what a repository's committed file grants is gated by trust instead.
+        for entry in [
+            "[sandbox.filesystem]\n\"~/.ssh/config\" = \"read\"\n\"/s\" = \"deny\"\n",
             "[sandbox.network.connections]\n\"*\" = \"allow\"\n",
-            "[sandbox]\nprofile = \"yolo\"\n",
-            "[sandbox]\nallow_git_control_files = true\n",
+            "[sandbox]\nprofile = \"yolo\"\nallow_git_control_files = true\npresets = [\"pi-claude-code\"]\n",
             "[[sandbox.commands]]\nmatch = \"bash(husky install *)\"\nruntime = \"sandbox\"\ngrant = \"all\"\n",
-            "[[sandbox.commands]]\nmatch = \"bash(log show *)\"\nruntime = \"host\"\n",
         ] {
-            for level in [Parent, Repository] {
-                assert!(
-                    matches!(
-                        part(loosening, level, Shared, Table::Sandbox),
-                        Err(ConfigError::NotInProjectConfig { .. })
-                    ),
-                    "{loosening}"
-                );
-                assert!(part(loosening, level, Local, Table::Sandbox).is_ok(), "{loosening}");
+            for level in [Global, Parent, Repository] {
+                for sharing in [Shared, Local] {
+                    assert!(part(entry, level, sharing, Table::Sandbox).is_ok(), "{entry}");
+                }
             }
-            assert!(part(loosening, Global, Shared, Table::Sandbox).is_ok(), "{loosening}");
-            assert!(part(loosening, Global, Local, Table::Sandbox).is_ok(), "{loosening}");
         }
-        for anywhere in [
-            "[sandbox.filesystem]\n\"/r\" = \"write\"\n\"/s\" = \"deny\"\n",
-            "[sandbox]\nallow_git_control_files = false\npresets = [\"swift\"]\n",
-            "[sandbox.network.connections]\n\"*\" = \"deny\"\n",
-        ] {
-            assert!(part(anywhere, Repository, Shared, Table::Sandbox).is_ok(), "{anywhere}");
+        // How trust is re-checked: never in a repository's committed file; a parent folder's is the user's own.
+        let reconfirm = "[trust]\nreconfirm = \"on-change\"\n";
+        assert!(matches!(
+            part(reconfirm, Repository, Shared, Table::Trust),
+            Err(ConfigError::NotInProjectConfig { .. })
+        ));
+        for (level, sharing) in [(Repository, Local), (Parent, Shared), (Global, Shared)] {
+            assert!(part(reconfirm, level, sharing, Table::Trust).is_ok());
         }
         // Integrations: project only.
         for table in [Table::Tracker, Table::Forge] {
@@ -369,6 +366,7 @@ mod tests {
             Err(ConfigError::NotInProjectConfig { .. })
         ));
         assert!(part(name, Repository, Local, Table::Branches).is_ok());
+        assert!(part(name, Parent, Shared, Table::Branches).is_ok());
         assert!(part(name, Global, Shared, Table::Branches).is_ok());
     }
 

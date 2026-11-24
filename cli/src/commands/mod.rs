@@ -8,6 +8,7 @@ mod control;
 mod logging;
 mod sandbox;
 mod sessions;
+mod trust;
 mod worker;
 
 use std::{
@@ -120,6 +121,12 @@ enum Cmd {
         #[usage(subcommand)]
         action: StateAction,
     },
+    /// Whether a repository's committed grants apply, and pi loads its project files: your decision, per source
+    /// checkout.
+    Trust {
+        #[usage(subcommand)]
+        action: TrustAction,
+    },
     /// Print the tools a repository can configure for itself (environment managers, agents, editors) and the
     /// repository files each reads, as JSON (for the pi package's incoming-PR review).
     Tools,
@@ -163,6 +170,23 @@ enum StateAction {
         #[usage(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommands)]
+enum TrustAction {
+    /// Show the repository's trust, its committed grants, and what pi would load from it.
+    Status {
+        /// Workspace (default: current directory).
+        workspace: Option<PathBuf>,
+        #[usage(long)]
+        json: bool,
+    },
+    /// Trust the repository's committed grants as they are now, and let pi load its project files.
+    Allow { workspace: Option<PathBuf> },
+    /// Don't trust it: its restrictions still apply, its grants don't, and pi loads none of its project files.
+    Deny { workspace: Option<PathBuf> },
+    /// Forget the decision: the next launch asks again.
+    Reset { workspace: Option<PathBuf> },
 }
 
 #[derive(Subcommands)]
@@ -404,6 +428,7 @@ pub fn main() -> ExitCode {
         | Cmd::Stop { .. }
         | Cmd::Worker { .. }
         | Cmd::State { .. }
+        | Cmd::Trust { .. }
         | Cmd::Setup { .. }
         | Cmd::Sandbox { .. }
         | Cmd::Logging { .. } => {}
@@ -418,6 +443,7 @@ pub fn main() -> ExitCode {
         | Cmd::Stop { .. }
         | Cmd::Worker { .. }
         | Cmd::State { .. }
+        | Cmd::Trust { .. }
         | Cmd::Logging { .. }
         | Cmd::Sandbox { .. }
         | Cmd::Service { .. }
@@ -495,6 +521,7 @@ async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
         Cmd::Worker { action, json } => worker::run(&config, action, json).await,
         Cmd::Logging { action } => logging::run(action, &config).await,
         Cmd::State { action } => state(action, &config).await,
+        Cmd::Trust { action } => trust::run(action, &config).await,
         Cmd::Setup { action, json } => setup(action, json, &config).await,
     }
 }

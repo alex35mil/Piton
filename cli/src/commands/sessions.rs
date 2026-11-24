@@ -29,12 +29,24 @@ pub async fn start(config: &DaemonConfig, workspace: Option<PathBuf>, host: bool
         }
     };
     let mode = if host { LaunchMode::Host } else { LaunchMode::Sandbox };
-    let request = ControlRequest::Start {
-        workspace,
+    let request = || ControlRequest::Start {
+        workspace: workspace.clone(),
         mode,
-        prompt,
+        prompt: prompt.clone(),
     };
-    match control(&config.socket, request).await {
+    let mut response = control(&config.socket, request()).await;
+    // Not decided yet: ask here when there's a terminal, then start again; otherwise say how to answer.
+    if let Ok(ControlResponse::TrustNeeded { needed }) = &response {
+        let Some(answer) = super::trust::ask(needed) else {
+            eprintln!("piton: {needed}");
+            return ExitCode::from(1);
+        };
+        if let Err(code) = super::trust::answer(config, needed, &answer).await {
+            return code;
+        }
+        response = control(&config.socket, request()).await;
+    }
+    match response {
         Ok(ControlResponse::Started { session }) => {
             println!(
                 "started {} in {} ({:?})",
@@ -43,6 +55,10 @@ pub async fn start(config: &DaemonConfig, workspace: Option<PathBuf>, host: bool
                 session.mode
             );
             ExitCode::SUCCESS
+        }
+        Ok(ControlResponse::TrustNeeded { needed }) => {
+            eprintln!("piton: {needed}");
+            ExitCode::from(1)
         }
         other => report(other),
     }

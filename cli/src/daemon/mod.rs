@@ -56,8 +56,10 @@ pub struct Daemon {
     status_changed: Arc<Notify>,
     /// Fires whenever the session list (membership, status, clients, identity, title) may have changed.
     list_changed: tokio::sync::broadcast::Sender<()>,
-    /// This host's identity, from the state database (opened once at start; nothing else in it is read yet).
+    /// This host's identity, from the state database.
     host_id: String,
+    /// The state database, open for the daemon's life: trust decisions are read at every launch and written by clients.
+    state: Mutex<crate::state::State>,
     /// Fires when host logging changes, so the expiry task re-arms.
     logging_changed: Arc<Notify>,
     /// Session tokens for `agent.sock`.
@@ -72,6 +74,24 @@ pub enum DaemonError {
     Socket { path: PathBuf, source: std::io::Error },
     #[error("state database: {0}")]
     State(#[from] crate::state::StateError),
+}
+
+/// Whether a launch asks the user about trust when a decision is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustCheck {
+    /// Refuse with [`LaunchError::TrustNeeded`], so the client asks: every launch a person started.
+    Ask,
+    /// Launch with what was decided (a restart the daemon starts on its own).
+    KeepDecided,
+}
+
+/// Why a trust decision can't be recorded or read.
+#[derive(Debug, thiserror::Error)]
+pub enum TrustError {
+    #[error("{0}")]
+    Workspace(String),
+    #[error(transparent)]
+    Decide(crate::trust::DecideError),
 }
 
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
@@ -143,7 +163,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
 
     // Socket folders of sessions that ended without their hook running (a crash, a kill).
     launch::claude_sockets::sweep(base_env.get("TMPDIR").map(Path::new), &config.state_dir());
-    let host_id = crate::state::State::open(&config.state_db())?.host_id()?;
+    let state = crate::state::State::open(&config.state_db())?;
+    let host_id = state.host_id()?;
     crate::log!("state: {} (host {host_id})", config.state_db().display());
     let app_settings = crate::apps::SettingsSnapshot::new(&config.paths, &tools);
     let daemon = Arc::new(Daemon {
@@ -157,6 +178,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         status_changed: Arc::new(Notify::new()),
         list_changed: tokio::sync::broadcast::channel(64).0,
         host_id,
+        state: Mutex::new(state),
         logging_changed: Arc::new(Notify::new()),
         agent_tokens: crate::agent::Tokens::default(),
     });
@@ -421,6 +443,7 @@ impl Daemon {
         session: SessionArg,
         prepared: launch::Prepared,
         launch_config: crate::config::LaunchConfig,
+        trust: &crate::trust::TrustState,
     ) -> Result<SessionHandle, LaunchError> {
         let config = self.config();
         let (mode, mut env, mut policy, proxy, mut commands, warnings, agent_dirs, sockets) = match prepared {
@@ -522,6 +545,13 @@ impl Daemon {
             }
             Err(e) => crate::log!("session {key}: can't describe its protected files to pi: {e}"),
         }
+        // Which of the repository's grants this session keeps, for `piton config resolve` inside it: a commit made
+        // during the session can't widen them. Set after the workspace's environment too. A filter that can't be
+        // described keeps nothing.
+        env.insert(
+            crate::trust::FILTER_ENV.into(),
+            serde_json::to_string(&trust.filter()).unwrap_or_else(|_| "{\"kind\":\"none\"}".into()),
+        );
         let weak = Arc::downgrade(self);
         let restarting = Arc::downgrade(self);
         let hooks = Hooks {
@@ -614,6 +644,7 @@ impl Daemon {
             levels: launch_config.levels.clone(),
             warnings,
             network,
+            project_trusted: trust.pi_trusts(),
         };
         let resume = match &spec.session {
             SessionArg::New => "new".to_string(),
@@ -643,6 +674,7 @@ impl Daemon {
         workspace: &Path,
         mode: LaunchMode,
         session: SessionArg,
+        trust: TrustCheck,
     ) -> Result<SessionHandle, LaunchError> {
         match mode {
             LaunchMode::Sandbox => {
@@ -652,8 +684,38 @@ impl Daemon {
         }
         let workspace = launch::resolve_workspace(workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let config = self.config();
-        let launch_config =
-            launch::resolve_config(&config, &workspace).inspect_err(|e| crate::log!("launch refused: {e}"))?;
+        let state = self
+            .trust_state(&workspace)
+            .inspect_err(|e| crate::log!("launch refused: {e}"))?;
+        match (&state, trust) {
+            (
+                crate::trust::TrustState::Needed {
+                    grants,
+                    resources,
+                    added,
+                    ..
+                },
+                TrustCheck::Ask,
+            ) => {
+                let needed = crate::trust::TrustNeeded {
+                    source: workspace.source().to_path_buf(),
+                    grants: grants.clone(),
+                    resources: resources.clone(),
+                    added: added.clone(),
+                };
+                crate::log!("launch refused: {needed}");
+                return Err(LaunchError::TrustNeeded(Box::new(needed)));
+            }
+            (crate::trust::TrustState::Needed { .. }, TrustCheck::KeepDecided)
+            | (
+                crate::trust::TrustState::NothingToTrust
+                | crate::trust::TrustState::Trusted { .. }
+                | crate::trust::TrustState::Declined { .. },
+                TrustCheck::Ask | TrustCheck::KeepDecided,
+            ) => {}
+        }
+        let launch_config = launch::resolve_config(&config, &workspace, &state.filter())
+            .inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let prepared = launch::prepare(
             &config,
             &self.tools,
@@ -664,7 +726,42 @@ impl Daemon {
         )
         .await
         .inspect_err(|e| crate::log!("launch refused: {e}"))?;
-        self.launch(workspace, session, prepared, launch_config)
+        self.launch(workspace, session, prepared, launch_config, &state)
+    }
+
+    /// A workspace's trust, from its configuration and the user's recorded decision.
+    pub fn trust_state(&self, workspace: &Workspace) -> Result<crate::trust::TrustState, LaunchError> {
+        let inputs = crate::config::trust_inputs(workspace, &self.config().paths)?;
+        let record = lock(&self.state).trust(&inputs.source).map_err(LaunchError::State)?;
+        Ok(crate::trust::TrustState::decide(&inputs, record.as_ref()))
+    }
+
+    /// Records the user's decision for the repository of `workspace`, checked against the grants they were shown.
+    pub fn decide_trust(
+        &self,
+        workspace: &Path,
+        decision: crate::state::Decision,
+        shown: &crate::config::Grants,
+    ) -> Result<crate::trust::TrustState, TrustError> {
+        let workspace = launch::resolve_workspace(workspace).map_err(|e| TrustError::Workspace(e.to_string()))?;
+        let inputs = crate::config::trust_inputs(&workspace, &self.config().paths)
+            .map_err(|e| TrustError::Workspace(e.to_string()))?;
+        crate::trust::record(&lock(&self.state), &inputs, decision, shown).map_err(TrustError::Decide)
+    }
+
+    /// Forgets the decision for the repository of `workspace`.
+    pub fn reset_trust(&self, workspace: &Path) -> Result<crate::trust::TrustState, TrustError> {
+        let workspace = launch::resolve_workspace(workspace).map_err(|e| TrustError::Workspace(e.to_string()))?;
+        let inputs = crate::config::trust_inputs(&workspace, &self.config().paths)
+            .map_err(|e| TrustError::Workspace(e.to_string()))?;
+        let state = lock(&self.state);
+        if state
+            .reset_trust(&inputs.source)
+            .map_err(|e| TrustError::Decide(e.into()))?
+        {
+            crate::log!("trust: {} reset", inputs.source.display());
+        }
+        Ok(crate::trust::TrustState::decide(&inputs, None))
     }
 
     /// Stops a session and launches it again from its file, in the same workspace and mode, with the configuration as
@@ -677,8 +774,14 @@ impl Daemon {
             return;
         };
         handle.stop(StopReason::Requested).await;
+        // A restart nobody asked for never asks: it keeps what was decided.
         match self
-            .launch_in(&shared.workspace, shared.mode, SessionArg::Resume(file.into()))
+            .launch_in(
+                &shared.workspace,
+                shared.mode,
+                SessionArg::Resume(file.into()),
+                TrustCheck::KeepDecided,
+            )
             .await
         {
             Ok(new) => crate::log!("session {key}: restarted as session {}", new.key),

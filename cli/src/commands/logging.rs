@@ -92,6 +92,8 @@ pub async fn logging_state(socket: &std::path::Path, request: ControlRequest) ->
         | ControlResponse::Worker { .. }
         | ControlResponse::Workers { .. }
         | ControlResponse::WorkerDeleted { .. }
-        | ControlResponse::WorkerRefused { .. }) => Err(format!("unexpected response: {other:?}")),
+        | ControlResponse::WorkerRefused { .. }
+        | ControlResponse::TrustNeeded { .. }
+        | ControlResponse::Trust { .. }) => Err(format!("unexpected response: {other:?}")),
     }
 }
