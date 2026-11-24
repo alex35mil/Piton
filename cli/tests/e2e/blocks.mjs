@@ -10,101 +10,20 @@
 //
 // macOS may not report a process's first sandbox refusals for some seconds (docs/pi-findings.md), so the faux tool
 // that blocks pi's own process keeps trying for 10 s until the kernel's record reaches the daemon.
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { attach, away, piton, runSuite, setup, sleep } from "./sandboxed.mjs";
 
-const root = resolve(import.meta.dirname, "../..");
-const piton = join(root, "target/debug/piton");
-const ext = join(root, "tests/fixtures/faux-extension.ts");
-const pkg = resolve(root, "../pi");
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const nested = process.env.PITON_RUNTIME === "sandbox";
 // The block question's title in either runtime.
 const QUESTION = /^Run (again in the sandbox|on the host, with no sandbox)\?/;
 
-function setup() {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-blocks-")));
-    const ws = join(dir, "ws");
-    const agent = join(dir, "agent");
-    mkdirSync(join(ws, ".git"), { recursive: true });
-    mkdirSync(agent);
-    writeFileSync(join(agent, "settings.json"), JSON.stringify({ packages: [pkg] }));
-    mkdirSync(join(dir, "state"));
-    // Outside every grant: the temp folder is writable, so the blocked writes go to the home folder, under names this
-    // test removes.
-    const outside = join(homedir(), `piton-e2e-blocks-${process.pid}`);
-    const config = writeConfig(dir, {
-        daemon: {
-            socket: join(dir, "state/piton.sock"),
-            log: join(dir, "piton.log"),
-            tailnet: { enabled: false },
-            pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
-            env: { login_shell: false },
-            tools: { mise: { enabled: false } },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
-        },
-        host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
-        project: { permissions: { default_mode: "allow" } },
-    });
-    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
-    return { dir, ws, config, env, outside };
-}
-
-async function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
-    let err = "";
-    d.stderr.on("data", (c) => (err += c));
-    for (let i = 0; i < 100 && !err.includes("listening"); i++) await sleep(50);
-    assert.ok(err.includes("listening"), "daemon didn't start: " + err);
-    d.exited = new Promise((r) => d.on("exit", (code) => r(code)));
-    return d;
-}
-
-function attach(ctx) {
-    const child = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
-    const c = { child, records: [], waiters: [], stderr: "", n: 0 };
-    let buf = "";
-    child.stdout.on("data", (chunk) => {
-        buf += chunk;
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-            const line = buf.slice(0, nl);
-            buf = buf.slice(nl + 1);
-            if (!line.trim()) continue;
-            const rec = JSON.parse(line);
-            c.records.push(rec);
-            for (const w of [...c.waiters]) if (w.pred(rec)) { c.waiters.splice(c.waiters.indexOf(w), 1); w.resolve(rec); }
-        }
-    });
-    child.stderr.on("data", (d) => (c.stderr += d));
-    c.exited = new Promise((r) => child.on("exit", () => r()));
-    c.send = (cmd) => child.stdin.write(JSON.stringify({ ...cmd, id: cmd.id ?? `c-${++c.n}` }) + "\n");
-    c.waitNew = (pred, ms = 20000) => {
-        const from = c.records.length;
-        return new Promise((res, rej) => {
-            const w = { pred: (r) => c.records.indexOf(r) >= from && pred(r), resolve: res };
-            c.waiters.push(w);
-            setTimeout(() => rej(new Error(`timeout; last ${JSON.stringify(c.records.slice(-4).map((r) => r.type))}; ${c.stderr}`)), ms);
-        });
-    };
-    /** Sends a prompt and waits for the bash call it makes to end; returns its result text. */
-    c.bash = async (prompt) => {
-        const ended = c.waitNew((r) => r.type === "tool_execution_end" && r.toolName === "bash", 60000);
-        c.send({ type: "prompt", message: prompt });
-        const end = await ended;
-        await c.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
-        return JSON.stringify(end.result);
-    };
-    c.close = () => {
-        child.stdin.end();
-        return c.exited;
-    };
-    return c;
+function prepare() {
+    // Outside every grant: the temp folder is writable, so the blocked writes go to the run's folder under
+    // /private/var/tmp, under names this test removes.
+    const outside = join(away(), "blocks");
+    return { ...setup("blocks"), outside };
 }
 
 const tests = {
@@ -314,30 +233,12 @@ const tests = {
     },
 };
 
-if (nested) {
-    console.log("skip  blocks.mjs: sandboxes don't nest and `log` refuses inside one");
-    process.exit(0);
-}
-let failed = 0;
-for (const [name, test] of Object.entries(tests)) {
-    const ctx = setup();
-    const daemon = await startDaemon(ctx);
-    try {
-        await test(ctx);
-        console.log(`ok    ${name}`);
-    } catch (e) {
-        failed++;
-        console.log(`FAIL  ${name}\n${e.stack}`);
-        try {
-            console.log(readFileSync(join(ctx.dir, "piton.log"), "utf8").split("\n").slice(-30).join("\n"));
-        } catch {}
-    } finally {
-        daemon.kill("SIGTERM");
-        await daemon.exited;
+await runSuite("blocks.mjs", tests, {
+    prepare,
+    cleanup(ctx) {
         for (const suffix of ["-plain", "-asked", "-rerun", "-rerun2", "-persist", "-process", "-process2", "-silenced"]) {
             rmSync(`${ctx.outside}${suffix}`, { force: true });
         }
-        rmSync(ctx.dir, { recursive: true, force: true });
-    }
-}
-process.exit(failed ? 1 : 0);
+    },
+    skip: "sandboxes don't nest and `log` refuses inside one",
+});
