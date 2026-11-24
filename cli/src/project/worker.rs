@@ -130,8 +130,8 @@ pub enum WorkerRefusal {
     ProtectedUpdate(Blocked),
     /// Fast-forwarding the source changes protected files, and the user's `piton(git-pull)` deny rule refuses it.
     #[error(
-        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [permissions] refuses \
-         it; update the source by hand",
+        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [tools.permissions] \
+         refuses it; update the source by hand",
         files.join(", ")
     )]
     UpdateDenied { checkout: PathBuf, files: Vec<String> },
@@ -165,7 +165,7 @@ impl From<UpdateError> for WorkerRefusal {
 type Result<T> = std::result::Result<T, WorkerRefusal>;
 
 /// What the source checkout's permission rules say about an update that changes protected files. The update runs on
-/// the host, so the host's rules apply: `[permissions]` and `[permissions.host]`.
+/// the host, so the host's rules apply: `[tools.permissions]` and `[tools.permissions.host]`.
 fn pull_rule(source: &Path, paths: &crate::config::Paths) -> Result<source::PullRule> {
     let workspace = project::Workspace {
         path: source.to_path_buf(),
@@ -174,10 +174,10 @@ fn pull_rule(source: &Path, paths: &crate::config::Paths) -> Result<source::Pull
     };
     let resolved = crate::config::resolve(&workspace, paths, crate::config::Runtime::Host)
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
-    let permissions = resolved
-        .permissions
+    let tools = resolved
+        .tools
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
-    Ok(source::PullRule::of(&permissions.merged))
+    Ok(source::PullRule::of(&tools.permissions.merged))
 }
 
 fn failed(message: impl Into<String>) -> WorkerRefusal {
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!((git.ran("fetch"), git.ran("merge")), (1, 1));
     }
 
-    /// `piton(git-pull)` in the source's `[permissions]` answers the question before anyone is asked: `allow` applies
+    /// `piton(git-pull)` in the source's `[tools.permissions]` answers the question before anyone is asked: `allow` applies
     /// the protected files; `deny` refuses creation and leaves the source as it is on deletion; `ask` asks.
     #[test]
     fn the_git_pull_rule_decides_first() {
@@ -992,7 +992,7 @@ mod tests {
         // As a project's setup keeps it: local configuration outside Git.
         std::fs::write(source.join(".git/info/exclude"), "/.piton/*.local.*\n").unwrap();
         let rule = |list: &str| {
-            let text = format!("[permissions]\n{list} = [\"piton(git-pull)\"]\n");
+            let text = format!("[tools.permissions]\n{list} = [\"piton(git-pull)\"]\n");
             std::fs::write(source.join(".piton/config.local.toml"), text).unwrap();
         };
         let one = create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p).unwrap();

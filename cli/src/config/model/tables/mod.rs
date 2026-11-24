@@ -7,17 +7,19 @@
 pub mod branches;
 pub mod permissions;
 pub mod sandbox;
+pub mod tools;
 pub mod web_search;
 pub mod workers;
 
 pub use self::{
     branches::BranchesTable,
-    permissions::{PermissionSettings, PermissionsTable},
+    permissions::PermissionSettings,
     sandbox::{
         AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Effect, FileAccess,
         Grant, GrantEntries, Listed, NetworkTarget, Origin, PathKey, Preset, Profile, SandboxSettings, SandboxTable,
         ServiceKey, ServiceName, Silence, SilenceTarget,
     },
+    tools::ToolsTable,
     web_search::WebSearchTable,
     workers::WorkersTable,
 };
@@ -27,7 +29,7 @@ pub use self::{
 pub enum Table {
     Sandbox,
     Workers,
-    Permissions,
+    Tools,
     Branches,
     Tracker,
     Forge,
@@ -38,7 +40,7 @@ impl Table {
     pub const ALL: [Table; 7] = [
         Table::Sandbox,
         Table::Workers,
-        Table::Permissions,
+        Table::Tools,
         Table::Branches,
         Table::Tracker,
         Table::Forge,
@@ -50,7 +52,7 @@ impl Table {
         match self {
             Table::Sandbox => "sandbox",
             Table::Workers => "workers",
-            Table::Permissions => "permissions",
+            Table::Tools => "tools",
             Table::Branches => "branches",
             Table::Tracker => "tracker",
             Table::Forge => "forge",
@@ -123,7 +125,7 @@ pub trait TableValue: serde::de::DeserializeOwned {
     }
 }
 
-/// How a table merges across levels, farthest first. `[permissions]` merges per runtime instead (see
+/// How a table merges across levels, farthest first. `[tools.permissions]` merges per runtime instead (see
 /// [`PermissionSettings`]).
 pub trait Merge: Default {
     /// Folds a nearer level's value into this one.

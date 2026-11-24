@@ -1,7 +1,7 @@
 /**
  * Every test file imports this first, so tests run in the host runtime no matter where the
  * runner was launched. A sandboxed session exports PITON_RUNTIME=sandbox, which would select
- * fixtures' `[permissions.sandbox]` rules. Tests that exercise the sandbox runtime set
+ * fixtures' `[tools.permissions.sandbox]` rules. Tests that exercise the sandbox runtime set
  * PITON_RUNTIME themselves and restore it afterward.
  *
  * Configuration resolves through the `piton` binary: tests use this repository's debug build
@@ -43,7 +43,7 @@ export function writeGlobalSetting(name: string, value: unknown): string {
 
 /**
  * Writes settings to a configuration file through the binary, as the pi package does. `changes` has dotted keys as the
- * file names them (`"permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
+ * file names them (`"tools.permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
  * repository (its source checkout's `.piton/config.toml`), `"global"` for the test's global `config.toml`, or `"host"`
  * for its `config.host.toml` (`[development]`). `local` writes the pair's `.local` file. Returns the file.
  */

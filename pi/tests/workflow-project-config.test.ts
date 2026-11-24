@@ -367,7 +367,7 @@ describe("workflow project configuration", () => {
                     missing: [],
                     existing: [],
                     incompatible: ["branches"],
-                    malformed: ["permissions", "web_search", "branches", "tracker", "forge"],
+                    malformed: ["tools", "web_search", "branches", "tracker", "forge"],
                 }
                 assert.deepEqual(
                     broken.map((error) => error.part),
@@ -543,7 +543,7 @@ describe("workflow project configuration", () => {
         try {
             const settingsPath = writeSettings(
                 root,
-                { permissions: { default_mode: "deny", allow: ["read"], ask: ["write(existing.md)"] } },
+                { "tools.permissions": { default_mode: "deny", allow: ["read"], ask: ["write(existing.md)"] } },
                 true,
             )
             const indexBefore = git(root, ["ls-files", "--stage"])

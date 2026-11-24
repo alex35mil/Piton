@@ -507,7 +507,7 @@ test("queue reads its tracker and credential through piton config get", function
     -- A broken file: the resolver's message, unchanged.
     responses.tracker = {
         code = 3,
-        stdout = vim.json.encode({ format = 3, error = { kind = "invalid", message = "invalid config.toml" } }),
+        stdout = vim.json.encode({ format = 1, error = { kind = "invalid", message = "invalid config.toml" } }),
     }
     fails("invalid config.toml", function() queue.load(source) end)
 end)

@@ -24,7 +24,7 @@ import { requireRuntime, type Runtime } from "./runtime.js"
 
 export const BIN_ENV = "PITON_BIN"
 /** The `piton config resolve` output version this client understands. */
-export const RESOLVE_FORMAT = 3
+export const RESOLVE_FORMAT = 1
 
 export type PermissionMode = "allow" | "ask" | "deny"
 export type LevelKind = "global" | "parent" | "repository"
@@ -54,7 +54,7 @@ export type PermissionScope = "shared" | Runtime
 /** Which file of a level's pair: `config.toml` (shared) or `config.local.toml` (this machine's). */
 export type Sharing = "shared" | "local"
 
-/** One permission table that sets something: `[permissions]` (`shared`) or `[permissions.<runtime>]`. */
+/** One permission table that sets something: `[tools.permissions]` (`shared`) or `[tools.permissions.<runtime>]`. */
 export interface ResolvedPermissionSource {
     path: string
     level: LevelKind
@@ -77,7 +77,7 @@ export function section<T>(part: Section<T>): T {
 
 /** The parts the pi package reads. */
 const PARTS = [
-    "permissions",
+    "tools",
     "mcp",
     "mcp_global",
     "web_search",
@@ -118,8 +118,8 @@ export interface ResolvedSettings {
     /** The user's home folder (from the user database), for `~` in path values. */
     home: string
     runtime: Runtime
-    /** The merged rules, and each permission table of the runtime that sets something, in merge order. */
-    permissions: Section<{ merged: ResolvedPermissions; sources: ResolvedPermissionSource[] }>
+    /** `[tools]`: the merged permission rules, and each permission table of the runtime that sets something, in merge order. */
+    tools: Section<{ permissions: { merged: ResolvedPermissions; sources: ResolvedPermissionSource[] } }>
     /** Every level's servers. */
     mcp: Section<ResolvedMcp>
     /** The global tier's servers alone: what pi loads in a project it doesn't trust. */

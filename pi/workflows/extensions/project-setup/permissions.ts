@@ -41,7 +41,7 @@ export function inspectProjectPermissions(cwd: string, input: unknown, catalog: 
     const parsed = parse(PermissionInspectionValidator, input)
     const { sources } = inspectPersistentPermissions(cwd)
     return {
-        scope: "Persistent [permissions] and current-runtime [permissions.<runtime>] tables of every level's config.toml and config.local.toml; excludes session overrides and skill-derived allows.",
+        scope: "Persistent [tools.permissions] and current-runtime [tools.permissions.<runtime>] tables of every level's config.toml and config.local.toml; excludes session overrides and skill-derived allows.",
         rules: inspectMcpAllowRules(parsed.rules, sources, catalog),
     }
 }
@@ -53,7 +53,7 @@ export async function configureProjectPermissions(cwd: string, input: unknown, c
     const root = setupRoot(cwd)
     const resolved = resolveSettings(cwd)
     const { sources } = inspectPersistentPermissions(cwd)
-    // Setup writes only `[permissions]` of the source checkout's config.toml (or its .local); runtime tables are
+    // Setup writes only `[tools.permissions]` of the source checkout's config.toml (or its .local); runtime tables are
     // maintained by hand.
     const sharing: Sharing = parsed.target === "local" ? "local" : "shared"
     const settingsPath = projectConfigPath(resolved, sharing)
@@ -95,7 +95,7 @@ export async function configureProjectPermissions(cwd: string, input: unknown, c
         // Only the changed lists, so the rest of the file keeps its comments and layout.
         const edit = plannedConfigEdit(
             cwd,
-            Object.fromEntries(Object.entries(lists).map(([list, rules]) => [`permissions.${list}`, rules])),
+            Object.fromEntries(Object.entries(lists).map(([list, rules]) => [`tools.permissions.${list}`, rules])),
             sharing,
         )
         // A protected file: under the daemon, the user sees the diff and approves it.

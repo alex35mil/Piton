@@ -13,8 +13,8 @@ use crate::{
             level::{Chain, Level, LevelKind},
             paths::{FilePair, Paths, Sharing},
             tables::{
-                BranchesTable, Integration, Merge, Origin, PermissionSettings, PermissionsTable, SandboxSettings,
-                SandboxTable, Table, TableValue, WebSearchTable, WorkersTable,
+                BranchesTable, Integration, Merge, Origin, PermissionSettings, SandboxSettings, SandboxTable, Table,
+                TableValue, ToolsTable, WebSearchTable, WorkersTable,
             },
         },
     },
@@ -52,7 +52,7 @@ pub struct Resolved {
     #[serde(serialize_with = "section")]
     pub workers: Section<WorkersTable>,
     #[serde(serialize_with = "section")]
-    pub permissions: Section<ResolvedPermissions>,
+    pub tools: Section<ResolvedTools>,
     #[serde(serialize_with = "section")]
     pub branches: Section<BranchesTable>,
     /// The nearest `[tracker]`, whole and as written (the pi package validates it).
@@ -89,7 +89,7 @@ impl Resolved {
         let Resolved {
             sandbox,
             workers,
-            permissions,
+            tools,
             branches,
             tracker,
             forge,
@@ -110,7 +110,7 @@ impl Resolved {
         [
             ("sandbox", sandbox.as_ref().err()),
             ("workers", workers.as_ref().err()),
-            ("permissions", permissions.as_ref().err()),
+            ("tools", tools.as_ref().err()),
             ("branches", branches.as_ref().err()),
             ("tracker", tracker.as_ref().err()),
             ("forge", forge.as_ref().err()),
@@ -148,6 +148,12 @@ pub(super) fn section<T: Serialize, S: serde::Serializer>(
     map.end()
 }
 
+/// `[tools]` resolved: its permission rules.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedTools {
+    pub permissions: ResolvedPermissions,
+}
+
 /// The merged permission rules, and each table they came from.
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedPermissions {
@@ -170,7 +176,7 @@ pub struct Instructions {
 pub struct PermissionSource {
     pub path: PathBuf,
     pub level: LevelKind,
-    /// `shared` (`[permissions]`) or the runtime (`[permissions.<runtime>]`).
+    /// `shared` (`[tools.permissions]`) or the runtime (`[tools.permissions.<runtime>]`).
     pub scope: PermissionScope,
     /// Which file of the level's pair.
     pub sharing: Sharing,
@@ -459,7 +465,7 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
         runtime,
         sandbox: docs.merged(Table::Sandbox),
         workers: docs.merged(Table::Workers),
-        permissions: read_permissions(&docs, runtime),
+        tools: read_tools(&docs, runtime),
         branches: docs.merged(Table::Branches),
         // Each table whole: a nearer level's replaces a farther one's.
         tracker: docs.nearest(Table::Tracker),
@@ -489,11 +495,11 @@ fn read_policies(files: &mut Vec<FileOrigin>, levels: &[Level]) -> Section<Vec<F
     Ok(policies)
 }
 
-/// Per file: `[permissions]`, then the runtime's `[permissions.<runtime>]`; files in merge order.
-fn read_permissions(docs: &Docs, runtime: Runtime) -> Section<ResolvedPermissions> {
+/// Per file: `[tools.permissions]`, then the runtime's `[tools.permissions.<runtime>]`; files in merge order.
+fn read_tools(docs: &Docs, runtime: Runtime) -> Section<ResolvedTools> {
     let mut merged = PermissionSettings::default();
     let mut sources = Vec::new();
-    for (table, doc) in docs.parts::<PermissionsTable>(Table::Permissions)? {
+    for (ToolsTable { permissions: table }, doc) in docs.parts::<ToolsTable>(Table::Tools)? {
         let shared = PermissionSettings::shared(&table);
         let (rules, scope) = match runtime {
             Runtime::Host => (table.host, PermissionScope::Host),
@@ -516,7 +522,9 @@ fn read_permissions(docs: &Docs, runtime: Runtime) -> Section<ResolvedPermission
             merged.merge(settings);
         }
     }
-    Ok(ResolvedPermissions { merged, sources })
+    Ok(ResolvedTools {
+        permissions: ResolvedPermissions { merged, sources },
+    })
 }
 
 fn read_mcp(files: &mut Vec<FileOrigin>, levels: &[Level]) -> Section<ResolvedMcp> {
@@ -646,13 +654,13 @@ presets = ["rust"]
 "~/.cargo/registry" = "write"
 "/r" = "write"
 
-[permissions]
+[tools.permissions]
 deny = ["bash(rm -rf *)"]
 ask = ["write"]
-[permissions.sandbox]
+[tools.permissions.sandbox]
 default_mode = "allow"
 ask = ["bash(git push *)"]
-[permissions.host]
+[tools.permissions.host]
 default_mode = "ask"
 "#,
         );
@@ -676,7 +684,7 @@ skip = ["apps/.build"]
 presets = ["swift"]
 [sandbox.filesystem]
 "/r" = "deny"
-[permissions]
+[tools.permissions]
 allow = ["read"]
 default_mode = "ask"
 [branches]
@@ -718,7 +726,7 @@ mcp_server = "linear"
         assert_eq!(r.workers.as_ref().unwrap().skip, ["apps/.build"]);
 
         // Sandbox runtime: the host table isn't read; the repository's default_mode is nearest.
-        let permissions = r.permissions.as_ref().unwrap();
+        let permissions = &r.tools.as_ref().unwrap().permissions;
         assert_eq!(permissions.merged.deny, ["bash(rm -rf *)"]);
         assert_eq!(permissions.merged.ask, ["write", "bash(git push *)"]);
         assert_eq!(permissions.merged.allow, ["read"]);
@@ -772,7 +780,7 @@ mcp_server = "linear"
         assert!(r.files.iter().any(|f| f.path == repo.join(".piton/config.local.toml")));
 
         let host = run(&t, &source(repo), Runtime::Host).unwrap();
-        let permissions = &host.permissions.as_ref().unwrap().merged;
+        let permissions = &host.tools.as_ref().unwrap().permissions.merged;
         assert_eq!(permissions.ask, ["write"]);
         assert_eq!(permissions.default_mode, Some(PermissionMode::Ask));
     }
@@ -787,7 +795,7 @@ mcp_server = "linear"
         );
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.sandbox, Err(ConfigError::NotInProjectConfig { .. })));
-        assert!(r.permissions.is_ok());
+        assert!(r.tools.is_ok());
         // Integrations are project only: a global [tracker] fails its part.
         write(&t.global.join("config.toml"), "[tracker]\nprovider = \"github\"\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
@@ -828,11 +836,11 @@ mcp_server = "linear"
         let repo = t.home.join("repo");
         write(
             &repo.join(".piton/config.toml"),
-            "[branches]\nunknown = 1\n[permissions]\nallow = [\"read\"]\n",
+            "[branches]\nunknown = 1\n[tools.permissions]\nallow = [\"read\"]\n",
         );
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.branches, Err(ConfigError::Invalid { .. })));
-        assert_eq!(r.permissions.as_ref().unwrap().merged.allow, ["read"]);
+        assert_eq!(r.tools.as_ref().unwrap().permissions.merged.allow, ["read"]);
         assert!(r.tracker.is_ok() && r.mcp.is_ok() && r.policies.is_ok() && r.instructions.is_ok());
 
         // A typo in the global [branches] leaves [sandbox] readable, and launches with it.
@@ -849,9 +857,9 @@ mcp_server = "linear"
         );
         std::fs::remove_file(t.global.join("config.toml")).unwrap();
 
-        write(&repo.join(".piton/config.toml"), "[permissions\n");
+        write(&repo.join(".piton/config.toml"), "[tools.permissions\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.permissions, Err(ConfigError::Invalid { .. })));
+        assert!(matches!(r.tools, Err(ConfigError::Invalid { .. })));
         assert!(matches!(r.sandbox, Err(ConfigError::Invalid { .. })));
         assert!(r.mcp.is_ok() && r.policies.is_ok());
         // The broken file stays watched, so fixing it invalidates a client's cache.
@@ -864,10 +872,13 @@ mcp_server = "linear"
         let t = tree();
         let src = t.home.join("p/repo");
         let worker = t.home.join("p/repo--w");
-        write(&src.join(".piton/config.toml"), "[permissions]\ndeny = [\"bash(*)\"]\n");
+        write(
+            &src.join(".piton/config.toml"),
+            "[tools.permissions]\ndeny = [\"bash(*)\"]\n",
+        );
         write(
             &worker.join(".piton/config.toml"),
-            "[permissions]\nallow = [\"bash(*)\"]\n",
+            "[tools.permissions]\nallow = [\"bash(*)\"]\n",
         );
         let ws = Workspace {
             path: worker.clone(),
@@ -880,7 +891,7 @@ mcp_server = "linear"
         assert!(resolve_launch(&ws, &t.paths).is_ok());
         let r = run(&t, &ws, Runtime::Sandbox).unwrap();
         assert!(r.errors().is_empty(), "{:?}", r.errors());
-        let permissions = &r.permissions.as_ref().unwrap().merged;
+        let permissions = &r.tools.as_ref().unwrap().permissions.merged;
         assert_eq!(permissions.deny, ["bash(*)"]);
         assert!(permissions.allow.is_empty());
         assert_eq!(
