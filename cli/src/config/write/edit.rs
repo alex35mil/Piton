@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
+use super::layout;
 use crate::config::{
     ConfigError,
     model::paths::{FilePair, Sharing},
@@ -181,6 +182,7 @@ pub fn append_table(
     let mut entry = entry.clone();
     entry.set_position(None);
     entry.decor_mut().set_prefix("\n");
+    layout::table(&mut entry);
     array.push(entry);
     let new = doc.to_string().trim_start_matches('\n').to_string();
     validate(&new, path)?;
@@ -382,7 +384,8 @@ fn insert(doc: &mut DocumentMut, key: &[&str], value: Item, path: &Path) -> Resu
     }
     match (table.get_mut(last), value) {
         // Keep the comment and spacing around an existing value.
-        (Some(Item::Value(existing)), Item::Value(value)) => {
+        (Some(Item::Value(existing)), Item::Value(mut value)) => {
+            layout::replacing(&mut value, existing);
             let decor = existing.decor().clone();
             *existing = value;
             *existing.decor_mut() = decor;
@@ -393,12 +396,14 @@ fn insert(doc: &mut DocumentMut, key: &[&str], value: Item, path: &Path) -> Resu
             let decor = existing.decor().clone();
             let mut value = Item::Table(value);
             place(&mut value, position);
+            layout::item(&mut value);
             if let Item::Table(value) = value {
                 *existing = value;
                 *existing.decor_mut() = decor;
             }
         }
-        (_, value) => {
+        (_, mut value) => {
+            layout::item(&mut value);
             table.insert(last, value);
         }
     }

@@ -778,7 +778,9 @@ the line. A host or client file has one schema and is read whole.
 - **Writes.** The apps and `piton config set` change keys with `toml_edit`, keeping comments and layout
   (`--global` for the global `config.toml`, `--scope host|client` for the host and client files). The pi package
   writes through `piton config set --dry-run`, which returns the file's new text; a protected file then goes through
-  the daemon's confirmation. Nothing else writes these files.
+  the daemon's confirmation. Nothing else writes these files. An array Piton writes is inline with one item and one
+  item per line (indented, with a trailing comma) with two or more; items it keeps keep their comments, and arrays
+  it doesn't change keep their layout.
 - Paths in every file accept `~` and `$HOME`.
 - **When read.** The global files at daemon start and on every change (watched; keys that need a restart are
   reported as pending); the project chain at every launch and `worker create`; the pi package's files at pi start and

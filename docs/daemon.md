@@ -74,7 +74,8 @@ Unknown keys are refused. The daemon watches the files: a change applies to the 
 show `log`, `[env]`, `[tailnet]`, and `[tools]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
 that file's last good values and the apps say why. The apps change the keys below (`socket` shown read-only), keeping
 your comments and order, writing through a symlink into a dotfiles repository, and moving a key to the `.local` file
-when you check Local. The whole layout, including repository and parent-folder levels and where each key may be set,
+when you check Local. A list they write goes one item per line once it has two items, and its items keep their
+comments. The whole layout, including repository and parent-folder levels and where each key may be set,
 is in "Configuration and state" in [design.md](design.md); `piton config check` validates a workspace's configuration
 and the host and client files, lists the files it reads, and warns about a path under another user's home or a secret
 in a file Git tracks; `piton config set KEY VALUE [--global | --scope host|client] [--local]` changes one key the same
