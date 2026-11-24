@@ -763,12 +763,18 @@ the daemon without restarting sessions, until the switch expires or the daemon r
 ## Tests
 
 ```sh
-mise run cli:test                                 # unit tests + e2e against real pi (faux model, host mode)
+mise run cli:test                                 # unit tests + e2e against real pi (faux model)
 cd cli && node tests/probe/probe.mjs <scenario>      # pi RPC probes, see pi-findings.md
 ```
 
-The e2e tests use pi's faux provider through `cli/tests/fixtures/faux-extension.ts`, so they need no credentials.
-They run pi in host mode; in a sandboxed session a sandboxed launch can't start (sandboxes don't nest), so the worker
-test checks its sandbox through `piton sandbox show`. `sh cli/tests/probe/protected.sh` checks the applied sandbox on
-the host. `mise run cli:nono-policy-check` compares the vendored deny groups with nono's at the `nono` version in
+The e2e tests use pi's faux provider through `cli/tests/fixtures/faux-extension.ts`, so they need no credentials, and
+a scratch configuration, never yours. Most run pi in host mode. Three run it in the real sandbox on the host, sharing
+`cli/tests/e2e/sandboxed.mjs`: `blocks.mjs` (the block question, reruns, saved grants), `network.mjs` (`strict`'s
+filtered network), and `sandbox.mjs`, which launches pi in each profile and checks its startup (it answers, writes its
+session file, loads global settings and packages and a project's `.pi/`) and what the profile grants and refuses. None
+of them writes to your home folder: a write outside every grant goes to a folder of the run's own under
+`/private/var/tmp`. `sandbox.mjs` reads only what isn't secret there (SSH's config, known hosts, and one public key,
+output discarded). In a sandboxed session these three skip, since a sandboxed launch can't start (sandboxes don't
+nest), and the worker test checks its sandbox through `piton sandbox show`. `sh cli/tests/probe/protected.sh` checks
+the applied sandbox with a shell on the host, with the same run folder. `mise run cli:nono-policy-check` compares the vendored deny groups with nono's at the `nono` version in
 `Cargo.lock`; a unit test fails when the crate is bumped without re-vendoring.

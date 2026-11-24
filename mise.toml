@@ -39,7 +39,7 @@ dir = "cli"
 run = "cargo build"
 
 [tasks."cli:test"]
-description = "Unit tests, then the e2e tests against real pi (faux model, host mode)"
+description = "Unit tests, then the e2e tests against real pi (faux model; the sandboxed suites skip in a sandboxed session)"
 dir = "cli"
 run = '''
 set -eu
@@ -58,6 +58,7 @@ node tests/e2e/setup.mjs
 node tests/e2e/fnox.mjs
 node tests/e2e/blocks.mjs
 node tests/e2e/network.mjs
+node tests/e2e/sandbox.mjs
 '''
 
 # Formatting uses a pinned nightly rustfmt: the import rules in cli/rustfmt.toml are unstable options. Builds, tests,

@@ -21,18 +21,29 @@ git -C "$src" init -q
 # A commit, so the sandboxed Git checks below have a branch and a HEAD; a nested repository for the any-depth rules.
 git -C "$src" -c user.email=p@p -c user.name=p commit -q --allow-empty -m probe
 git -C "$src/apps/sub" init -q
-# A grant through a link the sandbox could have made (here, in the checkout) mustn't reach the link's target: a folder
-# outside every write the sandbox has, created and removed by this script.
 probe="piton-probe-$$"
-linked="$HOME/$probe-linked"
-# Names for the entries the denied attempts would create outside the scratch folder; removed below if they exist.
 agent_dir=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+# Outside every write the sandbox has, and not the home folder: /private/var/tmp is no profile's write root. One folder
+# per run. A run killed with SIGKILL skips its trap, so earlier runs' folders older than a day are removed first, and so
+# are the home entries a run names after its pid (they exist only when the sandbox let a denied write through) whose
+# run is gone.
+find /private/var/tmp -maxdepth 1 -type d -name 'piton-test.*' -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+for stale in "$HOME"/piton-probe-* "$HOME/Library/Caches"/piton-probe-* "$agent_dir/extensions"/piton-probe-*; do
+    test -e "$stale" || continue
+    pid=${stale##*/piton-probe-}
+    pid=${pid%%[!0-9]*}
+    test -n "$pid" && kill -0 "$pid" 2>/dev/null || rm -rf "$stale"
+done
+away=$(mktemp -d /private/var/tmp/piton-test.XXXXXX)
+# A grant through a link the sandbox could have made (here, in the checkout) mustn't reach the link's target.
+linked="$away/linked"
+# Names for the entries the denied attempts would create in places that can only be checked where they are (the home
+# folder, a user cache, pi's extensions); removed below if they exist.
 cleanup_real() {
-    rm -rf "$linked"
+    rm -rf "$away"
     rm -f "$HOME/$probe"
     rmdir "$HOME/Library/Caches/$probe" "$agent_dir/extensions/$probe" 2>/dev/null || true
     rmdir "$agent_dir/TRUST.JSON.LOCK" 2>/dev/null || true
-    rm -f "$HOME/$probe-launched"
 }
 listener=
 # The listener is waited for after it's killed, so the shell doesn't report its end ("Terminated: 15").
@@ -95,7 +106,7 @@ kr = lib.bootstrap_look_up(ctypes.c_uint.in_dll(lib, "bootstrap_port").value, sy
 sys.exit({0: 0, 1100: 1}.get(kr, 2))
 PY
 # What `open` and `osascript` would start on the host: a script that leaves a marker, checked from outside.
-launched="$HOME/$probe-launched"
+launched="$away/launched"
 printf '#!/bin/sh\ntouch "%s"\n' "$launched" > "$src/x.command"
 chmod +x "$src/x.command"
 expect_pasteboard=$(policy_says --service com.apple.pasteboard.1)
