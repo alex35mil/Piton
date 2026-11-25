@@ -3,6 +3,7 @@ mod apps;
 mod commands;
 mod config;
 mod daemon;
+mod integrations;
 mod launch;
 mod logging;
 mod pi;
@@ -10,7 +11,6 @@ mod project;
 mod session;
 mod setup;
 mod state;
-mod tools;
 mod trust;
 
 use std::process::ExitCode;

@@ -113,7 +113,7 @@ pub struct Placements {
 }
 
 impl Placements {
-    /// The file that sets a dotted `key` (`tailnet.port`), if either does; the local file wins.
+    /// The file that sets a dotted `key` (`stop.kill_after`), if either does; the local file wins.
     pub fn of(&self, key: &str) -> Option<Sharing> {
         self.placement(&key.split('.').collect::<Vec<_>>())
     }
@@ -517,7 +517,7 @@ mod tests {
         let files = host_pair(dir.path());
         std::fs::write(
             &files.shared,
-            "# my settings\n# where I work\nroots = [\"~/a\"]   # trailing\nlogging = \"info\"\n\n[tailnet]\nport = 8\n",
+            "# my settings\n# where I work\nroots = [\"~/a\"]   # trailing\nkeep_awake = true\n\n[stop]\nkill_after = \"8s\"\n",
         )
         .unwrap();
         files
@@ -528,14 +528,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\nfavorites = [\"~/c\"]\n\n[tailnet]\nport = 8\n"
+            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nkeep_awake = true\nfavorites = [\"~/c\"]\n\n[stop]\nkill_after = \"8s\"\n"
         );
         // Back to the default: the key goes, the rest stays.
         files.set(&["favorites"], None, Placement::Current, &ok).unwrap();
-        files.set(&["tailnet", "port"], None, Placement::Current, &ok).unwrap();
+        files
+            .set(&["stop", "kill_after"], None, Placement::Current, &ok)
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\n"
+            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nkeep_awake = true\n"
         );
     }
 
@@ -577,7 +579,7 @@ mod tests {
         write_key_with(
             &files.shared,
             &[Change {
-                key: &["logging"],
+                key: &["default_attach_mode"],
                 value: Some(&debug),
             }],
             &|_, _| Ok(()),
@@ -591,7 +593,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "roots = [\"~/hand\"]\nlogging = \"debug\"\n"
+            "roots = [\"~/hand\"]\ndefault_attach_mode = \"debug\"\n"
         );
     }
 
@@ -625,7 +627,7 @@ mod tests {
     fn a_failed_move_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let files = host_pair(dir.path());
-        std::fs::write(&files.shared, "logging = \"info\"\n").unwrap();
+        std::fs::write(&files.shared, "keep_awake = true\n").unwrap();
         std::fs::write(local(&files), "roots = [\"~/here\"]\n").unwrap();
         // Removing the key from the local file is refused (validation of the local file's new text).
         let local_path = local(&files).to_path_buf();
@@ -649,7 +651,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "logging = \"info\"\n");
+        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "keep_awake = true\n");
         assert_eq!(
             std::fs::read_to_string(local(&files)).unwrap(),
             "roots = [\"~/here\"]\n"
@@ -660,7 +662,7 @@ mod tests {
     fn local_moves_a_key_between_the_files() {
         let dir = tempfile::tempdir().unwrap();
         let files = host_pair(dir.path());
-        std::fs::write(&files.shared, "roots = [\"~/a\"]\nlogging = \"info\"\n").unwrap();
+        std::fs::write(&files.shared, "roots = [\"~/a\"]\nkeep_awake = true\n").unwrap();
         let roots = ["roots"];
         assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Shared));
 
@@ -671,7 +673,7 @@ mod tests {
             std::fs::read_to_string(local(&files)).unwrap(),
             "roots = [\"~/here\"]\n"
         );
-        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "logging = \"info\"\n");
+        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "keep_awake = true\n");
         assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Local));
         // A later write without a placement stays where the key is.
         files
@@ -688,7 +690,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(local(&files)).unwrap(), "");
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "logging = \"info\"\nroots = [\"~/all\"]\n"
+            "keep_awake = true\nroots = [\"~/all\"]\n"
         );
     }
 }

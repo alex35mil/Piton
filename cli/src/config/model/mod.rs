@@ -3,6 +3,7 @@
 
 pub mod client;
 pub mod daemon;
+pub mod duration;
 pub mod grants;
 pub mod host;
 pub mod level;

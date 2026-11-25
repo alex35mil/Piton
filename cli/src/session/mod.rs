@@ -753,12 +753,12 @@ impl SessionTask {
         let mut end_reason = EndReason::PiExited;
         loop {
             let stop_deadline = self.stopping.as_ref().map(|(_, at)| *at);
-            let question_deadline = self.question.as_ref().map(|q| q.deadline);
+            let question_deadline = self.question.as_ref().and_then(|q| q.deadline);
             let network_deadline = self
                 .network
                 .as_ref()
                 .and_then(|n| n.asking.as_ref())
-                .map(|a| a.deadline);
+                .and_then(|a| a.deadline);
             tokio::select! {
                 line = stdout.next_line(), if stdout_open => match line {
                     Ok(Some(line)) => self.on_pi_line(line),
@@ -1461,7 +1461,7 @@ impl SessionTask {
             request,
             tag,
             reply,
-            deadline: Instant::now() + Duration::from_millis(self.config.confirmation_timeout_ms),
+            deadline: self.config.approval_timeout.deadline(Instant::now()),
         });
         self.on_pi_line(record.to_string());
         self.publish_view_state();
@@ -1751,7 +1751,7 @@ impl SessionTask {
         waiting.extend(same);
         self.next_internal += 1;
         let dialog_id = format!("piton:network:{}", self.next_internal);
-        let deadline = Instant::now() + Duration::from_millis(self.config.confirmation_timeout_ms);
+        let deadline = self.config.approval_timeout.deadline(Instant::now());
         let record = crate::agent::block::network_dialog(&dialog_id, &who, &to.to_string());
         if let Some(network) = &mut self.network {
             network.asking = Some(network::Asking {
@@ -2323,7 +2323,7 @@ impl SessionTask {
 
     fn arm_empty_timer(&mut self) {
         if self.stopping.is_none() && self.is_empty_and_unused() && self.empty_deadline.is_none() {
-            self.empty_deadline = Some(Instant::now() + Duration::from_millis(self.config.empty_grace_ms));
+            self.empty_deadline = Some(Instant::now() + self.config.stop_empty_session_after.get());
         }
     }
 
@@ -2335,7 +2335,7 @@ impl SessionTask {
         self.pi_tx = None; // closes pi's stdin once the writer drains
         self.stopping = Some((
             StopPhase::Closing,
-            Instant::now() + Duration::from_millis(self.config.stop.grace_ms),
+            Instant::now() + self.config.stop.terminate_after.get(),
         ));
         self.sync_shared();
     }
@@ -2351,7 +2351,7 @@ impl SessionTask {
                 self.signal(Signal::SIGTERM);
                 self.stopping = Some((
                     StopPhase::Terminating,
-                    Instant::now() + Duration::from_millis(self.config.stop.term_grace_ms),
+                    Instant::now() + self.config.stop.kill_after.get(),
                 ));
             }
             StopPhase::Terminating => {

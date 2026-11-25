@@ -72,7 +72,7 @@ or `PITON_CONFIG_HOME` for tests). Every key has the default shown.
   daemon reads its `[sandbox]` and `[workers]` for each launch.
 
 Unknown keys are refused. The daemon watches the files: a change applies to the next session at once, and the apps
-show `log`, `[env]`, `[tailnet]`, and `[tools]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
+show `log`, `[env]`, and `[integrations]` changes as waiting for a restart (`piton service install`). An invalid edit keeps
 that file's last good values and the apps say why. The apps change the keys below (`socket` shown read-only), keeping
 your comments and order, writing through a symlink into a dotfiles repository, and moving a key to the `.local` file
 when you check Local. A list they write goes one item per line once it has two items, and its items keep their
@@ -92,18 +92,12 @@ roots = []                # where the apps may browse and start sessions; none u
                           # e.g. ["~/Projects"]; piton attach and the CLI aren't limited
 favorites = []
 default_attach_mode = "sandbox"   # mode for `piton attach` when none is given
-empty_grace_ms = 10000    # stop a pi with no messages this long after its last client leaves
-confirmation_timeout_ms = 600000  # a question about a blocked command waits this long; then it isn't run
-logging = "info"          # host logging level ("info" or "debug"); `piton logging` and the Mac app switch it
-                          # until it expires or the daemon restarts
+stop_empty_session_after = "10s"  # stop a pi with no messages this long after its last client leaves
+approval_timeout = "10m"  # an approval (a blocked command, a held connection) waits this long for your answer;
+                          # then the action doesn't happen. "never" waits until it's answered, dismissed, or the
+                          # run ends, holding the session's one question slot meanwhile
 keep_awake = true         # hold the Mac awake while sessions are live; toggled from the apps
                           # (put it in config.host.local.toml to keep toggles out of a dotfiles diff)
-
-[tailnet]
-enabled = true            # the apps' WebSocket on this Mac's Tailscale addresses (needs the tailscale tool)
-port = 7357
-heartbeat_ms = 10000      # ping each app this often; drop it after three unanswered pings
-retry_ms = 10000          # while Tailscale isn't up, try again this often
 
 [pi]
 command = ["pi"]
@@ -113,21 +107,32 @@ args = []                 # added after `--mode rpc`
 login_shell = true        # base environment from `$SHELL -l`
 
 [stop]
-grace_ms = 15000          # after closing stdin, before SIGTERM
-term_grace_ms = 3000      # after SIGTERM, before SIGKILL
+terminate_after = "15s"   # after closing stdin, before SIGTERM
+kill_after = "3s"         # after SIGTERM, before SIGKILL
 
-[tools.mise]              # `mise env -C <workspace>` for every launch, trust for workers
+[integrations.mise]       # `mise env -C <workspace>` for every launch, trust for workers
 enabled = true            # unset: used when installed, off otherwise
 command = ["mise"]        # found through the login shell's PATH
 
-[tools.fnox]              # experimental: every launch behind fnox's credential proxy (below)
+[integrations.fnox]       # experimental: every launch behind fnox's credential proxy (below)
 enabled = true
 command = ["fnox"]        # e.g. ["fnox", "-P", "agent"] for a profile
 
-[tools.tailscale]         # remote access (`[tailnet]`)
+[integrations.tailscale]  # remote access: while it's used, the apps are served on this Mac's tailnet addresses
 enabled = true
 command = ["tailscale"]
+port = 7357
+heartbeat = "10s"         # ping each app this often; drop it after three unanswered pings
+retry = "10s"             # while Tailscale isn't up, try again this often
+
+[debugging]
+log_level = "info"        # host logging level ("info" or "debug"); `piton logging` and the Mac app switch it
+                          # until it expires or the daemon restarts
+session_analysis = true   # development installs only (development.md)
 ```
+
+Durations are a whole number and one unit: `ms`, `s`, `m`, or `h` (`"500ms"`, `"10s"`, `"10m"`, `"1h"`). Only
+`approval_timeout` also takes `"never"`; zero isn't a duration.
 
 A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after the workspace's mise
 environment.
@@ -139,9 +144,10 @@ environment and use the credential proxy (below).
 
 Everything in pi's environment is visible to the agent and every command it runs. `[tools.permissions]` rules steer the
 agent; in sandboxed sessions they aren't the boundary, the sandbox is.
-### External tools
+### Integrations
 
-Piton runs mise, fnox, and tailscale when they're there and works without them. Each has a `[tools.<name>]` table:
+Piton runs mise, fnox, and tailscale when they're there and works without them. Each has an `[integrations.<name>]`
+table:
 
 - **Unset `enabled`:** used when its command is installed, off otherwise. A Mac with neither works with both off:
   pi gets the login shell's environment, and only this Mac connects.
@@ -150,8 +156,10 @@ Piton runs mise, fnox, and tailscale when they're there and works without them. 
   warning on the setting, and each operation that needs it fails with an error naming the setting (a launch or a
   worker for mise; every launch for fnox; remote access for tailscale).
 
-The daemon decides each tool's state when it starts, so changes apply after a restart. `piton setup check` requires
-only pi and lists the tools with their state.
+Remote access has no switch of its own: the apps are served on the tailnet exactly while Tailscale is used.
+
+The daemon decides each integration's state when it starts, so changes apply after a restart. `piton setup check`
+requires only pi and lists the integrations with their state.
 
 ### Credential proxy (fnox, experimental)
 
@@ -159,7 +167,7 @@ With [fnox](https://fnox.jdx.dev/guide/proxy)'s credential proxy, pi never holds
 placeholders, and fnox, outside the sandbox, puts the real values (read from 1Password or another secret store) only
 into the requests its rules allow. An agent that reads `GITHUB_PERSONAL_ACCESS_TOKEN` gets `fnox_proxy_...`.
 
-When fnox is used (`[tools.fnox]`) and a fnox config with a `[proxy]` table applies to the workspace, every session,
+When fnox is used (`[integrations.fnox]`) and a fnox config with a `[proxy]` table applies to the workspace, every session,
 sandboxed or on the host, starts as `fnox --non-interactive proxy run --no-sandbox -- <the usual command>`. fnox finds
 its config itself: the global `~/.config/fnox/config.toml`, and `fnox.toml` files in the workspace and its parents.
 Where no `[proxy]` applies, launches run without it. `--no-sandbox` turns fnox's own sandbox off: Piton's applies.
@@ -475,7 +483,7 @@ gets a gate: a proxy on 127.0.0.1 that the sandbox's processes reach through the
 5. otherwise you're asked, in the apps and pi.nvim, while the connection waits: **Allow for this session**, **Allow in
    this project** or **everywhere** (saves `"host:port" = "allow"` in `[sandbox.network.connections]` of the
    project's `config.local.toml` or the global `config.toml`; applies at once, no restart), or **Not now** (refused this
-   time). There's no Deny: a host you never want is a `"deny"` you write. No answer within `confirmation_timeout_ms`
+   time). There's no Deny: a host you never want is a `"deny"` you write. No answer within `approval_timeout`
    refuses it.
 
 A refused connection gets `403` with the reason, which curl and most clients print, and a failed bash call lists it
@@ -695,7 +703,7 @@ The apps show a switch (left and right arrows with a keyboard) and the pattern i
 first option, **Choose an answer below**, decides nothing and shows the question again, so Enter alone never answers;
 its last option switches to the other runtime and asks again.
 
-No answer within `confirmation_timeout_ms` (10 minutes by default): it doesn't run. The agent can ask, never approve.
+No answer within `approval_timeout` (10 minutes by default): it doesn't run. The agent can ask, never approve.
 `osascript` is never offered, and neither is `open` of a file or app the sandbox could have written, as a path or a
 `file:` URL. `open` of a web link says it opens in the browser; another URL scheme names the app macOS hands it to,
 and is refused when no app handles it or the app is one the sandbox could have written. A blocked Mach service of a
@@ -858,7 +866,7 @@ refuses to start; an older one is migrated after a `.v<N>.bak` copy.
 ## Logging
 
 `piton logging status`, `piton logging debug [--until-disabled]`, and `piton logging info` switch host logging through
-the daemon without restarting sessions, until the switch expires or the daemon restarts. `logging` in
+the daemon without restarting sessions, until the switch expires or the daemon restarts. `[debugging] log_level` in
 `config.host.toml` is the default; debug expires after one hour unless kept on. The independent phone collector is installed with
 `mise run logs:install` (host only) and removed with `piton logging uninstall`. App settings, collection, paths, and limits: [logging.md](logging.md).
 

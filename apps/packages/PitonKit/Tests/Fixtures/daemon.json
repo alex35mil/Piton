@@ -48,7 +48,7 @@
         "editable": true
       },
       {
-        "key": "logging",
+        "key": "debugging.log_level",
         "scope": "host",
         "value": "info",
         "placement": null,
@@ -66,7 +66,7 @@
         "editable": true
       },
       {
-        "key": "tailnet.port",
+        "key": "integrations.tailscale.port",
         "scope": "host",
         "value": 9000,
         "placement": "shared",
@@ -77,6 +77,36 @@
         "applies": {
           "kind": "restart",
           "pending": true
+        },
+        "editable": true
+      },
+      {
+        "key": "approval_timeout",
+        "scope": "host",
+        "value": "never",
+        "placement": "shared",
+        "local_choice": true,
+        "value_type": {
+          "kind": "duration",
+          "never": true
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "stop.kill_after",
+        "scope": "host",
+        "value": "3s",
+        "placement": null,
+        "local_choice": true,
+        "value_type": {
+          "kind": "duration",
+          "never": false
+        },
+        "applies": {
+          "kind": "live"
         },
         "editable": true
       },
@@ -126,7 +156,7 @@
         "editable": true
       },
       {
-        "key": "tools.tailscale.enabled",
+        "key": "integrations.tailscale.enabled",
         "scope": "host",
         "value": true,
         "placement": "shared",
@@ -139,7 +169,7 @@
           "pending": false
         },
         "editable": true,
-        "warning": "tailscale is enabled ([tools.tailscale] enabled = true) but \"tailscale\" isn't installed"
+        "warning": "tailscale is enabled ([integrations.tailscale] enabled = true) but \"tailscale\" isn't installed"
       }
     ],
     "settings_error": null

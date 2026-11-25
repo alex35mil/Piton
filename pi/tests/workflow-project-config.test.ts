@@ -117,12 +117,12 @@ describe("workflow project configuration", () => {
         try {
             setInstallationForTests({ kind: "development", checkout: root })
             assert.equal(loadSessionAnalysis(), "enabled")
-            writeSettings("host", { "development.session_analysis": false })
+            writeSettings("host", { "debugging.session_analysis": false })
             assert.equal(loadSessionAnalysis(), "disabled")
             // It's a host setting: a project's config.toml has no such table.
-            assert.throws(() => writeSettings(root, { "development.session_analysis": true }), /development/)
+            assert.throws(() => writeSettings(root, { "debugging.session_analysis": true }), /debugging/)
             setInstallationForTests({ kind: "app" })
-            writeSettings("host", { "development.session_analysis": true })
+            writeSettings("host", { "debugging.session_analysis": true })
             assert.equal(loadSessionAnalysis(), "disabled")
         } finally {
             setInstallationForTests(undefined)

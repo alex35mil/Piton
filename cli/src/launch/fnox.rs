@@ -22,7 +22,7 @@ use super::{
     Env,
     sandbox::{Access, Policy, Provenance, Source},
 };
-use crate::{agent::canonical_target, tools::Program};
+use crate::{agent::canonical_target, integrations::Program};
 
 /// What fnox prints when no config with a `[proxy]` table applies to the folder.
 const NO_PROXY_TABLE: &str = "No [proxy] configuration found";

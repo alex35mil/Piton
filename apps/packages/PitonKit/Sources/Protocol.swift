@@ -616,7 +616,7 @@ public enum SettingScope: String, Codable, Sendable, Hashable {
 
 /// One setting of the host: a key of one of its global files.
 public struct Setting: Codable, Sendable, Hashable, Identifiable {
-    /// The key as written in its file (`tailnet.port` is `[tailnet] port`).
+    /// The key as written in its file (`stop.kill_after` is `[stop] kill_after`).
     public let key: String
     public let scope: SettingScope
     /// The value in effect: the file's, else the default.
@@ -629,7 +629,7 @@ public struct Setting: Codable, Sendable, Hashable, Identifiable {
     public let applies: SettingApplies
     /// Whether the apps may change it.
     public let editable: Bool
-    /// Something the user should fix, shown with the setting: a tool enabled but not installed.
+    /// Something the user should fix, shown with the setting: an integration enabled but not installed.
     public let warning: String?
 
     public var id: String { "\(scope.rawValue).\(key)" }
@@ -653,13 +653,15 @@ public enum SettingValueType: Codable, Sendable, Hashable {
     case text
     case textList
     case integer
+    /// A length of time as text (`"10s"`); `"never"` too when `never`.
+    case duration(never: Bool)
     case choice(options: [String])
     /// Several of the listed options.
     case choiceList(options: [String])
     /// A table of keys (paths, hosts, names) to one of the listed values: one row per entry.
     case map(values: [String])
 
-    enum CodingKeys: String, CodingKey { case kind, options, values }
+    enum CodingKeys: String, CodingKey { case kind, options, values, never }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -668,6 +670,7 @@ public enum SettingValueType: Codable, Sendable, Hashable {
         case "text": self = .text
         case "text_list": self = .textList
         case "integer": self = .integer
+        case "duration": self = .duration(never: try c.decode(Bool.self, forKey: .never))
         case "choice": self = .choice(options: try c.decode([String].self, forKey: .options))
         case "choice_list": self = .choiceList(options: try c.decode([String].self, forKey: .options))
         case "map": self = .map(values: try c.decode([String].self, forKey: .values))
@@ -684,6 +687,9 @@ public enum SettingValueType: Codable, Sendable, Hashable {
         case .text: try c.encode("text", forKey: .kind)
         case .textList: try c.encode("text_list", forKey: .kind)
         case .integer: try c.encode("integer", forKey: .kind)
+        case .duration(let never):
+            try c.encode("duration", forKey: .kind)
+            try c.encode(never, forKey: .never)
         case .choice(let options):
             try c.encode("choice", forKey: .kind)
             try c.encode(options, forKey: .options)

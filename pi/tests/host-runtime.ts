@@ -48,7 +48,7 @@ export function writeGlobalSetting(name: string, value: unknown): string {
  * Writes settings to a configuration file through the binary, as the pi package does. `changes` has dotted keys as the
  * file names them (`"tools.permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
  * repository (its source checkout's `.piton/config.toml`), `"global"` for the test's global `config.toml`, or `"host"`
- * for its `config.host.toml` (`[development]`). `local` writes the pair's `.local` file. Returns the file.
+ * for its `config.host.toml` (`[debugging]`). `local` writes the pair's `.local` file. Returns the file.
  */
 export function writeConfig(dir: string, changes: Record<string, unknown>, local = false): string {
     const args = ["config", "set", JSON.stringify(changes), "--changes"]

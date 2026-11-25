@@ -135,11 +135,26 @@ pub enum WorkerRefusal {
         files.join(", ")
     )]
     UpdateDenied { checkout: PathBuf, files: Vec<String> },
-    /// A tool workers need (mise, for trust) is enabled but not installed.
-    #[error(transparent)]
-    ToolUnavailable(crate::tools::Unavailable),
+    /// An integration workers need (mise, for trust) is enabled but not installed. `message` names the setting, so a
+    /// client shows it as is.
+    #[error("{message}")]
+    IntegrationUnavailable {
+        integration: crate::integrations::Integration,
+        program: String,
+        message: String,
+    },
     #[error("{message}")]
     Failed { message: String },
+}
+
+impl WorkerRefusal {
+    pub fn integration_unavailable(unavailable: crate::integrations::Unavailable) -> Self {
+        Self::IntegrationUnavailable {
+            message: unavailable.to_string(),
+            integration: unavailable.integration,
+            program: unavailable.program,
+        }
+    }
 }
 
 impl From<ProjectError> for WorkerRefusal {
@@ -1373,5 +1388,21 @@ mod tests {
         git(w, &["reset", "-q", "--", "README"]);
         assert_eq!(pr_review(w), changed);
         assert!(uncommitted(&leftovers(w)));
+    }
+
+    /// An integration a worker needs that isn't installed: clients get the daemon's message, which names the setting.
+    #[test]
+    fn an_unavailable_integration_carries_its_message() {
+        let refusal = WorkerRefusal::integration_unavailable(crate::integrations::Unavailable {
+            integration: crate::integrations::Integration::Mise,
+            program: "mise".into(),
+        });
+        let json = serde_json::to_value(&refusal).unwrap();
+        assert_eq!(json["kind"], "integration_unavailable");
+        assert_eq!(json["integration"], "mise");
+        assert_eq!(json["program"], "mise");
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("[integrations.mise] enabled = true"), "{message}");
+        assert_eq!(refusal.to_string(), message);
     }
 }

@@ -46,9 +46,9 @@ pub enum LaunchError {
         link: PathBuf,
         checkout: PathBuf,
     },
-    /// A tool the launch needs is enabled but not installed.
+    /// An integration the launch needs is enabled but not installed.
     #[error(transparent)]
-    Tool(#[from] crate::tools::Unavailable),
+    Integration(#[from] crate::integrations::Unavailable),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -256,7 +256,7 @@ fn launch_warnings(resolution: &sandbox::Resolution, env: &Env, proxy: Option<&f
 /// Builds a launch in `workspace` in `mode`.
 pub async fn prepare(
     config: &DaemonConfig,
-    tools: &crate::tools::Tools,
+    tools: &crate::integrations::Integrations,
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
@@ -277,12 +277,12 @@ pub async fn prepare(
 /// The credential proxy for a launch in `workspace`, when fnox is used and a `[proxy]` applies there; pi's `FNOX_*`
 /// variables then come from the daemon's base environment only.
 async fn proxy_for(
-    tools: &crate::tools::Tools,
+    integrations: &crate::integrations::Integrations,
     base: &Env,
     workspace: &Path,
     env: &mut Env,
 ) -> Result<Option<fnox::Proxy>, LaunchError> {
-    let Some(program) = tools.fnox.optional()? else {
+    let Some(program) = integrations.fnox.optional()? else {
         return Ok(None);
     };
     fnox::strip_workspace_variables(env, base);
@@ -293,7 +293,7 @@ async fn proxy_for(
 /// run on the host (a host session trusts the project by choice), then Piton's own variables.
 async fn host_env(
     config: &DaemonConfig,
-    tools: &crate::tools::Tools,
+    tools: &crate::integrations::Integrations,
     base: &Env,
     workspace: &Path,
 ) -> Result<Env, LaunchError> {
@@ -308,7 +308,7 @@ async fn host_env(
 /// the policy can read the keychain.
 pub async fn prepare_sandbox(
     config: &DaemonConfig,
-    all_tools: &crate::tools::Tools,
+    all_tools: &crate::integrations::Integrations,
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
@@ -735,7 +735,7 @@ mod tests {
         let granted = ClaudeCodeFolder::Granted("/h/.config/pi/claude".into());
         let token: Env = [(CLAUDE_CODE_TOKEN.to_string(), "sk-ant-oat01-x".to_string())].into();
         let proxy = |variables: Vec<String>| fnox::Proxy {
-            program: crate::tools::Program {
+            program: crate::integrations::Program {
                 program: "fnox".into(),
                 args: vec![],
             },

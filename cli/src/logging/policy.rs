@@ -1,4 +1,4 @@
-//! Host logging policy. The default comes from `config.toml` (`[logging] mode`); the daemon holds the current policy in
+//! Host logging policy. The default comes from `config.host.toml` (`[debugging] log_level`); the daemon holds the current policy in
 //! memory and changes it at runtime for the CLI and the Mac app (see `Daemon::set_logging`). A runtime change is
 //! temporary: it lasts until it expires or the daemon restarts. The collector and the Mac app follow the daemon's policy.
 //! The sandbox gets read-only access to `logs/`, never to the control socket next to it.
@@ -33,7 +33,7 @@ pub enum Expiration {
     Manual,
 }
 
-/// The configured default (`[logging] mode`).
+/// The configured default (`[debugging] log_level`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {

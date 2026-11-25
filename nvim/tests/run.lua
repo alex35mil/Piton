@@ -828,6 +828,11 @@ test("cli passes the answers and describes the new refusals", function()
     }, commands)
     assert(cli.describe(PROTECTED):find("origin/main", 1, true))
     equal("no socket", cli.describe({ kind = "source_fetch", checkout = "/p", message = "no socket" }))
+    -- The daemon's message names the setting; the plugin shows it as is.
+    equal(
+        "mise is enabled",
+        cli.describe({ kind = "integration_unavailable", integration = "mise", program = "mise", message = "mise is enabled" })
+    )
 end)
 
 test("unsaved buffers require confirmation before any daemon deletion", function()

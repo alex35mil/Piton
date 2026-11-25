@@ -135,7 +135,8 @@ pub struct PendingQuestion {
     /// The tag the call's sandbox gets.
     pub tag: String,
     pub reply: oneshot::Sender<RunDecision>,
-    pub deadline: tokio::time::Instant,
+    /// When it's refused unanswered; none when `approval_timeout` is `"never"`.
+    pub deadline: Option<tokio::time::Instant>,
 }
 
 /// Blocked processes that aren't bash calls: the question showing, the refusals already offered (once per process,

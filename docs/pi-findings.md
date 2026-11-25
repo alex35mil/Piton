@@ -143,7 +143,7 @@ workspace and agent dir). They aren't part of `probe.mjs`; the research report o
 
 - Closing stdin exits pi with code 0: idle within ~5 ms; mid-stream within ~10 ms on 1.3.0 and ~200–270 ms on 1.5.2
   (faux provider; a real provider with pending work may take longer). Either is far inside Piton's stop grace
-  (`grace_ms`, 15 s). Mid-stream, the stream simply stops: no `message_end`, `agent_end`, or `agent_settled`.
+  (`[stop] terminate_after`, 15 s). Mid-stream, the stream simply stops: no `message_end`, `agent_end`, or `agent_settled`.
 - SIGKILL mid-stream: the session file has the earlier turns only; the interrupted turn is lost entirely, its user
   message included, although that message's `message_end` had already been emitted. Resuming works, and a new prompt
   continues the branch from the last persisted entry. So a client that saw the user message live won't find it after

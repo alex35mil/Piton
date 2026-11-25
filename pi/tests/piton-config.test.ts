@@ -49,7 +49,7 @@ function resolved(watch: string[]) {
         branches: { error: { message: "invalid /w/.piton/config.toml" } },
         tracker: { ok: null },
         forge: { ok: null },
-        development: { ok: {} },
+        debugging: { ok: {} },
         policies: { ok: [] },
         instructions: { ok: { rules: [], skills: [] } },
         files: [],

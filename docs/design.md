@@ -82,7 +82,7 @@ The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is
   (`protected`), `agent.sock` (`socket`), a protected write asked of the user (`write`), bash calls the daemon runs
   (`run`) and the per-command grants it matches (`command`), the block question (`block`), and `open` (`open`).
 - `project/`: a workspace's source or worker relation, and worker clones.
-- `tools/`: the external tools piton runs (mise, fnox, tailscale) and whether each is used.
+- `integrations/`: the external programs piton runs (mise, fnox, tailscale) and whether each is used.
 - `setup/`: `piton setup` and the launchd agent. `logging/`: Piton's own logs, the logging policy, the collector.
 
 ### Packaging
@@ -140,12 +140,14 @@ workspace's mise environment, provider keys. In sandboxed sessions the `[tools.p
 aren't the boundary: a rule that hides `mise.local.toml` doesn't stop another command from printing the environment.
 Keep secrets out of the mise environment; with the credential proxy (below), pi holds placeholders instead.
 
-**External tools.** mise, fnox, and tailscale are optional. `tools/` decides each one's state once at daemon start from
-`[tools.<name>] enabled` and the login shell's PATH: unset means used when installed and off otherwise, `false` is
-off, and `true` uses it and is an error when it's missing. An enabled tool that's missing is never run: the apps'
-Settings show a warning on its setting, and every operation that needs it fails with a typed error (a launch, a
-worker, remote access). `Tool` is one enum matched exhaustively, so a new tool (direnv, Nix) answers every
-decision.
+**Integrations.** mise, fnox, and tailscale are optional. `integrations/` decides each one's state once at daemon
+start from `[integrations.<name>] enabled` and the login shell's PATH: unset means used when installed and off
+otherwise, `false` is off, and `true` uses it and is an error when it's missing. An enabled integration that's missing
+is never run: the apps' Settings show a warning on its setting, and every operation that needs it fails with a typed
+error naming the setting (a launch, a worker, remote access); a worker refusal carries that message, so clients show it
+as is. `Integration` is one enum matched exhaustively, so a new one (direnv, Nix) answers every decision. The apps are
+served on the tailnet exactly while Tailscale is used: `[integrations.tailscale]` holds the tailnet settings, with no
+second switch.
 
 **Credential proxy (fnox, experimental).** When fnox is used and `fnox proxy rules` in the workspace finds a
 `[proxy]` table, the launch's command line (either mode) is wrapped as `fnox --non-interactive proxy run
@@ -488,7 +490,7 @@ arrive out of request order.
 | --- | --- |
 | `sessions.list` | `{sessions}`: live sessions (key, id, file, workspace, checkout, mode, status, clients, pid, title) |
 | `sessions.subscribe` | `{}`; then pushes `sessions` and `daemon {state}` lines on change |
-| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `scope` (`host`, `client`, `project`), `value`, `placement` (`shared`, `local`, or null), `local_choice`, `value_type`, `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
+| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `scope` (`host`, `client`, `project`), `value`, `placement` (`shared`, `local`, or null), `local_choice`, `value_type` (`bool`, `text`, `text_list`, `integer`, `duration` with `never`, `choice` and `choice_list` with `options`, `map` with `values`), `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
 | `settings.set {scope, key, value, local?}` | `{state}`; the key in the global file of `scope`; `value: null` resets; `local` moves the key between the shared and `.local` file (refused for `client`, which has no local file) |
 | `daemon.logging {policy}` | `{state}`; until it expires or the daemon restarts |
 | `workspaces.browse {path?}` | `{entries}`; see "Workspace roots" |
@@ -527,7 +529,7 @@ A view client counts as a session client (writer rule, empty-pi cleanup). Not ye
 
 ### Remote access (tailnet WebSocket)
 
-The `view` protocol also runs over WebSocket on this Mac's tailnet addresses (`[tailnet] port`, default 7357), one
+The `view` protocol also runs over WebSocket on this Mac's tailnet addresses (`[integrations.tailscale] port`, default 7357), one
 text frame per message, plain `ws://` (Tailscale encrypts the traffic). `cli/src/apps/tailnet.rs`,
 `cli/src/apps/websocket.rs`.
 
@@ -544,7 +546,7 @@ text frame per message, plain `ws://` (Tailscale encrypts the traffic). `cli/src
   token path to the WebSocket: the identity check is the only way in.
 - **Only `view`:** an `rpc` or `control` hello over the WebSocket is closed (no remote `piton attach`).
 - **Dead connections:** a phone that loses its network sends no close, and its TCP connection would linger for many
-  minutes. The daemon pings every client (`[tailnet] heartbeat_ms`, default 10 s) and drops one that answers none of
+  minutes. The daemon pings every client (`[integrations.tailscale] heartbeat`, default 10 s) and drops one that answers none of
   three pings in a row. The apps ping too (every 15 s) and reconnect when a pong doesn't arrive within 10 s.
 - **Unnoticed drops:** a connection can die while the phone is suspended in the background or when its network changes,
   and through a local proxy the phone's side stays open: writes seem to succeed and requests wait for the next pong
@@ -552,7 +554,7 @@ text frame per message, plain `ws://` (Tailscale encrypts the traffic). `cli/src
   changes: a ping with a 2 s deadline, reconnecting at once when it isn't answered. A store waiting to retry retries
   immediately.
 - Without Tailscale (not installed, not running) the daemon logs it once and serves local clients only, trying again
-  every `[tailnet] retry_ms` (default 10 s): at login launchd can start it before Tailscale is up. Once listening, it
+  every `[integrations.tailscale] retry` (default 10 s): at login launchd can start it before Tailscale is up. Once listening, it
   checks every minute whether this Mac's tailnet addresses changed and listens on the new ones.
 - Tests use a fake `tailscale` CLI (`cli/tests/fixtures/fake-tailscale.sh`) that puts the listener on loopback.
 - macOS firewalls (Little Snitch) hold incoming connections until allowed. `mise run cli:install` signs
@@ -626,7 +628,7 @@ Attention is derived from the event stream:
 
 The Info level records essential events; opt-in Debug adds detailed traces and expires after an hour by default unless
 explicitly kept on. The apps retain bounded files alongside Apple's unified logger. Host logging (the
-Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `logging` in `config.host.toml`
+Mac app, the daemon, and a separate paired-iPhone collector) follows the daemon: `[debugging] log_level` in `config.host.toml`
 is the default, and `daemon.logging` (the Mac app) or `piton logging` switches it until it expires or the daemon restarts.
 The policy is part of the pushed daemon state. The phone's capture setting is a device setting, local
 to the phone, and works offline. No logging control changes pi's settings, uses its RPC channel, or restarts sessions.
@@ -713,7 +715,7 @@ that the user approved as a diff ("Protected files").
 ```
 $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
   config[.local].toml            # the chain's farthest level: defaults every project inherits
-  config.host[.local].toml       # how the daemon runs on this host, this host's preferences, [development]
+  config.host[.local].toml       # how the daemon runs on this host, this host's preferences, [debugging]
   config.client.toml             # the apps' preferences, served to every client (no local file)
   mcp[.local].json               # MCP servers, in the format other harnesses read
   policies.md
@@ -736,9 +738,11 @@ Three families of files, each read by its own consumer:
   committed": this machine's values, secrets, or anything you don't want in a diff (`/.piton/*.local.*` keeps it out
   of Git).
 - **`config.host.toml` / `config.host.local.toml`, global only:** read by the daemon. Top-level keys: `socket`, `log`,
-  `roots`, `favorites`, `logging`, `default_attach_mode`, `empty_grace_ms`, `keep_awake`; tables `[pi]`, `[env]`, `[stop]`, `[tailnet]`, `[tools]` (the external tools, above), and `[development]` (switches for a
-  development install, in [development.md](development.md)), which the pi package reads through
-  `piton config resolve --global` on whichever machine pi runs.
+  `roots`, `favorites`, `default_attach_mode`, `stop_empty_session_after`, `approval_timeout`, `keep_awake`; tables
+  `[pi]`, `[env]`, `[stop]`, `[integrations]` (above, with Tailscale's tailnet settings), and `[debugging]` (the host
+  log level, and switches for a development install in [development.md](development.md), which the pi package reads
+  through `piton config resolve --global` on whichever machine pi runs). Durations are strings: a whole number and
+  one unit (`"500ms"`, `"10s"`, `"10m"`, `"1h"`); `approval_timeout` also takes `"never"`.
 - **`config.client.toml`, global only:** the apps' preferences (`text_font`, `code_font`; themes and keybindings
   later), served by the host to every client. It has no local file: a device keeps its own value in its app.
 
@@ -824,7 +828,7 @@ the line. A host or client file has one schema and is read whole.
   running. The daemon passes the binary's path in `PITON_BIN` after the mise environment; the pi package caches the
   result and calls again only when a watched file changed. The result is per part: one per table of `config.toml`,
   named as the table, plus MCP, the global tier's MCP alone, policies, and rule and skill folders. Each is its value or
-  its error, so a broken table fails only the tools that read it. `--global` returns the host file's `[development]`.
+  its error, so a broken table fails only the tools that read it. `--global` returns the host file's `[debugging]`.
 - **Code layout.** `cli/src/config/` is the only code that reads or writes these files. Its `mod.rs` is the API;
   the four layers are private:
   - `model/`: what configuration is, with no I/O: paths and scopes, levels and chains, one file per project table
@@ -856,10 +860,10 @@ the line. A host or client file has one schema and is read whole.
   apps may change it. `settings.set {scope, key, value, local?}` writes it. The daemon edits with `toml_edit`, keeping
   comments and order, writes through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. The
   apps edit the host file's keys (`socket` shown read-only), the client file, and the global `[sandbox]` and
-  `[workers]`; `[development]`, `[tools.permissions]`, `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited
+  `[workers]`; `[debugging] session_analysis`, `[tools.permissions]`, `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited
   in the file. The apps never write repository or parent-folder files. A change is checked against the schema before
   it's written. The daemon watches the global folder (and a symlink's target folder): edits apply at once; `log`,
-  `[env]`, `[tailnet]`, and `[tools]` wait for a restart and show as pending; a file that can't be used keeps its last good
+  `[env]`, and `[integrations]` wait for a restart and show as pending; a file that can't be used keeps its last good
   values and `settings_error` says why.
 
 #### State database
@@ -1093,7 +1097,7 @@ writable from the sandbox, which runs the real `ssh` with `ProxyCommand=piton ga
   question, one at a time in the session's slot, connections to the same destination joining it. Answers: allow for
   the session; allow and save (`"host:port" = "allow"`, `grant::Lift::Network`), which also joins every live
   sandbox's policy so it applies at once (Seatbelt doesn't change, so no restart); not now. No answer saves a denial,
-  as in Codex. No answer in `confirmation_timeout_ms`, or no client, refuses it with `403`.
+  as in Codex. No answer in `approval_timeout`, or no client, refuses it with `403`.
 - **pi's trusted hosts** (`pi/catalog.rs`): the hosts of every provider built into the installed pi and the sign-in hosts
   in its OAuth code, read by running `builtin.mjs` with Node against pi's package folder (found from its launcher,
   npm's link or aube's shim), once per package folder; `baseUrl`s in the agent directory's `models.json`; and
@@ -1310,8 +1314,8 @@ question per connection, by the protocol its hello chose, so the view protocol i
   writes and process questions are still pi dialogs (#338 generalizes it).
 
 Only a client answers. One
-question at a time per session, shared with protected writes; no answer within `confirmation_timeout_ms` (host
-configuration, 10 minutes by default), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
+question at a time per session, shared with protected writes; no answer within `approval_timeout` (host
+configuration, 10 minutes by default, or `"never"`), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
 (`agent/open/`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
 scheme names the app Launch Services hands it to (`LSCopyDefaultApplicationURLForURL`, asked by the daemon) and is
 refused when none does or the app is one the sandbox could have written; a file or app the sandbox could have written,

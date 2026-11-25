@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::tools::Program;
+use crate::integrations::Program;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfNode {

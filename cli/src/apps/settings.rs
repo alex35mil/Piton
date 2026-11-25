@@ -28,6 +28,10 @@ pub enum ValueType {
     Text,
     TextList,
     Integer,
+    /// A length of time as text (`"10s"`); `"never"` too when `never`.
+    Duration {
+        never: bool,
+    },
     Choice {
         options: &'static [&'static str],
     },
@@ -43,7 +47,7 @@ pub enum ValueType {
 
 #[derive(Debug)]
 pub struct Entry {
-    /// The key as written in its file (`tailnet.port` is `[tailnet] port`).
+    /// The key as written in its file (`stop.kill_after` is `[stop] kill_after`).
     pub key: &'static str,
     /// The file family it lives in.
     pub scope: Scope,
@@ -96,6 +100,8 @@ fn null(_: &DaemonConfig) -> Value {
 use Applies::{Live, Restart};
 use ValueType::{Bool, Integer, Text, TextList};
 
+const DURATION: ValueType = ValueType::Duration { never: false };
+
 /// The values of `[sandbox.filesystem]`.
 const FILE_ACCESS: &[&str] = &["read", "write", "deny"];
 /// The values of every other `[sandbox]` map.
@@ -110,14 +116,6 @@ pub static CATALOG: &[Entry] = &[
     host("roots", TextList, Live, empty),
     host("favorites", TextList, Live, empty),
     host(
-        "logging",
-        ValueType::Choice {
-            options: &["info", "debug"],
-        },
-        Live,
-        |c| json!(c.logging.mode),
-    ),
-    host(
         "default_attach_mode",
         ValueType::Choice {
             options: &["sandbox", "host"],
@@ -125,9 +123,11 @@ pub static CATALOG: &[Entry] = &[
         Live,
         |c| json!(c.default_attach_mode),
     ),
-    host("empty_grace_ms", Integer, Live, |c| json!(c.empty_grace_ms)),
-    host("confirmation_timeout_ms", Integer, Live, |c| {
-        json!(c.confirmation_timeout_ms)
+    host("stop_empty_session_after", DURATION, Live, |c| {
+        json!(c.stop_empty_session_after)
+    }),
+    host("approval_timeout", ValueType::Duration { never: true }, Live, |c| {
+        json!(c.approval_timeout)
     }),
     Entry {
         key: "socket",
@@ -141,23 +141,40 @@ pub static CATALOG: &[Entry] = &[
     host("pi.command", TextList, Live, |c| json!(c.pi.command)),
     host("pi.args", TextList, Live, |c| json!(c.pi.args)),
     host("env.login_shell", Bool, Restart, |c| json!(c.env.login_shell)),
-    // Unset (`null`): used when installed. See `crate::tools`.
-    host("tools.mise.enabled", Bool, Restart, null),
-    host("tools.mise.command", TextList, Restart, |c| json!(c.tools.mise.command)),
-    host("tools.fnox.enabled", Bool, Restart, null),
-    host("tools.fnox.command", TextList, Restart, |c| json!(c.tools.fnox.command)),
-    host("tools.tailscale.enabled", Bool, Restart, null),
-    host("tools.tailscale.command", TextList, Restart, |c| {
-        json!(c.tools.tailscale.command)
+    host("stop.terminate_after", DURATION, Live, |c| {
+        json!(c.stop.terminate_after)
     }),
-    host("stop.grace_ms", Integer, Live, |c| json!(c.stop.grace_ms)),
-    host("stop.term_grace_ms", Integer, Live, |c| json!(c.stop.term_grace_ms)),
-    host("tailnet.enabled", Bool, Restart, |c| json!(c.tailnet.enabled)),
-    host("tailnet.port", Integer, Restart, |c| json!(c.tailnet.port)),
-    host("tailnet.heartbeat_ms", Integer, Restart, |c| {
-        json!(c.tailnet.heartbeat_ms)
+    host("stop.kill_after", DURATION, Live, |c| json!(c.stop.kill_after)),
+    // Unset (`null`): used when installed. See `crate::integrations`.
+    host("integrations.mise.enabled", Bool, Restart, null),
+    host("integrations.mise.command", TextList, Restart, |c| {
+        json!(c.integrations.mise.command)
     }),
-    host("tailnet.retry_ms", Integer, Restart, |c| json!(c.tailnet.retry_ms)),
+    host("integrations.fnox.enabled", Bool, Restart, null),
+    host("integrations.fnox.command", TextList, Restart, |c| {
+        json!(c.integrations.fnox.command)
+    }),
+    host("integrations.tailscale.enabled", Bool, Restart, null),
+    host("integrations.tailscale.command", TextList, Restart, |c| {
+        json!(c.integrations.tailscale.command)
+    }),
+    host("integrations.tailscale.port", Integer, Restart, |c| {
+        json!(c.integrations.tailnet.port)
+    }),
+    host("integrations.tailscale.heartbeat", DURATION, Restart, |c| {
+        json!(c.integrations.tailnet.heartbeat)
+    }),
+    host("integrations.tailscale.retry", DURATION, Restart, |c| {
+        json!(c.integrations.tailnet.retry)
+    }),
+    host(
+        "debugging.log_level",
+        ValueType::Choice {
+            options: &["info", "debug"],
+        },
+        Live,
+        |c| json!(c.logging.mode),
+    ),
     entry_of(Scope::Client, "text_font", Text, Live, null),
     entry_of(Scope::Client, "code_font", Text, Live, null),
     project(
@@ -218,7 +235,7 @@ pub struct SettingInfo {
     pub value_type: ValueType,
     pub applies: AppliesInfo,
     pub editable: bool,
-    /// Something the user should fix, shown with the setting: a tool enabled but not installed.
+    /// Something the user should fix, shown with the setting: an integration enabled but not installed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
@@ -242,7 +259,7 @@ pub struct Snapshot {
     placements: BTreeMap<Id, Option<Sharing>>,
     /// Restart-only values the daemon started with.
     started: BTreeMap<Id, Value>,
-    /// Warnings by setting: each enabled tool that isn't installed, on its `enabled` key; a `socket` a release build
+    /// Warnings by setting: each enabled integration that isn't installed, on its `enabled` key; a `socket` a release build
     /// ignores.
     warnings: BTreeMap<Id, String>,
     /// Why some file's latest version can't be used (its values are the last good ones).
@@ -250,13 +267,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Reads the global files as the daemon starts. `tools` is each tool's state the daemon decided at start.
-    pub fn new(paths: &Paths, tools: &crate::tools::Tools) -> Self {
+    /// Reads the global files as the daemon starts. `integrations` is each integration's state the daemon decided at
+    /// start.
+    pub fn new(paths: &Paths, integrations: &crate::integrations::Integrations) -> Self {
         let mut snapshot = Self {
             values: BTreeMap::new(),
             placements: BTreeMap::new(),
             started: BTreeMap::new(),
-            warnings: tool_warnings(tools),
+            warnings: integration_warnings(integrations),
             error: None,
         };
         snapshot.reload(paths);
@@ -358,20 +376,16 @@ impl Snapshot {
     }
 }
 
-/// The warning for each tool enabled but not installed, on its `enabled` key.
-fn tool_warnings(tools: &crate::tools::Tools) -> BTreeMap<Id, String> {
-    use crate::tools::{Tool, ToolState};
-    Tool::ALL
+/// The warning for each integration enabled but not installed, on its `enabled` key.
+fn integration_warnings(integrations: &crate::integrations::Integrations) -> BTreeMap<Id, String> {
+    use crate::integrations::{Integration, IntegrationState};
+    Integration::ALL
         .iter()
-        .filter_map(|&tool| {
-            let key = match tool {
-                Tool::Mise => "tools.mise.enabled",
-                Tool::Fnox => "tools.fnox.enabled",
-                Tool::Tailscale => "tools.tailscale.enabled",
-            };
-            match tools.get(tool) {
-                ToolState::Unavailable(unavailable) => Some(((Scope::Host, key), unavailable.to_string())),
-                ToolState::Off(_) | ToolState::Used(_) => None,
+        .filter_map(|&integration| {
+            let key = integration.enabled_key();
+            match integrations.get(integration) {
+                IntegrationState::Unavailable(unavailable) => Some(((Scope::Host, key), unavailable.to_string())),
+                IntegrationState::Off(_) | IntegrationState::Used(_) => None,
             }
         })
         .collect()
@@ -471,6 +485,18 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
             "a list of strings",
         ),
         Integer => (integer(value), "a whole number"),
+        ValueType::Duration { never: false } => (
+            value
+                .as_str()
+                .is_some_and(|text| text.parse::<crate::config::ConfigDuration>().is_ok()),
+            "a duration like \"10s\"",
+        ),
+        ValueType::Duration { never: true } => (
+            value
+                .as_str()
+                .is_some_and(|text| text.parse::<crate::config::Timeout>().is_ok()),
+            "a duration like \"10s\", or \"never\"",
+        ),
         ValueType::Choice { options } => (
             value.as_str().is_some_and(|choice| options.contains(&choice)),
             "one of the listed choices",
@@ -523,33 +549,33 @@ mod tests {
         list.iter().find(|s| s.scope == scope && s.key == key).unwrap()
     }
 
-    /// Every tool off: no warnings.
-    fn no_tools() -> crate::tools::Tools {
-        use crate::tools::{OffReason, ToolState};
-        crate::tools::Tools {
-            mise: ToolState::Off(OffReason::Disabled),
-            fnox: ToolState::Off(OffReason::Disabled),
-            tailscale: ToolState::Off(OffReason::Disabled),
+    /// Every integration off: no warnings.
+    fn no_tools() -> crate::integrations::Integrations {
+        use crate::integrations::{IntegrationState, OffReason};
+        crate::integrations::Integrations {
+            mise: IntegrationState::Off(OffReason::Disabled),
+            fnox: IntegrationState::Off(OffReason::Disabled),
+            tailscale: IntegrationState::Off(OffReason::Disabled),
         }
     }
 
-    /// A tool enabled but not installed shows its warning on its `enabled` key, and nowhere else.
+    /// An integration enabled but not installed shows its warning on its `enabled` key, and nowhere else.
     #[test]
-    fn unavailable_tools_are_warned_about() {
-        use crate::tools::{Tool, ToolState, Unavailable};
+    fn unavailable_integrations_are_warned_about() {
+        use crate::integrations::{Integration, IntegrationState, Unavailable};
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
-        let mut tools = no_tools();
-        tools.tailscale = ToolState::Unavailable(Unavailable {
-            tool: Tool::Tailscale,
+        let mut integrations = no_tools();
+        integrations.tailscale = IntegrationState::Unavailable(Unavailable {
+            integration: Integration::Tailscale,
             program: "tailscale".into(),
         });
-        let list = Snapshot::new(&paths, &tools).info();
-        let warning = info(&list, Scope::Host, "tools.tailscale.enabled")
+        let list = Snapshot::new(&paths, &integrations).info();
+        let warning = info(&list, Scope::Host, "integrations.tailscale.enabled")
             .warning
             .clone()
             .unwrap();
-        assert!(warning.contains("tailscale"), "{warning}");
+        assert!(warning.contains("[integrations.tailscale] enabled = true"), "{warning}");
         assert_eq!(list.iter().filter(|s| s.warning.is_some()).count(), 1);
     }
 
@@ -579,6 +605,8 @@ mod tests {
                 }
                 ValueType::Map { values } => json!({ "~/x": values[0] }),
                 Integer => json!(default.as_u64().unwrap_or(0) + 1),
+                // Not the default of any duration key.
+                ValueType::Duration { .. } => json!("42s"),
                 ValueType::Choice { options } => {
                     json!(
                         options
@@ -675,9 +703,26 @@ mod tests {
             Err(SetError::WrongType { .. })
         ));
         assert!(matches!(
-            validate(Scope::Host, "logging", &json!("loud"), None),
+            validate(Scope::Host, "debugging.log_level", &json!("loud"), None),
             Err(SetError::WrongType { .. })
         ));
+        // Durations are text in their grammar; only the question's timeout may be `never`.
+        for (key, value) in [
+            ("stop_empty_session_after", json!(10000)),
+            ("stop_empty_session_after", json!("10")),
+            ("stop_empty_session_after", json!("never")),
+            ("stop.kill_after", json!("0s")),
+            ("approval_timeout", json!("1m30s")),
+        ] {
+            assert!(
+                matches!(
+                    validate(Scope::Host, key, &value, None),
+                    Err(SetError::WrongType { .. })
+                ),
+                "{key} = {value}"
+            );
+        }
+        assert!(validate(Scope::Host, "approval_timeout", &json!("never"), None).is_ok());
         // The client file has no local one: a device keeps its own value in its app.
         assert!(matches!(
             validate(Scope::Client, "text_font", &json!("Inter"), Some(true)),
@@ -691,12 +736,17 @@ mod tests {
         .unwrap();
         write(
             &paths,
-            &validate(Scope::Host, "tailnet.port", &json!(9000), None).unwrap(),
+            &validate(Scope::Host, "integrations.tailscale.port", &json!(9000), None).unwrap(),
         )
         .unwrap();
         write(
             &paths,
             &validate(Scope::Host, "keep_awake", &json!(false), None).unwrap(),
+        )
+        .unwrap();
+        write(
+            &paths,
+            &validate(Scope::Host, "approval_timeout", &json!("10m"), None).unwrap(),
         )
         .unwrap();
         snapshot.reload(&paths);
@@ -709,26 +759,33 @@ mod tests {
         assert!(roots.local_choice);
         assert!(!info(&list, Scope::Client, "text_font").local_choice);
         assert_eq!(
-            info(&list, Scope::Host, "tailnet.port").applies,
+            info(&list, Scope::Host, "integrations.tailscale.port").applies,
             AppliesInfo::Restart { pending: true }
         );
         assert_eq!(
-            info(&list, Scope::Host, "tailnet.enabled").applies,
+            info(&list, Scope::Host, "integrations.tailscale.retry").applies,
             AppliesInfo::Restart { pending: false }
         );
         assert_eq!(info(&list, Scope::Host, "keep_awake").value, json!(false));
-        assert_eq!(info(&list, Scope::Host, "tailnet.enabled").value, json!(true));
+        assert_eq!(
+            info(&list, Scope::Host, "integrations.tailscale.enabled").value,
+            json!(null)
+        );
+        assert_eq!(info(&list, Scope::Host, "approval_timeout").value, json!("10m"));
+        assert_eq!(info(&list, Scope::Host, "stop.kill_after").value, json!("3s"));
 
         // A value the schema refuses never reaches the file.
         let before = std::fs::read_to_string(paths.global.join("config.host.toml")).unwrap();
         assert!(
-            before.contains("port = 9000") && before.contains("keep_awake = false"),
+            before.contains("port = 9000")
+                && before.contains("keep_awake = false")
+                && before.contains("approval_timeout = \"10m\""),
             "{before}"
         );
         assert!(
             write(
                 &paths,
-                &validate(Scope::Host, "tailnet.port", &json!(70000), None).unwrap()
+                &validate(Scope::Host, "integrations.tailscale.port", &json!(70000), None).unwrap()
             )
             .is_err()
         );

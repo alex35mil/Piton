@@ -3124,8 +3124,8 @@ mod tests {
     #[test]
     fn fnox_checks_against_resolved_policies() {
         use crate::{
+            integrations::Program,
             launch::fnox::{FnoxError, KeychainOpener, Proxy},
-            tools::Program,
         };
         let proxy = |files: Vec<PathBuf>| Proxy {
             program: Program {

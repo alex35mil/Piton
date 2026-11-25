@@ -17,7 +17,7 @@ const ext = join(root, "tests/fixtures/faux-extension.ts");
 const fakeFnox = join(root, "tests/fixtures/fake-fnox.sh");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/// `fnox`: the `[tools.fnox]` table. `files`: the workspace's files, which steer the fake fnox. `project`: the global
+/// `fnox`: the `[integrations.fnox]` table. `files`: the workspace's files, which steer the fake fnox. `project`: the global
 /// `config.toml`. `mise`: run mise for the workspace's environment (its `mise.toml` in `files`).
 function setup({ fnox = { enabled: true, command: [fakeFnox] }, files = {}, project = {}, mise = false } = {}) {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-fnox-")));
@@ -34,13 +34,12 @@ function setup({ fnox = { enabled: true, command: [fakeFnox] }, files = {}, proj
         daemon: {
             socket,
             log: join(dir, "piton.log"),
-            tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tools: { mise: { enabled: mise }, fnox },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+            integrations: { mise: { enabled: mise }, tailscale: { enabled: false }, fnox },
+            stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "host", empty_grace_ms: 60000, roots: [projects] },
+        host: { default_attach_mode: "host", stop_empty_session_after: "60s", roots: [projects] },
         project,
     });
     // The daemon's own FNOX_PROFILE reaches pi; a workspace's would not (mise is off here, so only the base sets it).
@@ -290,7 +289,7 @@ const enabledButMissing = {
         const c = viewClient(ctx, "mac");
         const reply = await c.reqRaw("session.start", { workspace: ctx.ws, mode: "host" });
         assert.equal(reply.ok, false);
-        assert.match(reply.error, /fnox is enabled \(\[tools\.fnox\] enabled = true\)/);
+        assert.match(reply.error, /fnox is enabled \(\[integrations\.fnox\] enabled = true\)/);
         c.close();
     },
 };

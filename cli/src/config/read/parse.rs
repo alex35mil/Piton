@@ -256,9 +256,9 @@ mod tests {
         for text in [
             "[host]\nroots = []\n",
             "[client]\ntext_font = \"x\"\n",
-            "[tailnet]\nport = 1\n",
+            "[integrations.tailscale]\nport = 1\n",
             "socket = \"/s\"\n",
-            "[development]\nsession_analysis = true\n",
+            "[debugging]\nsession_analysis = true\n",
             // Tool rules moved to `[tools.permissions]`; the old table is just an unknown key.
             "[permissions]\nallow = [\"read\"]\n",
         ] {
