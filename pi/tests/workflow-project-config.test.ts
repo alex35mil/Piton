@@ -117,12 +117,12 @@ describe("workflow project configuration", () => {
         try {
             setInstallationForTests({ kind: "development", checkout: root })
             assert.equal(loadSessionAnalysis(), "enabled")
-            writeSettings("host", { "development.session_analysis": false })
+            writeSettings("host", { "debugging.session_analysis": false })
             assert.equal(loadSessionAnalysis(), "disabled")
             // It's a host setting: a project's config.toml has no such table.
-            assert.throws(() => writeSettings(root, { "development.session_analysis": true }), /development/)
+            assert.throws(() => writeSettings(root, { "debugging.session_analysis": true }), /debugging/)
             setInstallationForTests({ kind: "app" })
-            writeSettings("host", { "development.session_analysis": true })
+            writeSettings("host", { "debugging.session_analysis": true })
             assert.equal(loadSessionAnalysis(), "disabled")
         } finally {
             setInstallationForTests(undefined)
@@ -366,8 +366,9 @@ describe("workflow project configuration", () => {
                 const expected = {
                     missing: [],
                     existing: [],
-                    incompatible: ["branches"],
-                    malformed: ["permissions", "web_search", "branches", "tracker", "forge"],
+                    // piton validates the tracker: a GitHub tracker with only its provider is incomplete.
+                    incompatible: ["branches", "tracker"],
+                    malformed: ["tools", "web_search", "branches", "tracker", "forge"],
                 }
                 assert.deepEqual(
                     broken.map((error) => error.part),
@@ -543,7 +544,7 @@ describe("workflow project configuration", () => {
         try {
             const settingsPath = writeSettings(
                 root,
-                { permissions: { default_mode: "deny", allow: ["read"], ask: ["write(existing.md)"] } },
+                { "tools.permissions": { default_mode: "deny", allow: ["read"], ask: ["write(existing.md)"] } },
                 true,
             )
             const indexBefore = git(root, ["ls-files", "--stage"])
@@ -614,11 +615,11 @@ describe("workflow project configuration", () => {
                 clearSettingsCache()
             }
             raw('[branches]\nformat = "identifier-title"\nextra = true\n')
-            assert.throws(() => loadProjectConfig(root), /config\.toml: \[branches\] unknown field `extra`/)
+            assert.throws(() => loadProjectConfig(root), /config\.toml: line 3, branches\.extra: unknown field `extra`/)
             raw('[branches]\nformat = "feature/identifier"\n')
             assert.throws(
                 () => loadProjectConfig(root),
-                /config\.toml: \[branches\] unknown variant `feature\/identifier`/,
+                /config\.toml: line 2, branches\.format: unknown variant `feature\/identifier`/,
             )
             raw('[branches.format]\nepic = "identifier"\n')
             assert.throws(() => loadProjectConfig(root), /config\.toml/)

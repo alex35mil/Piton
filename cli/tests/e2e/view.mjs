@@ -29,13 +29,12 @@ function setup(options = {}) {
         daemon: {
             socket,
             log: join(dir, "piton.log"),
-            tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tools: { mise: { enabled: false } },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+            integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
+            stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "host", empty_grace_ms: 60000, ...(options.roots === false ? {} : { roots: [root] }) },
+        host: { default_attach_mode: "host", stop_empty_session_after: "60s", ...(options.roots === false ? {} : { roots: [root] }) },
     });
     return { dir, root, ws, socket, config, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
 }
@@ -51,8 +50,8 @@ async function startDaemon(ctx) {
     return d;
 }
 
-/// A view client: requests with ids, replies, and pushed lines.
-function viewClient(ctx, name) {
+/// A view client on `device` (`mac`, `iphone`, `ipad`): requests with ids, replies, and pushed lines.
+function viewClient(ctx, name, device = "mac") {
     const sock = net.connect(ctx.socket);
     const c = { name, lines: [], waiters: [], n: 0 };
     let buf = "";
@@ -68,7 +67,7 @@ function viewClient(ctx, name) {
             for (const w of [...c.waiters]) if (w.pred(msg)) { c.waiters.splice(c.waiters.indexOf(w), 1); w.resolve(msg); }
         }
     });
-    sock.write(JSON.stringify({ protocol: "view", version: 1, client: name }) + "\n");
+    sock.write(JSON.stringify({ protocol: "view", version: 1, client: name, device }) + "\n");
     c.wait = (pred, ms = 15000) => {
         const hit = c.lines.find(pred);
         if (hit) return Promise.resolve(hit);
@@ -216,6 +215,31 @@ const tests = {
         await c.req("session.stop", { session: key });
         await sleep(300);
         assert.equal((await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" })).type, "error");
+        c.close();
+    },
+
+    async "trust: a repository with grants is asked about first; the answer is for the grants shown"(ctx) {
+        const repo = join(ctx.root, "group", "inner");
+        mkdirSync(join(repo, ".piton"), { recursive: true });
+        writeFileSync(join(repo, ".piton/config.toml"), '[sandbox]\npresets = ["rust"]\n[tools.permissions]\ndeny = ["bash(rm *)"]\n');
+        const c = viewClient(ctx, "mac");
+        const asked = await c.req("session.start", { workspace: repo, mode: "host" });
+        assert.equal(asked.session, undefined, "nothing launched");
+        assert.deepEqual(asked.trust_needed.grants, ['sandbox.presets "rust"']);
+        assert.deepEqual(asked.trust_needed.added, asked.trust_needed.grants);
+        // The grants changed after they were shown: refused, so the user never trusts what they didn't see.
+        writeFileSync(join(repo, ".piton/config.toml"), '[sandbox]\npresets = ["rust", "node"]\n');
+        const stale = await c.reqRaw("trust.decide", { workspace: repo, decision: "trusted", grants: asked.trust_needed.grants });
+        assert.equal(stale.ok, false);
+        assert.match(stale.error, /changed since they were shown/);
+        const again = await c.req("session.start", { workspace: repo, mode: "host" });
+        const { trust } = await c.req("trust.decide", { workspace: repo, decision: "trusted", grants: again.trust_needed.grants });
+        assert.equal(trust.state, "trusted");
+        const { session } = await c.req("session.start", { workspace: repo, mode: "host" });
+        assert.ok(session.key, "launched once decided");
+        await c.req("session.stop", { session: session.key });
+        // A repository with nothing to trust starts without a question.
+        assert.ok((await c.req("session.start", { workspace: ctx.ws, mode: "host" })).session);
         c.close();
     },
 
@@ -475,8 +499,7 @@ const tests = {
             key: "keep_awake",
             scope: "host",
             value: true,
-            placement: "shared",
-            local_choice: true,
+            location: { kind: "file", placement: "shared" },
             value_type: { kind: "bool" },
             applies: { kind: "live" },
             editable: true,
@@ -508,21 +531,23 @@ const tests = {
         writeFileSync(hostFile, "# mine\n" + readFileSync(hostFile, "utf8"));
         const roots = [ctx.root];
         const moved = await set("host", "favorites", [ctx.ws], true);
-        assert.equal(setting(moved.state, "host", "favorites").placement, "local");
+        assert.deepEqual(setting(moved.state, "host", "favorites").location, { kind: "file", placement: "local" });
         assert.equal(readFileSync(localFile, "utf8"), `favorites = ${JSON.stringify([ctx.ws])}\n`);
         assert.match(readFileSync(hostFile, "utf8"), /^# mine\n/);
         assert.deepEqual(setting(moved.state, "host", "roots").value, roots);
 
         // A key that needs a restart is written, and waits.
-        const port = await set("host", "tailnet.port", 9123);
-        assert.deepEqual(setting(port.state, "host", "tailnet.port").applies, { kind: "restart", pending: true });
+        const port = await set("host", "integrations.tailscale.port", 9123);
+        assert.deepEqual(setting(port.state, "host", "integrations.tailscale.port").applies, { kind: "restart", pending: true });
 
         // Refused before anything is written.
         assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "socket", value: "/elsewhere" })).ok, false);
         assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "roots", value: "not a list" })).ok, false);
-        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "roots", value: [] })).ok, false);
-        // The client file has no local one: a device keeps its own value in its app.
-        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "text_font", value: "x", local: true })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "stop_empty_session_after", value: 61000 })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "roots", value: [], section: "default" })).ok, false);
+        // A client setting is set per device section: no Local, and a section is required.
+        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "appearance.text_font", value: "x", local: true })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "appearance.text_font", value: "x" })).ok, false);
 
         // A hand edit applies without a restart; a broken one keeps that file's last good values and says why.
         writeFileSync(localFile, `favorites = []\n`);
@@ -533,9 +558,12 @@ const tests = {
         await daemonLine((s) => s.settings_error === null);
 
         // Changes to two files at once: both kept, each in its own file.
-        await Promise.all([set("host", "empty_grace_ms", 61000), set("client", "text_font", "Iosevka")]);
-        assert.match(readFileSync(hostFile, "utf8"), /empty_grace_ms = 61000/);
-        assert.match(readFileSync(clientFile, "utf8"), /text_font = "Iosevka"/);
+        await Promise.all([
+            set("host", "stop_empty_session_after", "61s"),
+            c.req("settings.set", { scope: "client", key: "appearance.text_font", value: "Iosevka", section: "default" }),
+        ]);
+        assert.match(readFileSync(hostFile, "utf8"), /stop_empty_session_after = "61s"/);
+        assert.match(readFileSync(clientFile, "utf8"), /\[appearance\]\ntext_font = "Iosevka"/);
 
         // A file linked into a dotfiles folder after the daemon started: edits there apply too, and app writes keep
         // the link.
@@ -552,6 +580,48 @@ const tests = {
         assert.ok(lstatSync(localFile).isSymbolicLink());
         assert.match(readFileSync(linked, "utf8"), /\/from\/app/);
         c.close();
+    },
+
+    async "client settings: each device sees its own section; a choice made on a device is in effect there"(ctx) {
+        const clientFile = join(ctx.config, "config.client.toml");
+        writeFileSync(clientFile, `[appearance]\ncode_font = { default = "D", ipad = "P" }\n`);
+        const mac = viewClient(ctx, "mac", "mac");
+        const ipad = viewClient(ctx, "ipad", "ipad");
+        await Promise.all([mac.req("sessions.subscribe"), ipad.req("sessions.subscribe")]);
+        const font = (state) => state.settings.find((s) => s.scope === "client" && s.key === "appearance.code_font");
+        const seen = async (c) => font((await c.req("daemon.state")).state);
+        // The file was written as the daemon started: wait for it to be read.
+        await Promise.all([mac, ipad].map((c) => c.wait((m) => m.type === "daemon" && font(m.state).value !== null)));
+        const onMac = await seen(mac);
+        assert.equal(onMac.value, "D");
+        assert.deepEqual(onMac.location, { kind: "devices", sections: { default: "D", ipad: "P" }, section: "default" });
+        const onIpad = await seen(ipad);
+        assert.equal(onIpad.value, "P");
+        assert.equal(onIpad.location.section, "ipad");
+
+        // The Mac sets every Mac: both connections get their own pushed values.
+        const macPush = mac.waitNew((m) => m.type === "daemon" && font(m.state).value === "C");
+        const ipadPush = ipad.waitNew((m) => m.type === "daemon" && font(m.state).location.sections.mac === "C");
+        await mac.req("settings.set", { scope: "client", key: "appearance.code_font", value: "C", section: "mac" });
+        await macPush;
+        assert.equal(font((await ipadPush).state).value, "P", "the iPad keeps its own");
+
+        // From the iPad, every device: its own `ipad` goes, so the choice is in effect there; the Mac keeps `mac`.
+        const moved = await ipad.req("settings.set", { scope: "client", key: "appearance.code_font", value: "E", section: "default" });
+        assert.equal(font(moved.state).value, "E");
+        assert.equal(font(moved.state).location.section, "default");
+        assert.equal(readFileSync(clientFile, "utf8"), `[appearance]\ncode_font = { default = "E", mac = "C" }\n`);
+        assert.equal((await seen(mac)).value, "C");
+        mac.close();
+        ipad.close();
+
+        // A hello without a device is refused.
+        const sock = net.connect(ctx.socket);
+        let reply = "";
+        sock.on("data", (chunk) => (reply += chunk));
+        sock.write(JSON.stringify({ protocol: "view", version: 1, client: "nameless" }) + "\n");
+        await new Promise((res) => sock.on("close", res));
+        assert.match(reply, /invalid hello.*device/);
     },
 
     async "workspaces: browse the roots; start only inside them"(ctx) {

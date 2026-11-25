@@ -1,18 +1,18 @@
 /**
  * Permissions Extension
  *
- * Controls tool execution via `[permissions]` and `[permissions.<runtime>]` of `config.toml` (and `config.local.toml`)
- * in piton's configuration chain (the global tier, parent folders, the repository's .piton/), resolved by
- * `piton config resolve`. Within a file: `[permissions]`, then the runtime's table.
+ * Controls tool execution via `[tools.permissions]` and `[tools.permissions.<runtime>]` of `config.toml` (and
+ * `config.local.toml`) in piton's configuration chain (the global tier, parent folders, the repository's .piton/),
+ * resolved by `piton config resolve`. Within a file: `[tools.permissions]`, then the runtime's table.
  * PITON_RUNTIME selects the runtime: unset = host, `sandbox` = sandboxed worker; other values are invalid.
  *
  * Schema:
- *   [permissions]
+ *   [tools.permissions]
  *   default_mode = "ask" | "allow" | "deny"
  *   allow = ["toolPattern", "tool(argPattern)", ...]
  *   deny  = ["toolPattern", "tool(argPattern)", ...]
  *   ask   = ["toolPattern", "tool(argPattern)", ...]
- *   [permissions.sandbox]   # the same keys, for one launch mode
+ *   [tools.permissions.sandbox]   # the same keys, for one launch mode
  *
  * With `skill_grants = true` (off unless set), trusted local skills (global + project) also contribute runtime allow
  * rules via SKILL frontmatter: allowed_tools / allowed-tools. Skills aren't protected files, so an agent that edits a
@@ -364,7 +364,7 @@ export function deniedProtectedWrite(output: string, isProtected: (file: string)
     })
 }
 
-/** One permission table that sets something, with its own rules: `[permissions]` applies everywhere, `[permissions.<runtime>]` only in that runtime. */
+/** One permission table that sets something, with its own rules: `[tools.permissions]` applies everywhere, `[tools.permissions.<runtime>]` only in that runtime. */
 export interface PermissionSource {
     level: LevelKind
     scope: PermissionScope
@@ -375,7 +375,7 @@ export interface PermissionSource {
 
 /** The resolved permissions for `cwd` in `runtime`: the merged settings and each file that contributed. */
 export function inspectPersistentPermissions(cwd: string, runtime: Runtime = requireRuntime()) {
-    const resolved = section(resolveSettings(cwd, runtime).permissions)
+    const resolved = section(resolveSettings(cwd, runtime).tools).permissions
     const sources: PermissionSource[] = resolved.sources.map((source) => ({
         level: source.level,
         scope: source.scope,

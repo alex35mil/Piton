@@ -12,11 +12,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { parse } from "../extensions/__lib/schema.ts"
 import { type EntityStatus, EntityStatusValidator, writeEntityStatus } from "../workflows/extensions/__lib/entity.ts"
 import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
-import {
-    GitHubTrackerValidator,
-    LinearTrackerValidator,
-    type TrackerConfig,
-} from "../workflows/extensions/integrations/config.ts"
+import type { GitHubTracker, LinearTracker, TrackerConfig } from "../workflows/extensions/integrations/config.ts"
 import { registerWorkflowOperations } from "../workflows/extensions/integrations/operations.ts"
 import {
     setWorkflowPhase,
@@ -36,7 +32,7 @@ const statuses = {
     canceled: "Canceled",
 }
 const repository = { owner: "example", repo: "repo" }
-const github = parse(GitHubTrackerValidator, {
+const github: GitHubTracker = {
     provider: "github",
     mcpServer: "github",
     repository,
@@ -46,14 +42,14 @@ const github = parse(GitHubTrackerValidator, {
         phase: { field: "Phase", values: phaseValues },
         priority: { scope: "project", field: "Priority", values: ["High"] },
     },
-})
-const linear = parse(LinearTrackerValidator, {
+}
+const linear: LinearTracker = {
     provider: "linear",
     mcpServer: "linear",
     team: "Engineering",
     phase: linearPhases(),
     statuses: { projects: statuses, issues: statuses },
-})
+}
 const resolveTool = (server: string, operation: string) => `mcp__${server}__${operation}`
 
 function environment(provider: "github" | "linear"): TrackerConfig {

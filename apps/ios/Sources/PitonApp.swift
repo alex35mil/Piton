@@ -47,7 +47,8 @@ struct RemoteRoot: View {
     @Binding var port: Int
 
     init(url: URL, host: Binding<String>, port: Binding<Int>) {
-        _store = State(initialValue: Store(endpoint: .remote(url: url), client: UIDevice.current.name))
+        _store = State(
+            initialValue: Store(endpoint: .remote(url: url), client: UIDevice.current.name, device: .current))
         _host = host
         _port = port
     }

@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 
-import { attach, away, runSuite, setup, sleep } from "./sandboxed.mjs";
+import { attach, away, runSuite, setup, sleep, trust } from "./sandboxed.mjs";
 
 /// Paths outside every grant: in the run's folder, made on first use (after the suite's sandboxed-session skip).
 const outside = () => join(away(), "sandbox");
@@ -68,9 +68,9 @@ async function waitFor(path, what) {
 async function prepare(name) {
     const profile = name.split(":")[0];
     const ctx = setup("sandbox", {
-        // `always`: an RPC session has no trust prompt, so the project's `.pi/` loads only when trusted by default. pi
-        // still reads trust.json first, under its lock.
-        settings: { defaultProjectTrust: "always" },
+        // pi's own default declines a project in RPC mode; Piton's decision (`--approve`, from `piton trust allow` in
+        // `startup`) decides instead. pi still reads trust.json under its lock.
+        settings: { defaultProjectTrust: "never" },
         files: {
             ".piton/config.local.toml": `[sandbox]\nprofile = "${profile}"\n`,
             ".pi/settings.json": "{}\n",
@@ -204,6 +204,8 @@ async function probes(ctx, a) {
 }
 
 const profileTest = async (ctx) => {
+    // The workspace has pi project files: decided first, so pi gets `--approve` and loads them.
+    await trust(ctx);
     const a = session(ctx);
     try {
         await startup(ctx, a);

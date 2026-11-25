@@ -19,8 +19,8 @@ use crate::{
     apps::tailnet::{self, SelfNode},
     config::TailnetConfig,
     daemon::{Daemon, Hello, PROTOCOL_VERSION},
+    integrations::Program,
     session::lock,
-    tools::Program,
 };
 
 /// A client that answers none of this many pings in a row is dropped.
@@ -29,7 +29,7 @@ const MISSED_PINGS: u32 = 3;
 const RECHECK: Duration = Duration::from_secs(60);
 
 /// Serves the tailnet for as long as the daemon runs: listens on each of this Mac's tailnet addresses. Tailscale may
-/// not be up when the daemon starts (launchd starts it at login), so this keeps trying every `retry_ms`, and listens
+/// not be up when the daemon starts (launchd starts it at login), so this keeps trying every `retry`, and listens
 /// again when the addresses change. Connections already open are left alone.
 pub async fn serve_tailnet(daemon: Arc<Daemon>, cli: Program, config: TailnetConfig) {
     let mut listening: Option<Listening> = None;
@@ -42,7 +42,7 @@ pub async fn serve_tailnet(daemon: Arc<Daemon>, cli: Program, config: TailnetCon
                     crate::log!("tailnet: this Mac's addresses changed; listening again");
                     old.stop();
                 }
-                match listen(&daemon, &cli, me, config.port, config.heartbeat_ms).await {
+                match listen(&daemon, &cli, me, config.port, config.heartbeat.get()).await {
                     Ok(now) => {
                         let addrs: Vec<String> = now.bound.iter().map(ToString::to_string).collect();
                         crate::log!("tailnet: listening on {}", addrs.join(", "));
@@ -64,7 +64,7 @@ pub async fn serve_tailnet(daemon: Arc<Daemon>, cli: Program, config: TailnetCon
         last_problem = problem;
         tokio::time::sleep(match listening {
             Some(_) => RECHECK,
-            None => Duration::from_millis(config.retry_ms.max(1)),
+            None => config.retry.get(),
         })
         .await;
     }
@@ -92,7 +92,7 @@ async fn listen(
     cli: &Program,
     me: SelfNode,
     port: u16,
-    heartbeat_ms: u64,
+    heartbeat: Duration,
 ) -> Result<Listening, String> {
     if me.addresses.is_empty() {
         return Err("tailscale reports no addresses for this Mac".into());
@@ -111,7 +111,7 @@ async fn listen(
         bound.push(listener.local_addr().map_err(|e| e.to_string())?);
         let (daemon, cli, me) = (daemon.clone(), cli.clone(), me.clone());
         accepting.push(tokio::spawn(async move {
-            accept_loop(daemon, cli, me, listener, heartbeat_ms).await;
+            accept_loop(daemon, cli, me, listener, heartbeat).await;
         }));
     }
     Ok(Listening {
@@ -121,12 +121,12 @@ async fn listen(
     })
 }
 
-async fn accept_loop(daemon: Arc<Daemon>, cli: Program, me: SelfNode, listener: TcpListener, heartbeat_ms: u64) {
+async fn accept_loop(daemon: Arc<Daemon>, cli: Program, me: SelfNode, listener: TcpListener, heartbeat: Duration) {
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 let (daemon, cli, me) = (daemon.clone(), cli.clone(), me.clone());
-                tokio::spawn(async move { serve(daemon, &cli, &me, stream, peer, heartbeat_ms).await });
+                tokio::spawn(async move { serve(daemon, &cli, &me, stream, peer, heartbeat).await });
             }
             Err(e) => crate::log!("tailnet accept failed: {e}"),
         }
@@ -139,7 +139,7 @@ async fn serve(
     me: &SelfNode,
     stream: TcpStream,
     peer: SocketAddr,
-    heartbeat_ms: u64,
+    heartbeat: Duration,
 ) {
     let started = Instant::now();
     crate::debug!("tailnet: TCP accepted; identifying peer");
@@ -177,8 +177,12 @@ async fn serve(
             Some(Ok(Message::Binary(_) | Message::Close(_)) | Err(_)) | None => return,
         }
     };
-    let client = match hello {
-        Ok(Hello::View { version, client }) if version == PROTOCOL_VERSION => client,
+    let (client, device) = match hello {
+        Ok(Hello::View {
+            version,
+            client,
+            device,
+        }) if version == PROTOCOL_VERSION => (client, device),
         Ok(Hello::View { .. }) => {
             let _ = ws.close(None).await;
             crate::log!("tailnet client {} speaks another protocol version", who.name);
@@ -191,7 +195,7 @@ async fn serve(
         }
     };
     crate::log!(
-        "view client connected over the tailnet: {} ({}, {})",
+        "view client connected over the tailnet: {} ({device:?}; {}, {})",
         client.as_deref().unwrap_or("unnamed"),
         who.name,
         who.login
@@ -220,7 +224,7 @@ async fn serve(
     // Pings the client and drops it when it stops answering: a phone that lost its network sends no close, and the
     // TCP connection would otherwise linger for many minutes. Aborting the reader ends `serve` below.
     let stop_reading = reader.abort_handle();
-    let interval = Duration::from_millis(heartbeat_ms.max(1));
+    let interval = heartbeat;
     let name = who.name.clone();
     let writer = tokio::spawn(async move {
         let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
@@ -247,7 +251,7 @@ async fn serve(
         stop_reading.abort();
         let _ = sink.close().await;
     });
-    crate::apps::serve(daemon, in_rx, out_tx).await;
+    crate::apps::serve(daemon, device, in_rx, out_tx).await;
     reader.abort();
     let _ = writer.await;
     crate::log!("view client disconnected from the tailnet: {}", who.name);

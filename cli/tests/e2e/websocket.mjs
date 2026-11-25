@@ -40,10 +40,12 @@ function setup() {
             log,
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tailnet: { port: 0, heartbeat_ms: 300, retry_ms: 200 },
-            tools: { mise: { enabled: false }, tailscale: { enabled: true, command: [fakeTailscale] } },
+            integrations: {
+                mise: { enabled: false },
+                tailscale: { enabled: true, command: [fakeTailscale], port: 0, heartbeat: "300ms", retry: "200ms" },
+            },
         },
-        host: { default_attach_mode: "host", empty_grace_ms: 60000, roots: [root] },
+        host: { default_attach_mode: "host", stop_empty_session_after: "60s", roots: [root] },
     });
     const stopped = join(dir, "tailscale-stopped");
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40", PITON_FAKE_WHOIS: whoisFile, PITON_FAKE_STOPPED: stopped, PITON_LOGS_DIR: join(dir, "logging") };
@@ -67,13 +69,13 @@ async function listening(d, ctx) {
     ctx.port = Number(m[1]);
 }
 
-/// A WebSocket view client. `opened` resolves true when the server accepted, false when it closed first.
-function wsClient(ctx, name) {
+/// A WebSocket view client on `device`. `opened` resolves true when the server accepted, false when it closed first.
+function wsClient(ctx, name, device = "mac") {
     const sock = new WebSocket(`ws://127.0.0.1:${ctx.port}`);
     const c = { name, lines: [], waiters: [], n: 0, closed: false };
     c.opened = new Promise((res) => {
         sock.addEventListener("open", () => {
-            sock.send(JSON.stringify({ protocol: "view", version: 1, client: name }));
+            sock.send(JSON.stringify({ protocol: "view", version: 1, device, client: name }));
             res(true);
         });
         sock.addEventListener("error", () => res(false));
@@ -107,7 +109,7 @@ function wsClient(ctx, name) {
 
 const tests = {
     async "own device: full view protocol over the websocket"(ctx) {
-        const c = wsClient(ctx, "iphone");
+        const c = wsClient(ctx, "iphone", "iphone");
         assert.equal(await c.opened, true);
         await c.req("sessions.subscribe");
         const { session } = await c.req("session.start", { workspace: ctx.ws, mode: "host" });
@@ -121,7 +123,7 @@ const tests = {
         await c.closedP;
         await sleep(200);
         const log = readFileSync(ctx.log, "utf8");
-        assert.match(log, /view client connected over the tailnet: iphone \(iphone\.tail\.ts\.net, me@example\.com\)/);
+        assert.match(log, /view client connected over the tailnet: iphone \(Iphone; iphone\.tail\.ts\.net, me@example\.com\)/);
         assert.match(log, /view client disconnected from the tailnet: iphone\.tail\.ts\.net/);
     },
 
@@ -173,7 +175,7 @@ const tests = {
         );
         await new Promise((r) => sock.once("data", r)); // 101 Switching Protocols
         // The hello as one masked text frame.
-        const hello = Buffer.from(JSON.stringify({ protocol: "view", version: 1, client: "silent" }));
+        const hello = Buffer.from(JSON.stringify({ protocol: "view", version: 1, device: "mac", client: "silent" }));
         const mask = Buffer.from([1, 2, 3, 4]);
         const masked = Buffer.from(hello.map((b, i) => b ^ mask[i % 4]));
         sock.write(Buffer.concat([Buffer.from([0x81, 0x80 | hello.length]), mask, masked]));

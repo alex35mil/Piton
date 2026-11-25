@@ -87,7 +87,7 @@ Results reflect persistent settings only; session overrides and skill-derived al
 
 **Targets:**
 
-- The target is `[permissions]` of committed `.piton/config.toml` (`project`) or local `.piton/config.local.toml` (`local`).
+- The target is `[tools.permissions]` of committed `.piton/config.toml` (`project`) or local `.piton/config.local.toml` (`local`).
 - Before changing local settings, the tool checks the file is outside Git and ensures `/.piton/*.local.*` in `.git/info/exclude`. It never changes the index, and a no-op adds no exclusion.
 
 Workflow skills list routine `.piton/` bookkeeping in `allowed-tools`, including `epic.md`, `plan.md`, `result.md`, and `report.md`. The list grants them only with `skill_grants = true`. Setup offers no `ask` gate for those files; the workflow stops for the user where it needs to.

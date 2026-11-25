@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The Logging settings section. On the phone it's local and works while disconnected. On the Mac it switches the
 /// daemon's host level (Mac app, daemon, phone-log collector) until it expires or the daemon restarts; the default is
-/// `logging` in the host's config.host.toml (changeable in Settings > Host).
+/// `[debugging] log_level` in the host's config.host.toml (changeable in Settings > Host).
 public struct LoggingSettings: View {
     public enum Scope {
         /// This device's own capture (the phone).
@@ -108,7 +108,7 @@ public struct LoggingSettings: View {
                 case nil:
                     "Not connected to Piton."
                 case .some(let mode):
-                    "Applies to this Mac's app, daemon, and phone-log collector, until it expires or the daemon restarts. The default is \(mode.rawValue.capitalized), set by logging in config.host.toml (Settings > Host). No sessions restart."
+                    "Applies to this Mac's app, daemon, and phone-log collector, until it expires or the daemon restarts. The default is \(mode.rawValue.capitalized), set by log_level in config.host.toml (Settings > Host). No sessions restart."
                 }
             }
         switch policy {

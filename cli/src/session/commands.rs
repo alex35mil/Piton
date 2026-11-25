@@ -135,7 +135,8 @@ pub struct PendingQuestion {
     /// The tag the call's sandbox gets.
     pub tag: String,
     pub reply: oneshot::Sender<RunDecision>,
-    pub deadline: tokio::time::Instant,
+    /// When it's refused unanswered; none when `approval_timeout` is `"never"`.
+    pub deadline: Option<tokio::time::Instant>,
 }
 
 /// Blocked processes that aren't bash calls: the question showing, the refusals already offered (once per process,
@@ -196,36 +197,17 @@ impl Commands {
         scope: PersistScope,
         lift: &crate::launch::sandbox::grant::Lift,
     ) -> Result<PathBuf, String> {
-        use crate::launch::sandbox::grant::LiftEntry;
-        match lift.entry() {
-            LiftEntry::ListItem { key, value } => self.append(scope, key, &serde_json::Value::String(value)),
-            LiftEntry::Value { key, value } => {
-                let file = self.file(scope);
-                let path = file.path(&self.paths).map_err(|e| e.to_string())?;
-                file.write(
-                    &self.paths,
-                    &[crate::config::KeyChange {
-                        key: format!("sandbox.{key}"),
-                        value: Some(serde_json::Value::String(value)),
-                    }],
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(path)
-            }
-        }
-    }
-
-    /// Saves `entry` in the chosen file's `[sandbox] silence`: blocks it matches are only logged from then on.
-    pub fn persist_silence(&self, scope: PersistScope, entry: &crate::config::Silence) -> Result<PathBuf, String> {
-        let value = serde_json::to_value(entry).map_err(|e| e.to_string())?;
-        self.append(scope, "silence", &value)
-    }
-
-    fn append(&self, scope: PersistScope, key: &str, value: &serde_json::Value) -> Result<PathBuf, String> {
+        let entry = lift.entry();
         let file = self.file(scope);
         let path = file.path(&self.paths).map_err(|e| e.to_string())?;
-        file.append_to_list(&self.paths, &format!("sandbox.{key}"), value)
-            .map_err(|e| e.to_string())?;
+        file.write(
+            &self.paths,
+            &[crate::config::KeyChange {
+                key: crate::config::KeyPath::new(entry.path()),
+                value: Some(entry.value),
+            }],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(path)
     }
 
@@ -239,10 +221,14 @@ impl Commands {
         own.into_iter().any(|f| f == file) || file.parent().is_some_and(in_level)
     }
 
-    /// A saved `connect` entry joins the launch's policy and every narrowed grant's, so calls started from now on reach
+    /// A saved connection entry joins the launch's policy and every narrowed grant's, so calls started from now on reach
     /// it. (`all` opens the network already.)
     pub fn add_network_entry(&mut self, target: crate::config::NetworkTarget, source: crate::launch::sandbox::Source) {
-        let grant = crate::launch::sandbox::NetworkGrant { target, source };
+        let grant = crate::launch::sandbox::NetworkGrant {
+            target,
+            effect: crate::config::Effect::Allow,
+            source,
+        };
         let add = |policy: &mut crate::launch::sandbox::Policy| {
             if let crate::launch::sandbox::Network::Filtered { grants, .. } = &mut policy.network
                 && !grants.contains(&grant)
@@ -867,6 +853,7 @@ mod tests {
                         source: dir.to_path_buf(),
                         checkout: dir.to_path_buf(),
                         levels: Vec::new(),
+                        untrusted: Vec::new(),
                     },
                     |_| Ok(policy()),
                 ),
@@ -972,8 +959,8 @@ mod tests {
         c.after_failure(calls, req, last, false)
     }
 
-    /// A `connect` entry saved from a network question reaches calls that start afterwards, at the session's policy and
-    /// a grant's; only a session whose configuration reads the file takes it.
+    /// A `[sandbox.network.connections]` entry saved from a network question reaches calls that start afterwards, at
+    /// the session's policy and a grant's; only a session whose configuration reads the file takes it.
     #[test]
     fn a_saved_network_entry_reaches_later_calls() {
         let dir = tempfile::tempdir().unwrap();
@@ -1452,8 +1439,8 @@ mod tests {
             process: "node".into(),
             refusal: "file-write-create /h/x".into(),
             offer: crate::launch::sandbox::grant::Offer {
-                project: crate::launch::sandbox::grant::Lift::WriteFile("/h/x".into()),
-                everywhere: crate::launch::sandbox::grant::Lift::WriteFile("/h/x".into()),
+                project: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
+                everywhere: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
             },
         };
         blocks.queue(question("a"));
@@ -1637,24 +1624,35 @@ mod tests {
         assert!(!text.contains("grant"), "{text}");
     }
 
-    /// A process's listen, allowed in this project: `tcp_listen = "*"` is set in the checkout's `config.local.toml`,
-    /// beside the file's other entries, and saving it again leaves the file valid.
+    /// An Allow sets one key in the checkout's `config.local.toml` (a path quoted in its map, a boolean), beside the
+    /// file's other entries; saving it again leaves the file valid and unchanged.
     #[test]
-    fn persisting_listening_sets_the_key() {
+    fn persisting_an_allow_sets_its_key() {
+        use crate::launch::sandbox::grant::Lift;
         let dir = tempfile::tempdir().unwrap();
         let c = commands(dir.path(), &[]);
         let file = dir.path().join(".piton/config.local.toml");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "[sandbox]\nwrite = [\"~/x\"]\n").unwrap();
-        let lift = crate::launch::sandbox::grant::Lift::TcpListen;
+        std::fs::write(&file, "[sandbox.filesystem]\n\"~/x\" = \"write\"\n").unwrap();
         for _ in 0..2 {
-            let saved = c.persist_lift(PersistScope::Project, &lift).unwrap();
-            assert_eq!(saved, file);
+            for lift in [Lift::TcpListen, Lift::Write("/h/.cache/tool".into())] {
+                let saved = c.persist_lift(PersistScope::Project, &lift).unwrap();
+                assert_eq!(saved, file);
+            }
             let text = std::fs::read_to_string(&file).unwrap();
             let table: toml::Table = toml::from_str(&text).unwrap();
             let sandbox: crate::config::SandboxTable = table["sandbox"].clone().try_into().unwrap();
-            assert_eq!(sandbox.tcp_listen, Some(crate::config::TcpListen), "{text}");
-            assert_eq!(sandbox.write, ["~/x"], "the file's other entries stay");
+            assert_eq!(sandbox.allow_tcp_listening, Some(true), "{text}");
+            let key = |p: &str| crate::config::PathKey::new(p).unwrap();
+            assert_eq!(
+                sandbox.filesystem[&key("/h/.cache/tool")],
+                crate::config::FileAccess::Write
+            );
+            assert_eq!(
+                sandbox.filesystem[&key("~/x")],
+                crate::config::FileAccess::Write,
+                "the file's other entries stay"
+            );
         }
     }
 }

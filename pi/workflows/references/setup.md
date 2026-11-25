@@ -101,7 +101,7 @@ Never hand-build GitHub tracker configuration. Use the exact `trackerConfig` ret
 - optionally, one Project Phase single-select field mapping `planning`, `execution`, and `selfReview` to distinct names;
 - Priority, with `issue` or `project` scope, a field name, and unique non-empty values that exclude lowercase `not set`.
 
-It contains no `labels`; add the section the label setup tools return ([label groups](#label-groups)).
+It contains no `labels`; the label setup tools return the tracker with them ([label groups](#label-groups)).
 
 **Constraints:**
 
@@ -147,7 +147,7 @@ Example returned configuration for a Project-contained tracker (use the actual o
 
 ### Label groups
 
-`tracker.labels` is optional on both trackers. Never hand-build it: use the `configuration` that the approved `apply_label_setup` returns.
+`tracker.labels` is optional on both trackers. Never hand-build it: save the `configuration` that the approved `apply_label_setup` returns, which is the complete tracker with its labels.
 
 ```json
 {
@@ -179,7 +179,7 @@ Example returned configuration for a Project-contained tracker (use the actual o
 **Setup:**
 
 - `inspect_label_setup` reads the catalog, with usage, and the managed set setup last applied. `preview_label_setup` plans the changes and reports every decision the user must answer. `apply_label_setup` takes the approved `planHash`.
-- These tools take the tracker identity and the credential variable as input, like GitHub Project setup.
+- Preview and apply take the complete tracker to save, with the desired labels. Piton checks it with the rules it reads `config.toml` with, before any provider change; an error names the key at fault.
 - Labels outside the configuration are always the user's decision: remove or keep, and for a label retired outside setup, leave retired, restore and keep, or delete. Setup suggests no default.
 - A removal deletes an unused label and retires one items carry (archives it on GitHub). Present every removal with its usage before approval.
 - **Misplaced labels:** on first setup, a label with a configured name but in the wrong group, or a group of the wrong type, is a decision. Adopt moves it into place and keeps its items. Replace deletes it and creates the configured label, and is offered only when nothing carries it and, for a group, it has no child labels.

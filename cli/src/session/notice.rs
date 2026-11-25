@@ -1,9 +1,11 @@
 //! The warning a blocked process gets when no entry the block question saves would lift its block: what it was kept
-//! from, what that cost when it's known, what would change it, and the `silence` entry that quiets it.
+//! from, what that cost when it's known, what would change it, and the entry that keeps it blocked without a notice.
 //!
-//! Every notice that names a path or a Mach service ends with an entry that silences exactly it (for that process),
-//! narrowed only as far as stays safe, so noise is quieted one notice at a time. Each case is matched exhaustively on
-//! why the block can't be lifted.
+//! A block decided by an entry the user wrote (a `"deny"`, a `"read"` written to, a `false`) is only logged and never
+//! reaches here. Every other notice ends with the entry that turns it into one: a `"deny"` in the block's own table for
+//! a path or a host (narrowed only as far as stays safe), `allow_git_control_files = false` for Git's files, and a
+//! `silence` entry only for what has no path or host (a Mach service, a TCP listen). Each case is matched exhaustively
+//! on why the block can't be lifted.
 
 use std::path::Path;
 
@@ -28,8 +30,6 @@ pub struct Blocked<'a> {
 /// What a notice is built from, beyond the block: where the user's files are, and how pi's `claude` signs in.
 pub struct Context<'a> {
     pub home: &'a Path,
-    /// The launch's checkout: its parent holds the source and its workers.
-    pub checkout: &'a Path,
     pub claude: ClaudeSignIn,
 }
 
@@ -53,6 +53,33 @@ impl ClaudeSignIn {
     }
 }
 
+/// The entry that keeps a block blocked without a notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Quiet {
+    /// `"<path>" = "deny"` in a path table: closes it for every process, approved commands included.
+    Deny { table: &'static str, key: String },
+    /// `allow_git_control_files = false`.
+    GitControlOff,
+    /// A `silence` entry: a Mach service or TCP listening, for that process.
+    Silence(Silence),
+}
+
+impl std::fmt::Display for Quiet {
+    /// As the notice names it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Quiet::Deny { table, key } => write!(
+                f,
+                "`{} = \"deny\"` in [sandbox.{table}] (it closes that path to every process, commands you approve \
+                 included)",
+                toml_edit::Key::new(key.as_str()).display_repr()
+            ),
+            Quiet::GitControlOff => f.write_str("`allow_git_control_files = false` in [sandbox]"),
+            Quiet::Silence(entry) => write!(f, "`silence = [{}]` in [sandbox]", entry.inline()),
+        }
+    }
+}
+
 /// The notice for a block no entry lifts.
 pub fn notice(blocked: &Blocked, why: &NoLift, context: &Context) -> String {
     let Blocked {
@@ -66,7 +93,7 @@ pub fn notice(blocked: &Blocked, why: &NoLift, context: &Context) -> String {
         NoLift::Decided(DeniedBy::Keychain(block)) => keychain(process, target, *block, context.claude),
         NoLift::Decided(DeniedBy::GitControl) => git(process, target),
         NoLift::Decided(DeniedBy::UserDeny) => {
-            format!("The sandbox blocked {process}: {summary} (your [sandbox] deny).")
+            format!("The sandbox blocked {process}: {summary} (your own [sandbox] entry).")
         }
         NoLift::Decided(DeniedBy::FnoxConfig) => format!(
             "The sandbox blocked {process}: {summary} (a file fnox loads; changed only through a write you approve)."
@@ -79,70 +106,63 @@ pub fn notice(blocked: &Blocked, why: &NoLift, context: &Context) -> String {
             folder.display()
         ),
     };
-    match silence_entry(blocked, why, context) {
-        Some(entry) => format!(
-            "{text} To stop this notice, add `silence = [{}]` to [sandbox] in your global config.toml or a \
-             config.local.toml.",
-            entry.inline()
-        ),
+    match quiet(blocked, why, context) {
+        Some(entry) => {
+            format!("{text} To stop this notice, add {entry} in your global config.toml or a config.local.toml.")
+        }
         None => text,
     }
 }
 
-/// The entry that silences this notice, narrowed as far as stays safe; `None` when the target is neither a path nor a
-/// Mach service (a TCP address).
-pub fn silence_entry(blocked: &Blocked, why: &NoLift, context: &Context) -> Option<Silence> {
+/// The entry that quiets this notice, narrowed as far as stays safe; `None` when nothing names it (the floor, what's
+/// already the user's own).
+pub fn quiet(blocked: &Blocked, why: &NoLift, context: &Context) -> Option<Quiet> {
     let target = Path::new(blocked.target);
-    let process = Some(blocked.process.to_string());
-    let path = |path: &Path| {
-        Some(Silence {
-            target: SilenceTarget::Path(shown(path, context.home)),
-            process: process.clone(),
-        })
+    let silence = |target| {
+        Some(Quiet::Silence(Silence {
+            target,
+            process: Some(blocked.process.to_string()),
+        }))
     };
     if !target.is_absolute() {
         return match blocked.operation {
-            "mach-lookup" => Some(Silence {
-                target: SilenceTarget::Service(blocked.target.to_string()),
-                process,
-            }),
+            "mach-lookup" => silence(SilenceTarget::Service(blocked.target.to_string())),
             // A connection to a host or an address and port.
-            "network-outbound" => crate::launch::sandbox::Destination::parse(blocked.target).map(|to| Silence {
-                target: SilenceTarget::Host(to.to_string()),
-                process,
+            "network-outbound" => crate::launch::sandbox::Destination::parse(blocked.target).map(|to| Quiet::Deny {
+                table: "network.connections",
+                key: to.to_string(),
             }),
             // A TCP listen, on any port.
-            op if crate::launch::sandbox::is_listen(op, blocked.target) => Some(Silence {
-                target: SilenceTarget::TcpListen,
-                process,
-            }),
+            op if crate::launch::sandbox::is_listen(op, blocked.target) => silence(SilenceTarget::TcpListen),
             _ => None,
         };
     }
+    let table = match blocked.operation {
+        "network-outbound" => "network.unix_socket_connections",
+        "network-bind" => "network.unix_socket_bindings",
+        _ => "filesystem",
+    };
+    let deny = |path: &Path| {
+        Some(Quiet::Deny {
+            table,
+            key: shown(path, context.home),
+        })
+    };
     match why {
-        // The folder holding it, unless that folder is too broad to quiet (`~/.netrc`: the file itself).
+        // The folder holding it, unless that folder is too broad to close (`~/.netrc`: the file itself).
         NoLift::Decided(DeniedBy::Credential(_) | DeniedBy::Keychain(_)) => match target.parent() {
-            Some(folder) if !too_broad(folder, context.home) => path(folder),
-            Some(_) | None => path(target),
+            Some(folder) if !too_broad(folder, context.home) => deny(folder),
+            Some(_) | None => deny(target),
         },
-        // That entry in every checkout beside this one (the source and its workers).
-        NoLift::Decided(DeniedBy::GitControl) => {
-            let entry = GitControlEntry::of(target);
-            let parent = context.checkout.parent().filter(|p| !too_broad(p, context.home));
-            match (entry, parent) {
-                (Some(GitControlEntry::GitDir), Some(parent)) => path(&parent.join("*/.git")),
-                (Some(entry), Some(parent)) => path(&parent.join("**/.git").join(entry.name())),
-                (Some(_) | None, None) | (None, Some(_)) => path(target),
-            }
-        }
-        NoLift::PerProcess { folder } => path(folder),
-        NoLift::Decided(DeniedBy::UserDeny | DeniedBy::FnoxConfig | DeniedBy::Floor) | NoLift::Unsupported => {
-            path(target)
-        }
+        NoLift::Decided(DeniedBy::GitControl) => Some(Quiet::GitControlOff),
+        NoLift::PerProcess { folder } => deny(folder),
+        NoLift::Unsupported => deny(target),
+        // Already the user's own, or never liftable: nothing to add.
+        NoLift::Decided(DeniedBy::UserDeny | DeniedBy::FnoxConfig | DeniedBy::Floor) => None,
     }
 }
 
-/// A folder too broad to quiet a notice with: the root, the home folder, or a folder directly in it.
+/// A folder too broad to close with a notice's entry: the root, the home folder, or a folder directly in it.
 fn too_broad(folder: &Path, home: &Path) -> bool {
     folder.parent().is_none() || folder == home || folder.parent() == Some(home)
 }
@@ -156,15 +176,15 @@ fn shown(path: &Path, home: &Path) -> String {
     }
 }
 
-/// A credential: what it was kept from. A read could be lifted with `read`, but that exposes the credential to every
-/// sandboxed process, and programs nearly always carry on without it (ssh reads a private key's public half, then signs
-/// through the agent), so it's named as a last resort.
+/// A credential: what it was kept from. A read could be reopened with `"read"`, but that exposes the credential to
+/// every sandboxed process, and programs nearly always carry on without it (ssh reads a private key's public half, then
+/// signs through the agent), so it's named as a last resort.
 fn credential(process: &str, target: &str, access: Access) -> String {
     match access {
         Access::Read => format!(
             "The sandbox kept {process} from reading {target} (a credential). Programs usually carry on without it. \
-             `read = [\"{target}\"]` in [sandbox] would expose it to the sandbox: add it only for a program that \
-             fails without it."
+             `\"{target}\" = \"read\"` in [sandbox.filesystem] would expose it to the sandbox: add it only for a \
+             program that fails without it."
         ),
         Access::Write => format!("The sandbox kept {process} from writing {target} (a credential; never writable)."),
         Access::Connect => format!("The sandbox kept {process} from connecting to {target} (a credential)."),
@@ -178,8 +198,8 @@ fn credential(process: &str, target: &str, access: Access) -> String {
 fn keychain(process: &str, target: &str, block: KeychainBlock, claude: ClaudeSignIn) -> String {
     let base = format!("The sandbox kept {process} from the keychain ({target}).");
     let fix = match block {
-        KeychainBlock::Readable => "If it needs it, add `read = [\"~/Library/Keychains\"]` to [sandbox] in your \
-                                    global config.toml or a config.local.toml."
+        KeychainBlock::Readable => "If it needs it, add `\"~/Library/Keychains\" = \"read\"` to [sandbox.filesystem] \
+                                    in your global config.toml or a config.local.toml."
             .to_string(),
         KeychainBlock::ClosedForFnox => "It stays closed while fnox runs: the credentials of fnox's secret sources \
                                          live there, so a sandbox that can read it isn't started."
@@ -196,8 +216,8 @@ fn keychain(process: &str, target: &str, block: KeychainBlock, claude: ClaudeSig
     format!("{base} {fix}{claude}")
 }
 
-/// Git's hooks and configuration, by the entry refused: what Git skipped. The `git` preset opens them, but lets the
-/// agent plant what Git on the host runs, so it isn't offered.
+/// Git's hooks and configuration, by the entry refused: what Git skipped. `allow_git_control_files` opens them, but
+/// lets the agent plant what Git on the host runs, so it isn't offered.
 fn git(process: &str, target: &str) -> String {
     let cost = match GitControlEntry::of(Path::new(target)) {
         Some(GitControlEntry::Config) => {
@@ -220,11 +240,10 @@ mod tests {
 
     use super::*;
 
-    /// The home folder and checkout a test's context names.
-    fn context_for_tests() -> (PathBuf, PathBuf) {
-        ("/h".into(), "/h/Projects/tooling/Piton--1-x".into())
+    /// The home folder a test's context names.
+    fn home() -> PathBuf {
+        "/h".into()
     }
-    use crate::launch::sandbox::{SilenceSource, Silenced, silenced};
 
     fn blocked<'a>(process: &'a str, operation: &'a str, target: &'a str, summary: &'a str) -> Blocked<'a> {
         Blocked {
@@ -235,37 +254,19 @@ mod tests {
         }
     }
 
-    /// The entry a notice names, resolved as the configuration resolves it, silences that refusal.
-    fn silences(entry: &Silence, home: &Path, process: &str, operation: &str, target: &str) -> bool {
-        let target_path = match &entry.target {
-            SilenceTarget::Path(p) => crate::launch::sandbox::Silent::Path(match p.strip_prefix('~') {
-                Some(rest) => PathBuf::from(format!("{}{rest}", home.display())),
-                None => PathBuf::from(p),
-            }),
-            SilenceTarget::Service(s) => crate::launch::sandbox::Silent::Service(s.clone()),
-            SilenceTarget::Host(h) => match crate::config::Connect::try_from(h.clone()) {
-                Ok(crate::config::Connect::Network(t)) => crate::launch::sandbox::Silent::Host(t),
-                Ok(crate::config::Connect::Socket(_)) | Err(_) => panic!("{h}"),
-            },
-            SilenceTarget::TcpListen => crate::launch::sandbox::Silent::TcpListen,
-        };
-        let resolved = [Silenced {
-            target: target_path,
-            process: entry.process.clone(),
-            source: SilenceSource::File("/h/.config/piton/config.toml".into()),
-        }];
-        silenced(&resolved, process, operation, target).is_some()
+    fn context(home: &Path) -> Context<'_> {
+        Context {
+            home,
+            claude: ClaudeSignIn::Keychain,
+        }
     }
 
-    /// A keychain block with fnox on suggests no `read`; with fnox off it does; `claude`'s names the preset.
+    /// A keychain block with fnox on suggests no `"read"`; with fnox off it does; `claude`'s names the preset; a lookup
+    /// is quieted by a `silence` entry for that process.
     #[test]
     fn keychain_notices_follow_fnox() {
-        let (home, checkout) = context_for_tests();
-        let context = Context {
-            home: &home,
-            checkout: &checkout,
-            claude: ClaudeSignIn::Keychain,
-        };
+        let home = home();
+        let context = context(&home);
         let b = blocked(
             "security",
             "mach-lookup",
@@ -277,14 +278,18 @@ mod tests {
             &NoLift::Decided(DeniedBy::Keychain(KeychainBlock::ClosedForFnox)),
             &context,
         );
-        assert!(!closed.contains("read ="), "{closed}");
+        assert!(!closed.contains("= \"read\""), "{closed}");
         assert!(closed.contains("fnox"), "{closed}");
         let readable = notice(
             &b,
             &NoLift::Decided(DeniedBy::Keychain(KeychainBlock::Readable)),
             &context,
         );
-        assert!(readable.contains("read = [\"~/Library/Keychains\"]"), "{readable}");
+        assert!(readable.contains("`\"~/Library/Keychains\" = \"read\"`"), "{readable}");
+        assert!(
+            readable.contains(r#"silence = [{ process = "security", target = "com.apple.SecurityServer" }]"#),
+            "{readable}"
+        );
         let claude = blocked("claude", "mach-lookup", "com.apple.SecurityServer", "x");
         let named = notice(
             &claude,
@@ -292,52 +297,15 @@ mod tests {
             &context,
         );
         assert!(named.contains("pi-claude-code preset"), "{named}");
-        // Already on with its token: not named again.
-        let on = Context {
-            claude: ClaudeSignIn::PresetToken,
-            ..context
-        };
-        let quiet = notice(
-            &claude,
-            &NoLift::Decided(DeniedBy::Keychain(KeychainBlock::ClosedForFnox)),
-            &on,
-        );
-        assert!(!quiet.contains("turn on"), "{quiet}");
-        // No message carries a source line's indentation.
-        assert!(!named.contains("  "), "{named}");
-        // The service entry it names silences exactly that lookup, by that process.
-        let entry = silence_entry(
-            &b,
-            &NoLift::Decided(DeniedBy::Keychain(KeychainBlock::Readable)),
-            &context,
-        )
-        .unwrap();
-        assert!(silences(
-            &entry,
-            &home,
-            "security",
-            "mach-lookup",
-            "com.apple.SecurityServer"
-        ));
-        assert!(!silences(
-            &entry,
-            &home,
-            "node",
-            "mach-lookup",
-            "com.apple.SecurityServer"
-        ));
+        assert!(!named.contains("  "), "no source line's indentation: {named}");
     }
 
-    /// A credential read doesn't recommend `read` as the fix; its entry is the folder, or the file when the folder is
-    /// the home folder.
+    /// A credential read names `"read"` only as a last resort; its quieting entry is a `"deny"` of the folder, or of
+    /// the file when the folder is the home folder.
     #[test]
-    fn credential_notices_name_read_as_a_last_resort() {
-        let (home, checkout) = context_for_tests();
-        let context = Context {
-            home: &home,
-            checkout: &checkout,
-            claude: ClaudeSignIn::Keychain,
-        };
+    fn credential_notices_name_a_deny() {
+        let home = home();
+        let context = context(&home);
         let why = NoLift::Decided(DeniedBy::Credential(Access::Read));
         let ssh = blocked(
             "ssh",
@@ -348,63 +316,37 @@ mod tests {
         let text = notice(&ssh, &why, &context);
         assert!(text.contains("usually carry on") && text.contains("expose"), "{text}");
         assert!(
-            text.contains(r#"{ process = "ssh", target = "~/.ssh/keys" }"#),
+            text.contains("`\"~/.ssh/keys\" = \"deny\"` in [sandbox.filesystem]"),
             "{text}"
         );
-        let entry = silence_entry(&ssh, &why, &context).unwrap();
-        assert!(silences(
-            &entry,
-            &home,
-            "ssh",
-            "file-read-data",
-            "/h/.ssh/keys/id_ed25519"
-        ));
+        assert!(text.contains("commands you approve"), "{text}");
         let netrc = blocked("curl", "file-read-data", "/h/.netrc", "x");
         assert_eq!(
-            silence_entry(&netrc, &why, &context).unwrap().target,
-            SilenceTarget::Path("~/.netrc".into())
+            quiet(&netrc, &why, &context),
+            Some(Quiet::Deny {
+                table: "filesystem",
+                key: "~/.netrc".into()
+            })
         );
-        let write = notice(
-            &blocked("ssh", "file-write-data", "/h/.ssh/known_hosts", "x"),
-            &NoLift::Decided(DeniedBy::Credential(Access::Write)),
-            &context,
-        );
-        assert!(!write.contains("read ="), "{write}");
     }
 
-    /// The git notice says what Git skipped, offers no preset, and its entry quiets every checkout beside this one.
+    /// The git notice says what Git skipped and names `allow_git_control_files = false`.
     #[test]
     fn git_notices_say_what_was_skipped() {
-        let (home, checkout) = context_for_tests();
-        let context = Context {
-            home: &home,
-            checkout: &checkout,
-            claude: ClaudeSignIn::Keychain,
-        };
+        let home = home();
+        let context = context(&home);
         let why = NoLift::Decided(DeniedBy::GitControl);
-        let config = "/h/Projects/tooling/Piton--1-x/.git/config";
-        let push = blocked("git", "file-write-create", config, "x");
-        let text = notice(&push, &why, &context);
-        assert!(text.contains("upstream") && !text.contains("preset"), "{text}");
-        let entry = silence_entry(&push, &why, &context).unwrap();
-        assert_eq!(
-            entry.target,
-            SilenceTarget::Path("~/Projects/tooling/**/.git/config".into())
-        );
-        for worker in [
-            config,
-            "/h/Projects/tooling/Piton--2-y/.git/config",
-            "/h/Projects/tooling/Piton/.git/config",
-        ] {
-            assert!(silences(&entry, &home, "git", "file-write-create", worker), "{worker}");
-        }
-        assert!(!silences(
-            &entry,
-            &home,
+        let push = blocked(
             "git",
             "file-write-create",
-            "/h/Projects/tooling/Piton/.git/config.bak"
-        ));
+            "/h/Projects/tooling/Piton--1-x/.git/config",
+            "x",
+        );
+        let text = notice(&push, &why, &context);
+        assert!(
+            text.contains("upstream") && text.contains("allow_git_control_files = false"),
+            "{text}"
+        );
         let hook = notice(
             &blocked(
                 "node",
@@ -418,52 +360,48 @@ mod tests {
         assert!(hook.contains("hook wasn't installed"), "{hook}");
     }
 
-    /// A per-process path names its folder; a block whose target isn't a path or a service has no entry.
+    /// A per-process path names its folder in its own table; a connection names a host deny; a listen names
+    /// `silence`; the floor names nothing.
     #[test]
-    fn per_process_and_address_notices() {
-        let (home, checkout) = context_for_tests();
-        let context = Context {
-            home: &home,
-            checkout: &checkout,
-            claude: ClaudeSignIn::Keychain,
-        };
+    fn per_process_address_and_floor_notices() {
+        let home = home();
+        let context = context(&home);
         let why = NoLift::PerProcess {
             folder: "/private/tmp/cc-socks".into(),
         };
         let probe = blocked("claude", "network-outbound", "/private/tmp/cc-socks/64421.sock", "x");
-        let text = notice(&probe, &why, &context);
-        assert!(text.contains("never match again"), "{text}");
-        let entry = silence_entry(&probe, &why, &context).unwrap();
-        assert!(silences(
-            &entry,
-            &home,
-            "claude",
-            "network-outbound",
-            "/private/tmp/cc-socks/1234.sock"
-        ));
+        assert!(notice(&probe, &why, &context).contains("never match again"));
+        assert_eq!(
+            quiet(&probe, &why, &context),
+            Some(Quiet::Deny {
+                table: "network.unix_socket_connections",
+                key: "/private/tmp/cc-socks".into()
+            })
+        );
         let tcp = blocked(
             "node",
             "network-outbound",
             "1.2.3.4:443",
             "network-outbound 1.2.3.4:443",
         );
-        // A connection's notice names a host entry, which silences that destination only.
-        let entry = silence_entry(&tcp, &NoLift::Unsupported, &context).unwrap();
-        assert_eq!(entry.target, SilenceTarget::Host("1.2.3.4:443".into()));
-        assert!(notice(&tcp, &NoLift::Unsupported, &context).contains("silence"));
-        assert!(silences(&entry, &home, "node", "network-outbound", "1.2.3.4:443"));
-        assert!(!silences(&entry, &home, "node", "network-outbound", "1.2.3.4:80"));
-        // A listen's notice names `tcp-listen`, which silences that process's listens on any port.
+        assert_eq!(
+            quiet(&tcp, &NoLift::Unsupported, &context),
+            Some(Quiet::Deny {
+                table: "network.connections",
+                key: "1.2.3.4:443".into()
+            })
+        );
         let listen = blocked(
             "node",
             "network-inbound",
             "local:*:50958",
             "network-inbound local:*:50958",
         );
-        let entry = silence_entry(&listen, &NoLift::Unsupported, &context).unwrap();
-        assert_eq!(entry.inline(), r#"{ process = "node", target = "tcp-listen" }"#);
-        assert!(silences(&entry, &home, "node", "network-inbound", "local:*:61000"));
-        assert!(!silences(&entry, &home, "python3", "network-inbound", "local:*:61000"));
-        assert!(!silences(&entry, &home, "node", "network-outbound", "1.2.3.4:443"));
+        assert!(
+            notice(&listen, &NoLift::Unsupported, &context)
+                .contains(r#"silence = [{ process = "node", target = "tcp-listen" }]"#)
+        );
+        let floor = blocked("pi", "file-write-create", "/h/.pi/agent/settings.json", "x");
+        assert_eq!(quiet(&floor, &NoLift::Decided(DeniedBy::Floor), &context), None);
     }
 }

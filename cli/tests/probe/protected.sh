@@ -53,15 +53,15 @@ trap 'code=$?; test -z "$listener" || { kill "$listener" 2>/dev/null; wait "$lis
 mkdir "$linked"
 ln -s "$linked" "$src/cache"
 marker="# piton protected-file probe
-[sandbox]
-write = [\"$src/cache\"]"
+[sandbox.filesystem]
+\"$src/cache\" = \"write\""
 printf '%s\n' "$marker" > "$src/.piton/config.toml"
 # Unix sockets the host listens on, in the scratch folder (temp, which the sandbox writes): one no entry names, and one
 # the checkout's own config.local.toml lists, which must stay in place.
 mkdir -p "$scratch/host" "$scratch/listed"
 host_sock="$scratch/host/listen.sock"
 listed_sock="$scratch/listed/ok.sock"
-printf '[sandbox]\nconnect = ["%s"]\n' "$listed_sock" > "$src/.piton/config.local.toml"
+printf '[sandbox.network.unix_socket_connections]\n"%s" = "allow"\n' "$listed_sock" > "$src/.piton/config.local.toml"
 python3 -I -c '
 import signal, socket, sys, threading
 def serve(path):
@@ -213,7 +213,7 @@ attempt denied "write through a granted symlink"        'touch cache/x'
 attempt ok     "read system files"                      'cat /etc/hosts'
 attempt ok     "read git config"                        "test ! -e $HOME/.gitconfig || cat $HOME/.gitconfig"
 attempt "$EXPECT_SSH_KEY" "read an SSH key"              "cat '$SSH_KEY'"
-# Denied by default; allowed when the configuration lists the keychains in `read`.
+# Denied by default; allowed when the configuration has a `"read"` entry for the keychains in `[sandbox.filesystem]`.
 attempt "$EXPECT_KEYCHAIN" "read the login keychain"     "cat $KEYCHAIN"
 attempt "$EXPECT_HISTORY" "read shell history"           "cat $HOME/.zsh_history"
 # Other case: APFS is case-insensitive, and so is Seatbelt's matching there; denies and the allows inside them hold.
@@ -316,7 +316,7 @@ git -C "$strict" init -q
 # gate runs for the pass (`piton sandbox gate`), deciding by these entries and pi's own hosts.
 local_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
 other_port=$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
-printf '[sandbox]\nprofile = "strict"\nconnect = ["github.com", "example.com", "localhost:%s", "*:7"]\n' "$local_port" \
+printf '[sandbox]\nprofile = "strict"\n[sandbox.network.connections]\n"github.com" = "allow"\n"example.com" = "allow"\n"localhost:%s" = "allow"\n"*:7" = "allow"\n' "$local_port" \
     > "$strict/.piton/config.local.toml"
 mkfifo "$scratch/gate-in"
 ("$piton" sandbox gate --workspace "$strict" < "$scratch/gate-in" > "$scratch/gate-policy" 2>"$scratch/gate-err") &
@@ -416,17 +416,17 @@ wait "$gate_pid" 2>/dev/null || true
 cat "$scratch/strict-out"
 cat "$scratch/strict-out" >> "$scratch/out"
 
-# The apps preset: a link opens in the browser (from a strict checkout whose config.local.toml lists it, so the preset's
-# own services are what open uses).
+# Launching apps: a link opens in the browser (from a strict checkout whose config.local.toml sets
+# allow_launching_apps, so the services that switch opens are what open uses).
 apps="$scratch/apps"
 mkdir -p "$apps/.piton/.local"
 git -C "$apps" init -q
-printf '[sandbox]\nprofile = "strict"\npresets = ["apps"]\n' > "$apps/.piton/config.local.toml"
+printf '[sandbox]\nprofile = "strict"\nallow_launching_apps = true\n' > "$apps/.piton/config.local.toml"
 apps_policy=$("$piton" sandbox show --workspace "$apps" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
 if (cd "$apps" && PITON_SANDBOX_POLICY="$apps_policy" "$piton" sandbox-exec -- open -g https://example.com </dev/null >/dev/null 2>"$scratch/err"); then
-    echo "pass  ok      strict + apps preset: open a link" | tee -a "$scratch/out"
+    echo "pass  ok      strict + allow_launching_apps: open a link" | tee -a "$scratch/out"
 else
-    echo "FAIL  denied  strict + apps preset: open a link" | tee -a "$scratch/out"
+    echo "FAIL  denied  strict + allow_launching_apps: open a link" | tee -a "$scratch/out"
     printf '      %s\n' "$(tail -n 1 "$scratch/err")"
 fi
 # Every refusal reaches its call: with a tag, the default deny carries it too, so the kernel's record of a refusal no

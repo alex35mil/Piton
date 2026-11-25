@@ -26,8 +26,10 @@ pub enum ViewRequest {
     #[serde(rename = "daemon.state")]
     DaemonState,
     /// Change one setting: `key` (as written in its file) in the global file of `scope`. `value: null` returns it to
-    /// the default. `local` moves the key to the scope's `.local` file (`true`) or the shared one (`false`); omitted, it
-    /// stays in the file that sets it. A scope without a local file (`client`) refuses `local`.
+    /// the default. For `host` and `project`, `local` moves the key to the scope's `.local` file (`true`) or the shared
+    /// one (`false`); omitted, it stays in the file that sets it. For `client`, `section` (required) is the device
+    /// section to set or, with `null`, remove; setting one also removes the narrower sections that apply to this
+    /// connection's device, so the chosen one is in effect there.
     #[serde(rename = "settings.set")]
     SettingsSet {
         scope: crate::config::Scope,
@@ -35,9 +37,11 @@ pub enum ViewRequest {
         value: serde_json::Value,
         #[serde(default)]
         local: Option<bool>,
+        #[serde(default)]
+        section: Option<crate::config::DeviceSection>,
     },
-    /// Switch host logging until the policy expires or the daemon restarts (`logging` in `config.host.toml` is the
-    /// default).
+    /// Switch host logging until the policy expires or the daemon restarts (`[debugging] log_level` in `config.host.toml`
+    /// is the default).
     #[serde(rename = "daemon.logging")]
     DaemonLogging { policy: crate::logging::Policy },
     /// Push the session list now and whenever it changes.
@@ -57,6 +61,14 @@ pub enum ViewRequest {
         mode: Option<LaunchMode>,
         #[serde(default)]
         prompt: Option<String>,
+    },
+    /// The user's answer to a start refused with `trust_needed`: `trusted` or `declined`, for the grants they were shown
+    /// (refused when the repository's grants changed since). Replies with the repository's trust state.
+    #[serde(rename = "trust.decide")]
+    TrustDecide {
+        workspace: PathBuf,
+        decision: TrustDecisionWire,
+        grants: crate::config::Grants,
     },
     #[serde(rename = "session.stop")]
     SessionStop { session: u64 },
@@ -111,6 +123,22 @@ pub enum ViewRequest {
         question: String,
         answer: serde_json::Value,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustDecisionWire {
+    Trusted,
+    Declined,
+}
+
+impl From<TrustDecisionWire> for crate::state::Decision {
+    fn from(wire: TrustDecisionWire) -> Self {
+        match wire {
+            TrustDecisionWire::Trusted => crate::state::Decision::Trusted,
+            TrustDecisionWire::Declined => crate::state::Decision::Declined,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

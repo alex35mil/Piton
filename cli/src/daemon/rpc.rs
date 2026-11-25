@@ -34,7 +34,10 @@ impl Daemon {
         let writer = tokio::spawn(write_frames(write, rx));
 
         let mode = self.config().default_attach_mode;
-        let mut current = match self.launch_in(&workspace, mode, SessionArg::New).await {
+        let mut current = match self
+            .launch_in(&workspace, mode, SessionArg::New, super::TrustCheck::Ask)
+            .await
+        {
             Ok(handle) => handle,
             Err(e) => {
                 let _ = tx.send(Frame::Control(Arc::new(AttachControl::Error {
@@ -118,14 +121,27 @@ impl Daemon {
                     return Intercept::Forward;
                 }
                 match self
-                    .launch_in(&shared.workspace, shared.mode, SessionArg::Resume(path.into()))
+                    .launch_in(
+                        &shared.workspace,
+                        shared.mode,
+                        SessionArg::Resume(path.into()),
+                        super::TrustCheck::KeepDecided,
+                    )
                     .await
                 {
                     Ok(target) => Intercept::MoveTo(target),
                     Err(e) => Intercept::Reject(e.to_string()),
                 }
             }
-            "new_session" if is_shared => match self.launch_in(&shared.workspace, shared.mode, SessionArg::New).await {
+            "new_session" if is_shared => match self
+                .launch_in(
+                    &shared.workspace,
+                    shared.mode,
+                    SessionArg::New,
+                    super::TrustCheck::KeepDecided,
+                )
+                .await
+            {
                 Ok(target) => Intercept::MoveTo(target),
                 Err(e) => Intercept::Reject(e.to_string()),
             },

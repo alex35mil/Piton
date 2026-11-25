@@ -1,5 +1,5 @@
 import { resetGlobalSettings, TEST_CONFIG_HOME, writeConfig } from "./host-runtime.ts"
-import { writeProjectConfig } from "./config-fixture.ts"
+import { writeInvalidIntegrations, writeProjectConfig } from "./config-fixture.ts"
 import { clearSettingsCache } from "../extensions/__lib/settings.ts"
 
 import assert from "node:assert/strict"
@@ -22,8 +22,8 @@ import { withToolExecution } from "./extension-context-fixture.ts"
 
 import {
     assertConfiguredPriority,
+    integrationPresence,
     loadIntegrationRoles,
-    PriorityFieldValidator,
     requireTracker,
     RoleUnavailableError,
 } from "../workflows/extensions/integrations/config.ts"
@@ -474,14 +474,14 @@ describe("workflow-source queue context", () => {
         const before = fileSnapshot(f.root)
         assert.deepEqual(await inspect(), { sessionAnalysis: "enabled" })
         assert.deepEqual(fileSnapshot(f.root), before)
-        writeConfig("host", { "development.session_analysis": false })
+        writeConfig("host", { "debugging.session_analysis": false })
         assert.deepEqual(await inspect(), { sessionAnalysis: "disabled" })
         setInstallationForTests({ kind: "app" })
-        writeConfig("host", { "development.session_analysis": true })
+        writeConfig("host", { "debugging.session_analysis": true })
         assert.deepEqual(await inspect(), { sessionAnalysis: "disabled" })
         // A broken setting is reported, not read as off.
         setInstallationForTests({ kind: "development", checkout: f.source })
-        fs.writeFileSync(path.join(TEST_CONFIG_HOME, "config.host.toml"), "[development]\nsession_analysis = 1\n")
+        fs.writeFileSync(path.join(TEST_CONFIG_HOME, "config.host.toml"), "[debugging]\nsession_analysis = 1\n")
         clearSettingsCache()
         await assert.rejects(inspect, /session_analysis/)
     })
@@ -588,10 +588,16 @@ describe("workflow integration configuration", () => {
             assert.deepEqual(trackerOnly.tracker, { state: "on", config: config() })
             assert.equal(trackerOnly.forge.state, "off")
             assert.ok(trackerOnly.forge.state === "off" && trackerOnly.forge.reason === "disabled")
-            writeProjectConfig(cwd, { tracker: { provider: "none", mcpServer: "github" }, forge: forgeConfig() })
-            assert.throws(() => loadIntegrationRoles(cwd), /invalid .*\.piton\/config\.toml/)
-            writeProjectConfig(cwd, { tracker: { provider: "jira" } })
-            assert.throws(() => loadIntegrationRoles(cwd), /invalid .*\.piton\/config\.toml/)
+            // Both roles off: still configured, so the workflow rules stay in the system prompt.
+            writeProjectConfig(cwd, { tracker: { provider: "none" }, forge: { provider: "none" } })
+            assert.deepEqual(integrationPresence(cwd), { kind: "configured" })
+            writeInvalidIntegrations(cwd, { tracker: { provider: "none", mcpServer: "github" }, forge: forgeConfig() })
+            assert.throws(
+                () => loadIntegrationRoles(cwd),
+                /invalid .*\.piton\/config\.toml: line \d+, tracker\.mcp_server/,
+            )
+            writeInvalidIntegrations(cwd, { tracker: { provider: "jira" } })
+            assert.throws(() => loadIntegrationRoles(cwd), /tracker\.provider: unknown provider "jira"/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -731,14 +737,6 @@ describe("workflow integration configuration", () => {
         assert.doesNotThrow(() => assertConfiguredPriority(config("project"), "High"))
         assert.doesNotThrow(() => assertConfiguredPriority(config("project"), "not set"))
         assert.throws(() => assertConfiguredPriority(config("project"), "Critical"), /not configured/)
-        assert.equal(
-            PriorityFieldValidator.check({
-                scope: "project",
-                field: "Priority",
-                values: ["High", "not set"],
-            }),
-            false,
-        )
     })
 
     it("requires complete, distinct Linear status mappings and native priorities", () => {
@@ -754,24 +752,23 @@ describe("workflow integration configuration", () => {
 
         const cwd = temporaryProject()
         try {
-            const write = (tracker: unknown) => writeProjectConfig(cwd, { tracker, forge: forgeConfig() })
+            const write = (tracker: unknown) => writeInvalidIntegrations(cwd, { tracker, forge: forgeConfig() })
             write(linearConfig())
             assert.equal(loadTracker(cwd).provider, "linear")
 
+            // piton checks the table; the loader fails with its message, which names the key and line.
             const duplicateStatuses = linearConfig()
             duplicateStatuses.statuses.issues.todo = duplicateStatuses.statuses.issues.backlog
             write(duplicateStatuses)
-            assert.throws(() => loadTracker(cwd), /Linear issue Status mappings must use distinct options/)
-
-            const missingIssueCanceled = linearConfig()
-            delete (missingIssueCanceled.statuses.issues as Partial<typeof statuses>).canceled
-            write(missingIssueCanceled)
-            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(
+                () => loadTracker(cwd),
+                /invalid .*\.piton\/config\.toml: line \d+, tracker\.statuses\.issues: /,
+            )
 
             const missingProjectCanceled = linearConfig()
             delete (missingProjectCanceled.statuses.projects as Partial<typeof statuses>).canceled
             write(missingProjectCanceled)
-            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /tracker\.statuses\.projects: missing field `canceled`/)
 
             write({ ...linearConfig(), repository: { owner: "x", repo: "y" } })
             assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
@@ -788,41 +785,11 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("requires complete, distinct GitHub mappings while preserving separate scopes", () => {
+    it("reads GitHub mappings with their scopes, Phase optional", () => {
+        // piton's config module checks the mappings (distinct options and fields); see its tracker tests.
         const cwd = temporaryProject()
         try {
             const writeConfig = (tracker: unknown) => writeProjectConfig(cwd, { tracker, forge: forgeConfig() })
-
-            const duplicateStatus = config("project")
-            duplicateStatus.fields.status.values.todo = duplicateStatus.fields.status.values.backlog
-            writeConfig(duplicateStatus)
-            assert.throws(() => loadTracker(cwd), /Status mappings must use distinct options/)
-
-            const missingCanceled = config("project")
-            delete (missingCanceled.fields.status.values as Partial<typeof statuses>).canceled
-            writeConfig(missingCanceled)
-            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
-
-            const duplicateProjectField = config("project")
-            duplicateProjectField.fields.priority.field = duplicateProjectField.fields.status.field
-            writeConfig(duplicateProjectField)
-            assert.throws(() => loadTracker(cwd), /Project field names must be distinct/)
-
-            writeConfig({
-                ...config("project"),
-                labels: kindLabels({ ...kindLabelNames, bugfix: kindLabelNames.feature.toUpperCase() }),
-            })
-            assert.throws(() => loadTracker(cwd), /"KIND: FEATURE" is used more than once/)
-
-            const phaseCollision = config("project")
-            phaseCollision.fields.phase.field = phaseCollision.fields.status.field
-            writeConfig(phaseCollision)
-            assert.throws(() => loadTracker(cwd), /Project field names must be distinct/)
-
-            const duplicatePhase = config("project")
-            duplicatePhase.fields.phase.values.selfReview = duplicatePhase.fields.phase.values.execution
-            writeConfig(duplicatePhase)
-            assert.throws(() => loadTracker(cwd), /Phase mappings must use distinct options/)
 
             const separateScope = config("issue")
             separateScope.fields.priority.field = separateScope.fields.status.field
@@ -1470,182 +1437,23 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("fails loudly for invalid configuration without substituting labels", () => {
+    it("fails loudly with piton's message for invalid configuration, without substituting labels", () => {
+        // piton's config module owns the tracker's rules and their tests; the loader only surfaces its errors.
         const cwd = temporaryProject()
         try {
             const valid = config("project")
-            const write = (tracker: unknown) => writeProjectConfig(cwd, { tracker, forge: forgeConfig() })
+            const write = (tracker: unknown) => writeInvalidIntegrations(cwd, { tracker, forge: forgeConfig() })
             const { audit, ...otherKinds } = kindLabelNames
             write({
                 ...valid,
                 labels: kindLabels({ ...otherKinds, review: audit } as unknown as typeof kindLabelNames),
             })
-            assert.throws(() => loadTracker(cwd), /`kind` label group values must be exactly/)
+            assert.throws(() => loadTracker(cwd), /line \d+, tracker\.labels\.groups\.kind\.values: /)
             write({ ...valid, fields: { ...valid.fields, type: { scope: "project", field: "Kind" } } })
-            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
-            write({ ...valid, fields: { labels: true } })
-            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
-        } finally {
-            fs.rmSync(cwd, { recursive: true, force: true })
-        }
-    })
-
-    it("validates label groups, the kind group, and kept or retired labels", () => {
-        const cwd = temporaryProject()
-        try {
-            const write = (tracker: unknown) => writeProjectConfig(cwd, { tracker, forge: forgeConfig() })
-            const label = (name: string, description = "") => ({ name, color: "#1D76DB", description })
-            const area = {
-                appliesTo: ["epic", "deliverable"],
-                cardinality: "zeroOrMore",
-                values: { frontend: label("Area: Frontend"), backend: label("Area: Backend") },
-            }
-            const github = (labels: unknown) => ({ ...config("project", false), labels })
-            const loads = (tracker: unknown) => {
-                write(tracker)
-                return loadTracker(cwd)
-            }
-            const rejects = (tracker: unknown, error: RegExp) => {
-                write(tracker)
-                assert.throws(() => loadTracker(cwd), error)
-            }
-
-            assert.ok(loads(github({ groups: { ...kindLabels().groups, area } })))
-            assert.ok(loads(github({})))
-            assert.ok(loads(github({ groups: { area } })), "the kind group is optional")
-
-            const epicOnly = { appliesTo: ["epic"], cardinality: "exactlyOne", values: { epic: label("Kind: Epic") } }
-            rejects(github({ groups: { kind: epicOnly } }), /GitHub `kind` label group must apply to/)
-            const { scope: _scope, ...deliverablesOnly } = linearKindGroup()
-            rejects(github({ groups: { kind: deliverablesOnly } }), /GitHub `kind` label group must apply to/)
-            const { epic: _epic, ...withoutEpic } = kindLabels().groups.kind.values
-            rejects(
-                github({ groups: { kind: { ...kindLabels().groups.kind, values: withoutEpic } } }),
-                /values must be exactly/,
-            )
-            rejects(
-                github({ groups: { kind: { ...kindLabels().groups.kind, cardinality: "zeroOrOne" } } }),
-                /must be `exactlyOne`/,
-            )
-            const gate = {
-                appliesTo: ["deliverable"],
-                cardinality: "zeroOrMore",
-                values: { plan: label("Gate: Plan") },
-            }
-            assert.ok(loads(github({ groups: { gate } })))
-            rejects(
-                github({ groups: { gate: { ...gate, appliesTo: ["epic", "deliverable"] } } }),
-                /must apply only to "deliverable"/,
-            )
-            rejects(github({ groups: { gate: { ...gate, cardinality: "zeroOrOne" } } }), /must be `zeroOrMore`/)
-            rejects(
-                github({ groups: { gate: { ...gate, values: { ...gate.values, review: label("Gate: Review") } } } }),
-                /unknown gate "review"; known gates: "plan"/,
-            )
-            rejects(github({ groups: { Area: area } }), /invalid .*\.piton\/config\.toml/)
-            rejects(github({ groups: { area: { ...area, appliesTo: [] } } }), /invalid .*\.piton\/config\.toml/)
-            rejects(github({ groups: { area: { ...area, values: {} } } }), /invalid .*\.piton\/config\.toml/)
-            rejects(github({ groups: { area: { ...area, cardinality: "some" } } }), /invalid .*\.piton\/config\.toml/)
-            rejects(
-                github({
-                    groups: { area, other: { ...area, values: { fe: label("area: frontend") } } },
-                }),
-                /"area: frontend" is used more than once in the GitHub repository/,
-            )
-            rejects(
-                github({ groups: { area: { ...area, values: { fe: label("Area: Frontend", "x".repeat(101)) } } } }),
-                /description exceeds 100 characters/,
-            )
-
-            assert.ok(
-                loads(github({ groups: { area }, unmanaged: { keep: [{ name: "bug" }] }, retired: [{ name: "old" }] })),
-            )
-            rejects(
-                github({ groups: { area }, unmanaged: { keep: [{ name: "area: backend" }] } }),
-                /names a managed label/,
-            )
-            rejects(
-                github({ unmanaged: { keep: [{ name: "bug" }] }, retired: [{ name: "BUG" }] }),
-                /can't be both kept and retired/,
-            )
-            rejects(github({ retired: [{ name: "old" }, { name: "Old" }] }), /listed twice in retired/)
-
-            const linear = (labels: unknown) => ({ ...linearConfig(), labels })
-            assert.ok(loads(linear({ groups: { kind: linearKindGroup() } })))
-            rejects(
-                linear({ groups: { kind: { ...kindLabels().groups.kind, scope: "workspace" } } }),
-                /Linear `kind` label group must apply to exactly "deliverable"/,
-            )
-            const linearArea = { ...area, scope: "workspace" }
-            assert.ok(loads(linear({ groups: { area: { ...linearArea, nativeGroup: label("Area") } } })))
-            rejects(
-                linear({
-                    groups: {
-                        area: linearArea,
-                        perf: { ...linearArea, scope: "team", values: { perf: label("area: backend") } },
-                    },
-                }),
-                /used more than once in the Linear issue label catalog/,
-            )
-            assert.ok(
-                loads(
-                    linear({
-                        groups: {
-                            area: { ...linearArea, appliesTo: ["epic"] },
-                            perf: {
-                                ...linearArea,
-                                appliesTo: ["deliverable"],
-                                values: { fe: label("Area: Frontend") },
-                            },
-                        },
-                    }),
-                ),
-                "Project and issue labels are separate catalogs",
-            )
-            rejects(
-                linear({ groups: { area: { ...linearArea, values: { s: label("Status") } } } }),
-                /reserves the label name/,
-            )
-            rejects(
-                linear({ groups: { area: { ...linearArea, values: { p: label("planning") } } } }),
-                /"planning" is used more than once/,
-            )
-            assert.ok(
-                loads(
-                    linear({
-                        groups: { area: { ...linearArea, appliesTo: ["deliverable"] } },
-                        unmanaged: { keep: [{ name: "Area: Frontend", catalog: "project", scope: "team" }] },
-                    }),
-                ).provider === "linear",
-                "a kept Project label may share a name with a managed issue label",
-            )
-            rejects(
-                linear({
-                    groups: { area: { ...linearArea, appliesTo: ["deliverable"] } },
-                    unmanaged: { keep: [{ name: "Area: Frontend", catalog: "issue", scope: "team" }] },
-                }),
-                /names a managed label/,
-            )
-        } finally {
-            fs.rmSync(cwd, { recursive: true, force: true })
-        }
-    })
-
-    it("rejects the old label shapes through normal validation", () => {
-        const cwd = temporaryProject()
-        try {
-            const write = (tracker: unknown) => writeProjectConfig(cwd, { tracker, forge: forgeConfig() })
-            write({
-                ...config("project", false),
-                labels: { kind: { epic: "Kind: Epic", deliverableKinds: { feature: "Kind: Feature" } } },
-            })
-            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
-            const linear = linearConfig()
-            write({
-                ...linear,
-                phase: { ...linear.phase, issues: { scope: "workspace", group: "Phase", values: phaseValues } },
-            })
-            assert.throws(() => loadTracker(cwd), /invalid .*\.piton\/config\.toml/)
+            assert.throws(() => loadTracker(cwd), /tracker\.fields\.type: unknown field/)
+            // The labels' old shape is an unknown key.
+            write({ ...valid, labels: { kind: { epic: "Kind: Epic" } } })
+            assert.throws(() => loadTracker(cwd), /tracker\.labels\.kind: unknown field/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }

@@ -9,6 +9,8 @@ struct NewSessionView: View {
     @State private var prompt = ""
     @State private var host = false
     @State private var busy = false
+    /// The repository's trust question, while it's being asked.
+    @State private var trust: TrustNeeded?
 
     var body: some View {
         NavigationStack {
@@ -37,17 +39,96 @@ struct NewSessionView: View {
                     Button("Cancel") { done(nil) }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Start") {
+                    Button("Start") { Task { await start() } }
+                        .disabled(workspace.isEmpty || busy)
+                }
+            }
+            .sheet(item: $trust) { needed in
+                TrustQuestion(needed: needed) { decision in
+                    trust = nil
+                    guard let decision else { return }
+                    Task {
                         busy = true
-                        Task {
-                            let key = await store.startSession(
-                                workspace: workspace, mode: host ? .host : .sandbox,
-                                prompt: prompt.isEmpty ? nil : prompt)
-                            busy = false
-                            if key != nil { done(key) }
+                        _ = await store.decideTrust(workspace: workspace, decision, grants: needed.grants)
+                        // Recorded: this starts the session. Refused (the grants changed since it was shown): this
+                        // asks again with the current grants.
+                        await start()
+                    }
+                }
+            }
+        }
+    }
+
+    private func start() async {
+        busy = true
+        let outcome = await store.startSession(
+            workspace: workspace, mode: host ? .host : .sandbox, prompt: prompt.isEmpty ? nil : prompt)
+        busy = false
+        switch outcome {
+        case .started(let info): done(info.key)
+        case .trustNeeded(let needed): trust = needed
+        case nil: break
+        }
+    }
+}
+
+extension TrustNeeded: Identifiable {
+    public var id: String { source + grants.joined(separator: "\n") }
+}
+
+/// Asks whether to trust a repository before its first session: its committed grants (new ones marked) and what pi
+/// would load from it. `answer` gets the decision, or nil to cancel.
+struct TrustQuestion: View {
+    let needed: TrustNeeded
+    let answer: (TrustDecision?) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text(
+                        "Trusting it applies its committed grants and lets pi load its project files. Its restrictions apply either way."
+                    )
+                    .font(.callout)
+                }
+                if !needed.grants.isEmpty {
+                    Section("Committed grants") {
+                        ForEach(needed.grants, id: \.self) { grant in
+                            HStack {
+                                Text(grant).font(.caption.monospaced())
+                                if needed.isNew(grant) {
+                                    Spacer()
+                                    Text("new").font(.caption2).foregroundStyle(.orange)
+                                }
+                            }
                         }
                     }
-                    .disabled(workspace.isEmpty || busy)
+                }
+                if !needed.resources.pi.isEmpty {
+                    Section {
+                        ForEach(needed.resources.pi, id: \.self) { Text($0).font(.caption.monospaced()) }
+                    } header: {
+                        Text("pi's project files")
+                    } footer: {
+                        Text("Extensions run code in pi's process.")
+                    }
+                }
+                if !needed.resources.mcpServers.isEmpty {
+                    Section("MCP servers") {
+                        ForEach(needed.resources.mcpServers, id: \.self) { Text($0) }
+                    }
+                }
+            }
+            .navigationTitle("Trust \(URL(fileURLWithPath: needed.source).lastPathComponent)?")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { answer(nil) }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Trust") { answer(.trusted) }
+                }
+                ToolbarItem(placement: .destructiveAction) {
+                    Button("Don't Trust") { answer(.declined) }
                 }
             }
         }

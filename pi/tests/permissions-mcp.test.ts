@@ -232,7 +232,7 @@ function createContext(cwd: string, approval = true) {
     return { ctx, notifications, widgets, aborts: () => aborts }
 }
 
-/** A project whose `[permissions]` holds `content` (the extension's JSON); text that isn't JSON is written as a broken
+/** A project whose `[tools.permissions]` holds `content` (the extension's JSON); text that isn't JSON is written as a broken
  * config.toml. */
 function createProjectSettings(content: string) {
     const cwd = mkdtempSync(join(tmpdir(), "permission-mcp-"))
@@ -241,7 +241,7 @@ function createProjectSettings(content: string) {
         rules = JSON.parse(content) as PermissionsFixture
     } catch {
         mkdirSync(join(cwd, ".piton"))
-        writeFileSync(join(cwd, ".piton", "config.toml"), "[permissions\n")
+        writeFileSync(join(cwd, ".piton", "config.toml"), "[tools.permissions\n")
     }
     if (rules) writePermissions(cwd, rules)
     return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) }

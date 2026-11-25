@@ -39,7 +39,7 @@ function sweepAway() {
 }
 
 /// A scratch folder: a workspace (`ws/`, a Git checkout), pi's agent directory with Piton's pi package, the daemon's
-/// state folder, and the global configuration (sandbox attach mode, `[permissions] default_mode = "allow"` so the
+/// state folder, and the global configuration (sandbox attach mode, `[tools.permissions] default_mode = "allow"` so the
 /// permissions extension doesn't ask before each call). `settings` adds to the agent directory's `settings.json`;
 /// `files` writes workspace files (relative path to contents), such as `.piton/config.local.toml`.
 export function setup(prefix, { settings = {}, files = {} } = {}) {
@@ -58,14 +58,13 @@ export function setup(prefix, { settings = {}, files = {} } = {}) {
         daemon: {
             socket: join(dir, "state/piton.sock"),
             log: join(dir, "piton.log"),
-            tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tools: { mise: { enabled: false } },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+            integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
+            stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
-        project: { permissions: { default_mode: "allow" } },
+        host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s" },
+        project: { tools: { permissions: { default_mode: "allow" } } },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
     return { dir, ws, agent, config, env };
@@ -79,6 +78,16 @@ export async function startDaemon(ctx) {
     assert.ok(err.includes("listening"), "daemon didn't start: " + err);
     d.exited = new Promise((r) => d.on("exit", (code) => r(code)));
     return d;
+}
+
+/// `piton trust allow|deny` for the workspace: a repository with grants or pi project files needs a decision first.
+export function trust(ctx, decision = "allow") {
+    return new Promise((res, rej) => {
+        const p = spawn(piton, ["trust", decision, ctx.ws], { env: ctx.env, stdio: ["ignore", "pipe", "pipe"] });
+        let err = "";
+        p.stderr.on("data", (d) => (err += d));
+        p.on("exit", (code) => (code === 0 ? res() : rej(new Error(`piton trust ${decision}: ${err}`))));
+    });
 }
 
 /// `piton attach` in the workspace. `onRecord` sees every record as it arrives (to answer questions as they come).

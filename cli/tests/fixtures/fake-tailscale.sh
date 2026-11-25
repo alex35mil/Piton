@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fake `tailscale` CLI for tests (set as `[tools.tailscale] command`). `status --json` reports this "Mac" as node `self-node` of
+# Fake `tailscale` CLI for tests (set as `[integrations.tailscale] command`). `status --json` reports this "Mac" as node `self-node` of
 # user 1 on 127.0.0.1, so the daemon listens on loopback; `whois --json <addr>` prints the file named by
 # $PITON_FAKE_WHOIS, so a test decides who's connecting. While the file named by $PITON_FAKE_STOPPED exists, Tailscale
 # reports itself stopped (as before it's up at login).

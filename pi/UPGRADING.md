@@ -1,5 +1,11 @@
 # Upgrading
 
+## Tool permissions move to `[tools.permissions]`
+
+The tool-call rules move from `[permissions]` to `[tools.permissions]` in every `config.toml` and `config.local.toml`: `[permissions.host]` becomes `[tools.permissions.host]` and `[permissions.sandbox]` becomes `[tools.permissions.sandbox]`. Dotted keys move the same way (`permissions.allow = [...]` becomes `tools.permissions.allow = [...]`). Keys, values, and how rules combine don't change. A leftover `[permissions]` is an unknown key and makes the file invalid.
+
+`piton config resolve` now reports the rules under `tools`, so update `piton` and the pi package together. `piton config get permissions` is now `piton config get tools`.
+
 ## Epic Task issue processing orders child issues
 
 `plan_epic_task_issues` now takes `children` as `{ provider, issues }`. GitHub issues are listed in `get_sub_issues` order, each with its numeric `issueId`; Linear issues drop `onBoard` and `closed`. Once every Task is settled, GitHub Epics also get `reorder` steps (`sub_issue_write` `reprioritize`) that put the sub-issues in the plan's Task order. If your permission settings prompt for `sub_issue_write`, expect one prompt per reorder.
@@ -22,7 +28,7 @@ Projects without a `kind` group are unaffected. No `.piton/.local` artifact migr
 The package no longer reads configuration itself: it asks `piton config resolve` (the daemon sets `PITON_BIN`; outside Piton, `piton` must be on `PATH`). Earlier files (`.project/`, `.agents/*.json`, `.nono.json`, `.piton.toml`, `.piton/`'s separate JSON files, and Piton's files in pi's agent folder) are no longer read; move their settings into these tables by hand.
 
 - **Each folder** (a repository's `.piton/`, a parent folder's, and the global folder `$XDG_CONFIG_HOME/piton/`, default `~/.config/piton/`) has one `config.toml` and a `config.local.toml` that isn't committed. `mcp.json` and `policies.md` stay separate.
-- **The global folder also has** `config.host.toml` (with `config.host.local.toml`) for how the daemon runs, this host's preferences, and `[development]`, and `config.client.toml` for the apps' preferences.
+- **The global folder also has** `config.host.toml` (with `config.host.local.toml`) for how the daemon runs, this host's preferences, and `[debugging]`, and `config.client.toml` for the apps' preferences.
 - **Keys are snake_case:** `default_mode`, `mcp_server`, `owner_type`, `in_progress`, `self_review`, `api_key`. Label keys you chose, like `pi-workflows`, stay as written.
 - **Where keys may go:** `web_search.api_key` only in a `config.local.toml`; `branches.username` only in a project's `config.local.toml` (either file in the global folder); `[tracker]` and `[forge]` only in a project or parent folder.
 - **Removed:** `[permissions.keybindings]`. Use `/permissions-toggle-auto-accept`.

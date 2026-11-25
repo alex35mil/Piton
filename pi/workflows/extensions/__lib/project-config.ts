@@ -102,7 +102,7 @@ function currentInstallation(): Installation {
 
 /**
  * Whether a finished workflow ends with session analysis: only in a development install, where it's on unless the
- * host file's `[development] session_analysis = false` turns it off.
+ * host file's `[debugging] session_analysis = false` turns it off.
  */
 export function loadSessionAnalysis(): SessionAnalysis {
     const install = currentInstallation()
@@ -110,7 +110,7 @@ export function loadSessionAnalysis(): SessionAnalysis {
         case "app":
             return "disabled"
         case "development":
-            return section(resolveGlobalSettings().development).session_analysis === false ? "disabled" : "enabled"
+            return section(resolveGlobalSettings().debugging).session_analysis === false ? "disabled" : "enabled"
     }
 }
 

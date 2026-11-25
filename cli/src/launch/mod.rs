@@ -46,9 +46,9 @@ pub enum LaunchError {
         link: PathBuf,
         checkout: PathBuf,
     },
-    /// A tool the launch needs is enabled but not installed.
+    /// An integration the launch needs is enabled but not installed.
     #[error(transparent)]
-    Tool(#[from] crate::tools::Unavailable),
+    Integration(#[from] crate::integrations::Unavailable),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -57,6 +57,11 @@ pub enum LaunchError {
     Sandbox(#[from] crate::launch::sandbox::SandboxError),
     #[error(transparent)]
     Fnox(#[from] fnox::FnoxError),
+    /// The user must decide whether to trust the repository first: the client asks, records it, and launches again.
+    #[error("{0}")]
+    TrustNeeded(Box<crate::trust::TrustNeeded>),
+    #[error("state database: {0}")]
+    State(crate::state::StateError),
 }
 
 /// Which session pi starts with.
@@ -251,7 +256,7 @@ fn launch_warnings(resolution: &sandbox::Resolution, env: &Env, proxy: Option<&f
 /// Builds a launch in `workspace` in `mode`.
 pub async fn prepare(
     config: &DaemonConfig,
-    tools: &crate::tools::Tools,
+    tools: &crate::integrations::Integrations,
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
@@ -272,12 +277,12 @@ pub async fn prepare(
 /// The credential proxy for a launch in `workspace`, when fnox is used and a `[proxy]` applies there; pi's `FNOX_*`
 /// variables then come from the daemon's base environment only.
 async fn proxy_for(
-    tools: &crate::tools::Tools,
+    integrations: &crate::integrations::Integrations,
     base: &Env,
     workspace: &Path,
     env: &mut Env,
 ) -> Result<Option<fnox::Proxy>, LaunchError> {
-    let Some(program) = tools.fnox.optional()? else {
+    let Some(program) = integrations.fnox.optional()? else {
         return Ok(None);
     };
     fnox::strip_workspace_variables(env, base);
@@ -288,7 +293,7 @@ async fn proxy_for(
 /// run on the host (a host session trusts the project by choice), then Piton's own variables.
 async fn host_env(
     config: &DaemonConfig,
-    tools: &crate::tools::Tools,
+    tools: &crate::integrations::Integrations,
     base: &Env,
     workspace: &Path,
 ) -> Result<Env, LaunchError> {
@@ -303,7 +308,7 @@ async fn host_env(
 /// the policy can read the keychain.
 pub async fn prepare_sandbox(
     config: &DaemonConfig,
-    all_tools: &crate::tools::Tools,
+    all_tools: &crate::integrations::Integrations,
     resolved: &LaunchConfig,
     base: &Env,
     workspace: &Path,
@@ -431,18 +436,36 @@ fn with_piton_vars(config: &DaemonConfig, mut env: Env, mode: LaunchMode) -> Env
     env
 }
 
-/// The launch's configuration: `[sandbox]` and `[workers]` of the workspace's chain, refusing them when they're invalid.
-/// The pi package checks its own parts when pi starts.
-pub fn resolve_config(config: &DaemonConfig, workspace: &Workspace) -> Result<LaunchConfig, LaunchError> {
-    Ok(crate::config::resolve_launch(workspace, &config.paths)?)
+/// The launch's configuration: `[sandbox]` and `[workers]` of the workspace's chain, the repository's committed grants
+/// kept as `filter` says, refusing them when they're invalid. The pi package checks its own parts when pi starts.
+pub fn resolve_config(
+    config: &DaemonConfig,
+    workspace: &Workspace,
+    filter: &crate::config::GrantFilter,
+) -> Result<LaunchConfig, LaunchError> {
+    Ok(crate::config::resolve_launch(workspace, &config.paths, filter)?)
 }
 
 /// The full argument vector for pi in `mode`. A sandboxed pi starts through `helper sandbox-exec` (this binary), which
-/// applies the policy in [`sandbox::POLICY_ENV`] and then runs pi.
-pub fn command_line(config: &DaemonConfig, mode: LaunchMode, session: &SessionArg, helper: &Path) -> Vec<String> {
+/// applies the policy in [`sandbox::POLICY_ENV`] and then runs pi. pi's project trust is Piton's decision, never asked
+/// or saved by pi: `--approve` or `--no-approve` (after the user's own arguments, so it wins).
+pub fn command_line(
+    config: &DaemonConfig,
+    mode: LaunchMode,
+    session: &SessionArg,
+    project_trusted: bool,
+    helper: &Path,
+) -> Vec<String> {
     let mut pi: Vec<String> = config.pi.command.clone();
     pi.extend(["--mode".into(), "rpc".into()]);
     pi.extend(config.pi.args.iter().cloned());
+    pi.push(
+        match project_trusted {
+            true => "--approve",
+            false => "--no-approve",
+        }
+        .into(),
+    );
     match session {
         SessionArg::New => {}
         SessionArg::Resume(file) => {
@@ -567,6 +590,7 @@ mod tests {
             &config,
             LaunchMode::Sandbox,
             &SessionArg::Resume("/s.jsonl".into()),
+            false,
             Path::new("/app/piton"),
         );
         assert_eq!(
@@ -578,6 +602,7 @@ mod tests {
                 "pi",
                 "--mode",
                 "rpc",
+                "--no-approve",
                 "--session",
                 "/s.jsonl"
             ]
@@ -658,6 +683,7 @@ mod tests {
             },
             claude_code,
             silence: Vec::new(),
+            ignored: Vec::new(),
         }
     }
 
@@ -709,7 +735,7 @@ mod tests {
         let granted = ClaudeCodeFolder::Granted("/h/.config/pi/claude".into());
         let token: Env = [(CLAUDE_CODE_TOKEN.to_string(), "sk-ant-oat01-x".to_string())].into();
         let proxy = |variables: Vec<String>| fnox::Proxy {
-            program: crate::tools::Program {
+            program: crate::integrations::Program {
                 program: "fnox".into(),
                 args: vec![],
             },
@@ -794,8 +820,14 @@ mod tests {
     #[test]
     fn host_runs_pi_directly() {
         let config = DaemonConfig::for_tests();
-        let argv = command_line(&config, LaunchMode::Host, &SessionArg::New, Path::new("/app/piton"));
-        assert_eq!(argv, ["pi", "--mode", "rpc"]);
+        let argv = command_line(
+            &config,
+            LaunchMode::Host,
+            &SessionArg::New,
+            true,
+            Path::new("/app/piton"),
+        );
+        assert_eq!(argv, ["pi", "--mode", "rpc", "--approve"]);
     }
 
     #[test]

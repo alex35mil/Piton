@@ -130,16 +130,31 @@ pub enum WorkerRefusal {
     ProtectedUpdate(Blocked),
     /// Fast-forwarding the source changes protected files, and the user's `piton(git-pull)` deny rule refuses it.
     #[error(
-        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [permissions] refuses \
-         it; update the source by hand",
+        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [tools.permissions] \
+         refuses it; update the source by hand",
         files.join(", ")
     )]
     UpdateDenied { checkout: PathBuf, files: Vec<String> },
-    /// A tool workers need (mise, for trust) is enabled but not installed.
-    #[error(transparent)]
-    ToolUnavailable(crate::tools::Unavailable),
+    /// An integration workers need (mise, for trust) is enabled but not installed. `message` names the setting, so a
+    /// client shows it as is.
+    #[error("{message}")]
+    IntegrationUnavailable {
+        integration: crate::integrations::Integration,
+        program: String,
+        message: String,
+    },
     #[error("{message}")]
     Failed { message: String },
+}
+
+impl WorkerRefusal {
+    pub fn integration_unavailable(unavailable: crate::integrations::Unavailable) -> Self {
+        Self::IntegrationUnavailable {
+            message: unavailable.to_string(),
+            integration: unavailable.integration,
+            program: unavailable.program,
+        }
+    }
 }
 
 impl From<ProjectError> for WorkerRefusal {
@@ -165,19 +180,23 @@ impl From<UpdateError> for WorkerRefusal {
 type Result<T> = std::result::Result<T, WorkerRefusal>;
 
 /// What the source checkout's permission rules say about an update that changes protected files. The update runs on
-/// the host, so the host's rules apply: `[permissions]` and `[permissions.host]`.
-fn pull_rule(source: &Path, paths: &crate::config::Paths) -> Result<source::PullRule> {
+/// the host, so the host's rules apply: `[tools.permissions]` and `[tools.permissions.host]`.
+fn pull_rule(
+    source: &Path,
+    paths: &crate::config::Paths,
+    filter: &crate::config::GrantFilter,
+) -> Result<source::PullRule> {
     let workspace = project::Workspace {
         path: source.to_path_buf(),
         checkout: source.to_path_buf(),
         relation: Relation::Source,
     };
-    let resolved = crate::config::resolve(&workspace, paths, crate::config::Runtime::Host)
+    let resolved = crate::config::resolve(&workspace, paths, crate::config::Runtime::Host, filter)
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
-    let permissions = resolved
-        .permissions
+    let tools = resolved
+        .tools
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
-    Ok(source::PullRule::of(&permissions.merged))
+    Ok(source::PullRule::of(&tools.permissions.merged))
 }
 
 fn failed(message: impl Into<String>) -> WorkerRefusal {
@@ -220,6 +239,7 @@ pub fn create(
     request: &CreateRequest,
     mise: Option<&Mise>,
     paths: &crate::config::Paths,
+    filter: &crate::config::GrantFilter,
     git: &dyn GitRunner,
 ) -> Result<WorkerInfo> {
     let source = source_of(&request.from)?;
@@ -245,13 +265,13 @@ pub fn create(
         checkout: source.clone(),
         relation: Relation::Source,
     };
-    let workers = crate::config::resolve_launch(&workspace, paths)
+    let workers = crate::config::resolve_launch(&workspace, paths, filter)
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?
         .workers;
     let skip_list = workers.skip;
 
     let branch = ready_branch(&source)?;
-    let rule = pull_rule(&source, paths)?;
+    let rule = pull_rule(&source, paths, filter)?;
     let plan = source::plan(git, &source, &branch, (&request.update).into(), rule)?;
     source::apply(git, &source, &plan)?;
 
@@ -514,6 +534,7 @@ pub fn plan_removal(
     update: &DeleteUpdate,
     git: source::SourceGit<'_>,
     paths: &crate::config::Paths,
+    filter: &crate::config::GrantFilter,
 ) -> Result<Removal> {
     if !project::is_worker_layout(&worker.path, &worker.source) || !worker.path.join(".git").is_dir() {
         return Err(WorkerRefusal::NotAWorker {
@@ -530,7 +551,7 @@ pub fn plan_removal(
         (Err(e), _) => stale(e.to_string()),
         (Ok(_), source::SourceGit::Unavailable(why)) => stale(why),
         (Ok(branch), source::SourceGit::Ready(git)) => {
-            let rule = pull_rule(&worker.source, paths)?;
+            let rule = pull_rule(&worker.source, paths, filter)?;
             match source::plan(git, &worker.source, &branch, update.into(), rule) {
                 Ok(plan) => AfterRemoval::Update(plan),
                 Err(UpdateError::Blocked(blocked)) => return Err(WorkerRefusal::ProtectedUpdate(*blocked)),
@@ -765,7 +786,13 @@ mod tests {
         mise: Option<&Mise>,
         paths: &crate::config::Paths,
     ) -> Result<WorkerInfo> {
-        create(request, mise, paths, &Recorder::default())
+        create(
+            request,
+            mise,
+            paths,
+            &crate::config::GrantFilter::All,
+            &Recorder::default(),
+        )
     }
 
     /// Plans and carries out a deletion with Git on the host, the way the daemon does.
@@ -781,7 +808,14 @@ mod tests {
     ) -> Result<Option<String>> {
         let git = Recorder::default();
         let p = paths(worker.source.parent().unwrap());
-        let removal = plan_removal(worker.clone(), force, update, source::SourceGit::Ready(&git), &p)?;
+        let removal = plan_removal(
+            worker.clone(),
+            force,
+            update,
+            source::SourceGit::Ready(&git),
+            &p,
+            &crate::config::GrantFilter::All,
+        )?;
         remove(&removal, mise, source::SourceGit::Ready(&git))
     }
 
@@ -954,7 +988,13 @@ mod tests {
         let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
         let target = push_upstream(&source, ".piton/config.toml");
         let git = Recorder::default();
-        let blocked = match create(&request(&source, "one", CreateUpdate::Ask), None, &p, &git) {
+        let blocked = match create(
+            &request(&source, "one", CreateUpdate::Ask),
+            None,
+            &p,
+            &crate::config::GrantFilter::All,
+            &git,
+        ) {
             Err(WorkerRefusal::ProtectedUpdate(blocked)) => blocked,
             other => panic!("expected ProtectedUpdate, got {other:?}"),
         };
@@ -971,19 +1011,33 @@ mod tests {
         assert_eq!(json["target"], target.as_str());
 
         let approved = CreateUpdate::Approve { target: target.clone() };
-        create(&request(&source, "one", approved), None, &p, &git).unwrap();
+        create(
+            &request(&source, "one", approved),
+            None,
+            &p,
+            &crate::config::GrantFilter::All,
+            &git,
+        )
+        .unwrap();
         assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), target.as_str());
         assert_eq!(git.ran("merge"), 1, "the merge runs through the sandboxed runner");
         assert!(git_ok(&source, &["status", "--porcelain"]).unwrap().is_empty());
 
         let ordinary = push_upstream(&source, "src/lib.rs");
         let git = Recorder::default();
-        create(&request(&source, "two", CreateUpdate::Ask), None, &p, &git).unwrap();
+        create(
+            &request(&source, "two", CreateUpdate::Ask),
+            None,
+            &p,
+            &crate::config::GrantFilter::All,
+            &git,
+        )
+        .unwrap();
         assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), ordinary.as_str());
         assert_eq!((git.ran("fetch"), git.ran("merge")), (1, 1));
     }
 
-    /// `piton(git-pull)` in the source's `[permissions]` answers the question before anyone is asked: `allow` applies
+    /// `piton(git-pull)` in the source's `[tools.permissions]` answers the question before anyone is asked: `allow` applies
     /// the protected files; `deny` refuses creation and leaves the source as it is on deletion; `ask` asks.
     #[test]
     fn the_git_pull_rule_decides_first() {
@@ -992,7 +1046,7 @@ mod tests {
         // As a project's setup keeps it: local configuration outside Git.
         std::fs::write(source.join(".git/info/exclude"), "/.piton/*.local.*\n").unwrap();
         let rule = |list: &str| {
-            let text = format!("[permissions]\n{list} = [\"piton(git-pull)\"]\n");
+            let text = format!("[tools.permissions]\n{list} = [\"piton(git-pull)\"]\n");
             std::fs::write(source.join(".piton/config.local.toml"), text).unwrap();
         };
         let one = create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p).unwrap();
@@ -1004,6 +1058,7 @@ mod tests {
             &request(&source, "two", CreateUpdate::Ask),
             None,
             &p,
+            &crate::config::GrantFilter::All,
             &Recorder::default(),
         ) {
             Err(WorkerRefusal::UpdateDenied { files, .. }) => assert_eq!(files, [".piton/config.toml"]),
@@ -1024,7 +1079,14 @@ mod tests {
 
         rule("allow");
         let git = Recorder::default();
-        create(&request(&source, "three", CreateUpdate::Ask), None, &p, &git).unwrap();
+        create(
+            &request(&source, "three", CreateUpdate::Ask),
+            None,
+            &p,
+            &crate::config::GrantFilter::All,
+            &git,
+        )
+        .unwrap();
         assert_ne!(
             git_ok(&source, &["rev-parse", "HEAD"]).unwrap(),
             before,
@@ -1038,6 +1100,7 @@ mod tests {
                 &request(&source, "four", CreateUpdate::Ask),
                 None,
                 &p,
+                &crate::config::GrantFilter::All,
                 &Recorder::default()
             ),
             Err(WorkerRefusal::ProtectedUpdate(_))
@@ -1104,7 +1167,15 @@ mod tests {
         let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
         push_upstream(&source, "src/lib.rs");
         let unavailable = || source::SourceGit::Unavailable("mise env failed".into());
-        let removal = plan_removal(one.clone(), false, &DeleteUpdate::Ask, unavailable(), &p).unwrap();
+        let removal = plan_removal(
+            one.clone(),
+            false,
+            &DeleteUpdate::Ask,
+            unavailable(),
+            &p,
+            &crate::config::GrantFilter::All,
+        )
+        .unwrap();
         let warning = remove(&removal, None, unavailable()).unwrap();
         assert!(warning.is_some_and(|w| w.contains("mise env failed")));
         assert!(!one.path.exists());
@@ -1317,5 +1388,21 @@ mod tests {
         git(w, &["reset", "-q", "--", "README"]);
         assert_eq!(pr_review(w), changed);
         assert!(uncommitted(&leftovers(w)));
+    }
+
+    /// An integration a worker needs that isn't installed: clients get the daemon's message, which names the setting.
+    #[test]
+    fn an_unavailable_integration_carries_its_message() {
+        let refusal = WorkerRefusal::integration_unavailable(crate::integrations::Unavailable {
+            integration: crate::integrations::Integration::Mise,
+            program: "mise".into(),
+        });
+        let json = serde_json::to_value(&refusal).unwrap();
+        assert_eq!(json["kind"], "integration_unavailable");
+        assert_eq!(json["integration"], "mise");
+        assert_eq!(json["program"], "mise");
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("[integrations.mise] enabled = true"), "{message}");
+        assert_eq!(refusal.to_string(), message);
     }
 }

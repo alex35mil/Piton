@@ -4,7 +4,7 @@ presets = ["swift", "rust"]
 [workers]
 skip = ["apps/.build/index-build"]
 
-[permissions]
+[tools.permissions]
 deny = [
     "read(*mise.local.toml)"
 ]
