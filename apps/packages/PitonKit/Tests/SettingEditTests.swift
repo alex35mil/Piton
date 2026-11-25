@@ -5,7 +5,7 @@ import Testing
 
 @Test func emptyTextResetsEveryType() {
     let types: [SettingValueType] = [
-        .bool, .text, .textList, .integer, .choice(options: ["a"]), .choiceList(options: ["a"]),
+        .bool, .text, .textList, .integer, .duration(never: true), .choice(options: ["a"]), .choiceList(options: ["a"]),
         .map(values: ["allow", "deny"]),
     ]
     for type in types {
@@ -25,6 +25,19 @@ import Testing
     #expect(SettingValueType.bool.parse("true") == .bool(true))
     #expect(SettingValueType.choice(options: ["info", "debug"]).parse("debug") == .string("debug"))
     #expect(SettingValueType.choice(options: ["info", "debug"]).parse("loud") == nil)
+}
+
+@Test func durationsParseInTheHostFilesGrammar() {
+    let duration = SettingValueType.duration(never: false)
+    for text in ["500ms", "10s", " 10m ", "1h", "05s"] {
+        #expect(duration.parse(text) == .string(text.trimmingCharacters(in: .whitespaces)), "\(text)")
+    }
+    for text in ["10", "s", "0s", "00m", "1m30s", "1.5s", "-1s", "10 s", "10S", "10d", "never"] {
+        #expect(duration.parse(text) == nil, "\(text)")
+    }
+    #expect(SettingValueType.duration(never: true).parse("never") == .string("never"))
+    #expect(SettingValueType.duration(never: true).parse("0s") == nil)
+    #expect(duration.text(.string("10m")) == "10m")
 }
 
 @Test func valuesShowAsEditableText() {

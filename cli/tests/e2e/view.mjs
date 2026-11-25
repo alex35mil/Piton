@@ -29,13 +29,12 @@ function setup(options = {}) {
         daemon: {
             socket,
             log: join(dir, "piton.log"),
-            tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tools: { mise: { enabled: false } },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+            integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
+            stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "host", empty_grace_ms: 60000, ...(options.roots === false ? {} : { roots: [root] }) },
+        host: { default_attach_mode: "host", stop_empty_session_after: "60s", ...(options.roots === false ? {} : { roots: [root] }) },
     });
     return { dir, root, ws, socket, config, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
 }
@@ -539,12 +538,13 @@ const tests = {
         assert.deepEqual(setting(moved.state, "host", "roots").value, roots);
 
         // A key that needs a restart is written, and waits.
-        const port = await set("host", "tailnet.port", 9123);
-        assert.deepEqual(setting(port.state, "host", "tailnet.port").applies, { kind: "restart", pending: true });
+        const port = await set("host", "integrations.tailscale.port", 9123);
+        assert.deepEqual(setting(port.state, "host", "integrations.tailscale.port").applies, { kind: "restart", pending: true });
 
         // Refused before anything is written.
         assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "socket", value: "/elsewhere" })).ok, false);
         assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "roots", value: "not a list" })).ok, false);
+        assert.equal((await c.reqRaw("settings.set", { scope: "host", key: "stop_empty_session_after", value: 61000 })).ok, false);
         assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "roots", value: [] })).ok, false);
         // The client file has no local one: a device keeps its own value in its app.
         assert.equal((await c.reqRaw("settings.set", { scope: "client", key: "text_font", value: "x", local: true })).ok, false);
@@ -558,8 +558,8 @@ const tests = {
         await daemonLine((s) => s.settings_error === null);
 
         // Changes to two files at once: both kept, each in its own file.
-        await Promise.all([set("host", "empty_grace_ms", 61000), set("client", "text_font", "Iosevka")]);
-        assert.match(readFileSync(hostFile, "utf8"), /empty_grace_ms = 61000/);
+        await Promise.all([set("host", "stop_empty_session_after", "61s"), set("client", "text_font", "Iosevka")]);
+        assert.match(readFileSync(hostFile, "utf8"), /stop_empty_session_after = "61s"/);
         assert.match(readFileSync(clientFile, "utf8"), /text_font = "Iosevka"/);
 
         // A file linked into a dotfiles folder after the daemon started: edits there apply too, and app writes keep

@@ -178,7 +178,7 @@ checkout's `pi/`, next to `cli/`). Then:
   workflow problems. It costs tokens; turn it off in the global `config.host.toml`:
 
   ```toml
-  [development]
+  [debugging]
   session_analysis = false
   ```
 

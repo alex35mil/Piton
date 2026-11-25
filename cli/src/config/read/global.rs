@@ -15,7 +15,7 @@ use crate::config::{
     model::{
         client::ClientFile,
         daemon::DaemonConfig,
-        host::{DevelopmentTable, HostFile},
+        host::{DebuggingTable, HostFile},
         level::LevelKind,
         paths::{Paths, Scope},
     },
@@ -117,12 +117,12 @@ pub fn global_candidates(paths: &Paths) -> Vec<PathBuf> {
 }
 
 /// What `piton config resolve --global` prints: the global tier's settings the pi package reads, which never depend on
-/// a project. Today `[development]` from the host file.
+/// a project. Today `[debugging]` from the host file.
 #[derive(Debug, Serialize)]
 pub struct GlobalResolved {
     pub global: PathBuf,
     #[serde(serialize_with = "section")]
-    pub development: Section<DevelopmentTable>,
+    pub debugging: Section<DebuggingTable>,
     /// The host file's candidates: clients cache the result until one of them changes.
     pub watch: Vec<PathBuf>,
 }
@@ -131,7 +131,7 @@ pub fn resolve_global(paths: &Paths) -> GlobalResolved {
     let host_files = paths.global_files(Scope::Host);
     GlobalResolved {
         global: paths.global.clone(),
-        development: host(paths).map(|host| host.development),
+        debugging: host(paths).map(|host| host.debugging),
         watch: host_files.paths().map(|(_, path)| path.to_path_buf()).collect(),
     }
 }
@@ -161,7 +161,7 @@ pub fn daemon_lenient(config_home: Option<&Path>) -> DaemonConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::launch::LaunchMode;
+    use crate::{config::ConfigDuration, launch::LaunchMode};
 
     #[test]
     fn the_host_file_overrides_defaults() {
@@ -170,23 +170,31 @@ mod tests {
         std::fs::create_dir_all(&global).unwrap();
         std::fs::write(
             global.join("config.host.toml"),
-            "socket = \"/tmp/s.sock\"\nroots = [\"~/p\"]\ndefault_attach_mode = \"host\"\nlogging = \"debug\"\n[stop]\ngrace_ms = 5\n",
+            "socket = \"/tmp/s.sock\"\nroots = [\"~/p\"]\ndefault_attach_mode = \"host\"\n[stop]\nterminate_after = \"5ms\"\n[debugging]\nlog_level = \"debug\"\n",
         )
         .unwrap();
         std::fs::write(
             global.join("config.host.local.toml"),
-            "keep_awake = false\n[stop]\nterm_grace_ms = 7\n",
+            "keep_awake = false\n[stop]\nkill_after = \"7ms\"\n",
         )
         .unwrap();
         let config = daemon(Some(&global)).unwrap();
         assert_eq!(config.socket, PathBuf::from("/tmp/s.sock"));
-        assert_eq!((config.stop.grace_ms, config.stop.term_grace_ms), (5, 7));
+        assert_eq!(
+            (config.stop.terminate_after, config.stop.kill_after),
+            (ConfigDuration::from_millis(5), ConfigDuration::from_millis(7))
+        );
         assert_eq!(config.roots, ["~/p"]);
         assert_eq!(config.default_attach_mode, LaunchMode::Host);
         assert_eq!(config.logging.mode, crate::logging::Mode::Debug);
         assert!(!config.keep_awake);
         assert_eq!(config.pi.command, ["pi"]);
-        assert_eq!(config.empty_grace_ms, 10_000);
+        assert_eq!(config.stop_empty_session_after, ConfigDuration::from_millis(10_000));
+        assert_eq!(
+            config.approval_timeout,
+            crate::config::Timeout::After(ConfigDuration::from_millis(600_000))
+        );
+        assert_eq!(config.integrations.tailnet.port, 7357);
     }
 
     /// Each global file stands alone: a broken client file or global `config.toml` doesn't stop the daemon.
@@ -197,12 +205,15 @@ mod tests {
         std::fs::create_dir_all(&global).unwrap();
         std::fs::write(global.join("config.client.toml"), "text_font = 1\n").unwrap();
         std::fs::write(global.join("config.toml"), "[workers]\nskip = [\"../x\"]\n").unwrap();
-        std::fs::write(global.join("config.host.toml"), "[stop]\ngrace_ms = 5\n").unwrap();
-        assert_eq!(daemon(Some(&global)).unwrap().stop.grace_ms, 5);
+        std::fs::write(global.join("config.host.toml"), "[stop]\nterminate_after = \"5s\"\n").unwrap();
+        assert_eq!(
+            daemon(Some(&global)).unwrap().stop.terminate_after,
+            ConfigDuration::from_millis(5_000)
+        );
         let all = super::global(&paths(Some(&global)));
         assert!(all.client.is_err());
         assert!(all.project.unwrap().workers.is_err());
-        std::fs::write(global.join("config.host.toml"), "[tailnet]\nprot = 1\n").unwrap();
+        std::fs::write(global.join("config.host.toml"), "[integrations.tailscale]\nprot = 1\n").unwrap();
         assert!(daemon(Some(&global)).is_err());
     }
 
@@ -235,17 +246,17 @@ mod tests {
     }
 
     #[test]
-    fn development_comes_from_the_host_file() {
+    fn debugging_comes_from_the_host_file() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("piton");
         std::fs::create_dir_all(&global).unwrap();
         std::fs::write(
             global.join("config.host.toml"),
-            "[development]\nsession_analysis = false\n",
+            "[debugging]\nsession_analysis = false\n",
         )
         .unwrap();
         let resolved = resolve_global(&paths(Some(&global)));
-        assert_eq!(resolved.development.unwrap().session_analysis, Some(false));
+        assert_eq!(resolved.debugging.unwrap().session_analysis, Some(false));
         assert!(resolved.watch.contains(&global.join("config.host.local.toml")));
     }
 }

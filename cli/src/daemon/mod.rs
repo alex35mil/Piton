@@ -48,8 +48,9 @@ pub struct Daemon {
     /// The global files as the apps see them: values, where each is set, and keys waiting for a restart.
     app_settings: Mutex<crate::apps::SettingsSnapshot>,
     base_env: Env,
-    /// The external tools and whether each is used, decided at start from `[tools]` and the login shell's PATH.
-    tools: crate::tools::Tools,
+    /// The external programs and whether each is used, decided at start from `[integrations]` and the login shell's
+    /// PATH.
+    integrations: crate::integrations::Integrations,
     sessions: Mutex<BTreeMap<SessionKey, SessionHandle>>,
     next_key: AtomicU64,
     next_client: AtomicU64,
@@ -150,7 +151,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         resolved if resolved.contains('/') => format!("{pi}={resolved}"),
         _ => format!("{pi}=NOT FOUND"),
     };
-    let tools = crate::tools::Tools::resolve(&config, &base_env);
+    let integrations = crate::integrations::Integrations::resolve(&config, &base_env);
     // pi's own agent dir: unset means pi's default (~/.pi/agent), not the user's usual setup.
     let agent_dir = base_env
         .get("PI_CODING_AGENT_DIR")
@@ -158,7 +159,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     crate::log!(
         "environment: {} variables; {pi_found}, {}; PI_CODING_AGENT_DIR={agent_dir}",
         base_env.len(),
-        tools.describe()
+        integrations.describe()
     );
 
     // Socket folders of sessions that ended without their hook running (a crash, a kill).
@@ -166,12 +167,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     let state = crate::state::State::open(&config.state_db())?;
     let host_id = state.host_id()?;
     crate::log!("state: {} (host {host_id})", config.state_db().display());
-    let app_settings = crate::apps::SettingsSnapshot::new(&config.paths, &tools);
+    let app_settings = crate::apps::SettingsSnapshot::new(&config.paths, &integrations);
     let daemon = Arc::new(Daemon {
         config: std::sync::RwLock::new(Arc::new(config)),
         app_settings: Mutex::new(app_settings),
         base_env,
-        tools,
+        integrations,
         sessions: Mutex::new(BTreeMap::new()),
         next_key: AtomicU64::new(first_session_key()),
         next_client: AtomicU64::new(1),
@@ -187,15 +188,22 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     crate::daemon::watch::spawn(daemon.clone());
     tokio::spawn(crate::agent::serve(daemon.clone(), agent_listener));
     tokio::spawn(refusals::watch(daemon.clone()));
-    let tailnet = daemon.config().tailnet.clone();
-    // Remote access is optional: without Tailscale the daemon still serves local clients.
-    match (tailnet.enabled, daemon.tools.tailscale.optional()) {
-        (false, _) => {}
-        (true, Ok(Some(tailscale))) => {
+    let tailnet = daemon.config().integrations.tailnet.clone();
+    // Remote access is optional: the apps are served on the tailnet while Tailscale is used, and without it the daemon
+    // still serves local clients.
+    match &daemon.integrations.tailscale {
+        crate::integrations::IntegrationState::Used(tailscale) => {
             tokio::spawn(crate::apps::serve_tailnet(daemon.clone(), tailscale.clone(), tailnet));
         }
-        (true, Ok(None)) => crate::log!("tailnet: not listening: tailscale isn't installed"),
-        (true, Err(unavailable)) => crate::log!("tailnet: not listening: {unavailable}"),
+        crate::integrations::IntegrationState::Off(crate::integrations::OffReason::Disabled) => {
+            crate::log!("tailnet: not listening: tailscale is turned off")
+        }
+        crate::integrations::IntegrationState::Off(crate::integrations::OffReason::NotInstalled) => {
+            crate::log!("tailnet: not listening: tailscale isn't installed")
+        }
+        crate::integrations::IntegrationState::Unavailable(unavailable) => {
+            crate::log!("tailnet: not listening: {unavailable}")
+        }
     }
     crate::log!("listening on {} (pid {})", socket.display(), std::process::id());
 
@@ -312,10 +320,10 @@ impl Daemon {
     /// mise for worker trust: `None` when it's off; a refusal when it's enabled but not installed.
     fn worker_mise(&self) -> Result<Option<crate::project::Mise>, crate::project::WorkerRefusal> {
         let mise = self
-            .tools
+            .integrations
             .mise
             .optional()
-            .map_err(crate::project::WorkerRefusal::ToolUnavailable)?;
+            .map_err(crate::project::WorkerRefusal::integration_unavailable)?;
         Ok(mise.map(|mise| crate::project::Mise {
             program: mise.program.clone(),
             args: mise.args.clone(),
@@ -364,8 +372,7 @@ impl Daemon {
                 new.socket = current.socket.clone();
                 new.log = current.log.clone();
                 new.env = current.env.clone();
-                new.tailnet = current.tailnet.clone();
-                new.tools = current.tools.clone();
+                new.integrations = current.integrations.clone();
                 let mode = new.logging.mode;
                 let keep_awake = new.keep_awake;
                 *self.config.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new);
@@ -718,7 +725,7 @@ impl Daemon {
             .inspect_err(|e| crate::log!("launch refused: {e}"))?;
         let prepared = launch::prepare(
             &config,
-            &self.tools,
+            &self.integrations,
             &launch_config,
             &self.base_env,
             &workspace.path,

@@ -30,7 +30,7 @@
 ---| { kind: "source_fetch", checkout: string, message: string }
 ---| { kind: "protected_update", checkout: string, upstream: string, target: string, files: string[] }
 ---| { kind: "update_denied", checkout: string, files: string[] }
----| { kind: "tool_unavailable", tool: string, program: string }
+---| { kind: "integration_unavailable", integration: string, program: string, message: string }
 ---| { kind: "failed", message: string }
 
 --- The answer to a `protected_update` refusal.
@@ -65,7 +65,7 @@ local REFUSAL_KINDS = {
     source_fetch = true,
     protected_update = true,
     update_denied = true,
-    tool_unavailable = true,
+    integration_unavailable = true,
     failed = true,
 }
 
@@ -369,7 +369,12 @@ function M.describe(refusal_value)
         return r.path .. " is not an agent"
     elseif r.kind == "leftovers" then
         return r.path .. " isn't clean:\n" .. table.concat(r.lines, "\n")
-    elseif r.kind == "invalid_configuration" or r.kind == "source_fetch" or r.kind == "failed" then
+    elseif
+        r.kind == "invalid_configuration"
+        or r.kind == "source_fetch"
+        or r.kind == "integration_unavailable"
+        or r.kind == "failed"
+    then
         return r.message
     elseif r.kind == "protected_update" then
         return ("Updating %s to %s changes protected files, which the sandbox can't write:\n%s"):format(
@@ -382,13 +387,6 @@ function M.describe(refusal_value)
             r.checkout,
             table.concat(util.head(r.files, 15), "\n")
         )
-    elseif r.kind == "tool_unavailable" then
-        return r.tool
-            .. " is enabled ([tools."
-            .. r.tool
-            .. "] enabled = true) but "
-            .. r.program
-            .. " isn't installed; install it or turn it off"
     end
     error("unknown piton refusal: " .. vim.inspect(r))
 end

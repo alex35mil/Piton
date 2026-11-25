@@ -45,7 +45,7 @@ public struct HostSettings: View {
 
 /// How the host's settings are grouped: by file, and within the host file by table.
 enum HostSettingGroup: String, CaseIterable, Identifiable {
-    case host, tailnet, daemon, projects
+    case host, tailnet, daemon, debugging, projects
 
     var id: Self { self }
 
@@ -57,9 +57,9 @@ enum HostSettingGroup: String, CaseIterable, Identifiable {
         case .host:
             let table = setting.key.split(separator: ".").count > 1 ? setting.key.split(separator: ".").first : nil
             switch table.map(String.init) {
-            case "tailnet": self = .tailnet
-            // `[tools.tailscale]` is remote access's tool; the other tools are the daemon's.
-            case "tools": self = setting.key.hasPrefix("tools.tailscale.") ? .tailnet : .daemon
+            // `[integrations.tailscale]` is remote access; the other integrations are the daemon's.
+            case "integrations": self = setting.key.hasPrefix("integrations.tailscale.") ? .tailnet : .daemon
+            case "debugging": self = .debugging
             case "pi", "sandbox", "env", "stop": self = .daemon
             case .some, nil:
                 switch setting.key {
@@ -75,6 +75,7 @@ enum HostSettingGroup: String, CaseIterable, Identifiable {
         case .host: "This host"
         case .tailnet: "Remote access"
         case .daemon: "Daemon"
+        case .debugging: "Debugging"
         case .projects: "Every project"
         }
     }
@@ -124,7 +125,7 @@ struct HostSettingRow: View {
             } label: {
                 label
             }
-        case (true, .text), (true, .integer), (true, .textList), (true, .choiceList):
+        case (true, .text), (true, .integer), (true, .duration), (true, .textList), (true, .choiceList):
             TextSettingField(
                 label: label, text: setting.valueType.text(setting.value), parse: setting.valueType.parse(_:),
                 save: save(_:))

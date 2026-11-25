@@ -36,8 +36,8 @@ pub enum ViewRequest {
         #[serde(default)]
         local: Option<bool>,
     },
-    /// Switch host logging until the policy expires or the daemon restarts (`logging` in `config.host.toml` is the
-    /// default).
+    /// Switch host logging until the policy expires or the daemon restarts (`[debugging] log_level` in `config.host.toml`
+    /// is the default).
     #[serde(rename = "daemon.logging")]
     DaemonLogging { policy: crate::logging::Policy },
     /// Push the session list now and whenever it changes.

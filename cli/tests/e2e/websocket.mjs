@@ -40,10 +40,12 @@ function setup() {
             log,
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tailnet: { port: 0, heartbeat_ms: 300, retry_ms: 200 },
-            tools: { mise: { enabled: false }, tailscale: { enabled: true, command: [fakeTailscale] } },
+            integrations: {
+                mise: { enabled: false },
+                tailscale: { enabled: true, command: [fakeTailscale], port: 0, heartbeat: "300ms", retry: "200ms" },
+            },
         },
-        host: { default_attach_mode: "host", empty_grace_ms: 60000, roots: [root] },
+        host: { default_attach_mode: "host", stop_empty_session_after: "60s", roots: [root] },
     });
     const stopped = join(dir, "tailscale-stopped");
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40", PITON_FAKE_WHOIS: whoisFile, PITON_FAKE_STOPPED: stopped, PITON_LOGS_DIR: join(dir, "logging") };

@@ -27,7 +27,8 @@ pub struct Asking {
     pub dialog_id: String,
     pub to: Destination,
     pub waiting: Vec<Waiting>,
-    pub deadline: tokio::time::Instant,
+    /// When it's refused unanswered; none when `approval_timeout` is `"never"`.
+    pub deadline: Option<tokio::time::Instant>,
 }
 
 /// The session's network.

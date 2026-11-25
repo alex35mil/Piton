@@ -16,8 +16,8 @@ omitted. The collector makes **no device calls** at Info.
 **until disabled**. Expiration is an absolute timestamp, so re-reading or reconnecting never extends the hour. Switching
 back to Info preserves existing files.
 
-**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `logging` in Piton's
-`config.host.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
+**Host logging** (the Mac app, the daemon, and the collector) has one source of truth: `[debugging] log_level` in
+Piton's `config.host.toml` is the default (`info` unless set), and the daemon holds the policy in effect. Switching it from the Mac
 app or the CLI is **temporary**: it lasts until it expires or the daemon restarts, which returns to the config. Nothing
 else stores it. The daemon pushes the policy to the apps (including when a timed switch expires), the Mac app's own
 capture follows it, and the collector asks the daemon before every poll and transfer.
@@ -43,7 +43,8 @@ disconnected. There, the expiration persists across app restarts; an expired or 
   keep it out of your dotfiles) and restart the daemon:
 
   ```toml
-  logging = "debug"   # or "info" (the default)
+  [debugging]
+  log_level = "debug"   # or "info" (the default)
   ```
 - **Clearing:** each app's Logging screen can clear its own file ring without changing the level. It does not clear
   collected copies. Files naturally age out by size as new records are written; no time-based retention is promised.

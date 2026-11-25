@@ -33,7 +33,7 @@ public enum LoggingExpiration: Sendable, Hashable, Codable {
 }
 
 /// Host logging as the daemon reports it (Mac app, daemon, phone-log collector): the policy in effect and the
-/// configured default (`logging` in config.host.toml) it returns to when a timed switch expires or the daemon
+/// configured default (`[debugging] log_level` in config.host.toml) it returns to when a timed switch expires or the daemon
 /// restarts.
 public struct HostLogging: Sendable, Hashable, Codable {
     public enum Mode: String, Sendable, Hashable, Codable {

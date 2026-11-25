@@ -59,7 +59,7 @@ private final class Daemon: @unchecked Sendable {
         socket = "\(socket)"
         log = "\(log.path)"
         default_attach_mode = "host"
-        empty_grace_ms = 60000
+        stop_empty_session_after = "60s"
         roots = ["\(root.path)"]
         keep_awake = false
         [pi]
@@ -67,15 +67,14 @@ private final class Daemon: @unchecked Sendable {
         [env]
         login_shell = false
         [stop]
-        grace_ms = 3000
-        term_grace_ms = 1000
-        [tailnet]
-        port = 0
-        [tools.mise]
+        terminate_after = "3s"
+        kill_after = "1s"
+        [integrations.mise]
         enabled = false
-        [tools.tailscale]
+        [integrations.tailscale]
         enabled = true
         command = ["\(tailscale)"]
+        port = 0
         """.write(to: config.appendingPathComponent("config.host.toml"), atomically: true, encoding: .utf8)
         // A fixed host identity in the daemon's database (next to its socket).
         let seed = Process()

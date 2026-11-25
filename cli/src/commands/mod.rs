@@ -234,7 +234,7 @@ enum ConfigAction {
         /// host or sandbox (default: from PITON_RUNTIME).
         #[usage(long)]
         runtime: Option<String>,
-        /// Only the global tier's settings for the pi package that never depend on a project (`[development]` from
+        /// Only the global tier's settings for the pi package that never depend on a project (`[debugging]` from
         /// `config.host.toml`).
         #[usage(long)]
         global: bool,

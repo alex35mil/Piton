@@ -5,7 +5,7 @@
  * The Rust resolver in the daemon's binary is the only implementation of the chains and merge rules: the global tier
  * (`$XDG_CONFIG_HOME/piton/`), parent folders, and the repository's `.piton/` and `.agents/`, each level's settings in
  * one `config.toml` (and `config.local.toml`). The global tier's own files (`config.host.toml`, `config.client.toml`)
- * belong to the daemon and the apps; the pi package reads only `[development]` from the host file, through
+ * belong to the daemon and the apps; the pi package reads only `[debugging]` from the host file, through
  * {@link resolveGlobalSettings}. This client runs the resolver, caches the result, and runs it again only when a file
  * or folder it depends on changed, so per-tool-call loads cost a few `stat` calls.
  *
@@ -146,8 +146,8 @@ export interface ResolvedSettings {
 export interface GlobalSettings {
     format: typeof RESOLVE_FORMAT
     global: string
-    /** `[development]`: switches for a development install of piton. */
-    development: Section<{ session_analysis?: boolean }>
+    /** `[debugging]`: switches for a development install of piton. */
+    debugging: Section<{ session_analysis?: boolean }>
     watch: string[]
 }
 

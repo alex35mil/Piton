@@ -18,7 +18,7 @@ use super::{
     Env, LaunchError, resolve_program,
     sandbox::{Contained, Containment, Policy, contained},
 };
-use crate::tools::{Program, Tool, Tools, Unavailable};
+use crate::integrations::{Integration, Integrations, Program, Unavailable};
 
 /// A tool the daemon runs to add a workspace's environment to pi's. Every operation matches it exhaustively, so a new
 /// tool can't be added without saying how it runs, contained, and how its values' sources are read.
@@ -43,10 +43,10 @@ impl EnvTool {
         }
     }
 
-    /// The external tool it is, whose `[tools.<name>]` setting decides whether it runs.
-    fn tool(self) -> Tool {
+    /// The integration it is, whose `[integrations.<name>]` setting decides whether it runs.
+    fn integration(self) -> Integration {
         match self {
-            Self::Mise => Tool::Mise,
+            Self::Mise => Integration::Mise,
         }
     }
 
@@ -97,12 +97,12 @@ pub struct Enabled {
     pub program: Program,
 }
 
-/// The environment tools that run for every launch, by their `[tools]` state; an error when one is enabled but not
-/// installed.
-pub fn enabled(tools: &Tools) -> Result<Vec<Enabled>, Unavailable> {
+/// The environment tools that run for every launch, by their `[integrations]` state; an error when one is enabled but
+/// not installed.
+pub fn enabled(integrations: &Integrations) -> Result<Vec<Enabled>, Unavailable> {
     let mut out = Vec::new();
     for tool in ENV_TOOLS {
-        if let Some(program) = tools.get(tool.tool()).optional()? {
+        if let Some(program) = integrations.get(tool.integration()).optional()? {
             out.push(Enabled {
                 tool,
                 program: program.clone(),
@@ -455,33 +455,37 @@ mod tests {
         }
     }
 
-    /// Each environment tool runs when its `[tools]` state uses it; enabled but not installed refuses every launch.
+    /// Each environment tool runs when its `[integrations]` state uses it; enabled but not installed refuses every
+    /// launch.
     #[test]
-    fn tools_state_decides_which_run() {
-        use crate::tools::{OffReason, ToolState};
+    fn integration_state_decides_which_run() {
+        use crate::integrations::{IntegrationState, OffReason};
         let used = Program {
             program: "/bin/mise".into(),
             args: vec![],
         };
-        let tools = |mise: ToolState| Tools {
+        let tools = |mise: IntegrationState| Integrations {
             mise,
-            fnox: ToolState::Off(OffReason::Disabled),
-            tailscale: ToolState::Off(OffReason::Disabled),
+            fnox: IntegrationState::Off(OffReason::Disabled),
+            tailscale: IntegrationState::Off(OffReason::Disabled),
         };
         assert_eq!(
-            enabled(&tools(ToolState::Used(used.clone()))).unwrap(),
+            enabled(&tools(IntegrationState::Used(used.clone()))).unwrap(),
             [Enabled {
                 tool: EnvTool::Mise,
                 program: used
             }]
         );
-        assert_eq!(enabled(&tools(ToolState::Off(OffReason::NotInstalled))).unwrap(), []);
+        assert_eq!(
+            enabled(&tools(IntegrationState::Off(OffReason::NotInstalled))).unwrap(),
+            []
+        );
         let unavailable = Unavailable {
-            tool: Tool::Mise,
+            integration: Integration::Mise,
             program: "mise".into(),
         };
         assert_eq!(
-            enabled(&tools(ToolState::Unavailable(unavailable.clone()))),
+            enabled(&tools(IntegrationState::Unavailable(unavailable.clone()))),
             Err(unavailable)
         );
     }

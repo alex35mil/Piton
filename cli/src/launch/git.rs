@@ -26,7 +26,7 @@ impl SourceGit {
     /// Resolves the sandbox of a launch in `source`, as [`prepare_sandbox`] does for pi (environment tools included).
     pub async fn for_source(
         config: &DaemonConfig,
-        tools: &crate::tools::Tools,
+        tools: &crate::integrations::Integrations,
         base: &Env,
         source: &Path,
         filter: &crate::config::GrantFilter,

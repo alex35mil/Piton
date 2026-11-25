@@ -1,4 +1,4 @@
-// Host logging lives in the daemon: `logging` in config.host.toml is the default, `piton logging` and the apps switch
+// Host logging lives in the daemon: `[debugging] log_level` in config.host.toml is the default, `piton logging` and the apps switch
 // it until it expires or the daemon restarts, and nothing is persisted elsewhere. All state is temporary.
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -22,11 +22,10 @@ function writeConfig(mode) {
         daemon: {
             socket,
             log: join(dir, "piton.log"),
-            tailnet: { enabled: false },
             env: { login_shell: false },
-            tools: { mise: { enabled: false } },
+            integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
         },
-        host: mode ? { logging: mode } : {},
+        host: mode ? { debugging: { log_level: mode } } : {},
     });
 }
 

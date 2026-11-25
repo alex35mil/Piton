@@ -237,7 +237,7 @@ async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Des
             .unwrap_or_else(|| std::env::vars().collect()),
         false => std::env::vars().collect(),
     };
-    let tools = crate::tools::Tools::resolve(config, &base);
+    let tools = crate::integrations::Integrations::resolve(config, &base);
     // `show` and `why` describe a session's policy without starting one: no socket folder of its own, so a user's
     // `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR` is shown as it is, and Piton's own folder isn't.
     launch::prepare_sandbox(

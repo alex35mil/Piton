@@ -175,7 +175,7 @@ impl Daemon {
         source: &std::path::Path,
     ) -> Result<crate::launch::git::SourceGit, crate::project::WorkerRefusal> {
         let filter = self.source_filter(source);
-        crate::launch::git::SourceGit::for_source(&self.config(), &self.tools, &self.base_env, source, &filter)
+        crate::launch::git::SourceGit::for_source(&self.config(), &self.integrations, &self.base_env, source, &filter)
             .await
             .map_err(|e| crate::project::WorkerRefusal::InvalidConfiguration {
                 message: format!("can't sandbox Git for {}: {e}", source.display()),

@@ -1618,14 +1618,16 @@ mod tests {
                             setting(Scope::Host, "roots", json!(["~/Projects"]), Some(Sharing::Shared), ValueType::TextList, AppliesInfo::Live, true),
                             setting(
                                 Scope::Host,
-                                "logging",
+                                "debugging.log_level",
                                 json!("info"),
                                 None,
                                 ValueType::Choice { options: &["info", "debug"] },
                                 AppliesInfo::Live,
                                 true,
                             ),
-                            setting(Scope::Host, "tailnet.port", json!(9000), Some(Sharing::Shared), ValueType::Integer, AppliesInfo::Restart { pending: true }, true),
+                            setting(Scope::Host, "integrations.tailscale.port", json!(9000), Some(Sharing::Shared), ValueType::Integer, AppliesInfo::Restart { pending: true }, true),
+                            setting(Scope::Host, "approval_timeout", json!("never"), Some(Sharing::Shared), ValueType::Duration { never: true }, AppliesInfo::Live, true),
+                            setting(Scope::Host, "stop.kill_after", json!("3s"), None, ValueType::Duration { never: false }, AppliesInfo::Live, true),
                             setting(
                                 Scope::Host,
                                 "socket",
@@ -1638,8 +1640,8 @@ mod tests {
                             setting(Scope::Client, "text_font", json!("Inter"), Some(Sharing::Shared), ValueType::Text, AppliesInfo::Live, true),
                             setting(Scope::Project, "workers.skip", json!([".build"]), None, ValueType::TextList, AppliesInfo::Live, true),
                             SettingInfo {
-                                warning: Some("tailscale is enabled ([tools.tailscale] enabled = true) but \"tailscale\" isn't installed".into()),
-                                ..setting(Scope::Host, "tools.tailscale.enabled", json!(true), Some(Sharing::Shared), ValueType::Bool, AppliesInfo::Restart { pending: false }, true)
+                                warning: Some("tailscale is enabled ([integrations.tailscale] enabled = true) but \"tailscale\" isn't installed".into()),
+                                ..setting(Scope::Host, "integrations.tailscale.enabled", json!(true), Some(Sharing::Shared), ValueType::Bool, AppliesInfo::Restart { pending: false }, true)
                             },
                         ]
                     },

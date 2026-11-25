@@ -23,6 +23,8 @@ extension SettingValueType {
         switch self {
         case .text: return .string(trimmed)
         case .integer: return Self.nonNegative(trimmed).map(JSON.integer)
+        case .duration(let never):
+            return (never && trimmed == "never") || Self.isDuration(trimmed) ? .string(trimmed) : nil
         case .textList: return .array(lines.map(JSON.string))
         case .bool: return ["true": JSON.bool(true), "false": .bool(false)][trimmed]
         case .choice(let options): return options.contains(trimmed) ? .string(trimmed) : nil
@@ -63,6 +65,15 @@ extension SettingValueType {
 
     private static func nonNegative(_ text: String) -> Int64? {
         Int64(text).flatMap { $0 >= 0 ? $0 : nil }
+    }
+
+    /// A positive whole number and one unit (`ms`, `s`, `m`, `h`), as the daemon's host file takes it. Its own
+    /// limits (too long) are the daemon's to refuse.
+    private static func isDuration(_ text: String) -> Bool {
+        guard let split = text.firstIndex(where: { !$0.isASCII || !$0.isNumber }) else { return false }
+        let digits = text[..<split]
+        let unit = text[split...]
+        return !digits.isEmpty && digits.contains { $0 != "0" } && ["ms", "s", "m", "h"].contains(unit)
     }
 
     private static func scalar(_ value: JSON) -> String {

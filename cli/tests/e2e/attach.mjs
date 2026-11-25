@@ -26,13 +26,12 @@ function setup() {
         daemon: {
             socket,
             log: join(dir, "piton.log"),
-            tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tools: { mise: { enabled: false } },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+            integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
+            stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "host", empty_grace_ms: 1500 },
+        host: { default_attach_mode: "host", stop_empty_session_after: "1500ms" },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" };
     return { dir, ws, agent, socket, config, env };

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fake `fnox` for tests (set as `[tools.fnox] command`), mimicking fnox 1.48's output. What it does is decided by files
+# Fake `fnox` for tests (set as `[integrations.fnox] command`), mimicking fnox 1.48's output. What it does is decided by files
 # in the folder it runs in (the workspace):
 # - `fake-fnox-no-proxy`: no `[proxy]` applies (`proxy rules` fails with fnox's message);
 # - `fake-fnox-broken`: the config is invalid (`proxy rules` and `proxy run` fail);

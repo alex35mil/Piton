@@ -51,13 +51,12 @@ function setup() {
         daemon: {
             socket,
             log,
-            tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tools: { mise: { enabled: false } },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+            integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
+            stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
+        host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s" },
         project: { sandbox: { presets: ["rust"], filesystem: { "/global-grant": "write" } } },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
