@@ -123,8 +123,8 @@ describe("workflow MCP publication binding", () => {
                 clearSettingsCache()
                 const settings = resolveSettings(h.context.cwd, "host")
                 assert.deepEqual(section(settings.branches), {})
-                assert.equal(section(settings.tracker), null)
-                assert.equal(section(settings.forge), null)
+                assert.deepEqual(section(settings.tracker), { state: "off", reason: "absent" })
+                assert.deepEqual(section(settings.forge), { state: "off", reason: "absent" })
                 assert.equal(h.prompts.length, 0)
             } finally {
                 await h.cleanup()

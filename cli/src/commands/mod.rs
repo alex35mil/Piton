@@ -279,6 +279,10 @@ enum ConfigAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
+    /// Check VALUE (JSON, keys as the file has them) as TABLE of a `config.toml` (`tracker`, `forge`, ...), with the
+    /// same schema and checks as a file but no placement rules, and print it as JSON. Setup checks a table this way
+    /// before changing anything at a provider. An invalid value prints the error naming its key, with exit code 3.
+    Validate { table: String, value: String },
     /// Whether PATH is a protected file of the workspace, as JSON with `protected: true|false`. Every write to one asks
     /// the user: through the daemon in sessions it launched, in pi itself outside piton. `piton sandbox show` prints
     /// the sandbox rules that also deny the writes.

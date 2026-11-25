@@ -21,27 +21,29 @@ export const CardinalitySchema = Type.Enum(["exactlyOne", "zeroOrOne", "oneOrMor
 })
 export type Cardinality = Static<typeof CardinalitySchema>
 
-const LabelKeySchema = Type.String({ pattern: "^[a-z][a-z0-9-]*$" })
-const LabelNameSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
+/*
+ * The shapes of `tracker.labels` and Linear's `tracker.phase`: types and setup tool inputs. piton's config module owns
+ * their rules (key and color formats, distinct names, the reserved groups); see `config.ts`.
+ */
+
+const LabelKeySchema = Type.String()
+const LabelNameSchema = Type.String()
 
 /** One tracker label as setup provisions it. Runtime reads only `name`. */
 export const LabelDefinitionSchema = Type.Object(
     {
         name: LabelNameSchema,
-        color: Type.String({ pattern: "^#[0-9A-Fa-f]{6}$" }),
+        color: Type.String({ description: 'A color like "#1D76DB"' }),
         description: Type.String(),
     },
     { additionalProperties: false },
 )
 export type LabelDefinition = Static<typeof LabelDefinitionSchema>
 
-const LabelValuesSchema = Type.Record(LabelKeySchema, LabelDefinitionSchema, {
-    minProperties: 1,
-    additionalProperties: false,
-})
+const LabelValuesSchema = Type.Record(LabelKeySchema, LabelDefinitionSchema, { additionalProperties: false })
 
 const groupProperties = {
-    appliesTo: Type.Array(LabelItemTypeSchema, { minItems: 1, uniqueItems: true }),
+    appliesTo: Type.Array(LabelItemTypeSchema),
     cardinality: CardinalitySchema,
     values: LabelValuesSchema,
 }
@@ -139,10 +141,9 @@ export const KIND_GROUP_KEY = "kind"
  */
 export const GATE_GROUP_KEY = "gate"
 
-/** The gates the workflow knows how to honor; config may name only these. */
+/** The gates the workflow knows how to honor; config may name only these (piton's config module checks it). */
 export const GateSchema = Type.Enum(["plan"], { type: "string" })
 export type Gate = Static<typeof GateSchema>
-const GATES: readonly Gate[] = GateSchema.enum
 
 export type WorkflowKind = "epic" | DeliverableKind
 
@@ -171,184 +172,6 @@ export function groupValuesFor(
     if (key !== KIND_GROUP_KEY) return entries
     const allowed = new Set<string>(kindValuesFor(itemType))
     return entries.filter(([value]) => allowed.has(value))
-}
-
-// Linear rejects these label names because they duplicate native features.
-const LINEAR_RESERVED_LABEL_NAMES = new Set([
-    "assignee",
-    "cycle",
-    "effort",
-    "estimate",
-    "hours",
-    "priority",
-    "project",
-    "state",
-    "status",
-])
-const GITHUB_DESCRIPTION_LIMIT = 100
-
-/** The tracker whose label configuration is being checked. */
-type LabelTracker = "github" | "linear"
-
-/**
- * The item types a `kind` group must cover. GitHub Epics and Tasks are both issues, so `Kind: Epic`
- * tells them apart. A Linear Epic is a Project, which its object type already distinguishes.
- */
-function kindCoverageFor(tracker: LabelTracker): readonly LabelItemType[] {
-    switch (tracker) {
-        case "github":
-            return ["epic", "deliverable"]
-        case "linear":
-            return ["deliverable"]
-    }
-}
-
-function trackerName(tracker: LabelTracker): string {
-    switch (tracker) {
-        case "github":
-            return "GitHub"
-        case "linear":
-            return "Linear"
-    }
-}
-
-function assertKindGroup(tracker: LabelTracker, group: GitHubLabelGroup | LinearLabelGroup): void {
-    if (group.cardinality !== "exactlyOne") throw new Error("the `kind` label group must be `exactlyOne`")
-    const coverage = kindCoverageFor(tracker)
-    if (group.appliesTo.length !== coverage.length || coverage.some((itemType) => !group.appliesTo.includes(itemType)))
-        throw new Error(
-            `the ${trackerName(tracker)} \`kind\` label group must apply to exactly ${coverage.map((itemType) => JSON.stringify(itemType)).join(" and ")}`,
-        )
-    const expected = group.appliesTo.flatMap((itemType) => [...kindValuesFor(itemType)]).sort()
-    const actual = Object.keys(group.values).sort()
-    if (expected.length !== actual.length || expected.some((key, index) => key !== actual[index])) {
-        throw new Error(
-            `the \`kind\` label group values must be exactly ${expected.map((key) => JSON.stringify(key)).join(", ")} for its \`appliesTo\``,
-        )
-    }
-}
-
-function assertGateGroup(group: GitHubLabelGroup | LinearLabelGroup): void {
-    if (group.appliesTo.length !== 1 || group.appliesTo[0] !== "deliverable")
-        throw new Error('the `gate` label group must apply only to "deliverable"')
-    if (group.cardinality !== "zeroOrMore") throw new Error("the `gate` label group must be `zeroOrMore`")
-    for (const value of Object.keys(group.values)) {
-        if (!(GATES as readonly string[]).includes(value))
-            throw new Error(
-                `the \`gate\` label group has unknown gate ${JSON.stringify(value)}; known gates: ${GATES.map((gate) => JSON.stringify(gate)).join(", ")}`,
-            )
-    }
-}
-
-/** Checks the shape of the groups whose keys the workflow reserves; other groups are free-form. */
-function assertReservedGroups(tracker: LabelTracker, groups: [string, GitHubLabelGroup | LinearLabelGroup][]): void {
-    for (const [key, group] of groups) {
-        if (key === KIND_GROUP_KEY) assertKindGroup(tracker, group)
-        if (key === GATE_GROUP_KEY) assertGateGroup(group)
-    }
-}
-
-function assertDistinctNames(domain: string, names: readonly string[]): Set<string> {
-    const seen = new Set<string>()
-    for (const name of names) {
-        const normalized = name.toLowerCase()
-        if (seen.has(normalized))
-            throw new Error(`label name ${JSON.stringify(name)} is used more than once in ${domain}`)
-        seen.add(normalized)
-    }
-    return seen
-}
-
-function assertEntries<T extends { name: string }>(
-    keep: readonly T[],
-    retired: readonly T[],
-    location: (entry: T) => string,
-    managed: (entry: T) => Set<string>,
-): void {
-    const seen = new Map<string, "keep" | "retired">()
-    for (const [list, entries] of [
-        ["keep", keep],
-        ["retired", retired],
-    ] as const) {
-        for (const entry of entries) {
-            const id = `${location(entry)}\u0000${entry.name.toLowerCase()}`
-            const previous = seen.get(id)
-            if (previous === list) throw new Error(`label ${JSON.stringify(entry.name)} is listed twice in ${list}`)
-            if (previous) throw new Error(`label ${JSON.stringify(entry.name)} can't be both kept and retired`)
-            seen.set(id, list)
-            if (managed(entry).has(entry.name.toLowerCase()))
-                throw new Error(`${list} label ${JSON.stringify(entry.name)} names a managed label`)
-        }
-    }
-}
-
-export function assertGitHubLabels(labels: GitHubLabels | undefined): void {
-    const groups = Object.entries(labels?.groups ?? {})
-    assertReservedGroups("github", groups)
-    const definitions = groups.flatMap(([, group]) => Object.values(group.values))
-    for (const definition of definitions) {
-        if (definition.description.length > GITHUB_DESCRIPTION_LIMIT)
-            throw new Error(
-                `GitHub label ${JSON.stringify(definition.name)} description exceeds ${GITHUB_DESCRIPTION_LIMIT} characters`,
-            )
-    }
-    const managed = assertDistinctNames(
-        "the GitHub repository",
-        definitions.map((definition) => definition.name),
-    )
-    assertEntries(
-        labels?.unmanaged?.keep ?? [],
-        labels?.retired ?? [],
-        () => "repository",
-        () => managed,
-    )
-}
-
-function linearCatalogItemType(catalog: LinearLabelCatalog): LabelItemType {
-    switch (catalog) {
-        case "issue":
-            return "deliverable"
-        case "project":
-            return "epic"
-    }
-}
-
-/**
- * An item in the configured team sees workspace and team labels together, and runtime applies
- * labels by name, so each catalog's workspace and team scopes form one collision domain.
- */
-export function assertLinearLabels(labels: LinearLabels | undefined, phase: LinearPhaseGroups | undefined): void {
-    const groups = Object.entries(labels?.groups ?? {})
-    assertReservedGroups("linear", groups)
-    const managedByCatalog = new Map<LinearLabelCatalog, Set<string>>()
-    for (const catalog of LinearLabelCatalogSchema.enum) {
-        const itemType = linearCatalogItemType(catalog)
-        const phaseGroup = phase ? (catalog === "issue" ? phase.issues : phase.projects) : undefined
-        const names = [
-            ...(phaseGroup
-                ? [phaseGroup.group.name, ...Object.values(phaseGroup.values).map((value) => value.name)]
-                : []),
-            ...groups.flatMap(([key, group]) => {
-                const values = groupValuesFor(key, group, itemType)
-                if (values.length === 0) return []
-                return [
-                    ...(group.nativeGroup ? [group.nativeGroup.name] : []),
-                    ...values.map(([, value]) => value.name),
-                ]
-            }),
-        ]
-        for (const name of names) {
-            if (LINEAR_RESERVED_LABEL_NAMES.has(name.toLowerCase()))
-                throw new Error(`Linear reserves the label name ${JSON.stringify(name)}`)
-        }
-        managedByCatalog.set(catalog, assertDistinctNames(`the Linear ${catalog} label catalog`, names))
-    }
-    assertEntries(
-        labels?.unmanaged?.keep ?? [],
-        labels?.retired ?? [],
-        (entry) => `${entry.catalog}\u0000${entry.scope}`,
-        (entry) => managedByCatalog.get(entry.catalog)!,
-    )
 }
 
 /** Where a label lives: one GitHub repository, or a Linear catalog at workspace or team level. */

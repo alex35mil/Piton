@@ -331,7 +331,7 @@ local EXIT_INVALID_CONFIG = 3
 --- the resolver's message when the part can't be used.
 ---@param part "tracker" | "forge" | "mcp"
 ---@param workspace string
----@return any value nil when the part is unset (`tracker` or `forge` with no table)
+---@return any value `tracker` and `forge` are a role: on with its validated config, or off with the reason
 function M.config(part, workspace)
     local result = util.exec({ "piton", "config", "get", part, "--workspace", workspace })
     local ok, value = pcall(vim.json.decode, result.stdout or "", { luanil = { object = true, array = true } })

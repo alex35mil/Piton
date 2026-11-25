@@ -602,12 +602,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = host_pair(dir.path());
         std::fs::write(&files.shared, "roots = []\n").unwrap();
-        let refuse = |_: &str, path: &Path, _: Sharing| {
-            Err(ConfigError::Invalid {
-                path: path.to_path_buf(),
-                reason: "no".into(),
-            })
-        };
+        let refuse = |_: &str, path: &Path, _: Sharing| Err(ConfigError::invalid(path, "no"));
         assert!(matches!(
             files.set(&["x"], Some(Item::Value(Value::from(1))), Placement::Current, &refuse),
             Err(EditError::Invalid(_))
@@ -633,10 +628,7 @@ mod tests {
         let local_path = local(&files).to_path_buf();
         let refuse_local = move |_: &str, path: &Path, _: Sharing| {
             if path == local_path {
-                Err(ConfigError::Invalid {
-                    path: path.to_path_buf(),
-                    reason: "no".into(),
-                })
+                Err(ConfigError::invalid(path, "no"))
             } else {
                 Ok(())
             }

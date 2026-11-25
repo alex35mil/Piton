@@ -107,6 +107,16 @@ export interface FileValue<T> {
     value: T
 }
 
+/**
+ * An integration role (`[tracker]` or `[forge]`) as the nearest table sets it: on, with its file and its configuration,
+ * validated by piton (keys as the file has them); or off, because no level has the table, or because the nearest one
+ * says `provider = "none"`.
+ */
+export type ResolvedRole =
+    | { state: "on"; path: string; config: unknown }
+    | { state: "off"; reason: "absent" }
+    | { state: "off"; reason: "disabled"; path: string }
+
 export interface ResolvedSettings {
     format: typeof RESOLVE_FORMAT
     workspace: string
@@ -126,10 +136,10 @@ export interface ResolvedSettings {
     mcp_global: Section<ResolvedMcp>
     web_search: Section<{ api_key?: string }>
     branches: Section<ResolvedBranches>
-    /** The nearest `[tracker]`, whole, as the file has it (snake_case keys), unvalidated. */
-    tracker: Section<FileValue<unknown> | null>
-    /** The nearest `[forge]`, likewise. */
-    forge: Section<FileValue<unknown> | null>
+    /** The tracker: the nearest `[tracker]`, whole. */
+    tracker: Section<ResolvedRole>
+    /** The forge: the nearest `[forge]`, whole. */
+    forge: Section<ResolvedRole>
     /** Every `policies.md`, farthest first. */
     policies: Section<FileValue<string>[]>
     instructions: Section<{
@@ -250,6 +260,19 @@ export function plannedConfigEdit(
         throw new Error("piton config set printed an unexpected result")
     }
     return { path: output.path, content: output.content }
+}
+
+/**
+ * `value` checked as `table` of a `config.toml` (keys as the file has them) by piton's own schema and checks, without a
+ * file: `piton config validate`. Returns the value as the file would hold it; throws piton's message, which names the
+ * key at fault. What setup checks before changing anything at a provider, so the rules have one implementation.
+ */
+export function validateTable(table: "tracker" | "forge", value: unknown): unknown {
+    const output = runPiton(["config", "validate", table, JSON.stringify(value)], "piton config validate") as {
+        ok?: unknown
+    }
+    if (!("ok" in output)) throw new Error("piton config validate printed an unexpected result")
+    return output.ok
 }
 
 /** `mcp_server` -> `mcpServer`. */

@@ -3,7 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Merge, TableValue, union};
-use crate::project::validate_relative;
+use crate::{
+    config::model::key::{Issue, Key},
+    project::validate_relative,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -14,9 +17,10 @@ pub struct WorkersTable {
 }
 
 impl TableValue for WorkersTable {
-    fn check(&self) -> Result<(), String> {
-        for skip in &self.skip {
-            validate_relative(skip).map_err(|reason| format!("workers.skip {skip:?}: {reason}"))?;
+    fn check(&self) -> Result<(), Issue> {
+        for (i, skip) in self.skip.iter().enumerate() {
+            validate_relative(skip)
+                .map_err(|reason| Issue::new(Key::of(&["workers", "skip"]).index(i), format!("{skip:?}: {reason}")))?;
         }
         Ok(())
     }
