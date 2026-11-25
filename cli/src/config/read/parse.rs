@@ -140,6 +140,9 @@ impl ConfigDoc {
         let Some(value) = document.get_ref().get(table.name()) else {
             return Ok(None);
         };
+        if let Some(rule) = table.rule() {
+            self.check_rule(table.name(), rule)?;
+        }
         let value: T = T::read(value.clone()).map_err(|ReadError { message, span }| match span {
             Some(span) => self.error(span, message),
             None => ConfigError::Invalid {
@@ -549,6 +552,12 @@ mod tests {
                 Err(ConfigError::ProjectOnly { .. })
             ));
             assert!(part(&text, Parent, Local, table).is_ok());
+            // A half-written table in the wrong file is refused for being there, before what it's missing.
+            let partial = format!("[{}]\nprovider = \"github\"\n", table.name());
+            assert!(matches!(
+                part(&partial, Global, Shared, table),
+                Err(ConfigError::ProjectOnly { .. })
+            ));
         }
         // A secret: local only everywhere.
         let key = "[web_search]\napi_key = \"k\"\n";

@@ -9,7 +9,7 @@ use std::{fmt, num::NonZeroU64};
 use serde::{Deserialize, Deserializer, Serialize};
 use toml::{Spanned, de::DeValue};
 
-use super::{ReadError, Rule, TableValue};
+use super::{ReadError, TableValue};
 use crate::config::model::key::Issue;
 
 /// The providers of one role (`[tracker]` or `[forge]`), other than `none`: each reads its own table.
@@ -102,10 +102,7 @@ impl<P: Providers> TableValue for RoleTable<P> {
     fn read(value: Spanned<DeValue<'_>>) -> Result<Self, ReadError> {
         Self::read_table(value)
     }
-    /// Project only, as a whole.
-    fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
-        vec![(P::TABLE, Rule::PROJECT)]
-    }
+    // Project only, as a whole: `Table::rule`, checked before the table is read.
     fn check(&self) -> Result<(), Issue> {
         match self {
             RoleTable::Off(_) => Ok(()),

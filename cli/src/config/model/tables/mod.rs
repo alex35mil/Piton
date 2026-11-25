@@ -78,6 +78,16 @@ impl Table {
     pub fn of(key: &str) -> Option<Table> {
         Table::ALL.into_iter().find(|table| table.name() == key)
     }
+
+    /// Where the whole table may be set, checked before its contents are read: a table in the wrong file is refused
+    /// for being there, not for what it's missing. `None`: any file, with its keys' own rules.
+    pub fn rule(self) -> Option<Rule> {
+        match self {
+            // Project only: a global one would become the role of every repository that has none.
+            Table::Tracker | Table::Forge => Some(Rule::PROJECT),
+            Table::Sandbox | Table::Workers | Table::Tools | Table::Branches | Table::WebSearch | Table::Trust => None,
+        }
+    }
 }
 
 /// Which levels may set a key.
