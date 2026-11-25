@@ -134,7 +134,7 @@ Precedence is in [core approvals](./core.md#approvals).
 ```text
 .piton/.local/epics/<reference>-<slug>/   # <YYYYMMDD>-<slug> for a Linear Project
   brief.md             # Approved Request.
-  metadata.json        # Tracker identity, Phase, branch contract, accepted Task list.
+  metadata.json        # Tracker identity, branch contract, accepted Task list.
   epic.md              # The initiative's current state and its `## Tasks` sections.
   resource-ids.json    # Scoped Resource IDs; disposable, never lifecycle authority.
   notes.md
@@ -155,7 +155,7 @@ Precedence is in [core approvals](./core.md#approvals).
 .piton/.local/epics/<epic>/tasks/<reference>-<slug>/
 .piton/.local/gigs/<reference>-<slug>/
   brief.md             # Approved Request.
-  metadata.json        # Kind, tracker identity, Phase, branch contract, PR intent. A Task's parent comes from its directory.
+  metadata.json        # Kind, tracker identity, branch contract, PR intent. A Task's parent comes from its directory.
   plan.md              # Work plan; absent on the direct path.
   result.md            # Feature, Bugfix, Refactor, Chore: delivered outcome and actual verification.
   report.md            # Research, Audit: the result; kept when the work continues into implementation.
@@ -170,7 +170,7 @@ Precedence is in [core approvals](./core.md#approvals).
 - Task and Gig share the Deliverable lifecycle and these meanings. Only a Task has a parent Epic and may update parent Epic artifacts. Its parent identity is the containing Epic directory plus its exact marker.
 - `metadata.branch` records the branch name, start, target, and whether the name was generated or tracker-provided.
 - A Task's stored start and target never change when its Epic's routing later changes.
-- `metadata.json` is authoritative for kind and `phase: planning | execution | selfReview`.
+- `metadata.json` is authoritative for kind.
 - Completion artifacts follow the [Deliverable lifecycle](./deliverable.md#completion-artifact). Kind-only updates leave plans, results, and reports unchanged.
 
 ### Review round files
@@ -212,8 +212,8 @@ The shared guard validates the branch configuration and persistence safety, reus
 
 **Authority:**
 
-- Artifacts, tracker identity, relationships, branch contracts, Phase, and review rounds are authoritative. With Phase configured, every entity stores `phase` in `metadata.json`. When changing Phase, read [Phase](./phase.md).
-- Lifecycle and Priority are native tracker Status and Priority, read fresh; nothing local stores them.
+- Artifacts, tracker identity, relationships, branch contracts, and review rounds are authoritative.
+- Lifecycle, Priority, and Phase are native tracker values, read fresh; nothing local stores them. When changing Phase, read [Phase](./phase.md).
 - Keep machine data valid and transient context in `notes.md`. Never store credentials in `.piton/config.toml`.
 
 **Ownership:**

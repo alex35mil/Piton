@@ -49,8 +49,6 @@ export const expectedWorkflowTools = [
     "prepare_tracker_publication_update",
     "record_tracker_publication",
     "recover_tracker_publication",
-    "set_github_workflow_phase",
-    "set_linear_workflow_phase",
     "accept_epic_tasks",
     "plan_epic_task_issues",
     "record_epic_task_issue",

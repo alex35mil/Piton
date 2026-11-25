@@ -164,10 +164,8 @@ describe("workflow model-facing contracts", () => {
         for (const name of ["record_resource_ids", "invalidate_resource_ids"])
             assert.deepEqual(inputs(name), ["entityDir", "evidence"], name)
         assert.deepEqual(inputs("resolve_resource_ids"), ["entityDir", "resource"])
-        assert.deepEqual(inputs("set_github_workflow_phase"), ["entityDir", "native", "phase"])
-        assert.deepEqual(inputs("prepare_github_phase_mutation"), ["entityDir", "native"])
-        assert.deepEqual(inputs("set_linear_workflow_phase"), ["entityDir", "lifecycle", "native", "phase"])
-        assert.deepEqual(inputs("prepare_linear_phase_mutation"), ["entityDir", "lifecycle", "native"])
+        assert.deepEqual(inputs("prepare_github_phase_mutation"), ["entityDir", "native", "phase"])
+        assert.deepEqual(inputs("prepare_linear_phase_mutation"), ["entityDir", "lifecycle", "native", "phase"])
         const mcp = tools.find((t) => t.name === "configure_mcp")!.parameters
         assert.ok(Type.IsObject(mcp))
         assert.ok("anyOf" in json(mcp).properties.registrations.items)
@@ -476,9 +474,10 @@ describe("workflow model-facing contracts", () => {
                 ] as const) {
                     const native = JSON.stringify(githubPhaseReads(target, current))
                     await invoke(
-                        `text(await tools.set_github_workflow_phase({entityDir:${JSON.stringify(directory)},phase:${JSON.stringify(phase)},native:${native}}));`,
+                        `text(await tools.prepare_github_phase_mutation({entityDir:${JSON.stringify(directory)},phase:${JSON.stringify(phase)},native:${native}}));`,
                     )
-                    assert.equal(JSON.parse(fs.readFileSync(metadataPath, "utf8")).phase, phase)
+                    // Phase lives only on the tracker: preparing its write leaves metadata untouched.
+                    assert.deepEqual(JSON.parse(fs.readFileSync(metadataPath, "utf8")), initial)
                 }
                 await h.session.reload()
                 await invoke(

@@ -18,8 +18,6 @@ import { RecordReviewResponseValidator } from "../workflows/extensions/review/in
 const commonMetadata = {
     slug: "example",
     title: "Example",
-    createdAt: "2026-01-01T00:00:00Z",
-    phase: "planning",
     branch: {
         state: "ready",
         name: "example",
@@ -73,9 +71,9 @@ describe("workflow consolidation contracts", () => {
             )
             const { tracker: _tracker, ...untracked } = metadata
             assert.equal(EntityStatusValidator.check(untracked), false)
-            for (const phase of ["planning", "execution", "selfReview"])
-                assert.equal(EntityStatusValidator.check({ ...metadata, phase }), true)
-            assert.equal(EntityStatusValidator.check({ ...metadata, phase: "paused" }), false)
+            // Phase and creation time live on the tracker, never in metadata.
+            assert.equal(EntityStatusValidator.check({ ...metadata, phase: "planning" }), false)
+            assert.equal(EntityStatusValidator.check({ ...metadata, createdAt: "2026-01-01T00:00:00Z" }), false)
             assert.equal(
                 EntityStatusValidator.check({
                     ...metadata,

@@ -24,7 +24,7 @@ Follow the [repository merge contract](../integrations/forge/merge.md).
    - `merged`: reuse `roles.forge.shipping.merge` as delivery proof.
    - `blocked`: report `roles.forge.shipping.reason` and stop.
 3. Before setting Done, confirm with a fresh PR get that the PR is merged, with the expected repository, head, base, head SHA, and `merged_at`. After a new merge, read only the missing facts.
-4. When the Deliverable has a tracker item, set native Status to Done. When Phase is configured ([Phase](../phase.md#when-phase-isnt-configured)), clear native Phase from an item read taken after the Status write ([fresh native facts](../phase.md#fresh-native-facts)), and keep the last metadata Phase. The lifecycle update never creates a commit.
+4. When the Deliverable has a tracker item, set native Status to Done. When Phase is configured ([Phase](../phase.md#when-phase-isnt-configured)), clear native Phase from an item read taken after the Status write ([fresh native facts](../phase.md#fresh-native-facts)). The lifecycle update never creates a commit.
 5. Call `cleanup_delivery_branch` once with the merged PR read as `evidence`.
 6. After cleanup succeeds, call `inspect_session_analysis`. When it returns `enabled`, read [session analysis](../session-analysis.md).
 

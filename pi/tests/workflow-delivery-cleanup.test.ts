@@ -85,7 +85,6 @@ function issue(number: number) {
 function recordPullRequest(root: string, directory: string) {
     const metadataPath = path.join(root, directory, "metadata.json")
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8"))
-    metadata.phase = "selfReview"
     metadata.forge = {
         provider: "github",
         repository: repo,

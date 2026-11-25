@@ -280,27 +280,6 @@ describe("workflow domain", () => {
         }
     })
 
-    it("initializes without a metadata Phase when the tracker doesn't configure Phase", () => {
-        for (const provider of ["github", "linear"] as const) {
-            const cwd = temporaryRepository(provider)
-            try {
-                const tracker = structuredClone(requireTracker(loadIntegrationRoles(cwd), "test")) as {
-                    phase?: unknown
-                    fields?: { phase?: unknown }
-                }
-                delete tracker.phase
-                delete tracker.fields?.phase
-                writeProjectConfig(cwd, { tracker })
-                const object = provider === "github" ? issue(7) : linearIssue("ENG-7")
-                const created = init(cwd, gig("No Phase", object))
-                assert.equal("phase" in created.status, false)
-                assert.doesNotMatch(formatInitializedEntity(created), /Phase/)
-            } finally {
-                fs.rmSync(cwd, { recursive: true, force: true })
-            }
-        }
-    })
-
     it("initializes a GitHub Epic and Task from their issues with a plan marker", () => {
         const cwd = temporaryRepository()
         try {
@@ -317,7 +296,9 @@ describe("workflow domain", () => {
                 external: { issueNumber: 12 },
                 planComment: { state: "unpublished" },
             })
-            assert.equal(epicStatus.phase, "planning")
+            // Phase and creation time live on the tracker, never in metadata.
+            assert.equal("phase" in epicStatus, false)
+            assert.equal("createdAt" in epicStatus, false)
             const epicDir = path.join(cwd, created.directory)
             for (const entry of ["brief.md", "notes.md", "metadata.json", "reviews", "scratch", "tasks"])
                 assert.ok(fs.existsSync(path.join(epicDir, entry)), entry)

@@ -112,8 +112,6 @@ function fixture() {
     const metadata: Record<string, unknown> = {
         slug: "example",
         title: "Example",
-        createdAt: "2026-10-01T00:00:00Z",
-        phase: "selfReview",
         entity: "gig",
         kind: "refactor",
         branch: { state: "ready", name: prScope.head, start: "main", target: "main", source: "generated" },
@@ -518,18 +516,6 @@ describe("resource ID operations", () => {
             )
             if (context.state !== "enabled") assert.fail("enabled shipping expected")
             assert.deepEqual(context.roles.forge?.shipping, decision)
-            // Phase is visibility only; merge preparation works in any Phase.
-            for (const phase of ["planning", "execution"]) {
-                fs.writeFileSync(f.file, JSON.stringify({ ...f.metadata, phase }))
-                const other = buildIntegrationContext(
-                    { cwd: f.root } as never,
-                    { operation: "shippingMerge", entityDir: f.directory, evidence: read },
-                    mcpTools,
-                )
-                if (other.state !== "enabled") assert.fail("enabled shipping expected")
-                assert.deepEqual(other.roles.forge?.shipping, decision)
-            }
-            fs.writeFileSync(f.file, JSON.stringify(f.metadata))
             const merged = { ...actual, merged: true, merged_at: "2026-10-01T08:10:44Z" }
             assert.equal(shippingReadDecision(prScope, { ...read, response: merged }, sha, 7, mcpTools).state, "merged")
             for (const response of [
@@ -580,8 +566,6 @@ describe("resource ID operations", () => {
                 JSON.stringify({
                     slug: "rollout",
                     title: "Rollout",
-                    createdAt: "2026-10-01T00:00:00Z",
-                    phase: "execution",
                     entity: "epic",
                     branch: { state: "ready", name: "9-rollout", start: "main", target: "main", source: "generated" },
                     tracker: {
@@ -881,7 +865,7 @@ describe("resource ID operations", () => {
                 state: "failed",
                 reason: "environment variable LINK_TOKEN is not set",
             })
-            const local = { ...status, tracker: { provider: "local" as const, createdAt: status.createdAt } }
+            const local = { ...status, tracker: { provider: "local" as const, createdAt: "2026-10-01T00:00:00Z" } }
             assert.deepEqual(await linkPullRequestIssue(f.root, local, 7, { projectTrusted: true }), {
                 state: "not-applicable",
             })
@@ -993,7 +977,7 @@ describe("resource ID operations", () => {
             assert.equal((await find(github([node(7), node(9)], []).fetchImpl)).state, "ambiguous")
             assert.equal((await find(github([], []).fetchImpl)).state, "none")
             // Without a GitHub issue, only the head and base listing is read.
-            const local = { ...status, tracker: { provider: "local" as const, createdAt: status.createdAt } }
+            const local = { ...status, tracker: { provider: "local" as const, createdAt: "2026-10-01T00:00:00Z" } }
             const listing = github([], [node(9)])
             assert.equal((await find(listing.fetchImpl, local)).state, "found")
             assert.deepEqual(listing.calls, ["head-base"])

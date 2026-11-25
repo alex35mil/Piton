@@ -35,7 +35,6 @@ import {
 } from "../__lib/entity.js"
 import { type EpicTask, epicTaskMarker, readEpicRouting, readEpicTasks } from "../__lib/epic-tasks.js"
 import type { ResourceIds } from "../integrations/resource-ids.js"
-import { initialPhase } from "../integrations/phase.js"
 import { stripPublicationSignature } from "../integrations/publication.js"
 import { resourceIdsFromTrackerObject } from "./resource-ids.js"
 import * as Git from "../__lib/git.js"
@@ -257,8 +256,6 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
         const common = {
             slug,
             title: input.title.trim(),
-            createdAt: (options.now ?? new Date()).toISOString(),
-            ...initialPhase(configured, "planning"),
             branch: contract,
             tracker,
         }
@@ -317,7 +314,6 @@ export function initializeLocalGig(input: LocalGigInitialization, options: Initi
         const status = parse(EntityStatusValidator, {
             slug,
             title: input.title.trim(),
-            createdAt,
             branch: contract,
             tracker,
             entity: "gig",

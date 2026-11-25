@@ -1,6 +1,7 @@
 import "./host-runtime.ts"
 
 import assert from "node:assert/strict"
+import * as cp from "node:child_process"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -14,7 +15,6 @@ import { githubPhaseFacts } from "../workflows/extensions/integrations/github-ph
 import {
     NativePhaseFactsValidator,
     phaseProjectionContract,
-    initialPhase,
     planPhaseMutation as planForItem,
     resolveLinearPhaseGroup,
     trackerPhase,
@@ -173,18 +173,29 @@ function planPhaseMutation(
 }
 
 describe("shared workflow Phase", () => {
-    it("projects exactly the active Phase only while In Progress for every entity and provider", () => {
+    it("projects a Phase only while In Progress, and clears it otherwise, for every entity and provider", () => {
         for (const entity of ["epic", "task", "gig"] as const) {
             for (const phase of ["planning", "execution", "selfReview"] as const) {
                 assert.equal(PhaseValidator.check(phase), true)
                 for (const lifecycle of lifecycles) {
-                    const expected = lifecycle === "inProgress" ? phase : null
-                    assert.equal(projectedPhase(lifecycle, phase), expected)
-                    const field = planPhaseMutation(github, entity, phase, lifecycle, githubFacts).assignment
+                    const active = lifecycle === "inProgress"
+                    const target = active ? phase : null
+                    const expected = target
+                    assert.equal(projectedPhase(lifecycle, target), expected)
+                    // The target must match lifecycle: a Phase only In Progress, none otherwise.
+                    assert.throws(
+                        () => projectedPhase(lifecycle, active ? null : phase),
+                        active ? /In Progress/ : /none/,
+                    )
+                    assert.throws(
+                        () => planPhaseMutation(github, entity, active ? null : phase, lifecycle, githubFacts),
+                        active ? /In Progress/ : /none/,
+                    )
+                    const field = planPhaseMutation(github, entity, target, lifecycle, githubFacts).assignment
                     assert.equal(field.provider, "github")
                     if (field.provider !== "github") assert.fail("expected GitHub")
                     assert.equal(field.value, expected === null ? null : phaseValues[expected])
-                    const labels = planPhaseMutation(linear, entity, phase, lifecycle, linearFacts()).assignment
+                    const labels = planPhaseMutation(linear, entity, target, lifecycle, linearFacts()).assignment
                     assert.equal(labels.provider, "linear")
                     if (labels.provider !== "linear") assert.fail("expected Linear")
                     assert.deepEqual(labels.labels, [
@@ -220,7 +231,7 @@ describe("shared workflow Phase", () => {
             mutation: githubCall("Execution"),
         })
         const selected = { ...githubFacts, current: "Execution" }
-        assert.deepEqual(planPhaseMutation(github, "gig", "execution", "inReview", selected), {
+        assert.deepEqual(planPhaseMutation(github, "gig", null, "inReview", selected), {
             assignment: { provider: "github", field: "Phase", value: null },
             nativeChanged: true,
             mutation: githubCall(null),
@@ -259,13 +270,12 @@ describe("shared workflow Phase", () => {
         )
     })
 
-    it("returns a local lifecycle-dependent contract, not an inferred tracker status", () => {
+    it("returns only how the tracker shows Phase, with no local Phase", () => {
         for (const tracker of [github, linear]) {
-            const contract = phaseProjectionContract("selfReview", tracker, "gig")
+            const contract = phaseProjectionContract(tracker, "gig")
             if (contract.state !== "configured") assert.fail("expected configured Phase")
-            assert.equal(contract.inProgress, "selfReview")
-            assert.equal(contract.otherwise, null)
-            assert.match(contract.authority, /read fresh native lifecycle/)
+            assert.deepEqual(Object.keys(contract).sort(), ["authority", "representation", "state"])
+            assert.equal(contract.representation.provider, tracker.provider)
         }
     })
 
@@ -279,32 +289,17 @@ describe("shared workflow Phase", () => {
             [linearWithout, linearFacts()],
         ] as const) {
             assert.equal(trackerPhase(tracker).state, "notConfigured")
-            assert.deepEqual(initialPhase(tracker, "planning"), {})
-            assert.equal(phaseProjectionContract(undefined, tracker, "gig").state, "notConfigured")
+            assert.equal(phaseProjectionContract(tracker, "gig").state, "notConfigured")
             assert.throws(() => planPhaseMutation(tracker, "gig", "execution", "inProgress", facts), /isn't configured/)
         }
-        assert.deepEqual(initialPhase(github, "planning"), { phase: "planning" })
         assert.throws(() => resolveLinearPhaseGroup(linearWithout, "gig", linearFacts().catalog), /isn't configured/)
-    })
-
-    it("clears native Phase for an entity whose metadata has no Phase yet, but won't project one", () => {
-        const selected = { ...githubFacts, current: phaseValues.execution }
-        assert.partialDeepStrictEqual(planPhaseMutation(github, "gig", undefined, "inReview", selected), {
-            assignment: { provider: "github", field: "Phase", value: null },
-            nativeChanged: true,
-        })
-        assert.throws(() => planPhaseMutation(github, "gig", undefined, "inProgress", selected), /set it/)
-        const contract = phaseProjectionContract(undefined, github, "gig")
-        if (contract.state !== "configured") assert.fail("expected configured Phase")
-        assert.equal(contract.phase, null)
-        assert.equal(contract.inProgress, null)
     })
 
     it("recognizes no-op and clearing assignments without losing unrelated labels", () => {
         const facts = linearFacts()
         facts.applied = ["customer-label", "execution", "other-execution"]
         assert.equal(planPhaseMutation(linear, "gig", "execution", "inProgress", facts).nativeChanged, false)
-        const cleared = planPhaseMutation(linear, "gig", "selfReview", "inReview", facts)
+        const cleared = planPhaseMutation(linear, "gig", null, "inReview", facts)
         assert.equal(cleared.assignment.provider, "linear")
         if (cleared.assignment.provider !== "linear") assert.fail("expected Linear")
         assert.deepEqual(cleared.assignment.labels, ["customer-label", "other-execution"])
@@ -316,7 +311,7 @@ describe("shared workflow Phase", () => {
             }).nativeChanged,
             false,
         )
-        assert.equal(planPhaseMutation(github, "gig", "selfReview", "done", githubFacts).nativeChanged, false)
+        assert.equal(planPhaseMutation(github, "gig", null, "done", githubFacts).nativeChanged, false)
     })
 
     it("requires the exact GitHub field name and type", () => {
@@ -357,9 +352,10 @@ describe("shared workflow Phase", () => {
             return reads
         }
 
+        // Targets Planning while In Progress and clears Phase otherwise, as the agent would.
         const plan = (reads: Reads) => {
             const { lifecycle, native } = facts(reads)
-            return planPhaseMutation(github, "gig", "planning", lifecycle, native)
+            return planPhaseMutation(github, "gig", lifecycle === "inProgress" ? "planning" : null, lifecycle, native)
         }
 
         it("extracts lifecycle and Phase from one item read as the MCP returns it", () => {
@@ -565,6 +561,31 @@ describe("shared workflow Phase", () => {
         assert.throws(() => resolveLinearPhaseGroup(tracker, "gig", facts.catalog), /Phase/)
     })
 
+    it("loads the shared Phase operation without a Pi runtime", () => {
+        const output = cp.execFileSync(
+            process.execPath,
+            [
+                "--import",
+                "tsx",
+                "--input-type=module",
+                "-e",
+                `
+            import { registerHooks } from 'node:module';
+            registerHooks({ resolve(specifier, context, next) {
+                // pi-schema is the package's own dependency, not the Pi runtime.
+                if (specifier.startsWith('@earendil-works/') && specifier !== '@earendil-works/pi-schema')
+                    throw new Error('Pi runtime dependency: ' + specifier);
+                return next(specifier, context);
+            }});
+            await import('./workflows/extensions/integrations/phase.ts');
+            console.log('portable operations loaded');
+        `,
+            ],
+            { encoding: "utf8" },
+        )
+        assert.match(output, /portable operations loaded/)
+    })
+
     it("lets every review category run in any Phase for every entity on both trackers", () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "phase-review-"))
         const branch = {
@@ -577,7 +598,6 @@ describe("shared workflow Phase", () => {
         const common = {
             title: "Example",
             slug: "example",
-            createdAt: "2026-01-01T00:00:00Z",
             branch,
         }
         try {
@@ -638,18 +658,11 @@ describe("shared workflow Phase", () => {
                         fs.writeFileSync(path.join(directory, "result.md"), "# Result\n\nDone.\n")
                     }
                     // Phase is visibility only: it never decides whether a review may run.
-                    for (const phase of ["planning", "execution", "selfReview"]) {
-                        fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify({ ...metadata, phase }))
-                        for (const category of entity === "epic"
-                            ? (["plan"] as const)
-                            : (["plan", "interim", "final"] as const))
-                            assert.doesNotThrow(() => assertReviewPreconditions(directory, category))
-                    }
-                    if (entity === "epic")
-                        fs.writeFileSync(
-                            path.join(directory, "metadata.json"),
-                            JSON.stringify({ ...metadata, phase: "planning" }),
-                        )
+                    fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata))
+                    for (const category of entity === "epic"
+                        ? (["plan"] as const)
+                        : (["plan", "interim", "final"] as const))
+                        assert.doesNotThrow(() => assertReviewPreconditions(directory, category))
                     assert.equal(fs.existsSync(path.join(directory, "status.md")), false)
                 }
             }
