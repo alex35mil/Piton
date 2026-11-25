@@ -126,21 +126,21 @@ pub struct Host<'a> {
 /// What setup learned about this host on the tailnet.
 #[derive(Debug)]
 pub enum TailnetCheck {
-    /// The tailscale tool is off (turned off, or not installed and unset): remote access isn't available.
-    ToolOff(crate::tools::OffReason),
-    /// The tailscale tool is enabled but not installed.
-    ToolUnavailable(crate::tools::Unavailable),
+    /// Tailscale is off (turned off, or not installed and unset): remote access isn't available.
+    Off(crate::integrations::OffReason),
+    /// Tailscale is enabled but not installed.
+    Unavailable(crate::integrations::Unavailable),
     /// Asked tailscale: this Mac's identity, or why it's unknown.
     Asked(Result<crate::apps::SelfNode, crate::apps::TailnetError>),
 }
 
 impl TailnetCheck {
-    /// Asks tailscale when the tool is used.
+    /// Asks tailscale when it's used.
     pub async fn run(config: &DaemonConfig, env: &crate::launch::Env) -> Self {
-        match crate::tools::resolve(crate::tools::Tool::Tailscale, config, env) {
-            crate::tools::ToolState::Off(reason) => TailnetCheck::ToolOff(reason),
-            crate::tools::ToolState::Unavailable(unavailable) => TailnetCheck::ToolUnavailable(unavailable),
-            crate::tools::ToolState::Used(program) => {
+        match crate::integrations::resolve(crate::integrations::Integration::Tailscale, config, env) {
+            crate::integrations::IntegrationState::Off(reason) => TailnetCheck::Off(reason),
+            crate::integrations::IntegrationState::Unavailable(unavailable) => TailnetCheck::Unavailable(unavailable),
+            crate::integrations::IntegrationState::Used(program) => {
                 TailnetCheck::Asked(crate::apps::tailnet_self_node(&program).await)
             }
         }
@@ -212,15 +212,15 @@ fn state_version(db: &Path) -> Result<(), String> {
     crate::state::check(db).map_err(|e| e.to_string())
 }
 
-/// pi is required; each optional tool is reported with its state, and only one enabled but not installed is a problem.
+/// pi is required; each integration is reported with its state, and only one enabled but not installed is a problem.
 fn prerequisites(host: &Host) -> Status {
-    use crate::tools::{OffReason, Tool, ToolState};
+    use crate::integrations::{Integration, IntegrationState, OffReason};
     let mut problems = Vec::new();
     let mut instructions = Vec::new();
     let mut found = Vec::new();
     let pi = host.config.pi.command.first().map(String::as_str).unwrap_or("pi");
     let resolved = crate::launch::resolve_program(pi, host.env);
-    match crate::tools::is_executable(Path::new(&resolved)) {
+    match crate::integrations::is_executable(Path::new(&resolved)) {
         true => found.push(format!("pi: {resolved}")),
         false => {
             problems.push(format!(
@@ -229,22 +229,24 @@ fn prerequisites(host: &Host) -> Status {
             instructions.push(format!("pi: {PI_INSTALL}"));
         }
     }
-    let tools = crate::tools::Tools::resolve(host.config, host.env);
-    for tool in Tool::ALL {
-        let name = tool.name();
-        match tools.get(tool) {
-            ToolState::Used(program) => found.push(format!("{name}: {}", program.program)),
-            ToolState::Off(OffReason::Disabled) => found.push(format!("{name}: off ([tools.{name}] enabled = false)")),
-            ToolState::Off(OffReason::NotInstalled) => found.push(format!(
+    let integrations = crate::integrations::Integrations::resolve(host.config, host.env);
+    for integration in Integration::ALL {
+        let name = integration.name();
+        match integrations.get(integration) {
+            IntegrationState::Used(program) => found.push(format!("{name}: {}", program.program)),
+            IntegrationState::Off(OffReason::Disabled) => {
+                found.push(format!("{name}: off ([integrations.{name}] enabled = false)"))
+            }
+            IntegrationState::Off(OffReason::NotInstalled) => found.push(format!(
                 "{name}: not installed, so off (optional: {}; {})",
-                tool.purpose(),
-                tool.install()
+                integration.purpose(),
+                integration.install()
             )),
-            ToolState::Unavailable(unavailable) => {
+            IntegrationState::Unavailable(unavailable) => {
                 problems.push(unavailable.to_string());
                 instructions.push(format!(
-                    "{name}: {}, or set [tools.{name}] enabled = false",
-                    tool.install()
+                    "{name}: {}, or set [integrations.{name}] enabled = false",
+                    integration.install()
                 ));
             }
         }
@@ -383,28 +385,23 @@ fn on_path(dir: &Path, env: &crate::launch::Env) -> bool {
 }
 
 fn remote_access(host: &Host) -> Status {
-    let port = host.config.tailnet.port;
-    if !host.config.tailnet.enabled {
-        return Status::Ok {
-            detail: "turned off ([tailnet] enabled = false): only this Mac connects".into(),
-        };
-    }
+    let port = host.config.integrations.tailnet.port;
     match &host.tailnet {
-        TailnetCheck::ToolOff(crate::tools::OffReason::Disabled) => Status::Ok {
-            detail: "tailscale is turned off ([tools.tailscale] enabled = false): only this Mac connects".into(),
+        TailnetCheck::Off(crate::integrations::OffReason::Disabled) => Status::Ok {
+            detail: "tailscale is turned off ([integrations.tailscale] enabled = false): only this Mac connects".into(),
         },
-        TailnetCheck::ToolOff(crate::tools::OffReason::NotInstalled) => Status::Ok {
+        TailnetCheck::Off(crate::integrations::OffReason::NotInstalled) => Status::Ok {
             detail: format!(
                 "tailscale isn't installed: only this Mac connects. For the phone, {}",
-                crate::tools::Tool::Tailscale.install()
+                crate::integrations::Integration::Tailscale.install()
             ),
         },
-        TailnetCheck::ToolUnavailable(unavailable) => Status::Missing {
+        TailnetCheck::Unavailable(unavailable) => Status::Missing {
             problems: vec![unavailable.to_string()],
             fix: Fix::Manual {
                 instructions: vec![format!(
-                    "{}, or set [tools.tailscale] enabled = false",
-                    crate::tools::Tool::Tailscale.install()
+                    "{}, or set [integrations.tailscale] enabled = false",
+                    crate::integrations::Integration::Tailscale.install()
                 )],
             },
         },
@@ -688,15 +685,15 @@ mod tests {
         assert!(matches!(apply(&host, "cli").unwrap().status, Status::Ok { .. }));
     }
 
-    /// Optional tools: missing and unset is fine and reported as off; enabled but missing is the step's problem, and
+    /// Integrations: missing and unset is fine and reported as off; enabled but missing is the step's problem, and
     /// remote access says what to do.
     #[test]
-    fn optional_tools() {
+    fn optional_integrations() {
         let f = fixture();
         std::fs::remove_file(f.root.join("bin/mise")).unwrap();
         std::fs::remove_file(f.root.join("bin/tailscale")).unwrap();
         let mut host = host(&f);
-        host.tailnet = TailnetCheck::ToolOff(crate::tools::OffReason::NotInstalled);
+        host.tailnet = TailnetCheck::Off(crate::integrations::OffReason::NotInstalled);
         let report = check(&host);
         let Status::Ok { detail } = status(&report, Step::Prerequisites) else {
             panic!("{report}")
@@ -708,13 +705,23 @@ mod tests {
         assert!(detail.contains("only this Mac connects"), "{detail}");
 
         let mut config = f.config.clone();
-        config.tools.mise.choice = crate::config::ToolChoice::On;
+        config.integrations.mise.choice = crate::config::IntegrationChoice::On;
         host.config = &config;
         let report = check(&host);
         let Status::Missing { problems, .. } = status(&report, Step::Prerequisites) else {
             panic!("{report}")
         };
-        assert!(problems[0].contains("[tools.mise] enabled = true"), "{problems:?}");
+        assert!(
+            problems[0].contains("[integrations.mise] enabled = true"),
+            "{problems:?}"
+        );
+
+        host.tailnet = TailnetCheck::Off(crate::integrations::OffReason::Disabled);
+        let report = check(&host);
+        let Status::Ok { detail } = status(&report, Step::RemoteAccess) else {
+            panic!("{report}")
+        };
+        assert!(detail.contains("[integrations.tailscale] enabled = false"), "{detail}");
     }
 
     #[test]

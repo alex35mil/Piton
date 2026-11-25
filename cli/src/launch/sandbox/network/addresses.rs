@@ -1,9 +1,10 @@
-//! Where an allowed name may lead: the resolved-address check. A `connect` entry, pi's trusted hosts, and the user's
-//! answer allow a name, but whoever controls that name's DNS chooses its addresses, so the gate resolves it once and
-//! drops the addresses that reach this Mac or its link: loopback, unspecified, link-local, multicast, broadcast, the
-//! cloud instance-metadata endpoints outside link-local, and every address of this Mac's own interfaces (a service bound
-//! to `0.0.0.0` answers on them as it does on loopback). IPv4 inside an IPv6 form is judged as the IPv4 it carries. An
-//! address an IP entry lists is exempt (listing `127.0.0.1:3000` is a choice). Same list as Claude Code's sandbox.
+//! Where an allowed name may lead: the resolved-address check. A `[sandbox.network.connections]` entry, pi's trusted
+//! hosts, and the user's answer allow a name, but whoever controls that name's DNS chooses its addresses, so the gate
+//! resolves it once and drops the addresses that reach this Mac or its link: loopback, unspecified, link-local,
+//! multicast, broadcast, the cloud instance-metadata endpoints outside link-local, and every address of this Mac's own
+//! interfaces (a service bound to `0.0.0.0` answers on them as it does on loopback). IPv4 inside an IPv6 form is judged
+//! as the IPv4 it carries. An address an IP entry lists is exempt (listing `127.0.0.1:3000` is a choice). Same list as
+//! Claude Code's sandbox.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

@@ -2,8 +2,8 @@ import Foundation
 import Observation
 import PitonKit
 
-/// The text and code fonts in effect on this device: each one the host's shared value (cached for offline start) or
-/// this device's own, as `ClientPreferences` says. Follows `UserDefaults`, so a pushed host value, a local change, or a
+/// The text and code fonts in effect on this device: each one the host's value for this device (cached for offline
+/// start) or this device's own, as `ClientPreferences` says. Follows `UserDefaults`, so a pushed host value, a local change, or a
 /// change in another window shows at once.
 @MainActor
 @Observable
@@ -31,7 +31,7 @@ final class FontPreferences {
     }
 
     func source(_ preference: ClientPreference) -> PreferenceSource {
-        sources[preference] ?? .shared(nil)
+        sources[preference] ?? .host(nil)
     }
 
     func choice(_ preference: ClientPreference) -> FontChoice {

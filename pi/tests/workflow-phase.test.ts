@@ -10,7 +10,7 @@ import { describe, it } from "node:test"
 import { parse } from "../extensions/__lib/schema.ts"
 import { PhaseValidator, projectedPhase, type LifecycleState } from "../workflows/extensions/__lib/domain.ts"
 import { assertReviewPreconditions } from "../workflows/extensions/review/index.ts"
-import { GitHubTrackerValidator, LinearTrackerValidator } from "../workflows/extensions/integrations/config.ts"
+import type { GitHubTracker, LinearTracker } from "../workflows/extensions/integrations/config.ts"
 import { githubPhaseFacts } from "../workflows/extensions/integrations/github-phase-evidence.ts"
 import {
     NativePhaseFactsValidator,
@@ -46,7 +46,7 @@ const statuses = {
     done: "Done",
     canceled: "Canceled",
 }
-const github = parse(GitHubTrackerValidator, {
+const github: GitHubTracker = {
     provider: "github",
     mcpServer: "github",
     repository: { owner: "example", repo: "example" },
@@ -57,14 +57,14 @@ const github = parse(GitHubTrackerValidator, {
         phase: { field: "Phase", values: phaseValues },
         priority: { scope: "project", field: "Priority", values: ["High"] },
     },
-})
-const linear = parse(LinearTrackerValidator, {
+}
+const linear: LinearTracker = {
     provider: "linear",
     mcpServer: "linear",
     team: "Engineering",
     phase: linearPhases(),
     statuses: { projects: statuses, issues: statuses },
-})
+}
 const githubFacts: Extract<NativePhaseFacts, { provider: "github" }> = {
     provider: "github",
     field: { name: "Phase", dataType: "SINGLE_SELECT" },

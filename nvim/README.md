@@ -12,8 +12,8 @@ sandbox settings, pi processes, and deletion. This plugin owns the editor UI, no
   [daemon setup](../docs/daemon.md#pinvim)).
 - For the queue: a GitHub or Linear tracker for queued work, and a GitHub forge for incoming pull requests: the
   nearest `[tracker]` and `[forge]` of Piton's configuration chain (`config.toml` in the source's `.piton/` or its
-  parent folders'; never the global folder), read through `piton config get`; the plugin reads no configuration file
-  itself. Each role reads with its own MCP registration (`mcp_server`), which must specify
+  parent folders'; never the global folder), read through `piton config get`, which validates them; the plugin reads
+  no configuration file itself. Each role reads with its own MCP registration (`mcp_server`), which must specify
   `Authorization: Bearer ${ENV_VAR}`. curl reads that variable from its own environment, which
   [`queue.with_credential`](#queue-credentials) supplies (by default, the environment Neovim was started with); the
   credential is never read into Neovim. Either role alone is enough. Without a tracker or a GitHub forge, named agents
@@ -64,9 +64,14 @@ them. All notifications use `vim.notify` with title `Piton`.
   - With a GitHub Project tracker too, PRs on the board come first, in board order with their board Status, then the
     rest; a PR on the board and on the forge is listed once. Board PRs that aren't open PRs of the forge's repository
     aren't listed.
-  - Without a forge, or with a forge other than GitHub, there is no pull-request section; tracker work still loads.
+  - Without a forge (or with it turned off), there is no pull-request section; tracker work still loads.
 - **`pick()`** lists the current repository's source and workers, with live pi status. Selecting an existing tab focuses
   it; otherwise it opens a tab. With no selection, typed text can create a named worker.
+- **Trust.** Before an agent's tab opens, a repository that needs the user's trust (committed grants or pi project
+  files, never decided) is asked about with `vim.ui.select`: the grants (new ones marked) and what pi would load.
+  Trust or Don't trust records it for the grants shown (`piton trust allow|deny --grants`; when they changed while the
+  question was open, it asks again) and opens the tab; Cancel or dismissing records nothing and opens nothing. pi.nvim
+  started on its own in such a repository can't ask: its attach fails naming `piton trust allow` (#390).
 - **`get(path)`** returns the agent containing a path, or nil. The record has `path`, `source`, `label`, and optional
   `issue`. Use this from your own tab-close action to distinguish workers from ordinary tabs.
 - **`close_tab(agent)`** offers “Close tab” or “Delete agent”. Closing only closes the editor tab: the daemon's pi keeps

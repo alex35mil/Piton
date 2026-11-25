@@ -30,7 +30,7 @@
 ---| { kind: "source_fetch", checkout: string, message: string }
 ---| { kind: "protected_update", checkout: string, upstream: string, target: string, files: string[] }
 ---| { kind: "update_denied", checkout: string, files: string[] }
----| { kind: "tool_unavailable", tool: string, program: string }
+---| { kind: "integration_unavailable", integration: string, program: string, message: string }
 ---| { kind: "failed", message: string }
 
 --- The answer to a `protected_update` refusal.
@@ -65,7 +65,7 @@ local REFUSAL_KINDS = {
     source_fetch = true,
     protected_update = true,
     update_denied = true,
-    tool_unavailable = true,
+    integration_unavailable = true,
     failed = true,
 }
 
@@ -254,6 +254,75 @@ function M.preview_folder(source_path, name)
     return vim.fs.basename(source_path) .. "--" .. normalized
 end
 
+---@alias PitonTrustState "nothing_to_trust" | "trusted" | "declined" | "needed"
+
+---@class PitonTrust
+---@field state PitonTrustState
+---@field grants string[]
+---@field added string[]
+---@field resources { pi: string[], mcp_servers: string[] }
+
+local TRUST_STATES = { nothing_to_trust = true, trusted = true, declined = true, needed = true }
+
+---@param value any
+---@return string[]
+local function strings(value)
+    local result = {}
+    for _, item in ipairs(type(value) == "table" and value or {}) do
+        if type(item) == "string" then
+            result[#result + 1] = item
+        end
+    end
+    return result
+end
+
+--- `piton trust status --json`: the repository's source checkout and its trust state.
+---@param path string
+---@return { source: string, trust: PitonTrust }
+function M.trust_status(path)
+    local result = util.exec({ "piton", "trust", "status", path, "--json" })
+    local ok, value = pcall(vim.json.decode, result.stdout or "", { luanil = { object = true, array = true } })
+    if result.code ~= EXIT_OK or not ok or type(value) ~= "table" or type(value.trust) ~= "table" then
+        util.refuse("piton trust status failed (exit " .. result.code .. "):\n" .. vim.trim(result.stderr or ""))
+    end
+    local trust = value.trust
+    if not TRUST_STATES[trust.state] or type(value.source) ~= "string" then
+        util.refuse("Unexpected trust state from piton: " .. vim.inspect(value))
+    end
+    local resources = type(trust.resources) == "table" and trust.resources or {}
+    return {
+        source = value.source,
+        trust = {
+            state = trust.state,
+            grants = strings(trust.grants),
+            added = strings(trust.added),
+            resources = { pi = strings(resources.pi), mcp_servers = strings(resources.mcp_servers) },
+        },
+    }
+end
+
+-- Exit code of `piton trust allow|deny --grants` when the grants changed since they were shown.
+local EXIT_TRUST_CHANGED = 4
+
+--- `piton trust allow|deny --grants`: records the decision for the grants the user was shown. "changed" when they
+--- changed since (nothing recorded: ask again).
+---@param path string
+---@param decision "allow" | "deny"
+---@param shown string[]
+---@return "recorded" | "changed"
+function M.trust_decide(path, decision, shown)
+    -- An empty Lua table encodes as `{}`: the list must be `[]`.
+    local grants = #shown > 0 and vim.json.encode(shown) or "[]"
+    local result = util.exec({ "piton", "trust", decision, path, "--grants", grants })
+    if result.code == EXIT_OK then
+        return "recorded"
+    elseif result.code == EXIT_TRUST_CHANGED then
+        return "changed"
+    end
+    util.refuse("piton trust " .. decision .. " failed:\n" .. vim.trim(result.stderr or ""))
+    error("unreachable")
+end
+
 -- Exit code of `piton config get` when the part's files are invalid.
 local EXIT_INVALID_CONFIG = 3
 
@@ -262,7 +331,7 @@ local EXIT_INVALID_CONFIG = 3
 --- the resolver's message when the part can't be used.
 ---@param part "tracker" | "forge" | "mcp"
 ---@param workspace string
----@return any value nil when the part is unset (`tracker` or `forge` with no table)
+---@return any value `tracker` and `forge` are a role: on with its validated config, or off with the reason
 function M.config(part, workspace)
     local result = util.exec({ "piton", "config", "get", part, "--workspace", workspace })
     local ok, value = pcall(vim.json.decode, result.stdout or "", { luanil = { object = true, array = true } })
@@ -300,7 +369,12 @@ function M.describe(refusal_value)
         return r.path .. " is not an agent"
     elseif r.kind == "leftovers" then
         return r.path .. " isn't clean:\n" .. table.concat(r.lines, "\n")
-    elseif r.kind == "invalid_configuration" or r.kind == "source_fetch" or r.kind == "failed" then
+    elseif
+        r.kind == "invalid_configuration"
+        or r.kind == "source_fetch"
+        or r.kind == "integration_unavailable"
+        or r.kind == "failed"
+    then
         return r.message
     elseif r.kind == "protected_update" then
         return ("Updating %s to %s changes protected files, which the sandbox can't write:\n%s"):format(
@@ -313,13 +387,6 @@ function M.describe(refusal_value)
             r.checkout,
             table.concat(util.head(r.files, 15), "\n")
         )
-    elseif r.kind == "tool_unavailable" then
-        return r.tool
-            .. " is enabled ([tools."
-            .. r.tool
-            .. "] enabled = true) but "
-            .. r.program
-            .. " isn't installed; install it or turn it off"
     end
     error("unknown piton refusal: " .. vim.inspect(r))
 end

@@ -22,7 +22,7 @@ use super::{
     Env,
     sandbox::{Access, Policy, Provenance, Source},
 };
-use crate::{agent::canonical_target, tools::Program};
+use crate::{agent::canonical_target, integrations::Program};
 
 /// What fnox prints when no config with a `[proxy]` table applies to the folder.
 const NO_PROXY_TABLE: &str = "No [proxy] configuration found";
@@ -67,7 +67,7 @@ impl Proxy {
         let keychains = canonical_target(&home.join("Library/Keychains"));
         let read = policy.decide(&keychains, Access::Read);
         if policy.keychain || read.allowed {
-            // A `read` entry inside the keychains folder reopens the services without deciding the folder itself.
+            // A `"read"` entry inside the keychains folder reopens the services without deciding the folder itself.
             let opened_by = match read.source {
                 Source::Preset { preset, from } => KeychainOpener::Preset { preset, from },
                 Source::Config { from, .. } => KeychainOpener::Read { from: Some(from) },
@@ -89,8 +89,8 @@ impl Proxy {
 pub enum KeychainOpener {
     /// A preset's keychain login (`pi-claude-code` with `login = "keychain"`).
     Preset { preset: String, from: Provenance },
-    /// A `[sandbox] read` entry covering `~/Library/Keychains` or inside it, and where it came from when it decides the
-    /// folder itself.
+    /// A `[sandbox.filesystem]` `"read"` entry covering `~/Library/Keychains` or inside it, and where it came from when
+    /// it decides the folder itself.
     Read { from: Option<Provenance> },
 }
 
@@ -106,8 +106,9 @@ impl std::fmt::Display for KeychainOpener {
                 let from = from.as_ref().map(|from| format!(" ({from})")).unwrap_or_default();
                 write!(
                     f,
-                    "a `read` entry for ~/Library/Keychains{from}; remove ~/Library/Keychains, any folder containing \
-                     it, and anything inside it from [sandbox] read (`piton config check` lists the files)"
+                    "a `\"read\"` entry for ~/Library/Keychains{from}; remove the `\"read\"` entries in \
+                     [sandbox.filesystem] for ~/Library/Keychains, any folder containing it, and anything inside it \
+                     (`piton config check` lists the files)"
                 )
             }
         }

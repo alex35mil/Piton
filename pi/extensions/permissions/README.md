@@ -4,28 +4,30 @@ Controls tool execution with configurable allow/deny/ask rules. Prompts the user
 
 ## Configuration
 
-Settings: `[permissions]` and `[permissions.<runtime>]` of `config.toml` (then `config.local.toml`) in every level of Piton's `.piton/` chain, farthest first: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, then `<repo-root>/.piton/`. `piton config resolve` reads them.
+Settings: `[tools.permissions]` and `[tools.permissions.<runtime>]` of `config.toml` (then `config.local.toml`) in every level of Piton's `.piton/` chain, farthest first: the global folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`), parent folders' `.piton/` strictly below home, then `<repo-root>/.piton/`. `piton config resolve` reads them.
 
 ### Runtime
 
 `PITON_RUNTIME` says where Pi runs: unset (or empty) means `host`, `sandbox` means a sandboxed worker, such as a nono worker launched by piton. Any other value is invalid: tools are blocked until it's fixed, like invalid settings.
 
-Only the current runtime's table loads. Each file contributes `[permissions]`, then its runtime table; `config.local.toml` comes after `config.toml`, and nearer levels later. `allow`, `ask`, and `deny` lists from every loaded table are combined, and deny or ask beats allow wherever it comes from. `default_mode` and `skill_grants` come from the nearest table that sets them.
+Only the current runtime's table loads. Each file contributes `[tools.permissions]`, then its runtime table; `config.local.toml` comes after `config.toml`, and nearer levels later. `allow`, `ask`, and `deny` lists from every loaded table are combined, and deny or ask beats allow wherever it comes from. `default_mode` and `skill_grants` come from the nearest table that sets them.
 
-For example, a global `[permissions.sandbox]` with `default_mode = "allow"` relaxes confirmations in every worker, unless a project's `[permissions]` sets its own `default_mode`. Project setup's `configure_permissions` writes only `[permissions]` of the project or local file; runtime tables are edited by hand.
+A repository's committed `<repo-root>/.piton/config.toml` always restricts (`ask`, `deny`, `default_mode = "ask"` or `"deny"`), but its grants (`allow`, `default_mode = "allow"`, `skill_grants = true`) apply only once the user trusts the repository (Piton's "Repository trust", `piton trust`). `piton config resolve` leaves the untrusted ones out; inside a Piton session it keeps exactly what the session's launch kept.
+
+For example, a global `[tools.permissions.sandbox]` with `default_mode = "allow"` relaxes confirmations in every worker, unless a project's `[tools.permissions]` sets its own `default_mode`. Project setup's `configure_permissions` writes only `[tools.permissions]` of the project or local file; runtime tables are edited by hand.
 
 `/permissions-settings` shows the runtime and the files that were loaded.
 
 ### Schema
 
 ```toml
-[permissions]
+[tools.permissions]
 default_mode = "ask"
 allow = ["read", "bash(git *)"]
 deny = ["bash(rm -rf *)"]
 ask = ["write", "edit"]
 
-[permissions.sandbox]       # only in a sandboxed worker; [permissions.host] for the host
+[tools.permissions.sandbox] # only in a sandboxed worker; [tools.permissions.host] for the host
 default_mode = "allow"
 ```
 
@@ -70,7 +72,7 @@ Exact literal `true` and `false` Bash commands are built-in allow rules. Session
 
 ### Skill-Derived Rules
 
-With `skill_grants = true` in `[permissions]` (off unless set), trusted local skills (global + project) contribute allow rules for the whole session via YAML frontmatter:
+With `skill_grants = true` in `[tools.permissions]` (off unless set), trusted local skills (global + project) contribute allow rules for the whole session via YAML frontmatter:
 
 ```yaml
 ---
@@ -139,7 +141,7 @@ run the cases in `pi/tests/fixtures/bash-matching.json`.
 `/permissions-toggle-auto-accept` switches `edit` and `write` away from what the settings resolve to, for the current session. Toggling again returns to the settings' default.
 
 - **Review default** (the usual host setup, where edits ask): the toggle turns auto-accept on.
-- **Auto-accept default** (both `edit` and `write` allowed, for example a sandbox's `[permissions.sandbox]` with `allow = ["edit", "write"]`): the toggle turns diff review on.
+- **Auto-accept default** (both `edit` and `write` allowed, for example a sandbox's `[tools.permissions.sandbox]` with `allow = ["edit", "write"]`): the toggle turns diff review on.
 
 The default comes from the merged settings, skill-derived allows included, using only rules that apply to every path: `"edit"`, `"edit(*)"`, or `"*"`, in the usual `deny` > `ask` > `allow` > `default_mode` order. It's auto-accept only when both tools resolve to `allow`. Path-scoped rules such as `edit(/tmp/*)` don't change the default and keep applying per call.
 

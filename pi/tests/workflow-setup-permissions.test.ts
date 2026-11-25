@@ -45,7 +45,7 @@ function fixture() {
         write(tier: keyof typeof paths, value: PermissionsFixture) {
             writePermissions(tier === "global" ? "global" : root, value, tier === "local")
         },
-        /** The `[permissions]` a tier's file holds, as the extension names its keys. */
+        /** The `[tools.permissions]` a tier's file holds, as the extension names its keys. */
         read(tier: keyof typeof paths) {
             clearSettingsCache()
             const sources = inspectPersistentPermissions(root, "host").sources
@@ -242,10 +242,11 @@ describe("project setup permissions", () => {
             }
             for (const tier of ["global", "project", "local"] as const) {
                 for (const content of [
-                    "[permissions\n",
-                    "permissions = []\n",
-                    '[permissions]\nallow = "read"\n',
-                    '[permissions]\nallow = ["mcp(team-gh, hint: unknown)"]\n',
+                    "[tools.permissions\n",
+                    "tools = []\n",
+                    "[tools]\npermissions = []\n",
+                    '[tools.permissions]\nallow = "read"\n',
+                    '[tools.permissions]\nallow = ["mcp(team-gh, hint: unknown)"]\n',
                 ]) {
                     clearSettingsCache()
                     fs.mkdirSync(path.dirname(f.paths[tier]), { recursive: true })

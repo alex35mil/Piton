@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::config::{ClaudeLogin, Connect, Preset, Profile, ServiceEntry};
+use crate::config::{ClaudeLogin, NetworkTarget, Preset, Profile, ServiceKey};
 
 /// Where a deny or a grant comes from: what `piton sandbox why` reports.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -51,16 +51,17 @@ impl std::fmt::Display for Provenance {
     }
 }
 
-/// A profile's entries, as written: added before the user's own lists. Profiles only add: `strict` adds nothing, and
-/// each profile holds the one before it. The network filter (#228) enforces what `connect` here grants to hosts.
+/// A profile's entries, as written: the base layer of the same maps the user writes, every one an opening entry, so
+/// any file can close it with a `"deny"` or a `false`. `strict` adds nothing, and each profile holds the one before it.
 pub struct ProfileEntries {
     pub read: Vec<ReadEntry>,
-    pub connect: Vec<Connect>,
-    pub unix_bind: &'static [&'static str],
-    /// `tcp_listen = "*"`: listening on TCP, on every address.
-    pub tcp_listen: bool,
-    pub services: Vec<ServiceEntry>,
-    pub presets: Vec<Preset>,
+    pub connections: Vec<NetworkTarget>,
+    pub unix_socket_connections: &'static [&'static str],
+    pub unix_socket_bindings: &'static [&'static str],
+    pub allow_tcp_listening: bool,
+    pub allow_git_control_files: bool,
+    pub allow_launching_apps: bool,
+    pub services: Vec<ServiceKey>,
 }
 
 /// A profile's `read` entry.
@@ -74,7 +75,6 @@ pub enum ReadEntry {
 }
 
 pub fn profile_entries(profile: Profile) -> ProfileEntries {
-    let entry = |text: &str| Connect::try_from(text.to_string()).expect("a profile's connect entries are valid");
     // Git over SSH: the user's SSH agent (keys used, never read), the host names and keys SSH checks, and the public
     // halves of the keys. Creating sockets anywhere and listening on TCP: test servers, dev servers, IPC, language
     // servers. Every Mach service but the keychain's, as the library allows: toolchains and GUI-adjacent tools reach
@@ -85,30 +85,33 @@ pub fn profile_entries(profile: Profile) -> ProfileEntries {
             ReadEntry::Path("~/.ssh/known_hosts"),
             ReadEntry::SshPublicKeys,
         ],
-        connect: vec![entry("$SSH_AUTH_SOCK"), entry("*")],
-        unix_bind: &["/"],
-        tcp_listen: true,
-        services: vec![ServiceEntry::Every],
-        presets: Vec::new(),
+        connections: vec![NetworkTarget::Anywhere],
+        unix_socket_connections: &["$SSH_AUTH_SOCK"],
+        unix_socket_bindings: &["/"],
+        allow_tcp_listening: true,
+        allow_git_control_files: false,
+        allow_launching_apps: false,
+        services: vec![ServiceKey::Every],
     };
     match profile {
         Profile::Strict => ProfileEntries {
             read: Vec::new(),
-            connect: Vec::new(),
-            unix_bind: &[],
-            tcp_listen: false,
+            connections: Vec::new(),
+            unix_socket_connections: &[],
+            unix_socket_bindings: &[],
+            allow_tcp_listening: false,
+            allow_git_control_files: false,
+            allow_launching_apps: false,
             services: Vec::new(),
-            presets: Vec::new(),
         },
         Profile::Standard => standard,
-        Profile::Yolo => {
-            let mut yolo = standard;
-            // Every Unix socket, Git's control files, and launching apps.
-            yolo.connect.push(entry("/"));
-            yolo.presets.push(Preset::Git);
-            yolo.presets.push(Preset::Apps);
-            yolo
-        }
+        // Every Unix socket, Git's control files, and launching apps: close to host mode.
+        Profile::Yolo => ProfileEntries {
+            unix_socket_connections: &["$SSH_AUTH_SOCK", "/"],
+            allow_git_control_files: true,
+            allow_launching_apps: true,
+            ..standard
+        },
     }
 }
 
@@ -231,7 +234,8 @@ pub fn agent_dir_runtime(relative: &std::path::Path) -> bool {
 
 /// The Mach services every launch may look up, each with why: what command-line tools reach without a window. Claude
 /// Code's list for its command sandbox, plus what Piton's whole-process sandbox needs for pi, its MCP servers, and
-/// their tools (TLS, proxies and reachability, preferences). Anything else is a `services` entry, or `standard`'s `*`.
+/// their tools (TLS, proxies and reachability, preferences). Anything else is a `[sandbox.macos.services]` entry, or
+/// `standard`'s `*`.
 pub const BASE_SERVICES: &[(&str, &str)] = &[
     ("com.apple.logd", "logging"),
     ("com.apple.system.logger", "logging (syslog)"),
@@ -278,7 +282,7 @@ pub const BASE_SERVICES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The Mach services the `apps` preset adds besides `lsopen` and Apple Events: what `open` and `osascript` reach.
+/// The Mach services `allow_launching_apps` adds besides `lsopen` and Apple Events: what `open` and `osascript` reach.
 pub const APP_SERVICES: &[&str] = &[
     // What `open` looked up in `strict`, from the kernel's record (#249's host probe).
     "com.apple.lsd.open",
@@ -290,17 +294,17 @@ pub const APP_SERVICES: &[&str] = &[
     "com.apple.coreservices.quarantine-resolver",
 ];
 
-/// What a preset grants, as written (`~/...`): added to the `[sandbox]` lists of the same names.
+/// What a preset grants, as written (`~/...`): base-layer entries of the maps of the same names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PresetGrants {
+    /// `"write"` filesystem entries.
     pub write: Vec<&'static str>,
-    pub write_file: Vec<&'static str>,
+    /// `"read"` filesystem entries.
     pub read: Vec<&'static str>,
-    pub connect: Vec<Connect>,
-    /// Mach services, by exact name.
-    pub services: Vec<&'static str>,
-    /// Listening on TCP, on every address.
-    pub tcp_listen: bool,
+    /// `"allow"` connection entries.
+    pub connections: Vec<NetworkTarget>,
+    /// `allow_tcp_listening = true`.
+    pub allow_tcp_listening: bool,
 }
 
 /// The Mach services that broker keychain access (the library denies them).
@@ -321,77 +325,55 @@ pub const CLAUDE_CODE_CACHE: &str = "~/Library/Caches/claude-cli-nodejs";
 /// What a preset grants. Each toolchain's are its caches and state; host builds reuse what the sandbox writes there,
 /// which is why none is on by default. None of them writes what the host executes or trusts (checked below): mise's
 /// installed tools and trusted configs, cargo's installed binaries, rustup's toolchains. An install that needs them is
-/// asked about and run by the daemon (#241). `git` grants no path: it leaves out the Git rule instead (`resolve.rs`).
-/// `apps` grants its services here, and `resolve.rs` opens launching and Apple Events.
+/// asked about and run by the daemon (#241). An entry covers a file or a folder alike.
 /// `pi-claude-code`'s config folder and its lock (`<folder>.lock` beside it: `claude` locks the folder itself with
 /// `proper-lockfile`) come from the launch's environment, so `resolve.rs` grants them; here are its fixed parts.
 pub fn preset_grants(preset: &Preset) -> PresetGrants {
-    let writes = |write: &[&'static str], write_file: &[&'static str]| PresetGrants {
+    let writes = |write: &[&'static str]| PresetGrants {
         write: write.to_vec(),
-        write_file: write_file.to_vec(),
         ..PresetGrants::default()
     };
     match preset {
-        Preset::Git => PresetGrants::default(),
-        Preset::Apps => PresetGrants {
-            services: APP_SERVICES.to_vec(),
-            ..PresetGrants::default()
-        },
-        Preset::Mise => writes(
-            &[
-                "~/Library/Caches/mise",
-                "~/.local/state/mise/incomplete-installs",
-                "~/.local/state/mise/tracked-configs",
-            ],
-            &[],
-        ),
-        Preset::Rust => writes(
-            &[
-                "~/.cargo/registry",
-                "~/.cargo/git",
-                "~/.rustup/tmp",
-                "~/.rustup/downloads",
-                "~/.rustup/update-hashes",
-            ],
-            &[
-                "~/.cargo/.package-cache",
-                "~/.cargo/.package-cache-mutate",
-                "~/.cargo/.global-cache",
-            ],
-        ),
-        Preset::Node => writes(
-            &[
-                "~/.npm",
-                "~/Library/pnpm",
-                "~/.local/share/pnpm",
-                "~/Library/Caches/pnpm",
-                "~/.bun/install/cache",
-                "~/Library/Caches/Yarn",
-            ],
-            &[],
-        ),
-        Preset::Swift => writes(
-            &[
-                "~/Library/Caches/org.swift.swiftpm",
-                "~/Library/org.swift.swiftpm",
-                "~/.cache/clang/ModuleCache",
-                "~/Library/Developer/Xcode/DerivedData",
-            ],
-            &[],
-        ),
+        Preset::Mise => writes(&[
+            "~/Library/Caches/mise",
+            "~/.local/state/mise/incomplete-installs",
+            "~/.local/state/mise/tracked-configs",
+        ]),
+        Preset::Rust => writes(&[
+            "~/.cargo/registry",
+            "~/.cargo/git",
+            "~/.rustup/tmp",
+            "~/.rustup/downloads",
+            "~/.rustup/update-hashes",
+            "~/.cargo/.package-cache",
+            "~/.cargo/.package-cache-mutate",
+            "~/.cargo/.global-cache",
+        ]),
+        Preset::Node => writes(&[
+            "~/.npm",
+            "~/Library/pnpm",
+            "~/.local/share/pnpm",
+            "~/Library/Caches/pnpm",
+            "~/.bun/install/cache",
+            "~/Library/Caches/Yarn",
+        ]),
+        Preset::Swift => writes(&[
+            "~/Library/Caches/org.swift.swiftpm",
+            "~/Library/org.swift.swiftpm",
+            "~/.cache/clang/ModuleCache",
+            "~/Library/Developer/Xcode/DerivedData",
+        ]),
         Preset::PiClaudeCode(options) => PresetGrants {
             write: vec![CLAUDE_CODE_CACHE],
             // The extension's relay listens on 127.0.0.1 at a random port in pi's process (listening can't be limited to
             // loopback: every address), and `claude` connects to it; it reaches Anthropic from pi's process.
-            connect: vec![Connect::Network(crate::config::NetworkTarget::LocalAnyPort)],
-            tcp_listen: true,
+            connections: vec![NetworkTarget::LocalAnyPort],
+            allow_tcp_listening: true,
             // Keychain sign-in goes through the keychain's services, not file writes: the files stay unwritable.
             read: match options.login() {
                 ClaudeLogin::Token => Vec::new(),
                 ClaudeLogin::Keychain => vec![KEYCHAINS],
             },
-            write_file: Vec::new(),
-            services: Vec::new(),
         },
     }
 }
@@ -433,23 +415,15 @@ mod tests {
     fn presets_grant_paths_under_home() {
         for preset in Preset::ALL {
             let grants = preset_grants(&preset);
+            assert!(!grants.write.is_empty(), "{}", preset.name());
             match preset {
-                Preset::Git => assert_eq!(grants, PresetGrants::default(), "git grants no path"),
-                Preset::Apps => {
-                    assert_eq!(grants.services, APP_SERVICES, "apps grants services, no path");
-                    assert!(grants.write.is_empty() && grants.read.is_empty());
-                }
-                Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift | Preset::PiClaudeCode(_) => {
-                    assert!(!grants.write.is_empty(), "{}", preset.name());
+                Preset::PiClaudeCode(_) => assert!(grants.allow_tcp_listening),
+                Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => {
+                    assert!(!grants.allow_tcp_listening, "{}", preset.name());
+                    assert!(grants.connections.is_empty(), "{}", preset.name());
                 }
             }
-            match preset {
-                Preset::PiClaudeCode(_) => assert!(grants.tcp_listen),
-                Preset::Git | Preset::Apps | Preset::Mise | Preset::Rust | Preset::Node | Preset::Swift => {
-                    assert!(!grants.tcp_listen, "{}", preset.name());
-                }
-            }
-            let paths = grants.write.iter().chain(&grants.write_file).chain(&grants.read);
+            let paths = grants.write.iter().chain(&grants.read);
             assert!(paths.into_iter().all(|p| p.starts_with("~/")));
         }
     }
@@ -467,9 +441,8 @@ mod tests {
         for login in [None, Some(ClaudeLogin::Token), Some(ClaudeLogin::Keychain)] {
             let grants = preset(login);
             assert_eq!(grants.write, [CLAUDE_CODE_CACHE]);
-            assert!(grants.write_file.is_empty());
-            assert_eq!(grants.connect, [Connect::try_from("localhost:*".to_string()).unwrap()]);
-            assert!(grants.tcp_listen, "its relay listens");
+            assert_eq!(grants.connections, [NetworkTarget::LocalAnyPort]);
+            assert!(grants.allow_tcp_listening, "its relay listens");
         }
     }
 
@@ -489,7 +462,7 @@ mod tests {
         let covers = |grant: &str, path: &str| Path::new(path).starts_with(grant) || Path::new(grant).starts_with(path);
         for preset in &Preset::ALL {
             let grants = preset_grants(preset);
-            for grant in grants.write.iter().chain(&grants.write_file) {
+            for grant in &grants.write {
                 for path in host_runs {
                     assert!(
                         !covers(grant, path),

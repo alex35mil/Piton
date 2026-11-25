@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table};
 
+use super::layout;
 use crate::config::{
     ConfigError,
     model::paths::{FilePair, Sharing},
@@ -112,7 +113,7 @@ pub struct Placements {
 }
 
 impl Placements {
-    /// The file that sets a dotted `key` (`tailnet.port`), if either does; the local file wins.
+    /// The file that sets a dotted `key` (`stop.kill_after`), if either does; the local file wins.
     pub fn of(&self, key: &str) -> Option<Sharing> {
         self.placement(&key.split('.').collect::<Vec<_>>())
     }
@@ -181,6 +182,7 @@ pub fn append_table(
     let mut entry = entry.clone();
     entry.set_position(None);
     entry.decor_mut().set_prefix("\n");
+    layout::table(&mut entry);
     array.push(entry);
     let new = doc.to_string().trim_start_matches('\n').to_string();
     validate(&new, path)?;
@@ -382,7 +384,8 @@ fn insert(doc: &mut DocumentMut, key: &[&str], value: Item, path: &Path) -> Resu
     }
     match (table.get_mut(last), value) {
         // Keep the comment and spacing around an existing value.
-        (Some(Item::Value(existing)), Item::Value(value)) => {
+        (Some(Item::Value(existing)), Item::Value(mut value)) => {
+            layout::replacing(&mut value, existing);
             let decor = existing.decor().clone();
             *existing = value;
             *existing.decor_mut() = decor;
@@ -393,12 +396,14 @@ fn insert(doc: &mut DocumentMut, key: &[&str], value: Item, path: &Path) -> Resu
             let decor = existing.decor().clone();
             let mut value = Item::Table(value);
             place(&mut value, position);
+            layout::item(&mut value);
             if let Item::Table(value) = value {
                 *existing = value;
                 *existing.decor_mut() = decor;
             }
         }
-        (_, value) => {
+        (_, mut value) => {
+            layout::item(&mut value);
             table.insert(last, value);
         }
     }
@@ -512,7 +517,7 @@ mod tests {
         let files = host_pair(dir.path());
         std::fs::write(
             &files.shared,
-            "# my settings\n# where I work\nroots = [\"~/a\"]   # trailing\nlogging = \"info\"\n\n[tailnet]\nport = 8\n",
+            "# my settings\n# where I work\nroots = [\"~/a\"]   # trailing\nkeep_awake = true\n\n[stop]\nkill_after = \"8s\"\n",
         )
         .unwrap();
         files
@@ -523,14 +528,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\nfavorites = [\"~/c\"]\n\n[tailnet]\nport = 8\n"
+            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nkeep_awake = true\nfavorites = [\"~/c\"]\n\n[stop]\nkill_after = \"8s\"\n"
         );
         // Back to the default: the key goes, the rest stays.
         files.set(&["favorites"], None, Placement::Current, &ok).unwrap();
-        files.set(&["tailnet", "port"], None, Placement::Current, &ok).unwrap();
+        files
+            .set(&["stop", "kill_after"], None, Placement::Current, &ok)
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nlogging = \"info\"\n"
+            "# my settings\n# where I work\nroots = [\"~/b\"]   # trailing\nkeep_awake = true\n"
         );
     }
 
@@ -572,7 +579,7 @@ mod tests {
         write_key_with(
             &files.shared,
             &[Change {
-                key: &["logging"],
+                key: &["default_attach_mode"],
                 value: Some(&debug),
             }],
             &|_, _| Ok(()),
@@ -586,7 +593,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "roots = [\"~/hand\"]\nlogging = \"debug\"\n"
+            "roots = [\"~/hand\"]\ndefault_attach_mode = \"debug\"\n"
         );
     }
 
@@ -595,12 +602,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = host_pair(dir.path());
         std::fs::write(&files.shared, "roots = []\n").unwrap();
-        let refuse = |_: &str, path: &Path, _: Sharing| {
-            Err(ConfigError::Invalid {
-                path: path.to_path_buf(),
-                reason: "no".into(),
-            })
-        };
+        let refuse = |_: &str, path: &Path, _: Sharing| Err(ConfigError::invalid(path, "no"));
         assert!(matches!(
             files.set(&["x"], Some(Item::Value(Value::from(1))), Placement::Current, &refuse),
             Err(EditError::Invalid(_))
@@ -620,16 +622,13 @@ mod tests {
     fn a_failed_move_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let files = host_pair(dir.path());
-        std::fs::write(&files.shared, "logging = \"info\"\n").unwrap();
+        std::fs::write(&files.shared, "keep_awake = true\n").unwrap();
         std::fs::write(local(&files), "roots = [\"~/here\"]\n").unwrap();
         // Removing the key from the local file is refused (validation of the local file's new text).
         let local_path = local(&files).to_path_buf();
         let refuse_local = move |_: &str, path: &Path, _: Sharing| {
             if path == local_path {
-                Err(ConfigError::Invalid {
-                    path: path.to_path_buf(),
-                    reason: "no".into(),
-                })
+                Err(ConfigError::invalid(path, "no"))
             } else {
                 Ok(())
             }
@@ -644,7 +643,7 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "logging = \"info\"\n");
+        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "keep_awake = true\n");
         assert_eq!(
             std::fs::read_to_string(local(&files)).unwrap(),
             "roots = [\"~/here\"]\n"
@@ -655,7 +654,7 @@ mod tests {
     fn local_moves_a_key_between_the_files() {
         let dir = tempfile::tempdir().unwrap();
         let files = host_pair(dir.path());
-        std::fs::write(&files.shared, "roots = [\"~/a\"]\nlogging = \"info\"\n").unwrap();
+        std::fs::write(&files.shared, "roots = [\"~/a\"]\nkeep_awake = true\n").unwrap();
         let roots = ["roots"];
         assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Shared));
 
@@ -666,7 +665,7 @@ mod tests {
             std::fs::read_to_string(local(&files)).unwrap(),
             "roots = [\"~/here\"]\n"
         );
-        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "logging = \"info\"\n");
+        assert_eq!(std::fs::read_to_string(&files.shared).unwrap(), "keep_awake = true\n");
         assert_eq!(files.placement(&roots).unwrap(), Some(Sharing::Local));
         // A later write without a placement stays where the key is.
         files
@@ -683,7 +682,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(local(&files)).unwrap(), "");
         assert_eq!(
             std::fs::read_to_string(&files.shared).unwrap(),
-            "logging = \"info\"\nroots = [\"~/all\"]\n"
+            "keep_awake = true\nroots = [\"~/all\"]\n"
         );
     }
 }

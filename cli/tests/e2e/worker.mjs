@@ -33,7 +33,7 @@ function setup() {
     mkdirSync(join(source, ".piton"));
     writeFileSync(
         join(source, ".piton/config.toml"),
-        '[workers]\nskip = ["apps/.build/index-build"]\n[sandbox]\nwrite = ["/source-grant"]\n',
+        '[workers]\nskip = ["apps/.build/index-build"]\n[sandbox.filesystem]\n"/source-grant" = "write"\n',
     );
     git(source, "add", ".");
     git(source, "commit", "-q", "-m", "init");
@@ -51,14 +51,13 @@ function setup() {
         daemon: {
             socket,
             log,
-            tailnet: { enabled: false },
             pi: { args: ["-e", ext, "--model", "faux/faux-1"] },
             env: { login_shell: false },
-            tools: { mise: { enabled: false } },
-            stop: { grace_ms: 3000, term_grace_ms: 1000 },
+            integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
+            stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "sandbox", empty_grace_ms: 60000 },
-        project: { sandbox: { presets: ["rust"], write: ["/global-grant"] } },
+        host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s" },
+        project: { sandbox: { presets: ["rust"], filesystem: { "/global-grant": "write" } } },
     });
     const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
     return { dir, source, log, env };
@@ -87,6 +86,21 @@ function cli(ctx, args, cwd) {
 
 const tests = {
     async "create, launch in the sandbox with the source's settings, delete"(ctx) {
+        // The source's committed grant applies only once the user trusts the source; its workers share the decision.
+        const needsTrust = await cli(ctx, ["start", ctx.source]);
+        assert.equal(needsTrust.code, 1);
+        assert.match(needsTrust.err, /needs your trust before a launch/);
+        const untrusted = JSON.parse((await cli(ctx, ["sandbox", "show"])).out);
+        assert.ok(untrusted.untrusted.some((g) => g.includes("/source-grant")), "left out until trusted");
+        // A decision for grants other than the repository's now is refused, naming the change (exit 4).
+        const stale = await cli(ctx, ["trust", "allow", "--grants", "[]"]);
+        assert.equal(stale.code, 4, stale.err);
+        assert.match(stale.err, /changed since they were shown/);
+        const status = await cli(ctx, ["trust", "status", "--json"]);
+        assert.equal(status.json.trust.state, "needed");
+        const allowed = await cli(ctx, ["trust", "allow", "--grants", JSON.stringify(status.json.trust.grants)]);
+        assert.equal(allowed.code, 0, allowed.err);
+        assert.match(allowed.out, /trusted/);
         const created = await cli(ctx, ["worker", "create", "Fix X", "--issue", "KID-5", "--json"]);
         assert.equal(created.code, 0, created.err);
         assert.equal(created.json.type, "worker");
@@ -96,7 +110,7 @@ const tests = {
         assert.ok(lstatSync(join(worker, ".piton/.local")).isSymbolicLink());
         assert.ok(!existsSync(join(worker, "apps/.build/index-build")), "skip list honored");
         // An agent edits its worker's grants to widen its sandbox: ignored.
-        writeFileSync(join(worker, ".piton/config.toml"), '[sandbox]\nwrite = ["/"]\n');
+        writeFileSync(join(worker, ".piton/config.toml"), '[sandbox.filesystem]\n"/" = "write"\n');
 
         // The worker's sandbox, as the daemon resolves it: the global and source grants and the source's artifacts,
         // never the worker's edit; the worker's checkout is the protected `.pi/` root.
@@ -222,7 +236,7 @@ const tests = {
         const local = join(ctx.source, ".piton/config.local.toml");
         writeFileSync(
             join(ctx.source, ".git/hooks/post-merge"),
-            `#!/bin/sh\nprintf '[sandbox]\\npresets = ["git"]\\n' > '${local}' 2>/dev/null\nexit 0\n`,
+            `#!/bin/sh\nprintf '[sandbox]\\nallow_git_control_files = true\\n' > '${local}' 2>/dev/null\nexit 0\n`,
             { mode: 0o755 },
         );
         const approved = await cli(ctx, ["worker", "create", "two", "--approve-source-update", target, "--json"]);

@@ -49,6 +49,16 @@ pub fn warnings(files: &[FileOrigin], home: &Path) -> Vec<Warning> {
         };
         let tracked = tracked_by_git(&file.path);
         walk(&value, &mut Vec::new(), &mut |key, value| {
+            // A path can be a key too (`[sandbox.filesystem] "/Users/other/x" = "write"`).
+            if let Some(last) = key.last()
+                && foreign_home(last, home)
+            {
+                warnings.push(Warning::ForeignHome {
+                    path: file.path.clone(),
+                    key: key[..key.len() - 1].join("."),
+                    value: last.clone(),
+                });
+            }
             if let Value::String(text) = value {
                 if foreign_home(text, home) {
                     warnings.push(Warning::ForeignHome {
@@ -162,7 +172,7 @@ mod tests {
         std::fs::write(
             &shared,
             format!(
-                "[sandbox]\nread = [\"{}\", \"{}\", \"~/x\"]\n[web_search]\napi_key = \"sk-1\"\n",
+                "[sandbox.filesystem]\n\"{}\" = \"read\"\n\"{}\" = \"read\"\n\"~/x\" = \"read\"\n[web_search]\napi_key = \"sk-1\"\n",
                 other.display(),
                 home.join("mine").display()
             ),
@@ -189,7 +199,7 @@ mod tests {
             [
                 Warning::ForeignHome {
                     path: shared.clone(),
-                    key: "sandbox.read".into(),
+                    key: "sandbox.filesystem".into(),
                     value: other.display().to_string(),
                 },
                 // The tracked file's literal key; the untracked local file and an environment reference are fine.

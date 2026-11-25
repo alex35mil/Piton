@@ -5,7 +5,8 @@
 //! - [`db`]: opening, the schema's migrations, and the backup before migrating.
 //! - [`transfer`]: `piton state export|import`, and the read-only check `piton setup` uses.
 //!
-//! Tables are added by the work that needs them: `host` (this host's identity) so far.
+//! Tables are added by the work that needs them: `host` (this host's identity) and `trust` (the user's decision about
+//! each repository's grants, `crate::trust`).
 
 mod db;
 mod transfer;
@@ -13,8 +14,8 @@ mod transfer;
 use std::path::PathBuf;
 
 pub use self::{
-    db::{FILE, State},
-    transfer::{check, export, import},
+    db::{Decision, FILE, State, TrustRecord},
+    transfer::{check, export, import, read_trust},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +36,8 @@ pub enum StateError {
     Exists { path: PathBuf },
     #[error("{path} doesn't exist: this host has no state yet")]
     Missing { path: PathBuf },
+    #[error("{path}: {reason}")]
+    Encoding { path: PathBuf, reason: String },
 }
 
 fn sqlite(path: &std::path::Path, source: rusqlite::Error) -> StateError {

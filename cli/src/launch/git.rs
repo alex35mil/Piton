@@ -26,16 +26,17 @@ impl SourceGit {
     /// Resolves the sandbox of a launch in `source`, as [`prepare_sandbox`] does for pi (environment tools included).
     pub async fn for_source(
         config: &DaemonConfig,
-        tools: &crate::tools::Tools,
+        tools: &crate::integrations::Integrations,
         base: &Env,
         source: &Path,
+        filter: &crate::config::GrantFilter,
     ) -> Result<Self, LaunchError> {
         let workspace = Workspace {
             path: source.to_path_buf(),
             checkout: source.to_path_buf(),
             relation: Relation::Source,
         };
-        let resolved = resolve_config(config, &workspace)?;
+        let resolved = resolve_config(config, &workspace, filter)?;
         // A credential proxy that applies here is checked against this sandbox too (no keychain, no writable fnox
         // files), so the user's hooks don't run where launches are refused. Git itself doesn't run behind the proxy.
         let sandboxed = prepare_sandbox(config, tools, &resolved, base, source, ClaudeSockets::None).await?;
@@ -51,8 +52,8 @@ impl SourceGit {
     }
 }
 
-/// A gate for Git under a filtered network: the policy's `connect` entries decide; a host they don't list is refused
-/// and logged (no session to ask). Git doesn't run behind fnox, so the gate dials directly.
+/// A gate for Git under a filtered network: the policy's `[sandbox.network.connections]` entries decide; a host they
+/// don't list is refused and logged (no session to ask). Git doesn't run behind fnox, so the gate dials directly.
 fn gate_for(
     policy: &mut Policy,
     config: &DaemonConfig,
@@ -60,7 +61,7 @@ fn gate_for(
 ) -> Result<Option<crate::launch::sandbox::network::Gate>, LaunchError> {
     use crate::launch::sandbox::{Gate, Network};
     match &policy.network {
-        Network::Open { .. } => return Ok(None),
+        Network::Open { .. } | Network::Direct { .. } => return Ok(None),
         Network::Filtered { .. } => {}
     }
     let decider = policy.clone();
@@ -72,11 +73,13 @@ fn gate_for(
             },
             false => {
                 crate::log!(
-                    "git in {}: the network gate refused {to} (no connect entry lists it)",
+                    "git in {}: the network gate refused {to} (no entry in [sandbox.network.connections] allows it)",
                     source.display()
                 );
                 crate::launch::sandbox::network::Verdict::Deny {
-                    reason: format!("Piton's sandbox refused {to}: no `connect` entry lists it"),
+                    reason: format!(
+                        "Piton's sandbox refused {to}: no entry in [sandbox.network.connections] allows it"
+                    ),
                 }
             }
         };

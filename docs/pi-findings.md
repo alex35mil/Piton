@@ -143,7 +143,7 @@ workspace and agent dir). They aren't part of `probe.mjs`; the research report o
 
 - Closing stdin exits pi with code 0: idle within ~5 ms; mid-stream within ~10 ms on 1.3.0 and ~200–270 ms on 1.5.2
   (faux provider; a real provider with pending work may take longer). Either is far inside Piton's stop grace
-  (`grace_ms`, 15 s). Mid-stream, the stream simply stops: no `message_end`, `agent_end`, or `agent_settled`.
+  (`[stop] terminate_after`, 15 s). Mid-stream, the stream simply stops: no `message_end`, `agent_end`, or `agent_settled`.
 - SIGKILL mid-stream: the session file has the earlier turns only; the interrupted turn is lost entirely, its user
   message included, although that message's `message_end` had already been emitted. Resuming works, and a new prompt
   continues the branch from the last persisted entry. So a client that saw the user message live won't find it after
@@ -180,6 +180,18 @@ them to read a file as well as to write it.
     pi keeps running.
   - `trust.json`: written when the user answers the trust prompt (interactive only) or an extension's
     `project_trust` handler asks to remember; RPC sessions with no handler only read it.
+
+## Project trust in RPC mode
+
+Verified with pi 1.5.2 (`pi --mode rpc --offline --no-session`, a scratch agent directory, a project with a
+`.pi/extensions/` extension that records `ctx.isProjectTrusted()` at `session_start`):
+
+- `--approve`: the project's extension loads, and `ctx.isProjectTrusted()` is true.
+- `--no-approve`, or no flag with `defaultProjectTrust` unset (`"ask"`): it doesn't load. RPC mode can't show pi's
+  trust prompt, so without a flag a project's `.pi/` resources are skipped silently.
+- Neither writes `trust.json`.
+
+Piton passes one of the two flags on every launch, from the user's decision ("Repository trust" in design.md).
   - `mcp.json` (MCP servers; `/mcp` changes, `pi mcp add`), `keybindings.json` (a one-time format migration),
     `models.json`, `extensions/`, `skills/`, `prompts/`, `themes/`, `SYSTEM.md`, `APPEND_SYSTEM.md`.
   - `bin/` (managed `fd` and `rg`, downloaded when they aren't on `PATH`), `npm/` and `git/` (packages: installed
@@ -191,7 +203,7 @@ them to read a file as well as to write it.
 
 A session folder set with `sessionDir` (settings or a project's `.pi/settings.json`), `--session-dir`, or
 `PI_CODING_AGENT_SESSION_DIR` outside the agent directory isn't granted: a sandboxed pi can't create its session file
-there. Grant it with `[sandbox] write`.
+there. Grant it with a `"write"` entry in `[sandbox.filesystem]`.
 
 ## Sandboxes don't nest
 
@@ -214,7 +226,7 @@ Verified on the host, macOS 27.0.1, with `piton sandbox-exec` (#241's spike):
   `user-preference-write <domain>` (`defaults write`), `signal pgrp [<process>(<pid>)] signum:<n>` (a signal to another
   process), `lsopen` with an empty target (`open`, `open -a`, `open x.command`, JXA `NSWorkspace.openURL`),
   `file-issue-extension target:<app> extension-class:com.apple.app-sandbox.read` (`osascript` telling another app to
-  act; still refused with launching apps open, the `apps` preset: `System Events got an error: A privilege violation
+  act; still refused with launching apps open, `allow_launching_apps`: `System Events got an error: A privilege violation
   occurred`), `sysctl-write <name>`, `network-outbound /private/var/run/syslog`. A signal 0 (`kill -0`) is refused
   with no record.
 - Two refusals never carry the profile's message: `job-creation` (`launchctl submit`, `at`: launchd checks the caller's

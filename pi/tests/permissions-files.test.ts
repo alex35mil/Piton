@@ -420,7 +420,7 @@ describe("native file permission execution", () => {
     it("blocks invalid permission settings without asking or writing", async () => {
         const h = fixture()
         try {
-            fs.writeFileSync(path.join(h.root, ".piton/config.toml"), "[permissions]\nallow = [7]\n")
+            fs.writeFileSync(path.join(h.root, ".piton/config.toml"), "[tools.permissions]\nallow = [7]\n")
             const outcome = await h.run("write", args("write"))
             assert.equal(outcome.isError, true)
             assert.equal(h.prompts(), 0)

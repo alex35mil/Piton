@@ -21,8 +21,10 @@
         "key": "keep_awake",
         "scope": "host",
         "value": true,
-        "placement": "local",
-        "local_choice": true,
+        "location": {
+          "kind": "file",
+          "placement": "local"
+        },
         "value_type": {
           "kind": "bool"
         },
@@ -37,8 +39,10 @@
         "value": [
           "~/Projects"
         ],
-        "placement": "shared",
-        "local_choice": true,
+        "location": {
+          "kind": "file",
+          "placement": "shared"
+        },
         "value_type": {
           "kind": "text_list"
         },
@@ -48,11 +52,13 @@
         "editable": true
       },
       {
-        "key": "logging",
+        "key": "debugging.log_level",
         "scope": "host",
         "value": "info",
-        "placement": null,
-        "local_choice": true,
+        "location": {
+          "kind": "file",
+          "placement": null
+        },
         "value_type": {
           "kind": "choice",
           "options": [
@@ -66,11 +72,13 @@
         "editable": true
       },
       {
-        "key": "tailnet.port",
+        "key": "integrations.tailscale.port",
         "scope": "host",
         "value": 9000,
-        "placement": "shared",
-        "local_choice": true,
+        "location": {
+          "kind": "file",
+          "placement": "shared"
+        },
         "value_type": {
           "kind": "integer"
         },
@@ -81,11 +89,47 @@
         "editable": true
       },
       {
+        "key": "approval_timeout",
+        "scope": "host",
+        "value": "never",
+        "location": {
+          "kind": "file",
+          "placement": "shared"
+        },
+        "value_type": {
+          "kind": "duration",
+          "never": true
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "stop.kill_after",
+        "scope": "host",
+        "value": "3s",
+        "location": {
+          "kind": "file",
+          "placement": null
+        },
+        "value_type": {
+          "kind": "duration",
+          "never": false
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
         "key": "socket",
         "scope": "host",
         "value": "/Users/me/.local/state/piton/piton.sock",
-        "placement": null,
-        "local_choice": true,
+        "location": {
+          "kind": "file",
+          "placement": null
+        },
         "value_type": {
           "kind": "text"
         },
@@ -96,11 +140,34 @@
         "editable": false
       },
       {
-        "key": "text_font",
+        "key": "appearance.text_font",
         "scope": "client",
         "value": "Inter",
-        "placement": "shared",
-        "local_choice": false,
+        "location": {
+          "kind": "devices",
+          "sections": {
+            "default": "Inter",
+            "ipad": "Berkeley Mono"
+          },
+          "section": "default"
+        },
+        "value_type": {
+          "kind": "text"
+        },
+        "applies": {
+          "kind": "live"
+        },
+        "editable": true
+      },
+      {
+        "key": "appearance.code_font",
+        "scope": "client",
+        "value": null,
+        "location": {
+          "kind": "devices",
+          "sections": {},
+          "section": null
+        },
         "value_type": {
           "kind": "text"
         },
@@ -115,8 +182,10 @@
         "value": [
           ".build"
         ],
-        "placement": null,
-        "local_choice": true,
+        "location": {
+          "kind": "file",
+          "placement": null
+        },
         "value_type": {
           "kind": "text_list"
         },
@@ -126,11 +195,13 @@
         "editable": true
       },
       {
-        "key": "tools.tailscale.enabled",
+        "key": "integrations.tailscale.enabled",
         "scope": "host",
         "value": true,
-        "placement": "shared",
-        "local_choice": true,
+        "location": {
+          "kind": "file",
+          "placement": "shared"
+        },
         "value_type": {
           "kind": "bool"
         },
@@ -139,7 +210,7 @@
           "pending": false
         },
         "editable": true,
-        "warning": "tailscale is enabled ([tools.tailscale] enabled = true) but \"tailscale\" isn't installed"
+        "warning": "tailscale is enabled ([integrations.tailscale] enabled = true) but \"tailscale\" isn't installed"
       }
     ],
     "settings_error": null

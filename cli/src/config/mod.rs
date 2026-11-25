@@ -17,15 +17,21 @@ mod write;
 
 use std::path::PathBuf;
 
+#[cfg(test)]
+pub use self::model::tables::{SandboxTable, TrustTable};
 pub use self::{
     check::portability::warnings as portability_warnings,
     model::{
-        daemon::{Build, DaemonConfig, TailnetConfig, ToolChoice, ToolConfig, default_socket},
+        client::{Device, DeviceSection, PerDevice},
+        daemon::{Build, DaemonConfig, IntegrationChoice, IntegrationConfig, TailnetConfig, default_socket},
+        duration::{ConfigDuration, Timeout},
+        grants::{GrantEntry, GrantFilter, Grants},
+        key::Location,
         paths::{AGENTS_DIR, LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
         tables::{
-            AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Connect, Grant,
-            GrantLists, Listed, NetworkTarget, PermissionSettings, Preset, Profile, SandboxTable, ServiceEntry,
-            ServiceName, Silence, SilenceTarget, TCP_LISTEN_ANY, TcpListen,
+            AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Effect, FileAccess,
+            Grant, GrantEntries, Listed, NetworkTarget, Origin, PathKey, PermissionSettings, Preset, Profile,
+            Reconfirm, ServiceKey, ServiceName, Silence, SilenceTarget,
         },
     },
     read::{
@@ -33,11 +39,12 @@ pub use self::{
             GlobalConfig, GlobalResolved, client, daemon, daemon_lenient, global, global_candidates, host, own_files,
             resolve_global,
         },
-        resolve::{LaunchConfig, Resolved, Runtime, launch_levels, resolve, resolve_launch},
+        parse::validate_table,
+        resolve::{LaunchConfig, Resolved, Runtime, TrustInputs, launch_levels, resolve, resolve_launch, trust_inputs},
     },
     write::{
         edit::{EditError, Placement},
-        file::{ConfigFile, KeyChange, WriteLevel, set_global},
+        file::{ConfigFile, KeyChange, KeyPath, WriteLevel, set_global},
     },
 };
 
@@ -46,8 +53,14 @@ pub use self::{
 pub enum ConfigError {
     #[error("can't read {path}: {source}")]
     Read { path: PathBuf, source: std::io::Error },
-    #[error("invalid {path}: {reason}")]
-    Invalid { path: PathBuf, reason: String },
+    /// A value the file's schema refuses, with where it is when that's known (a whole-file syntax error carries toml's
+    /// own message with its line instead).
+    #[error("invalid {path}: {}{reason}", located(.at))]
+    Invalid {
+        path: PathBuf,
+        at: Option<Location>,
+        reason: String,
+    },
     #[error("{path}: `{key}` belongs in a project's .piton/, not the global tier")]
     ProjectOnly { path: PathBuf, key: String },
     /// A secret, in a file that isn't `config.local.toml`.
@@ -62,4 +75,23 @@ pub enum ConfigError {
     NotInProjectConfig { path: PathBuf, key: String },
     #[error("{path}: `{key}` {reason}")]
     Conflict { path: PathBuf, key: String, reason: String },
+}
+
+impl ConfigError {
+    /// An invalid file, with no location in it.
+    pub fn invalid(path: impl Into<PathBuf>, reason: impl Into<String>) -> Self {
+        ConfigError::Invalid {
+            path: path.into(),
+            at: None,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// `line 4, tracker.provider: ` before a message, or nothing.
+fn located(at: &Option<Location>) -> String {
+    match at {
+        Some(at) => format!("{at}: "),
+        None => String::new(),
+    }
 }

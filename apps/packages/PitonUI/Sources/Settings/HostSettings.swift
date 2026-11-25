@@ -45,7 +45,7 @@ public struct HostSettings: View {
 
 /// How the host's settings are grouped: by file, and within the host file by table.
 enum HostSettingGroup: String, CaseIterable, Identifiable {
-    case host, tailnet, daemon, projects
+    case host, tailnet, daemon, debugging, projects
 
     var id: Self { self }
 
@@ -57,9 +57,9 @@ enum HostSettingGroup: String, CaseIterable, Identifiable {
         case .host:
             let table = setting.key.split(separator: ".").count > 1 ? setting.key.split(separator: ".").first : nil
             switch table.map(String.init) {
-            case "tailnet": self = .tailnet
-            // `[tools.tailscale]` is remote access's tool; the other tools are the daemon's.
-            case "tools": self = setting.key.hasPrefix("tools.tailscale.") ? .tailnet : .daemon
+            // `[integrations.tailscale]` is remote access; the other integrations are the daemon's.
+            case "integrations": self = setting.key.hasPrefix("integrations.tailscale.") ? .tailnet : .daemon
+            case "debugging": self = .debugging
             case "pi", "sandbox", "env", "stop": self = .daemon
             case .some, nil:
                 switch setting.key {
@@ -75,6 +75,7 @@ enum HostSettingGroup: String, CaseIterable, Identifiable {
         case .host: "This host"
         case .tailnet: "Remote access"
         case .daemon: "Daemon"
+        case .debugging: "Debugging"
         case .projects: "Every project"
         }
     }
@@ -96,7 +97,7 @@ struct HostSettingRow: View {
                 }
                 Spacer()
                 // Local moves a value between the files; a key no file sets has nothing to move yet.
-                if setting.localChoice, setting.placement != nil, setting.editable {
+                if case .file(placement: .some) = setting.location, setting.editable {
                     Toggle("Local", isOn: local).font(.caption)
                         #if os(macOS)
                             .toggleStyle(.checkbox)
@@ -124,10 +125,13 @@ struct HostSettingRow: View {
             } label: {
                 label
             }
-        case (true, .text), (true, .integer), (true, .textList), (true, .choiceList):
+        case (true, .text), (true, .integer), (true, .duration), (true, .textList), (true, .choiceList):
             TextSettingField(
                 label: label, text: setting.valueType.text(setting.value), parse: setting.valueType.parse(_:),
                 save: save(_:))
+        case (true, .map(let values)):
+            MapSettingField(
+                label: label, rows: SettingValueType.mapRows(setting.value), values: values, save: save(_:))
         case (false, _):
             LabeledContent {
                 Text(setting.valueType.text(setting.value)).textSelection(.enabled)
@@ -156,7 +160,8 @@ struct HostSettingRow: View {
             set: { isLocal in
                 saving = true
                 Task {
-                    _ = await store.setSetting(setting.scope, setting.key, to: setting.value, local: isLocal)
+                    _ = await store.setSetting(
+                        setting.scope, setting.key, to: setting.value, target: .file(local: isLocal))
                     saving = false
                 }
             })
@@ -168,6 +173,53 @@ struct HostSettingRow: View {
             _ = await store.setSetting(setting.scope, setting.key, to: value)
             saving = false
         }
+    }
+}
+
+/// A map edited as rows, each a key field and a value picker, with Add and Remove; saved as a whole with the Save
+/// button, so a half-typed key never reaches the host.
+struct MapSettingField: View {
+    let label: Text
+    let rows: [MapRow]
+    let values: [String]
+    let save: (JSON) -> Void
+    @State private var draft: [MapRow] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            label
+            ForEach($draft) { $row in
+                HStack {
+                    TextField("Path, host, or name", text: $row.key)
+                        .font(.callout.monospaced())
+                    Picker("", selection: $row.value) {
+                        ForEach(values, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    Button(role: .destructive) {
+                        draft.removeAll { $0.id == row.id }
+                    } label: {
+                        Image(systemName: "minus.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(row.key)")
+                }
+            }
+            HStack {
+                Button("Add") { draft.append(MapRow(key: "", value: values.first ?? "")) }
+                Spacer()
+                Button("Save", action: commit).disabled(value == nil || draft == rows)
+            }
+        }
+        .onAppear { draft = rows }
+        .onChange(of: rows) { _, new in draft = new }
+    }
+
+    private var value: JSON? { SettingValueType.mapValue(draft, values: values) }
+
+    private func commit() {
+        if let value { save(value) }
     }
 }
 

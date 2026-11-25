@@ -1,7 +1,7 @@
 /**
  * Every test file imports this first, so tests run in the host runtime no matter where the
  * runner was launched. A sandboxed session exports PITON_RUNTIME=sandbox, which would select
- * fixtures' `[permissions.sandbox]` rules. Tests that exercise the sandbox runtime set
+ * fixtures' `[tools.permissions.sandbox]` rules. Tests that exercise the sandbox runtime set
  * PITON_RUNTIME themselves and restore it afterward.
  *
  * Configuration resolves through the `piton` binary: tests use this repository's debug build
@@ -20,6 +20,11 @@ delete process.env[RUNTIME_ENV]
 // A session under piton has its own channel to the daemon; tests that need one set up a fake.
 delete process.env.PITON_AGENT_SOCKET
 delete process.env.PITON_SESSION_TOKEN
+// The session's protected files name the runner's checkout; outside one, they're the workspace's own (the fixtures').
+delete process.env.PITON_PROTECTED
+// As in a session of a trusted repository: fixtures' committed grants apply (`piton config resolve` keeps what the
+// session's launch kept). Never the runner's own session's filter.
+process.env.PITON_TRUST = JSON.stringify({ kind: "all" })
 
 // Always this checkout's build: a session's PITON_BIN is the installed piton, which may be older than the code tested.
 const built = path.resolve(import.meta.dirname, "../../cli/target/debug/piton")
@@ -43,9 +48,9 @@ export function writeGlobalSetting(name: string, value: unknown): string {
 
 /**
  * Writes settings to a configuration file through the binary, as the pi package does. `changes` has dotted keys as the
- * file names them (`"permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
+ * file names them (`"tools.permissions.allow"`, `"tracker"`), objects as tables; each named key is replaced whole. `dir` is a
  * repository (its source checkout's `.piton/config.toml`), `"global"` for the test's global `config.toml`, or `"host"`
- * for its `config.host.toml` (`[development]`). `local` writes the pair's `.local` file. Returns the file.
+ * for its `config.host.toml` (`[debugging]`). `local` writes the pair's `.local` file. Returns the file.
  */
 export function writeConfig(dir: string, changes: Record<string, unknown>, local = false): string {
     const args = ["config", "set", JSON.stringify(changes), "--changes"]

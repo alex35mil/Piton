@@ -52,14 +52,15 @@ private final class Daemon: @unchecked Sendable {
             .write(to: whois, atomically: true, encoding: .utf8)
         log = dir.appendingPathComponent("piton.log")
         // The global configuration folder's host file: how the daemon runs, and the host preferences. Keep-awake starts
-        // off, so no caffeinate runs.
+        // off, so no caffeinate runs. fnox is off: unset, it's used when installed, and the user's own fnox config (with
+        // secrets behind it) would then wrap every test session.
         let config = dir.appendingPathComponent("config")
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
         try """
         socket = "\(socket)"
         log = "\(log.path)"
         default_attach_mode = "host"
-        empty_grace_ms = 60000
+        stop_empty_session_after = "60s"
         roots = ["\(root.path)"]
         keep_awake = false
         [pi]
@@ -67,15 +68,16 @@ private final class Daemon: @unchecked Sendable {
         [env]
         login_shell = false
         [stop]
-        grace_ms = 3000
-        term_grace_ms = 1000
-        [tailnet]
-        port = 0
-        [tools.mise]
+        terminate_after = "3s"
+        kill_after = "1s"
+        [integrations.mise]
         enabled = false
-        [tools.tailscale]
+        [integrations.fnox]
+        enabled = false
+        [integrations.tailscale]
         enabled = true
         command = ["\(tailscale)"]
+        port = 0
         """.write(to: config.appendingPathComponent("config.host.toml"), atomically: true, encoding: .utf8)
         // A fixed host identity in the daemon's database (next to its socket).
         let seed = Process()
@@ -124,7 +126,8 @@ private final class Daemon: @unchecked Sendable {
         let deadline = Date().addingTimeInterval(10)
         while true {
             do {
-                return try await Connection(transport: try UnixSocketTransport(path: socket), client: client)
+                return try await Connection(
+                    transport: try UnixSocketTransport(path: socket), client: client, device: .mac)
             } catch {
                 if Date() > deadline { throw error }
                 try await Task.sleep(for: .milliseconds(50))
@@ -148,7 +151,8 @@ private final class Daemon: @unchecked Sendable {
     /// A connection over the tailnet WebSocket (on loopback here).
     func connectWebSocket(_ client: String) async throws -> Connection {
         let url = try await webSocketURL()
-        return try await Connection(transport: try await WebSocketTransport.connect(to: url), client: client)
+        return try await Connection(
+            transport: try await WebSocketTransport.connect(to: url), client: client, device: .mac)
     }
 
     func stop() {
@@ -227,7 +231,7 @@ struct IntegrationTests {
         defer { daemon.stop() }
         let connection = try await daemon.connect("pitonkit-test")
         try await connection.subscribeSessions()
-        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host)
+        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host).session()
         let listed = try await next(connection.events) { event -> [SessionInfo]? in
             guard case .sessions(let list) = event, list.contains(where: { $0.key == session.key }) else { return nil }
             return list
@@ -252,7 +256,7 @@ struct IntegrationTests {
         let daemon = try Daemon()
         defer { daemon.stop() }
         let connection = try await daemon.connect("pitonkit-test")
-        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host)
+        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host).session()
         try await connection.watch(session.key)
         try await connection.sendMessage(session.key, text: "ask")
         let dialog = try await next(connection.events) { event -> Dialog? in
@@ -281,6 +285,7 @@ struct IntegrationTests {
         defer { daemon.stop() }
         var connection = try await daemon.connect("pitonkit-test")
         let session = try await connection.start(workspace: daemon.workspace.path, mode: .host, prompt: "first")
+            .session()
         try await connection.watch(session.key)
         let before = try await next(connection.events, settledModel(session.key) { assistantText($0) != nil })
         await connection.close()
@@ -324,6 +329,7 @@ struct IntegrationTests {
         defer { daemon.stop() }
         let local = try await daemon.connect("mac")
         let session = try await local.start(workspace: daemon.workspace.path, mode: .host, prompt: "from the mac")
+            .session()
 
         let phone = try await daemon.connectWebSocket("iphone")
         try await phone.subscribeSessions()
@@ -380,7 +386,7 @@ struct IntegrationTests {
     @Test @MainActor func storeReconnects() async throws {
         let daemon = try Daemon()
         defer { daemon.stop() }
-        let store = Store(endpoint: .local(socket: daemon.socket), client: "store-test")
+        let store = Store(endpoint: .local(socket: daemon.socket), client: "store-test", device: .mac)
         store.start()
         defer { store.stop() }
         let describe = { @MainActor in
@@ -391,7 +397,7 @@ struct IntegrationTests {
         try await eventually(state: describe) { store.link == .connected }
 
         let key = try #require(
-            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "hello store"))
+            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "hello store")?.started)
         store.watch(key)
         try await eventually(state: describe) { store.models[key].flatMap(assistantText) == "echo: hello store" }
         try await eventually(state: describe) { store.sessions.first { $0.key == key }?.title == "hello store" }
@@ -412,7 +418,7 @@ struct IntegrationTests {
         try await eventually(state: describe) { store.sessions.isEmpty && store.models[key] == nil }
         // And it works again.
         let again = try #require(
-            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "after restart"))
+            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "after restart")?.started)
         store.watch(again)
         try await eventually { store.models[again].flatMap(assistantText) == "echo: after restart" }
     }
@@ -423,8 +429,8 @@ struct IntegrationTests {
         let daemon = try Daemon()
         defer { daemon.stop() }
         let local = try await daemon.connect("seed")
-        let session = try await local.start(workspace: daemon.workspace.path, mode: .host)
-        let store = Store(endpoint: .local(socket: daemon.socket), client: "outbox")
+        let session = try await local.start(workspace: daemon.workspace.path, mode: .host).session()
+        let store = Store(endpoint: .local(socket: daemon.socket), client: "outbox", device: .mac)
         store.start()
         defer { store.stop() }
         try await eventually { store.link == .connected }
@@ -472,8 +478,8 @@ struct IntegrationTests {
     @Test @MainActor func keepAwakeToggle() async throws {
         let daemon = try Daemon()
         defer { daemon.stop() }
-        let mac = Store(endpoint: .local(socket: daemon.socket), client: "mac")
-        let phone = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "phone")
+        let mac = Store(endpoint: .local(socket: daemon.socket), client: "mac", device: .mac)
+        let phone = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "phone", device: .iphone)
         mac.start()
         phone.start()
         defer {
@@ -484,7 +490,7 @@ struct IntegrationTests {
         try await eventually { mac.daemon?.keepAwake == false && phone.daemon?.keepAwake == false }
         #expect(await mac.setKeepAwake(true))
         try await eventually { phone.daemon?.keepAwake == true && phone.daemon?.awake == false }
-        _ = try #require(await mac.startSession(workspace: daemon.workspace.path, mode: .host, prompt: nil))
+        _ = try #require(await mac.startSession(workspace: daemon.workspace.path, mode: .host, prompt: nil)?.started)
         try await eventually(
             state: { "\(String(describing: phone.daemon))" },
             { phone.daemon?.awake == true && phone.daemon?.sessions == 1 })
@@ -497,8 +503,8 @@ struct IntegrationTests {
     @Test @MainActor func hostLoggingSwitch() async throws {
         let daemon = try Daemon()
         defer { daemon.stop() }
-        let mac = Store(endpoint: .local(socket: daemon.socket), client: "mac")
-        let phone = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "phone")
+        let mac = Store(endpoint: .local(socket: daemon.socket), client: "mac", device: .mac)
+        let phone = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "phone", device: .iphone)
         mac.start()
         phone.start()
         defer {
@@ -522,7 +528,7 @@ struct IntegrationTests {
             daemon.thaw()
             daemon.stop()
         }
-        let store = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "verify")
+        let store = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "verify", device: .mac)
         store.start()
         defer { store.stop() }
         try await eventually { store.link == .connected }
@@ -548,7 +554,7 @@ struct IntegrationTests {
     @Test @MainActor func idleWebSocketStaysUp() async throws {
         let daemon = try Daemon()
         defer { daemon.stop() }
-        let store = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "idle")
+        let store = Store(endpoint: .remote(url: try await daemon.webSocketURL()), client: "idle", device: .mac)
         store.start()
         defer { store.stop() }
         try await eventually { store.link == .connected }
@@ -564,10 +570,10 @@ struct IntegrationTests {
         let daemon = try Daemon()
         defer { daemon.stop() }
         let local = try await daemon.connect("seed")
-        let session = try await local.start(workspace: daemon.workspace.path, mode: .host, prompt: "seed")
+        let session = try await local.start(workspace: daemon.workspace.path, mode: .host, prompt: "seed").session()
         let url = try await daemon.webSocketURL()
         for endpoint in [Endpoint.local(socket: daemon.socket), .remote(url: url)] {
-            let store = Store(endpoint: endpoint, client: "reopen")
+            let store = Store(endpoint: endpoint, client: "reopen", device: .mac)
             store.start()
             defer { store.stop() }
             try await eventually { store.link == .connected && !store.sessions.isEmpty }

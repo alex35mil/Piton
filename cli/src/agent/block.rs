@@ -2,6 +2,9 @@
 //! question shares. Only a client can answer; the agent can ask but never approve. The question for a command is
 //! `question.rs`.
 //!
+//! A question saves no denial, as Codex's prompt doesn't: Allow saves the entry that lifts the block, Not now leaves it
+//! blocked this time. A block the user never wants is a `"deny"` entry they write themselves, and is then only logged.
+//!
 //! The dialog is pi's `select` (`extension_ui_request`), so the apps and pi.nvim show it with the dialog UI they already
 //! have.
 
@@ -34,43 +37,27 @@ impl PersistScope {
 pub const CHOOSE_BELOW: &str = "Choose an answer below";
 
 /// The question for a process that isn't a bash call (an MCP server, an extension, pi): the refusal, and per answer
-/// the exact entry it saves. Allow adds a `[sandbox]` entry and restarts; Deny adds a `silence` entry, so the block is
-/// only logged from then on.
+/// the exact entry it saves. Allow adds a `[sandbox]` entry and restarts.
 pub fn process_dialog(id: &str, process: &str, refusal: &str, offer: &Offer) -> Value {
     let entry = |lift: &Lift| format!("`{}`", lift.entry());
-    let silence = |lift: &Lift| {
-        let entry = crate::config::Silence {
-            target: lift.silence_target(),
-            process: None,
-        };
-        format!("`silence = [{}]`", entry.inline())
-    };
-    let scopes = [
+    let mut lines = Vec::new();
+    for (scope, at) in [
         (PersistScope::Project, &offer.project),
         (PersistScope::Global, &offer.everywhere),
-    ];
-    let mut lines = Vec::new();
-    for (scope, at) in scopes {
+    ] {
         lines.push(format!(
-            "- Allow {}: {}, and this session restarts",
+            "- Allow {}: {} in [sandbox], and this session restarts",
             scope.label(),
             entry(at)
         ));
     }
-    for (scope, at) in scopes {
-        lines.push(format!(
-            "- Deny {}: {}; it stays blocked without asking",
-            scope.label(),
-            silence(at)
-        ));
-    }
+    lines.push("- Not now: it stays blocked; a new session asks again".into());
     json!({
         "type": "extension_ui_request",
         "id": id,
         "method": "select",
         "title": format!(
-            "The sandbox blocked {process}: {refusal}\n\nEach answer saves to [sandbox] (a restart keeps the conversation \
-             but stops a running turn):\n{}",
+            "The sandbox blocked {process}: {refusal}\n\n(A restart keeps the conversation but stops a running turn.)\n{}",
             lines.join("\n")
         ),
         "options": process_options().map(|(label, _)| label),
@@ -84,13 +71,11 @@ pub enum ProcessAnswer {
     AskAgain,
     /// Save the entry that lifts it, and restart.
     Persist(PersistScope),
-    /// Save a `silence` entry: it stays blocked, and isn't asked about again.
-    Silence(PersistScope),
     /// Leave it blocked for now: asked again in a new session.
     NotNow,
 }
 
-fn process_options() -> [(String, ProcessAnswer); 6] {
+fn process_options() -> [(String, ProcessAnswer); 4] {
     use PersistScope::{Global, Project};
     [
         (CHOOSE_BELOW.to_string(), ProcessAnswer::AskAgain),
@@ -102,8 +87,6 @@ fn process_options() -> [(String, ProcessAnswer); 6] {
             format!("Allow {} and restart", Global.label()),
             ProcessAnswer::Persist(Global),
         ),
-        (format!("Deny {}", Project.label()), ProcessAnswer::Silence(Project)),
-        (format!("Deny {}", Global.label()), ProcessAnswer::Silence(Global)),
         ("Not now".to_string(), ProcessAnswer::NotNow),
     ]
 }
@@ -118,24 +101,20 @@ pub fn read_process_answer(answer: &serde_json::Map<String, Value>) -> ProcessAn
 }
 
 /// The question for a connection the gate holds: who asked, where to, and per answer the exact entry it saves. Allow
-/// applies at once, no restart (the gate reads the configuration again); Deny refuses it without asking from then on.
+/// applies at once, no restart (the gate reads the configuration again).
 pub fn network_dialog(id: &str, who: &str, to: &str) -> Value {
-    let entry = format!("`connect = [{}]`", toml::Value::String(to.to_string()));
-    let silence = format!(
-        "`silence = [{}]`",
-        crate::config::Silence {
-            target: crate::config::SilenceTarget::Host(to.to_string()),
-            process: None,
-        }
-        .inline()
-    );
+    let entry = match crate::config::NetworkTarget::try_from(to.to_string()) {
+        Ok(target) => format!("`{}`", Lift::Network(target).entry()),
+        Err(_) => format!(
+            "`network.connections.{} = \"allow\"`",
+            toml::Value::String(to.to_string())
+        ),
+    };
     let mut lines = vec!["- Allow for this session: until it ends, nothing saved".to_string()];
     for scope in [PersistScope::Project, PersistScope::Global] {
-        lines.push(format!("- Allow {}: {entry}", scope.label()));
+        lines.push(format!("- Allow {}: {entry} in [sandbox]", scope.label()));
     }
-    for scope in [PersistScope::Project, PersistScope::Global] {
-        lines.push(format!("- Deny {}: {silence}; refused without asking", scope.label()));
-    }
+    lines.push("- Not now: refused this time; asked again next time".into());
     json!({
         "type": "extension_ui_request",
         "id": id,
@@ -155,23 +134,19 @@ pub enum NetworkAnswer {
     AskAgain,
     /// Allow this host until the session ends.
     Session,
-    /// Save `connect = ["host:port"]`.
+    /// Save `"host:port" = "allow"` in `[sandbox.network.connections]`.
     Persist(PersistScope),
-    /// Save a `silence` entry: refused without asking.
-    Silence(PersistScope),
     /// Refuse it this time.
     NotNow,
 }
 
-fn network_options() -> [(String, NetworkAnswer); 7] {
+fn network_options() -> [(String, NetworkAnswer); 5] {
     use PersistScope::{Global, Project};
     [
         (CHOOSE_BELOW.to_string(), NetworkAnswer::AskAgain),
         ("Allow for this session".to_string(), NetworkAnswer::Session),
         (format!("Allow {}", Project.label()), NetworkAnswer::Persist(Project)),
         (format!("Allow {}", Global.label()), NetworkAnswer::Persist(Global)),
-        (format!("Deny {}", Project.label()), NetworkAnswer::Silence(Project)),
-        (format!("Deny {}", Global.label()), NetworkAnswer::Silence(Global)),
         ("Not now".to_string(), NetworkAnswer::NotNow),
     ]
 }
@@ -189,7 +164,7 @@ pub fn read_network_answer(answer: &serde_json::Map<String, Value>) -> NetworkAn
 mod tests {
     use super::*;
 
-    /// The network question names the entries each answer saves, and every option reads back.
+    /// The network question names the entry each Allow saves, offers no Deny, and every option reads back.
     #[test]
     fn network_answers_read_back() {
         let d = network_dialog("n", "curl", "api.example.com:443");
@@ -198,11 +173,11 @@ mod tests {
             title.contains("curl wants to connect to api.example.com:443"),
             "{title}"
         );
-        assert!(title.contains("`connect = [\"api.example.com:443\"]`"), "{title}");
         assert!(
-            title.contains("`silence = [{ target = \"api.example.com:443\" }]`"),
+            title.contains("`network.connections.\"api.example.com:443\" = \"allow\"`"),
             "{title}"
         );
+        assert!(!title.contains("Deny"), "{title}");
         let answers: Vec<NetworkAnswer> = d["options"]
             .as_array()
             .unwrap()
@@ -216,8 +191,6 @@ mod tests {
                 NetworkAnswer::Session,
                 NetworkAnswer::Persist(PersistScope::Project),
                 NetworkAnswer::Persist(PersistScope::Global),
-                NetworkAnswer::Silence(PersistScope::Project),
-                NetworkAnswer::Silence(PersistScope::Global),
                 NetworkAnswer::NotNow,
             ]
         );
@@ -227,7 +200,7 @@ mod tests {
         );
     }
 
-    /// Each answer names the exact entry it saves, and reads back as its answer; a dismissal is "Not now".
+    /// Each Allow names the exact entry it saves; there's no Deny; a dismissal is "Not now".
     #[test]
     fn process_answers_read_back() {
         let process = process_dialog(
@@ -242,13 +215,12 @@ mod tests {
         let title = process["title"].as_str().unwrap();
         assert!(title.contains("claude"), "{title}");
         for saved in [
-            "in this project: `write = [\"/h/c/-w-p\"]`",
-            "everywhere: `write = [\"/h/c\"]`",
-            "in this project: `silence = [{ target = \"/h/c/-w-p\" }]`",
-            "everywhere: `silence = [{ target = \"/h/c\" }]`",
+            "in this project: `filesystem.\"/h/c/-w-p\" = \"write\"`",
+            "everywhere: `filesystem.\"/h/c\" = \"write\"`",
         ] {
             assert!(title.contains(saved), "{saved} in {title}");
         }
+        assert!(!title.contains("silence") && !title.contains("Deny"), "{title}");
         let answers: Vec<ProcessAnswer> = process["options"]
             .as_array()
             .unwrap()
@@ -261,8 +233,6 @@ mod tests {
                 ProcessAnswer::AskAgain,
                 ProcessAnswer::Persist(PersistScope::Project),
                 ProcessAnswer::Persist(PersistScope::Global),
-                ProcessAnswer::Silence(PersistScope::Project),
-                ProcessAnswer::Silence(PersistScope::Global),
                 ProcessAnswer::NotNow,
             ]
         );
@@ -280,9 +250,9 @@ mod tests {
         assert_eq!(process_dialog("p", "n", "r", &offer)["options"][0], CHOOSE_BELOW);
     }
 
-    /// A blocked Mach service offers `services = [name]`, and Deny silences that service.
+    /// A blocked Mach service and a blocked TCP listen name their entries.
     #[test]
-    fn a_service_offer_names_the_service() {
+    fn service_and_listen_offers_name_their_entries() {
         let name = crate::config::ServiceName::Exact("com.example.agent".into());
         let offer = Offer {
             project: Lift::Service(name.clone()),
@@ -290,23 +260,16 @@ mod tests {
         };
         let d = process_dialog("p", "tool", "mach-lookup com.example.agent", &offer);
         let title = d["title"].as_str().unwrap();
-        assert!(title.contains("`services = [\"com.example.agent\"]`"), "{title}");
         assert!(
-            title.contains("`silence = [{ target = \"com.example.agent\" }]`"),
+            title.contains("`macos.services.\"com.example.agent\" = \"allow\"`"),
             "{title}"
         );
-    }
-
-    /// A blocked TCP listen offers `tcp_listen = "*"`, and Deny silences listening.
-    #[test]
-    fn a_listen_offer_names_the_switch() {
         let offer = Offer {
             project: Lift::TcpListen,
             everywhere: Lift::TcpListen,
         };
         let d = process_dialog("p", "node", "network-inbound local:*:50958", &offer);
         let title = d["title"].as_str().unwrap();
-        assert!(title.contains("`tcp_listen = \"*\"`"), "{title}");
-        assert!(title.contains("`silence = [{ target = \"tcp-listen\" }]`"), "{title}");
+        assert!(title.contains("`allow_tcp_listening = true`"), "{title}");
     }
 }

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{
+    duration::{ConfigDuration, Timeout},
     host::HostFile,
     paths::{Paths, expand_home},
 };
@@ -28,12 +29,12 @@ pub struct DaemonConfig {
     pub env: EnvConfig,
     pub stop: StopConfig,
     /// How long a pi with no messages, no run, and no pending dialog may stay without clients.
-    pub empty_grace_ms: u64,
-    /// How long a question about a blocked command waits for the user (`agent/block.rs`).
-    pub confirmation_timeout_ms: u64,
-    pub tailnet: TailnetConfig,
-    /// The external tools piton runs; whether each is used depends on what's installed (`crate::tools`).
-    pub tools: ToolsConfig,
+    pub stop_empty_session_after: ConfigDuration,
+    /// How long an approval (the block question about a command, the network question about a held connection) waits
+    /// for the user before the action doesn't happen (`agent/block.rs`).
+    pub approval_timeout: Timeout,
+    /// The external programs piton runs; whether each is used depends on what's installed (`crate::integrations`).
+    pub integrations: IntegrationsConfig,
     pub logging: LoggingConfig,
     /// Folders whose workspaces the native apps may browse and start sessions in. None by default: the apps can't
     /// start sessions until the owner lists some. `piton attach` and the CLI aren't limited. A leading `~/` is
@@ -43,15 +44,15 @@ pub struct DaemonConfig {
     pub paths: Paths,
 }
 
-/// The `view` protocol over WebSocket on this Mac's tailnet addresses, for the owner's other devices.
+/// The `view` protocol over WebSocket on this Mac's tailnet addresses, for the owner's other devices: served while
+/// Tailscale is used.
 #[derive(Debug, Clone)]
 pub struct TailnetConfig {
-    pub enabled: bool,
     pub port: u16,
     /// How often to ping each client; one that answers none of three pings in a row is dropped.
-    pub heartbeat_ms: u64,
+    pub heartbeat: ConfigDuration,
     /// While Tailscale isn't up (not started yet at login, logged out), how often to try again to listen.
-    pub retry_ms: u64,
+    pub retry: ConfigDuration,
 }
 
 /// Host logging: the daemon, the Mac app, and the phone-log collector. The apps and `piton logging` switch it at runtime
@@ -74,24 +75,26 @@ pub struct EnvConfig {
     pub login_shell: bool,
 }
 
-/// `[tools]`: one setting per external tool.
+/// `[integrations]`: one setting per external program, and how the apps are served on the tailnet.
 #[derive(Debug, Clone)]
-pub struct ToolsConfig {
-    pub mise: ToolConfig,
-    pub fnox: ToolConfig,
-    pub tailscale: ToolConfig,
+pub struct IntegrationsConfig {
+    pub mise: IntegrationConfig,
+    pub fnox: IntegrationConfig,
+    pub tailscale: IntegrationConfig,
+    /// The rest of `[integrations.tailscale]`.
+    pub tailnet: TailnetConfig,
 }
 
 #[derive(Debug, Clone)]
-pub struct ToolConfig {
-    pub choice: ToolChoice,
+pub struct IntegrationConfig {
+    pub choice: IntegrationChoice,
     /// The executable and leading arguments, found through the login shell's PATH.
     pub command: Vec<String>,
 }
 
-/// Whether to use a tool: `enabled` in the file, or unset.
+/// Whether to use an integration: `enabled` in the file, or unset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolChoice {
+pub enum IntegrationChoice {
     /// Unset: used when it's installed, off otherwise.
     Auto,
     /// `enabled = true`: used, and an error when it isn't installed.
@@ -100,13 +103,13 @@ pub enum ToolChoice {
     Off,
 }
 
-impl ToolConfig {
-    fn new(table: super::host::ToolTable, name: &str) -> Self {
+impl IntegrationConfig {
+    fn new(table: super::host::IntegrationTable, name: &str) -> Self {
         Self {
             choice: match table.enabled {
-                None => ToolChoice::Auto,
-                Some(true) => ToolChoice::On,
-                Some(false) => ToolChoice::Off,
+                None => IntegrationChoice::Auto,
+                Some(true) => IntegrationChoice::On,
+                Some(false) => IntegrationChoice::Off,
             },
             command: table.command.unwrap_or_else(|| vec![name.into()]),
         }
@@ -116,9 +119,9 @@ impl ToolConfig {
 #[derive(Debug, Clone)]
 pub struct StopConfig {
     /// After closing pi's stdin, how long pi may take before SIGTERM.
-    pub grace_ms: u64,
+    pub terminate_after: ConfigDuration,
     /// After SIGTERM, how long before SIGKILL.
-    pub term_grace_ms: u64,
+    pub kill_after: ConfigDuration,
 }
 
 /// The kind of build running: whether the daemon's socket may be moved.
@@ -177,24 +180,35 @@ impl DaemonConfig {
                 login_shell: host.env.login_shell.unwrap_or(true),
             },
             stop: StopConfig {
-                grace_ms: host.stop.grace_ms.unwrap_or(15_000),
-                term_grace_ms: host.stop.term_grace_ms.unwrap_or(3_000),
+                terminate_after: host.stop.terminate_after.unwrap_or(ConfigDuration::from_millis(15_000)),
+                kill_after: host.stop.kill_after.unwrap_or(ConfigDuration::from_millis(3_000)),
             },
-            empty_grace_ms: host.empty_grace_ms.unwrap_or(10_000),
-            confirmation_timeout_ms: host.confirmation_timeout_ms.unwrap_or(600_000),
-            tailnet: TailnetConfig {
-                enabled: host.tailnet.enabled.unwrap_or(true),
-                port: host.tailnet.port.unwrap_or(7357),
-                heartbeat_ms: host.tailnet.heartbeat_ms.unwrap_or(10_000),
-                retry_ms: host.tailnet.retry_ms.unwrap_or(10_000),
-            },
-            tools: ToolsConfig {
-                mise: ToolConfig::new(host.tools.mise, "mise"),
-                fnox: ToolConfig::new(host.tools.fnox, "fnox"),
-                tailscale: ToolConfig::new(host.tools.tailscale, "tailscale"),
+            stop_empty_session_after: host
+                .stop_empty_session_after
+                .unwrap_or(ConfigDuration::from_millis(10_000)),
+            approval_timeout: host
+                .approval_timeout
+                .unwrap_or(Timeout::After(ConfigDuration::from_millis(600_000))),
+            integrations: IntegrationsConfig {
+                tailscale: IntegrationConfig::new(host.integrations.tailscale.integration(), "tailscale"),
+                tailnet: TailnetConfig {
+                    port: host.integrations.tailscale.port.unwrap_or(7357),
+                    heartbeat: host
+                        .integrations
+                        .tailscale
+                        .heartbeat
+                        .unwrap_or(ConfigDuration::from_millis(10_000)),
+                    retry: host
+                        .integrations
+                        .tailscale
+                        .retry
+                        .unwrap_or(ConfigDuration::from_millis(10_000)),
+                },
+                mise: IntegrationConfig::new(host.integrations.mise, "mise"),
+                fnox: IntegrationConfig::new(host.integrations.fnox, "fnox"),
             },
             logging: LoggingConfig {
-                mode: host.logging.unwrap_or_default(),
+                mode: host.debugging.log_level.unwrap_or_default(),
             },
             roots: host.roots.unwrap_or_default(),
             paths,

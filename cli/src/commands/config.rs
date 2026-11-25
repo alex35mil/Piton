@@ -12,7 +12,7 @@ use super::ConfigAction;
 use crate::config::{ConfigError, Paths, Resolved, Runtime};
 
 /// Version of `piton config resolve --json`. Clients refuse a version they don't know.
-pub const RESOLVE_FORMAT: u32 = 3;
+pub const RESOLVE_FORMAT: u32 = 1;
 
 /// Exit code for invalid configuration, so callers can tell it from a failure to run.
 const EXIT_INVALID: u8 = 3;
@@ -161,6 +161,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 if let Some(note) = ignored {
                     eprintln!("piton: warning: {note}");
                 }
+                print_trust(&resolved);
                 if errors.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -171,6 +172,14 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 eprintln!("piton: {message}");
                 ExitCode::from(EXIT_INVALID)
             }
+        },
+        ConfigAction::Validate { table, value } => match validate(table, value) {
+            Ok(value) => {
+                let output = serde_json::json!({"format": RESOLVE_FORMAT, "ok": value});
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => print_error(ErrorBody::Invalid { message }),
         },
         ConfigAction::Protected { path, workspace } => {
             let dir = workspace
@@ -237,6 +246,7 @@ fn workspace_protected(
         source: workspace.source().to_path_buf(),
         checkout: workspace.checkout.clone(),
         levels: levels.clone(),
+        untrusted: Vec::new(),
     };
     let mut excluded = crate::launch::sandbox::never_configuration(&no_lists, &paths.home, &Default::default());
     excluded.extend(
@@ -270,6 +280,38 @@ fn runtime_or_host() -> Runtime {
     runtime_from_env().unwrap_or(Runtime::Host)
 }
 
+/// `piton config check`'s trust line: whether the repository's committed grants apply, and which are left out.
+fn print_trust(resolved: &Resolved) {
+    let Ok(workspace) = crate::launch::resolve_workspace(&resolved.workspace) else {
+        return;
+    };
+    let paths = Paths::current();
+    let Ok(inputs) = crate::config::trust_inputs(&workspace, &paths) else {
+        return;
+    };
+    let state = crate::trust::read_state(&state_db(&paths), &inputs);
+    let line = match &state {
+        Ok(crate::trust::TrustState::NothingToTrust) => "nothing to trust".to_string(),
+        Ok(crate::trust::TrustState::Trusted { .. }) => "trusted".to_string(),
+        Ok(crate::trust::TrustState::Declined { .. }) => "declined: its grants are left out".to_string(),
+        Ok(crate::trust::TrustState::Needed { added, .. }) => format!(
+            "not decided ({} grant(s) to decide): the next launch asks; `piton trust allow` answers ahead",
+            added.len()
+        ),
+        Err(e) => format!("unknown ({e})"),
+    };
+    println!("trust: {} {line}", inputs.source.display());
+    for grant in &resolved.untrusted {
+        println!("  untrusted  {grant}");
+    }
+}
+
+/// The state database, from the host file's socket (the daemon's state folder), as the daemon finds it.
+fn state_db(paths: &Paths) -> PathBuf {
+    let host = crate::config::host(paths).unwrap_or_default();
+    crate::config::DaemonConfig::new(&host, paths.clone()).state_db()
+}
+
 fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, ErrorBody> {
     let path = workspace
         .map(Path::to_path_buf)
@@ -277,7 +319,12 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         .unwrap_or_else(|| PathBuf::from("."));
     let workspace =
         crate::launch::resolve_workspace(&path).map_err(|e| ErrorBody::Workspace { message: e.to_string() })?;
-    crate::config::resolve(&workspace, &Paths::current(), runtime).map_err(|e| match e {
+    let paths = Paths::current();
+    // Inside a session: what its launch kept; outside: the user's recorded decision.
+    let filter = crate::config::trust_inputs(&workspace, &paths).map_or(crate::config::GrantFilter::None, |inputs| {
+        crate::trust::current_filter(&state_db(&paths), &inputs)
+    });
+    crate::config::resolve(&workspace, &paths, runtime, &filter).map_err(|e| match e {
         ConfigError::Read { .. }
         | ConfigError::Invalid { .. }
         | ConfigError::NotInProjectConfig { .. }
@@ -285,6 +332,13 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         | ConfigError::LocalOnly { .. }
         | ConfigError::Conflict { .. } => ErrorBody::Invalid { message: e.to_string() },
     })
+}
+
+/// `piton config validate`: `value` read and checked as `table`, and printed back as the file would hold it. Its errors
+/// name the key; a key that isn't a table, or text that isn't JSON, is an error too.
+fn validate(table: &str, value: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(value).map_err(|e| format!("VALUE isn't JSON: {e}"))?;
+    crate::config::validate_table(table, &value).map_err(|e| e.to_string())
 }
 
 /// One resolved part, for tools that need only that (the Neovim plugin's tracker queue): its value, or why its files
@@ -328,7 +382,7 @@ struct Planned {
 /// `piton config set`: one key of a level's `config.toml` or `config.local.toml`, written with its comments and layout
 /// kept, and refused when the file would no longer be valid.
 fn set(request: &SetRequest) -> ExitCode {
-    use crate::config::{ConfigFile, KeyChange, Sharing, WriteLevel};
+    use crate::config::{ConfigFile, KeyChange, KeyPath, Sharing, WriteLevel};
     let invalid = |message: String| print_error(ErrorBody::Invalid { message });
     let paths = Paths::current();
     let level = match (request.scope, request.global) {
@@ -352,12 +406,13 @@ fn set(request: &SetRequest) -> ExitCode {
     };
     let sharing = if request.local { Sharing::Local } else { Sharing::Shared };
     let target = ConfigFile { level, sharing };
-    // Each change: a dotted key, and its JSON value (`None`: remove it).
+    // Each change: a TOML dotted key (a part with dots or slashes quoted), and its JSON value (`None`: remove it).
+    let key = |text: &str| KeyPath::parse(text);
     let changes: Vec<KeyChange> = match (request.changes, request.unset, request.value) {
         (true, false, None) => match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(request.key) {
-            Ok(map) => map
-                .into_iter()
-                .map(|(key, value)| {
+            Ok(map) => {
+                let mut changes = Vec::new();
+                for (text, value) in map {
                     let value = match value {
                         serde_json::Value::Null => None,
                         other @ (serde_json::Value::Bool(_)
@@ -366,20 +421,27 @@ fn set(request: &SetRequest) -> ExitCode {
                         | serde_json::Value::Array(_)
                         | serde_json::Value::Object(_)) => Some(other),
                     };
-                    KeyChange { key, value }
-                })
-                .collect(),
+                    match key(&text) {
+                        Ok(key) => changes.push(KeyChange { key, value }),
+                        Err(e) => return invalid(e),
+                    }
+                }
+                changes
+            }
             Err(e) => return invalid(format!("--changes: a JSON object of keys and values: {e}")),
         },
-        (false, true, None) => vec![KeyChange {
-            key: request.key.to_string(),
-            value: None,
-        }],
+        (false, true, None) => match key(request.key) {
+            Ok(key) => vec![KeyChange { key, value: None }],
+            Err(e) => return invalid(e),
+        },
         // JSON, or a bare string.
-        (false, false, Some(text)) => vec![KeyChange {
-            key: request.key.to_string(),
-            value: Some(serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))),
-        }],
+        (false, false, Some(text)) => match key(request.key) {
+            Ok(key) => vec![KeyChange {
+                key,
+                value: Some(serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))),
+            }],
+            Err(e) => return invalid(e),
+        },
         (true, _, _) | (false, true, Some(_)) | (false, false, None) => {
             eprintln!("piton: give KEY VALUE, KEY --unset, or a JSON object with --changes");
             return ExitCode::from(1);
@@ -431,7 +493,7 @@ mod tests {
         std::fs::create_dir_all(repo.join(".piton")).unwrap();
         std::fs::write(
             repo.join(".piton/config.toml"),
-            "[permissions]\nallow = [\"read\"]\n[branches]\nformat = 1\n",
+            "[tools.permissions]\nallow = [\"read\"]\n[branches]\nformat = 1\n",
         )
         .unwrap();
         let paths = Paths {
@@ -443,7 +505,8 @@ mod tests {
             checkout: repo.clone(),
             relation: Relation::Source,
         };
-        let resolved = crate::config::resolve(&workspace, &paths, Runtime::Sandbox).unwrap();
+        let resolved =
+            crate::config::resolve(&workspace, &paths, Runtime::Sandbox, &crate::config::GrantFilter::All).unwrap();
         let json = serde_json::to_value(Output {
             format: RESOLVE_FORMAT,
             resolved: &resolved,
@@ -452,9 +515,15 @@ mod tests {
         assert_eq!(json["format"], RESOLVE_FORMAT);
         assert_eq!(json["runtime"], "sandbox");
         // Each part is `{ok}` or `{error: {message}}`.
-        assert_eq!(json["permissions"]["ok"]["merged"]["allow"][0], "read");
-        assert!(json["tracker"]["ok"].is_null());
-        assert_eq!(get(&resolved, "tracker").unwrap().unwrap(), serde_json::Value::Null);
+        assert_eq!(json["tools"]["ok"]["permissions"]["merged"]["allow"][0], "read");
+        assert!(json.get("permissions").is_none());
+        assert_eq!(
+            get(&resolved, "tools").unwrap().unwrap()["permissions"]["merged"]["allow"][0],
+            "read"
+        );
+        let absent = serde_json::json!({"state": "off", "reason": "absent"});
+        assert_eq!(json["tracker"]["ok"], absent);
+        assert_eq!(get(&resolved, "tracker").unwrap().unwrap(), absent);
         assert!(get(&resolved, "branches").unwrap().is_err());
         assert!(get(&resolved, "watch").is_none());
         assert!(

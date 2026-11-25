@@ -97,7 +97,7 @@ pub struct Protected {
     /// The global tier (canonical): its `config.toml` can loosen the sandbox.
     pub global: PathBuf,
     /// What no area outside the checkout ever reaches: the daemon's state folder, the credential denies, and the
-    /// user's `[sandbox] deny`.
+    /// user's `"deny"` entries.
     pub excluded: Vec<PathBuf>,
 }
 
@@ -114,7 +114,7 @@ pub struct ProtectedFacts<'a> {
     pub global: &'a Path,
     /// The user's home folder: an area holding it is never protected.
     pub home: &'a Path,
-    /// The daemon's state folder, the credential denies, and the user's `[sandbox] deny`, expanded.
+    /// The daemon's state folder, the credential denies, and the user's `"deny"` entries, expanded.
     pub excluded: &'a [PathBuf],
 }
 

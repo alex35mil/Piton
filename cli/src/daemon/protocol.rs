@@ -29,11 +29,12 @@ pub enum Hello {
     /// One control request and its response.
     Control { version: u32 },
     /// The native clients' protocol: requests with ids, replies, and pushed session-list and session-view updates.
-    /// See [`ViewRequest`].
+    /// See [`ViewRequest`]. `device` decides which of the client file's device sections the connection sees.
     View {
         version: u32,
         #[serde(default)]
         client: Option<String>,
+        device: crate::config::Device,
     },
 }
 
@@ -89,6 +90,21 @@ pub enum ControlRequest {
         #[serde(default)]
         update: crate::project::source::DeleteUpdate,
     },
+    /// A workspace's trust state (`piton trust status`).
+    TrustStatus {
+        workspace: PathBuf,
+    },
+    /// Records the user's decision for a workspace's repository, for the grants they were shown (`piton trust
+    /// allow|deny`).
+    TrustDecide {
+        workspace: PathBuf,
+        decision: crate::apps::TrustDecisionWire,
+        grants: crate::config::Grants,
+    },
+    /// Forgets the decision (`piton trust reset`): the next launch asks again.
+    TrustReset {
+        workspace: PathBuf,
+    },
     /// The host logging policy in effect (`piton logging status`, the collector).
     Logging,
     /// Switch host logging until the policy expires or the daemon restarts.
@@ -127,6 +143,20 @@ pub enum ControlResponse {
     },
     Logging {
         logging: crate::logging::State,
+    },
+    /// A launch needs the user's trust first.
+    TrustNeeded {
+        needed: crate::trust::TrustNeeded,
+    },
+    /// A repository's trust state, and its source checkout.
+    Trust {
+        source: PathBuf,
+        trust: crate::trust::TrustState,
+    },
+    /// A decision refused because the repository's grants changed since they were shown: ask again with `trust`.
+    TrustChanged {
+        source: PathBuf,
+        trust: crate::trust::TrustState,
     },
     Error {
         message: String,

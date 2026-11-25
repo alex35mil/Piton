@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::config::{DaemonConfig, EditError, GlobalConfig, KeyChange, Paths, Placement, Resolved, Scope, Sharing};
+use crate::config::{
+    DaemonConfig, Device, DeviceSection, EditError, GlobalConfig, KeyChange, Paths, PerDevice, Placement, Resolved,
+    Scope, Sharing,
+};
 
 /// When a changed value takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -28,6 +31,10 @@ pub enum ValueType {
     Text,
     TextList,
     Integer,
+    /// A length of time as text (`"10s"`); `"never"` too when `never`.
+    Duration {
+        never: bool,
+    },
     Choice {
         options: &'static [&'static str],
     },
@@ -35,11 +42,15 @@ pub enum ValueType {
     ChoiceList {
         options: &'static [&'static str],
     },
+    /// A table of keys (paths, hosts, names) to one of the listed values: one row per entry.
+    Map {
+        values: &'static [&'static str],
+    },
 }
 
 #[derive(Debug)]
 pub struct Entry {
-    /// The key as written in its file (`tailnet.port` is `[tailnet] port`).
+    /// The key as written in its file (`stop.kill_after` is `[stop] kill_after`).
     pub key: &'static str,
     /// The file family it lives in.
     pub scope: Scope,
@@ -92,18 +103,21 @@ fn null(_: &DaemonConfig) -> Value {
 use Applies::{Live, Restart};
 use ValueType::{Bool, Integer, Text, TextList};
 
+const DURATION: ValueType = ValueType::Duration { never: false };
+
+/// The values of `[sandbox.filesystem]`.
+const FILE_ACCESS: &[&str] = &["read", "write", "deny"];
+/// The values of every other `[sandbox]` map.
+const EFFECTS: &[&str] = &["allow", "deny"];
+
+fn empty_map(_: &DaemonConfig) -> Value {
+    json!({})
+}
+
 pub static CATALOG: &[Entry] = &[
     host("keep_awake", Bool, Live, |c| json!(c.keep_awake)),
     host("roots", TextList, Live, empty),
     host("favorites", TextList, Live, empty),
-    host(
-        "logging",
-        ValueType::Choice {
-            options: &["info", "debug"],
-        },
-        Live,
-        |c| json!(c.logging.mode),
-    ),
     host(
         "default_attach_mode",
         ValueType::Choice {
@@ -112,9 +126,11 @@ pub static CATALOG: &[Entry] = &[
         Live,
         |c| json!(c.default_attach_mode),
     ),
-    host("empty_grace_ms", Integer, Live, |c| json!(c.empty_grace_ms)),
-    host("confirmation_timeout_ms", Integer, Live, |c| {
-        json!(c.confirmation_timeout_ms)
+    host("stop_empty_session_after", DURATION, Live, |c| {
+        json!(c.stop_empty_session_after)
+    }),
+    host("approval_timeout", ValueType::Duration { never: true }, Live, |c| {
+        json!(c.approval_timeout)
     }),
     Entry {
         key: "socket",
@@ -128,25 +144,42 @@ pub static CATALOG: &[Entry] = &[
     host("pi.command", TextList, Live, |c| json!(c.pi.command)),
     host("pi.args", TextList, Live, |c| json!(c.pi.args)),
     host("env.login_shell", Bool, Restart, |c| json!(c.env.login_shell)),
-    // Unset (`null`): used when installed. See `crate::tools`.
-    host("tools.mise.enabled", Bool, Restart, null),
-    host("tools.mise.command", TextList, Restart, |c| json!(c.tools.mise.command)),
-    host("tools.fnox.enabled", Bool, Restart, null),
-    host("tools.fnox.command", TextList, Restart, |c| json!(c.tools.fnox.command)),
-    host("tools.tailscale.enabled", Bool, Restart, null),
-    host("tools.tailscale.command", TextList, Restart, |c| {
-        json!(c.tools.tailscale.command)
+    host("stop.terminate_after", DURATION, Live, |c| {
+        json!(c.stop.terminate_after)
     }),
-    host("stop.grace_ms", Integer, Live, |c| json!(c.stop.grace_ms)),
-    host("stop.term_grace_ms", Integer, Live, |c| json!(c.stop.term_grace_ms)),
-    host("tailnet.enabled", Bool, Restart, |c| json!(c.tailnet.enabled)),
-    host("tailnet.port", Integer, Restart, |c| json!(c.tailnet.port)),
-    host("tailnet.heartbeat_ms", Integer, Restart, |c| {
-        json!(c.tailnet.heartbeat_ms)
+    host("stop.kill_after", DURATION, Live, |c| json!(c.stop.kill_after)),
+    // Unset (`null`): used when installed. See `crate::integrations`.
+    host("integrations.mise.enabled", Bool, Restart, null),
+    host("integrations.mise.command", TextList, Restart, |c| {
+        json!(c.integrations.mise.command)
     }),
-    host("tailnet.retry_ms", Integer, Restart, |c| json!(c.tailnet.retry_ms)),
-    entry_of(Scope::Client, "text_font", Text, Live, null),
-    entry_of(Scope::Client, "code_font", Text, Live, null),
+    host("integrations.fnox.enabled", Bool, Restart, null),
+    host("integrations.fnox.command", TextList, Restart, |c| {
+        json!(c.integrations.fnox.command)
+    }),
+    host("integrations.tailscale.enabled", Bool, Restart, null),
+    host("integrations.tailscale.command", TextList, Restart, |c| {
+        json!(c.integrations.tailscale.command)
+    }),
+    host("integrations.tailscale.port", Integer, Restart, |c| {
+        json!(c.integrations.tailnet.port)
+    }),
+    host("integrations.tailscale.heartbeat", DURATION, Restart, |c| {
+        json!(c.integrations.tailnet.heartbeat)
+    }),
+    host("integrations.tailscale.retry", DURATION, Restart, |c| {
+        json!(c.integrations.tailnet.retry)
+    }),
+    host(
+        "debugging.log_level",
+        ValueType::Choice {
+            options: &["info", "debug"],
+        },
+        Live,
+        |c| json!(c.logging.mode),
+    ),
+    entry_of(Scope::Client, "appearance.text_font", Text, Live, null),
+    entry_of(Scope::Client, "appearance.code_font", Text, Live, null),
     project(
         "sandbox.presets",
         ValueType::ChoiceList {
@@ -161,16 +194,27 @@ pub static CATALOG: &[Entry] = &[
         },
         |_| json!("standard"),
     ),
-    project("sandbox.write", TextList, empty),
-    project("sandbox.write_file", TextList, empty),
-    project("sandbox.read", TextList, empty),
-    project("sandbox.connect", TextList, empty),
-    project("sandbox.unix_bind", TextList, empty),
-    // `"*"` or unset: the apps' text field writes `*`, and clearing it resets the key. Any other text is refused by the
-    // file's own check, which `validate` runs too.
-    project("sandbox.tcp_listen", Text, null),
-    project("sandbox.services", TextList, empty),
-    project("sandbox.deny", TextList, empty),
+    // Unset (`null`): the profile's value.
+    project("sandbox.allow_tcp_listening", Bool, null),
+    project("sandbox.allow_git_control_files", Bool, null),
+    project("sandbox.allow_launching_apps", Bool, null),
+    project("sandbox.filesystem", ValueType::Map { values: FILE_ACCESS }, empty_map),
+    project(
+        "sandbox.network.connections",
+        ValueType::Map { values: EFFECTS },
+        empty_map,
+    ),
+    project(
+        "sandbox.network.unix_socket_connections",
+        ValueType::Map { values: EFFECTS },
+        empty_map,
+    ),
+    project(
+        "sandbox.network.unix_socket_bindings",
+        ValueType::Map { values: EFFECTS },
+        empty_map,
+    ),
+    project("sandbox.macos.services", ValueType::Map { values: EFFECTS }, empty_map),
     // Not `sandbox.silence`: its entries are tables (`{ target, process }`), edited in the file; a notice names each.
     project("workers.skip", TextList, empty),
 ];
@@ -185,18 +229,30 @@ pub fn entry(scope: Scope, key: &str) -> Option<&'static Entry> {
 pub struct SettingInfo {
     pub key: &'static str,
     pub scope: Scope,
-    /// The value in effect: the file's, else the default.
+    /// The value in effect: the file's (for a client setting, on the connection's device), else the default.
     pub value: Value,
-    /// Which file of the scope's pair sets it; `None` when neither does (the default applies).
-    pub placement: Option<Sharing>,
-    /// Whether the apps offer the Local choice: the scope has a local file.
-    pub local_choice: bool,
+    /// Where the value is set.
+    pub location: Location,
     pub value_type: ValueType,
     pub applies: AppliesInfo,
     pub editable: bool,
-    /// Something the user should fix, shown with the setting: a tool enabled but not installed.
+    /// Something the user should fix, shown with the setting: an integration enabled but not installed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+/// Where a setting's value is set: which file of its scope's pair, or which device sections of the client file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Location {
+    /// A host or project setting: the file of the pair that sets it; `None` when neither does (the default applies).
+    File { placement: Option<Sharing> },
+    /// A client setting: the value of every section the file sets, and the one in effect on the connection's device
+    /// (`None`: no section applies, the default does).
+    Devices {
+        sections: BTreeMap<DeviceSection, Value>,
+        section: Option<DeviceSection>,
+    },
 }
 
 /// When a change takes effect, and for a restart-only key whether it changed since the daemon started.
@@ -213,12 +269,12 @@ type Id = (Scope, &'static str);
 /// What the files said at the last good read, and why they can't be used now if they can't.
 #[derive(Debug)]
 pub struct Snapshot {
-    /// Values in effect.
+    /// Values as the files set them (a client setting with its device sections), else the default.
     values: BTreeMap<Id, Value>,
     placements: BTreeMap<Id, Option<Sharing>>,
     /// Restart-only values the daemon started with.
     started: BTreeMap<Id, Value>,
-    /// Warnings by setting: each enabled tool that isn't installed, on its `enabled` key; a `socket` a release build
+    /// Warnings by setting: each enabled integration that isn't installed, on its `enabled` key; a `socket` a release build
     /// ignores.
     warnings: BTreeMap<Id, String>,
     /// Why some file's latest version can't be used (its values are the last good ones).
@@ -226,13 +282,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Reads the global files as the daemon starts. `tools` is each tool's state the daemon decided at start.
-    pub fn new(paths: &Paths, tools: &crate::tools::Tools) -> Self {
+    /// Reads the global files as the daemon starts. `integrations` is each integration's state the daemon decided at
+    /// start.
+    pub fn new(paths: &Paths, integrations: &crate::integrations::Integrations) -> Self {
         let mut snapshot = Self {
             values: BTreeMap::new(),
             placements: BTreeMap::new(),
             started: BTreeMap::new(),
-            warnings: tool_warnings(tools),
+            warnings: integration_warnings(integrations),
             error: None,
         };
         snapshot.reload(paths);
@@ -298,19 +355,29 @@ impl Snapshot {
 
     /// Refuses a change to a value the apps show read-only because the file gives it options.
     pub fn check_editable(&self, change: &Change) -> Result<(), SetError> {
-        let current = self.values.get(&(change.scope, change.change.key.as_str()));
-        match (entry(change.scope, &change.change.key), current) {
+        let current = self.values.get(&(change.scope, change.key));
+        match (entry(change.scope, change.key), current) {
             (Some(entry), Some(value)) if has_options(value) => Err(SetError::NotEditable { key: entry.key }),
             (Some(_) | None, _) => Ok(()),
         }
     }
 
-    pub fn info(&self) -> Vec<SettingInfo> {
+    /// The list as a client on `device` sees it: client settings resolved for that device.
+    pub fn info(&self, device: Device) -> Vec<SettingInfo> {
         CATALOG
             .iter()
             .map(|entry| {
                 let id = (entry.scope, entry.key);
-                let value = self.values.get(&id).cloned().unwrap_or(Value::Null);
+                let written = self.values.get(&id).cloned().unwrap_or(Value::Null);
+                let (value, location) = match entry.scope {
+                    Scope::Host | Scope::Project => (
+                        written,
+                        Location::File {
+                            placement: self.placements.get(&id).copied().flatten(),
+                        },
+                    ),
+                    Scope::Client => resolve_client(&written, device),
+                };
                 let applies = match entry.applies {
                     Live => AppliesInfo::Live,
                     Restart => AppliesInfo::Restart {
@@ -320,8 +387,7 @@ impl Snapshot {
                 SettingInfo {
                     key: entry.key,
                     scope: entry.scope,
-                    placement: self.placements.get(&id).copied().flatten(),
-                    local_choice: entry.scope.local_name().is_some(),
+                    location,
                     value_type: entry.value_type,
                     applies,
                     editable: entry.editable && !has_options(&value),
@@ -333,23 +399,52 @@ impl Snapshot {
     }
 }
 
-/// The warning for each tool enabled but not installed, on its `enabled` key.
-fn tool_warnings(tools: &crate::tools::Tools) -> BTreeMap<Id, String> {
-    use crate::tools::{Tool, ToolState};
-    Tool::ALL
+/// The warning for each integration enabled but not installed, on its `enabled` key.
+fn integration_warnings(integrations: &crate::integrations::Integrations) -> BTreeMap<Id, String> {
+    use crate::integrations::{Integration, IntegrationState};
+    Integration::ALL
         .iter()
-        .filter_map(|&tool| {
-            let key = match tool {
-                Tool::Mise => "tools.mise.enabled",
-                Tool::Fnox => "tools.fnox.enabled",
-                Tool::Tailscale => "tools.tailscale.enabled",
-            };
-            match tools.get(tool) {
-                ToolState::Unavailable(unavailable) => Some(((Scope::Host, key), unavailable.to_string())),
-                ToolState::Off(_) | ToolState::Used(_) => None,
+        .filter_map(|&integration| {
+            let key = integration.enabled_key();
+            match integrations.get(integration) {
+                IntegrationState::Unavailable(unavailable) => Some(((Scope::Host, key), unavailable.to_string())),
+                IntegrationState::Off(_) | IntegrationState::Used(_) => None,
             }
         })
         .collect()
+}
+
+/// A client setting's value as the file writes it (`null`: unset), read per device section.
+fn per_device(written: &Value) -> Option<PerDevice<Value>> {
+    match written {
+        Value::Null => None,
+        // The file was parsed with this schema, so its value reads back.
+        Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) | Value::Object(_) => {
+            serde_json::from_value(written.clone()).ok()
+        }
+    }
+}
+
+/// A client setting as `device` sees it: its value there (`null`: the default) and every section the file sets.
+fn resolve_client(written: &Value, device: Device) -> (Value, Location) {
+    let value = per_device(written);
+    let sections = DeviceSection::ALL
+        .iter()
+        .filter_map(|section| {
+            value
+                .as_ref()
+                .and_then(|value| value.get(*section))
+                .map(|v| (*section, v.clone()))
+        })
+        .collect();
+    let resolved = value.as_ref().and_then(|value| value.resolve(device));
+    (
+        resolved.map_or(Value::Null, |(value, _)| value.clone()),
+        Location::Devices {
+            sections,
+            section: resolved.map(|(_, section)| section),
+        },
+    )
 }
 
 /// A file's values in its own shape.
@@ -377,8 +472,12 @@ pub enum SetError {
     NotEditable { key: &'static str },
     #[error("{key}: expected {expected}")]
     WrongType { key: &'static str, expected: &'static str },
-    #[error("{key} has no Local choice: every client shares it")]
+    #[error("{key} has no Local choice: a client setting is set per device section")]
     NoLocal { key: &'static str },
+    #[error("{key} is a client setting: say which device section to set")]
+    NoSection { key: &'static str },
+    #[error("{key} isn't a client setting: it has no device sections")]
+    NotPerDevice { key: &'static str },
     #[error(transparent)]
     Edit(#[from] EditError),
 }
@@ -387,13 +486,34 @@ pub enum SetError {
 #[derive(Debug)]
 pub struct Change {
     pub scope: Scope,
-    pub change: KeyChange,
-    pub placement: Placement,
+    pub key: &'static str,
+    /// The new value; `None` returns it to the default (for a client setting, removes the section).
+    pub value: Option<Value>,
+    pub target: Target,
+}
+
+/// Where a change goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// A host or project setting: the file of its pair.
+    File(Placement),
+    /// A client setting: one device section, set from a client on `device` (see [`PerDevice::with_section`]).
+    Section { section: DeviceSection, device: Device },
+}
+
+/// How the apps say where a change goes: `local` for a host or project setting, `section` for a client one. The
+/// device is the connection's own.
+#[derive(Debug, Clone, Copy)]
+pub struct Destination {
+    pub local: Option<bool>,
+    pub section: Option<DeviceSection>,
+    pub device: Device,
 }
 
 /// Checks a change from the apps: the key exists in its scope and may change, the value has its type (`null` resets
-/// it), and `local` is given only where the scope has a local file.
-pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> Result<Change, SetError> {
+/// it), and the destination fits the scope: `local` only for a host or project setting, a `section` always and only
+/// for a client one.
+pub fn validate(scope: Scope, key: &str, value: &Value, destination: Destination) -> Result<Change, SetError> {
     let entry = entry(scope, key).ok_or_else(|| SetError::Unknown {
         scope,
         key: key.to_string(),
@@ -408,20 +528,29 @@ pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> 
             Some(value.clone())
         }
     };
-    let placement = match (local, scope.local_name()) {
-        (None, _) => Placement::Current,
-        (Some(_), None) => return Err(SetError::NoLocal { key: entry.key }),
-        (Some(true), Some(_)) => Placement::Move(Sharing::Local),
-        (Some(false), Some(_)) => Placement::Move(Sharing::Shared),
+    let target = match (scope, destination.local, destination.section) {
+        (Scope::Host | Scope::Project, _, Some(_)) => return Err(SetError::NotPerDevice { key: entry.key }),
+        (Scope::Host | Scope::Project, None, None) => Target::File(Placement::Current),
+        (Scope::Host | Scope::Project, Some(true), None) => Target::File(Placement::Move(Sharing::Local)),
+        (Scope::Host | Scope::Project, Some(false), None) => Target::File(Placement::Move(Sharing::Shared)),
+        (Scope::Client, Some(_), _) => return Err(SetError::NoLocal { key: entry.key }),
+        (Scope::Client, None, None) => return Err(SetError::NoSection { key: entry.key }),
+        (Scope::Client, None, Some(section)) => Target::Section {
+            section,
+            device: destination.device,
+        },
     };
     Ok(Change {
         scope,
-        change: KeyChange {
-            key: entry.key.to_string(),
-            value,
-        },
-        placement,
+        key: entry.key,
+        value,
+        target,
     })
+}
+
+/// A catalog key as a key path: every part is bare.
+fn catalog_key(key: &str) -> crate::config::KeyPath {
+    crate::config::KeyPath::new(key.split('.').map(str::to_string).collect())
 }
 
 /// A list with an entry that isn't a name, such as `presets = [{ name = "pi-claude-code", login = "keychain" }]`: the
@@ -441,6 +570,18 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
             "a list of strings",
         ),
         Integer => (integer(value), "a whole number"),
+        ValueType::Duration { never: false } => (
+            value
+                .as_str()
+                .is_some_and(|text| text.parse::<crate::config::ConfigDuration>().is_ok()),
+            "a duration like \"10s\"",
+        ),
+        ValueType::Duration { never: true } => (
+            value
+                .as_str()
+                .is_some_and(|text| text.parse::<crate::config::Timeout>().is_ok()),
+            "a duration like \"10s\", or \"never\"",
+        ),
         ValueType::Choice { options } => (
             value.as_str().is_some_and(|choice| options.contains(&choice)),
             "one of the listed choices",
@@ -453,6 +594,13 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
             }),
             "a list of the listed choices",
         ),
+        ValueType::Map { values } => (
+            value.as_object().is_some_and(|map| {
+                map.iter()
+                    .all(|(key, v)| !key.is_empty() && v.as_str().is_some_and(|v| values.contains(&v)))
+            }),
+            "a table of keys to the listed values",
+        ),
     };
     match ok {
         true => Ok(()),
@@ -463,9 +611,26 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
     }
 }
 
-/// Writes a change to its global file.
+/// Writes a change to its global file. A client setting's section change rewrites the setting's whole value from the
+/// file's current one.
 pub fn write(paths: &Paths, change: &Change) -> Result<(), SetError> {
-    crate::config::set_global(paths, change.scope, &change.change, change.placement)?;
+    let key = catalog_key(change.key);
+    match change.target {
+        Target::File(placement) => {
+            let edit = KeyChange {
+                key,
+                value: change.value.clone(),
+            };
+            crate::config::set_global(paths, change.scope, &edit, placement)?;
+        }
+        Target::Section { section, device } => {
+            let file = crate::config::client(paths).map_err(EditError::from)?;
+            let current = lookup(&file_value(&file), change.key).and_then(per_device);
+            let value =
+                PerDevice::with_section(current, section, change.value.clone(), device).map(|value| file_value(&value));
+            crate::config::set_global(paths, Scope::Client, &KeyChange { key, value }, Placement::Current)?;
+        }
+    }
     Ok(())
 }
 
@@ -486,33 +651,58 @@ mod tests {
         list.iter().find(|s| s.scope == scope && s.key == key).unwrap()
     }
 
-    /// Every tool off: no warnings.
-    fn no_tools() -> crate::tools::Tools {
-        use crate::tools::{OffReason, ToolState};
-        crate::tools::Tools {
-            mise: ToolState::Off(OffReason::Disabled),
-            fnox: ToolState::Off(OffReason::Disabled),
-            tailscale: ToolState::Off(OffReason::Disabled),
+    /// A host or project setting's file destination: `local` as the apps send it.
+    fn file(local: Option<bool>) -> Destination {
+        Destination {
+            local,
+            section: None,
+            device: Device::Mac,
         }
     }
 
-    /// A tool enabled but not installed shows its warning on its `enabled` key, and nowhere else.
+    /// A client setting's section, from a client on `device`.
+    fn section(section: DeviceSection, device: Device) -> Destination {
+        Destination {
+            local: None,
+            section: Some(section),
+            device,
+        }
+    }
+
+    fn placement(setting: &SettingInfo) -> Option<Sharing> {
+        match &setting.location {
+            Location::File { placement } => *placement,
+            Location::Devices { .. } => panic!("{} is a client setting", setting.key),
+        }
+    }
+
+    /// Every integration off: no warnings.
+    fn no_tools() -> crate::integrations::Integrations {
+        use crate::integrations::{IntegrationState, OffReason};
+        crate::integrations::Integrations {
+            mise: IntegrationState::Off(OffReason::Disabled),
+            fnox: IntegrationState::Off(OffReason::Disabled),
+            tailscale: IntegrationState::Off(OffReason::Disabled),
+        }
+    }
+
+    /// An integration enabled but not installed shows its warning on its `enabled` key, and nowhere else.
     #[test]
-    fn unavailable_tools_are_warned_about() {
-        use crate::tools::{Tool, ToolState, Unavailable};
+    fn unavailable_integrations_are_warned_about() {
+        use crate::integrations::{Integration, IntegrationState, Unavailable};
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
-        let mut tools = no_tools();
-        tools.tailscale = ToolState::Unavailable(Unavailable {
-            tool: Tool::Tailscale,
+        let mut integrations = no_tools();
+        integrations.tailscale = IntegrationState::Unavailable(Unavailable {
+            integration: Integration::Tailscale,
             program: "tailscale".into(),
         });
-        let list = Snapshot::new(&paths, &tools).info();
-        let warning = info(&list, Scope::Host, "tools.tailscale.enabled")
+        let list = Snapshot::new(&paths, &integrations).info(Device::Mac);
+        let warning = info(&list, Scope::Host, "integrations.tailscale.enabled")
             .warning
             .clone()
             .unwrap();
-        assert!(warning.contains("tailscale"), "{warning}");
+        assert!(warning.contains("[integrations.tailscale] enabled = true"), "{warning}");
         assert_eq!(list.iter().filter(|s| s.warning.is_some()).count(), 1);
     }
 
@@ -529,14 +719,21 @@ mod tests {
             let sample = match entry.value_type {
                 ValueType::ChoiceList { options } => json!([options[0]]),
                 Bool => json!(default != json!(true)),
-                // `sandbox.tcp_listen` takes only `*`.
-                Text if entry.key == "sandbox.tcp_listen" => json!("*"),
                 Text => json!("/x"),
-                // `workers.skip` takes relative paths, `sandbox.services` Mach service names, `[sandbox]` absolute paths.
+                // `workers.skip` takes relative paths.
                 TextList if entry.key == "workers.skip" => json!(["x"]),
-                TextList if entry.key == "sandbox.services" => json!(["com.example.agent"]),
                 TextList => json!(["~/x"]),
+                // Keys by table: a host, a Mach service, or a path.
+                ValueType::Map { values } if entry.key == "sandbox.network.connections" => {
+                    json!({ "github.com:22": values[0] })
+                }
+                ValueType::Map { values } if entry.key == "sandbox.macos.services" => {
+                    json!({ "com.example.agent": values[0] })
+                }
+                ValueType::Map { values } => json!({ "~/x": values[0] }),
                 Integer => json!(default.as_u64().unwrap_or(0) + 1),
+                // Not the default of any duration key.
+                ValueType::Duration { .. } => json!("42s"),
                 ValueType::Choice { options } => {
                     json!(
                         options
@@ -549,19 +746,24 @@ mod tests {
             // `check_type` is what `validate` uses; calling it directly covers the non-editable `socket` too.
             check_type(entry, &sample).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
             let _ = std::fs::remove_file(&paths.global_files(entry.scope).shared);
+            let target = match entry.scope {
+                Scope::Host | Scope::Project => Target::File(Placement::Current),
+                Scope::Client => Target::Section {
+                    section: DeviceSection::Default,
+                    device: Device::Mac,
+                },
+            };
             let change = Change {
                 scope: entry.scope,
-                change: KeyChange {
-                    key: entry.key.into(),
-                    value: Some(sample.clone()),
-                },
-                placement: Placement::Current,
+                key: entry.key,
+                value: Some(sample.clone()),
+                target,
             };
             write(&paths, &change).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
             let snapshot = Snapshot::new(&paths, &no_tools());
             assert_eq!(snapshot.error, None, "{}", entry.key);
             assert_eq!(
-                info(&snapshot.info(), entry.scope, entry.key).value,
+                info(&snapshot.info(Device::Mac), entry.scope, entry.key).value,
                 sample,
                 "{}",
                 entry.key
@@ -569,27 +771,43 @@ mod tests {
         }
     }
 
-    /// `sandbox.tcp_listen`: `*` writes it, clearing it (`null`) removes it, and any other text is refused with the
-    /// file's own reason, leaving the file as it was.
+    /// A map is written whole as its table, its keys quoted; a value outside the list, or a key the file refuses, is
+    /// refused, leaving the file as it was; clearing it (`null`) removes the table.
     #[test]
-    fn tcp_listen_is_set_cleared_or_refused() {
+    fn maps_are_set_refused_or_cleared() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
         let set = |value: Value| -> Result<SettingInfo, SetError> {
-            let change = validate(Scope::Project, "sandbox.tcp_listen", &value, None)?;
+            let change = validate(Scope::Project, "sandbox.filesystem", &value, file(None))?;
             write(&paths, &change)?;
             let snapshot = Snapshot::new(&paths, &no_tools());
             assert_eq!(snapshot.error, None);
-            Ok(info(&snapshot.info(), Scope::Project, "sandbox.tcp_listen").clone())
+            Ok(info(&snapshot.info(Device::Mac), Scope::Project, "sandbox.filesystem").clone())
         };
-        let on = set(json!("*")).unwrap();
-        assert_eq!(on.value, json!("*"));
-        assert_eq!(on.placement, Some(Sharing::Shared));
-        let err = set(json!("127.0.0.1:3000")).unwrap_err().to_string();
-        assert!(err.contains("can't limit listening"), "{err}");
+        let map = json!({ "~/.cache/x": "write", "~/secrets": "deny" });
+        let on = set(map.clone()).unwrap();
+        assert_eq!(on.value, map);
+        assert_eq!(placement(&on), Some(Sharing::Shared));
+        let text = std::fs::read_to_string(paths.global.join("config.toml")).unwrap();
+        assert!(text.contains("\"~/.cache/x\" = \"write\""), "{text}");
+        assert!(matches!(
+            set(json!({ "~/x": "allow" })),
+            Err(SetError::WrongType { .. })
+        ));
+        assert!(set(json!({ "relative": "write" })).is_err(), "the file's own check");
+        assert_eq!(
+            info(
+                &Snapshot::new(&paths, &no_tools()).info(Device::Mac),
+                Scope::Project,
+                "sandbox.filesystem"
+            )
+            .value,
+            map,
+            "left as it was"
+        );
         let off = set(Value::Null).unwrap();
-        assert_eq!(off.value, Value::Null);
-        assert_eq!(off.placement, None, "no file sets it");
+        assert_eq!(off.value, json!({}));
+        assert_eq!(placement(&off), None, "no file sets it");
     }
 
     #[test]
@@ -601,76 +819,124 @@ mod tests {
         let mut snapshot = Snapshot::new(&paths, &no_tools());
 
         assert!(matches!(
-            validate(Scope::Host, "nope", &json!(1), None),
+            validate(Scope::Host, "nope", &json!(1), file(None)),
             Err(SetError::Unknown { .. })
         ));
         assert!(matches!(
-            validate(Scope::Client, "roots", &json!([]), None),
+            validate(Scope::Client, "roots", &json!([]), file(None)),
             Err(SetError::Unknown { .. })
         ));
         assert!(matches!(
-            validate(Scope::Host, "socket", &json!("/s"), None),
+            validate(Scope::Host, "socket", &json!("/s"), file(None)),
             Err(SetError::NotEditable { .. })
         ));
         assert!(matches!(
-            validate(Scope::Host, "roots", &json!("~/a"), None),
+            validate(Scope::Host, "roots", &json!("~/a"), file(None)),
             Err(SetError::WrongType { .. })
         ));
         assert!(matches!(
-            validate(Scope::Host, "logging", &json!("loud"), None),
+            validate(Scope::Host, "debugging.log_level", &json!("loud"), file(None)),
             Err(SetError::WrongType { .. })
         ));
-        // The client file has no local one: a device keeps its own value in its app.
+        // Durations are text in their grammar; only the question's timeout may be `never`.
+        for (key, value) in [
+            ("stop_empty_session_after", json!(10000)),
+            ("stop_empty_session_after", json!("10")),
+            ("stop_empty_session_after", json!("never")),
+            ("stop.kill_after", json!("0s")),
+            ("approval_timeout", json!("1m30s")),
+        ] {
+            assert!(
+                matches!(
+                    validate(Scope::Host, key, &value, file(None)),
+                    Err(SetError::WrongType { .. })
+                ),
+                "{key} = {value}"
+            );
+        }
+        assert!(validate(Scope::Host, "approval_timeout", &json!("never"), file(None)).is_ok());
+        // A client setting is set per device section: no Local, and a section is required; only it takes one.
+        let font = "appearance.text_font";
         assert!(matches!(
-            validate(Scope::Client, "text_font", &json!("Inter"), Some(true)),
+            validate(Scope::Client, font, &json!("Inter"), file(Some(true))),
             Err(SetError::NoLocal { .. })
+        ));
+        assert!(matches!(
+            validate(Scope::Client, font, &json!("Inter"), file(None)),
+            Err(SetError::NoSection { .. })
+        ));
+        assert!(matches!(
+            validate(
+                Scope::Host,
+                "roots",
+                &json!([]),
+                section(DeviceSection::Mac, Device::Mac)
+            ),
+            Err(SetError::NotPerDevice { .. })
         ));
 
         write(
             &paths,
-            &validate(Scope::Host, "roots", &json!(["~/b"]), Some(true)).unwrap(),
+            &validate(Scope::Host, "roots", &json!(["~/b"]), file(Some(true))).unwrap(),
         )
         .unwrap();
         write(
             &paths,
-            &validate(Scope::Host, "tailnet.port", &json!(9000), None).unwrap(),
+            &validate(Scope::Host, "integrations.tailscale.port", &json!(9000), file(None)).unwrap(),
         )
         .unwrap();
         write(
             &paths,
-            &validate(Scope::Host, "keep_awake", &json!(false), None).unwrap(),
+            &validate(Scope::Host, "keep_awake", &json!(false), file(None)).unwrap(),
+        )
+        .unwrap();
+        write(
+            &paths,
+            &validate(Scope::Host, "approval_timeout", &json!("10m"), file(None)).unwrap(),
         )
         .unwrap();
         snapshot.reload(&paths);
         assert_eq!(snapshot.error, None);
 
-        let list = snapshot.info();
+        let list = snapshot.info(Device::Mac);
         let roots = info(&list, Scope::Host, "roots");
         assert_eq!(roots.value, json!(["~/b"]));
-        assert_eq!(roots.placement, Some(Sharing::Local));
-        assert!(roots.local_choice);
-        assert!(!info(&list, Scope::Client, "text_font").local_choice);
+        assert_eq!(placement(roots), Some(Sharing::Local));
         assert_eq!(
-            info(&list, Scope::Host, "tailnet.port").applies,
+            info(&list, Scope::Client, font).location,
+            Location::Devices {
+                sections: BTreeMap::new(),
+                section: None
+            }
+        );
+        assert_eq!(
+            info(&list, Scope::Host, "integrations.tailscale.port").applies,
             AppliesInfo::Restart { pending: true }
         );
         assert_eq!(
-            info(&list, Scope::Host, "tailnet.enabled").applies,
+            info(&list, Scope::Host, "integrations.tailscale.retry").applies,
             AppliesInfo::Restart { pending: false }
         );
         assert_eq!(info(&list, Scope::Host, "keep_awake").value, json!(false));
-        assert_eq!(info(&list, Scope::Host, "tailnet.enabled").value, json!(true));
+        assert_eq!(
+            info(&list, Scope::Host, "integrations.tailscale.enabled").value,
+            json!(null)
+        );
+        assert_eq!(info(&list, Scope::Host, "approval_timeout").value, json!("10m"));
+        assert_eq!(info(&list, Scope::Host, "stop.kill_after").value, json!("3s"));
 
         // A value the schema refuses never reaches the file.
         let before = std::fs::read_to_string(paths.global.join("config.host.toml")).unwrap();
         assert!(
-            before.contains("port = 9000") && before.contains("keep_awake = false"),
+            before.contains("port = 9000")
+                && before.contains("keep_awake = false")
+                && before.contains("approval_timeout = \"10m\""),
             "{before}"
         );
         assert!(
             write(
                 &paths,
-                &validate(Scope::Host, "tailnet.port", &json!(70000), None).unwrap()
+                &validate(Scope::Host, "integrations.tailscale.port", &json!(70000), file(None)).unwrap()
             )
             .is_err()
         );
@@ -681,12 +947,91 @@ mod tests {
 
         // A broken hand edit keeps that file's last good values and says why; the other files still update.
         std::fs::write(paths.global.join("config.host.local.toml"), "roots = [\n").unwrap();
-        std::fs::write(paths.global.join("config.client.toml"), "text_font = \"Inter\"\n").unwrap();
+        std::fs::write(
+            paths.global.join("config.client.toml"),
+            "[appearance]\ntext_font = \"Inter\"\n",
+        )
+        .unwrap();
         snapshot.reload(&paths);
         assert!(snapshot.error.is_some());
-        let list = snapshot.info();
+        let list = snapshot.info(Device::Mac);
         assert_eq!(info(&list, Scope::Host, "roots").value, json!(["~/b"]));
-        assert_eq!(info(&list, Scope::Client, "text_font").value, json!("Inter"));
+        assert_eq!(info(&list, Scope::Client, font).value, json!("Inter"));
+    }
+
+    /// One client file, seen from each device: the value in effect, every section, and the one that applies. A section
+    /// set from a device is in effect there: the narrower sections that would hide it go, other devices' stay. Written
+    /// inline, on the setting's line.
+    #[test]
+    fn client_settings_are_per_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::create_dir_all(&paths.global).unwrap();
+        let path = paths.global.join("config.client.toml");
+        std::fs::write(
+            &path,
+            "# fonts\n[appearance]\ntext_font = \"Inter\" # body\ncode_font = { default = \"D\", mobile = \"M\", ipad = \"P\" }\n",
+        )
+        .unwrap();
+        let key = "appearance.code_font";
+        let seen = |device| {
+            let snapshot = Snapshot::new(&paths, &no_tools());
+            assert_eq!(snapshot.error, None);
+            let setting = info(&snapshot.info(device), Scope::Client, key).clone();
+            match setting.location {
+                Location::Devices { sections, section } => (setting.value, sections, section),
+                Location::File { .. } => panic!("a client setting"),
+            }
+        };
+        let (value, sections, in_effect) = seen(Device::Mac);
+        assert_eq!((value, in_effect), (json!("D"), Some(DeviceSection::Default)));
+        assert_eq!(
+            sections,
+            BTreeMap::from([
+                (DeviceSection::Default, json!("D")),
+                (DeviceSection::Mobile, json!("M")),
+                (DeviceSection::Ipad, json!("P")),
+            ])
+        );
+        assert_eq!(seen(Device::Iphone).2, Some(DeviceSection::Mobile));
+        assert_eq!(
+            (seen(Device::Ipad).0, seen(Device::Ipad).2),
+            (json!("P"), Some(DeviceSection::Ipad))
+        );
+
+        let set = |value: Value, to: DeviceSection, device| {
+            write(
+                &paths,
+                &validate(Scope::Client, key, &value, section(to, device)).unwrap(),
+            )
+            .unwrap();
+        };
+        // From the iPad, every device: `ipad` and `mobile` go, so the iPad sees `default`.
+        set(json!("E"), DeviceSection::Default, Device::Ipad);
+        assert_eq!(
+            (seen(Device::Ipad).0, seen(Device::Ipad).2),
+            (json!("E"), Some(DeviceSection::Default))
+        );
+        // From the Mac, every Mac: the others keep `default`.
+        set(json!("C"), DeviceSection::Mac, Device::Mac);
+        assert_eq!(seen(Device::Mac).0, json!("C"));
+        assert_eq!(seen(Device::Iphone).0, json!("E"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "# fonts\n[appearance]\ntext_font = \"Inter\" # body\ncode_font = { default = \"E\", mac = \"C\" }\n"
+        );
+        // Removing `mac` leaves only `default`: a plain value again. Removing that, nothing.
+        set(Value::Null, DeviceSection::Mac, Device::Mac);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("code_font = \"E\"\n"), "{text}");
+        set(Value::Null, DeviceSection::Default, Device::Mac);
+        assert_eq!(seen(Device::Mac), (Value::Null, BTreeMap::new(), None));
+        // A section set from scratch is a table on the setting's line, not a `[table]`.
+        set(json!("I"), DeviceSection::Iphone, Device::Iphone);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("code_font = { iphone = \"I\" }\n"), "{text}");
+        assert_eq!(seen(Device::Mac).0, Value::Null, "no section applies to the Mac");
     }
 
     /// Presets with options are edited in the file: the apps' list control would drop the options.
@@ -698,9 +1043,9 @@ mod tests {
         let config = paths.global.join("config.toml");
         std::fs::write(&config, "[sandbox]\npresets = [\"rust\", \"pi-claude-code\"]\n").unwrap();
         let mut snapshot = Snapshot::new(&paths, &no_tools());
-        let presets = |s: &Snapshot| info(&s.info(), Scope::Project, "sandbox.presets").clone();
+        let presets = |s: &Snapshot| info(&s.info(Device::Mac), Scope::Project, "sandbox.presets").clone();
         assert!(presets(&snapshot).editable);
-        let change = validate(Scope::Project, "sandbox.presets", &json!(["rust", "swift"]), None).unwrap();
+        let change = validate(Scope::Project, "sandbox.presets", &json!(["rust", "swift"]), file(None)).unwrap();
         assert!(snapshot.check_editable(&change).is_ok());
 
         std::fs::write(

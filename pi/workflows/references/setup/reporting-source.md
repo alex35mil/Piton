@@ -11,4 +11,4 @@ Read this when a `target: "workflow"` inspection succeeds or reports an error. I
 **Session analysis:**
 
 - In a development install, every shipped Task or Gig, completed Epic, and shipped incoming PR ends with an in-chat analysis of the session for workflow problems ([session analysis](../session-analysis.md)). `inspect_session_analysis` says whether it's on.
-- `[development] session_analysis = false` in the global `config.host.toml` turns it off.
+- `[debugging] session_analysis = false` in the global `config.host.toml` turns it off.

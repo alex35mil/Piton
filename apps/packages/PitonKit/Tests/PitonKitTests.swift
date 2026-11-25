@@ -210,19 +210,26 @@ private let decoder = JSONDecoder()
     #expect(state.settingsError == nil)
     #expect(state.setting(.host, "keep_awake")?.placement == .local)
     let roots = try #require(state.setting(.host, "roots"))
-    #expect(roots.placement == .shared && roots.localChoice)
+    #expect(roots.location == .file(placement: .shared))
     #expect(roots.valueType == .textList && roots.value == .array([.string("~/Projects")]))
-    #expect(state.setting(.host, "logging")?.valueType == .choice(options: ["info", "debug"]))
-    #expect(state.setting(.host, "logging")?.placement == nil)
-    let port = try #require(state.setting(.host, "tailnet.port"))
+    #expect(state.setting(.host, "debugging.log_level")?.valueType == .choice(options: ["info", "debug"]))
+    #expect(state.setting(.host, "debugging.log_level")?.placement == nil)
+    #expect(state.setting(.host, "approval_timeout")?.valueType == .duration(never: true))
+    #expect(state.setting(.host, "approval_timeout")?.value == .string("never"))
+    #expect(state.setting(.host, "stop.kill_after")?.valueType == .duration(never: false))
+    let port = try #require(state.setting(.host, "integrations.tailscale.port"))
     #expect(port.applies == .restart(pending: true))
     #expect(roots.applies == .live)
     #expect(state.setting(.host, "socket")?.editable == false)
-    // The client file has no local one; the global config.toml is the projects' defaults.
-    #expect(state.setting(.client, "text_font")?.localChoice == false)
+    // Client settings are per device section: every section the file sets, and the one in effect here.
+    #expect(
+        state.setting(.client, "appearance.text_font")?.location
+            == .devices(sections: [.default: .string("Inter"), .ipad: .string("Berkeley Mono")], section: .default))
+    #expect(state.setting(.client, "appearance.code_font")?.location == .devices(sections: [:], section: nil))
+    #expect(state.setting(.client, "appearance.code_font")?.value == .null)
     #expect(state.setting(.project, "workers.skip")?.value == .array([.string(".build")]))
-    // A tool enabled but not installed carries its warning; other settings have none.
-    #expect(state.setting(.host, "tools.tailscale.enabled")?.warning?.contains("tailscale") == true)
+    // An integration enabled but not installed carries its warning; other settings have none.
+    #expect(state.setting(.host, "integrations.tailscale.enabled")?.warning?.contains("tailscale") == true)
     #expect(state.setting(.host, "keep_awake")?.warning == nil)
     #expect(SettingScope.host.fileName(.local) == "config.host.local.toml")
     #expect(state.keepAwake && state.awake && state.sessions == 2)
@@ -306,6 +313,28 @@ private let decoder = JSONDecoder()
     let send = Request.sessionSend(7, messageID: "m1", text: "hi", mode: .followUp).json(id: "y")
     #expect(send["mode"]?.string == "follow_up")
     #expect(send["message_id"]?.string == "m1")
+    let trust = Request.trustDecide(workspace: "/r", decision: .declined, grants: ["a", "b"]).json(id: "t")
+    #expect(trust["type"]?.string == "trust.decide")
+    #expect(trust["decision"]?.string == "declined")
+    #expect(trust["grants"] == .array([.string("a"), .string("b")]))
+}
+
+/// A start the daemon refused for trust: the question's contents, with the grants not trusted yet marked new.
+@Test func decodesTrustNeeded() throws {
+    let json = #"""
+        {"source":"/r","grants":["sandbox.presets \"rust\"","sandbox.presets \"swift\""],
+         "added":["sandbox.presets \"swift\""],"resources":{"pi":[".pi/extensions"],"mcp_servers":["docs"]}}
+        """#
+    let needed = try JSONDecoder().decode(TrustNeeded.self, from: Data(json.utf8))
+    #expect(needed.source == "/r")
+    #expect(needed.resources.pi == [".pi/extensions"])
+    #expect(needed.resources.mcpServers == ["docs"])
+    #expect(needed.isNew(#"sandbox.presets "swift""#))
+    #expect(!needed.isNew(#"sandbox.presets "rust""#))
+    let firstTime = TrustNeeded(source: "/r", grants: ["a"], added: ["a"], resources: .init(pi: [], mcpServers: []))
+    #expect(!firstTime.isNew("a"), "nothing is new when nothing was trusted")
+    #expect(StartOutcome.trustNeeded(needed).started == nil)
+    #expect(throws: Connection.RequestError.self) { try StartOutcome.trustNeeded(needed).session() }
 }
 
 @Test func contentBlocksAreTyped() throws {

@@ -18,15 +18,28 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         | SandboxAction::Why { workspace, .. }
         | SandboxAction::Gate { workspace } => workspace.clone(),
     };
-    let (policy, profile, silence, catalog) = match policy(config, workspace).await {
-        Ok((resolution, warnings, catalog)) => {
+    let (policy, profile, silence, ignored, catalog, untrusted) = match policy(config, workspace).await {
+        Ok((resolution, warnings, catalog, untrusted)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
             }
             for warning in &warnings {
                 eprintln!("piton: warning: {warning}");
             }
-            (resolution.policy, resolution.profile, resolution.silence, catalog)
+            for ignored in &resolution.ignored {
+                eprintln!("piton: warning: left out {ignored}");
+            }
+            for grant in &untrusted {
+                eprintln!("piton: warning: left out {grant}: the repository isn't trusted for it (`piton trust`)");
+            }
+            (
+                resolution.policy,
+                resolution.profile,
+                resolution.silence,
+                resolution.ignored,
+                catalog,
+                untrusted,
+            )
         }
         Err(message) => {
             eprintln!("piton: {message}");
@@ -39,11 +52,16 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             let output = serde_json::json!({
                 "nono_deny_groups": launch::sandbox::nono_version(),
                 "profile": profile,
+                "network": network_mode(&policy.network),
                 "policy": policy,
                 "silence": silence
                     .iter()
-                    .map(|s| serde_json::json!({ "entry": s.entry(), "source": s.source.to_string() }))
+                    .map(|s| serde_json::json!({ "entry": s.describe(), "source": s.source.to_string() }))
                     .collect::<Vec<_>>(),
+                // Entries a committed file wrote that would reopen what a credential or your own deny closes.
+                "ignored": ignored,
+                // The repository's committed grants left out because you haven't trusted them.
+                "untrusted": untrusted,
                 // Hosts pi reaches without asking under a filtered network, and the models pi discovered (listed,
                 // never trusted).
                 "pi_hosts": catalog.trusted(),
@@ -153,7 +171,7 @@ async fn serve_gate(
         let verdict = match decider.decide_network(&to).allowed || catalog.allows(&to.host, to.port).is_some() {
             true => crate::launch::sandbox::network::Verdict::Allow { literal },
             false => crate::launch::sandbox::network::Verdict::Deny {
-                reason: format!("Piton's sandbox refused {to}: no connect entry lists it"),
+                reason: format!("Piton's sandbox refused {to}: no entry in [sandbox.network.connections] allows it"),
             },
         };
         Box::pin(async move { verdict })
@@ -172,7 +190,7 @@ async fn serve_gate(
     };
     let (user, credential) = gate.issue("probe");
     match &mut policy.network {
-        Network::Open { .. } => {
+        Network::Open { .. } | Network::Direct { .. } => {
             eprintln!("piton: the network is open: no gate");
             return ExitCode::from(3);
         }
@@ -193,23 +211,33 @@ async fn serve_gate(
     ExitCode::SUCCESS
 }
 
-async fn policy(
-    config: &DaemonConfig,
-    workspace: Option<PathBuf>,
-) -> Result<(Resolution, Vec<launch::LaunchWarning>, crate::pi::catalog::Catalog), String> {
+type Described = (
+    Resolution,
+    Vec<launch::LaunchWarning>,
+    crate::pi::catalog::Catalog,
+    Vec<crate::config::GrantEntry>,
+);
+
+async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Described, String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     launch::check_workspace_links(&dir).map_err(|e| e.to_string())?;
     let workspace = launch::resolve_workspace(&dir).map_err(|e| e.to_string())?;
-    let resolved = launch::resolve_config(config, &workspace).map_err(|e| e.to_string())?;
+    // What a launch keeps: the session's filter inside one, the user's decision outside.
+    let filter = crate::config::trust_inputs(&workspace, &config.paths)
+        .map_or(crate::config::GrantFilter::None, |inputs| {
+            crate::trust::current_filter(&config.state_db(), &inputs)
+        });
+    let resolved = launch::resolve_config(config, &workspace, &filter).map_err(|e| e.to_string())?;
+    let untrusted = resolved.untrusted.clone();
     let base: launch::Env = match config.env.login_shell {
         true => launch::login_shell_env()
             .await
             .unwrap_or_else(|| std::env::vars().collect()),
         false => std::env::vars().collect(),
     };
-    let tools = crate::tools::Tools::resolve(config, &base);
+    let tools = crate::integrations::Integrations::resolve(config, &base);
     // `show` and `why` describe a session's policy without starting one: no socket folder of its own, so a user's
     // `XDG_RUNTIME_DIR` or `CLAUDE_CODE_TMPDIR` is shown as it is, and Piton's own folder isn't.
     launch::prepare_sandbox(
@@ -235,7 +263,7 @@ async fn policy(
             &resolved.levels,
         );
         let catalog = crate::pi::catalog::Catalog::new(builtin, files);
-        (sandboxed.resolution, sandboxed.warnings, catalog)
+        (sandboxed.resolution, sandboxed.warnings, catalog, untrusted)
     })
     .map_err(|e| e.to_string())
 }
@@ -262,7 +290,7 @@ fn silenced_lines(silence: &[launch::sandbox::Silenced], target: &std::path::Pat
                 };
                 format!(
                     "  silenced {whose}: {} ({}): a block here is only logged",
-                    s.entry().inline(),
+                    s.describe(),
                     s.source
                 )
             })
@@ -275,8 +303,8 @@ fn explain(source: &Source) -> String {
         Source::Workspace => "the workspace is writable".into(),
         Source::BuiltIn { what } => format!("built in: {what}"),
         Source::NonoGroup { group } => format!(
-            "built-in credential deny (nono's {group}); lift it with `read` in the global config.toml or a \
-             config.local.toml"
+            "built-in credential deny (nono's {group}); `\"<path>\" = \"read\"` in [sandbox.filesystem] (global \
+             config.toml or a config.local.toml) reopens reading a path inside it"
         ),
         Source::Piton { what } => format!("Piton: {what}"),
         Source::FnoxConfig => {
@@ -287,6 +315,14 @@ fn explain(source: &Source) -> String {
         Source::AgentDir => "pi's runtime state in its agent directory".into(),
         Source::Preset { preset, from } => format!("the {preset} preset, {from}"),
         Source::Config { key, from } => format!("{key}, {from}"),
+    }
+}
+
+/// The network's mode as `show` prints it: open (no gate), or filtered through the gate.
+fn network_mode(network: &launch::sandbox::Network) -> &'static str {
+    match network {
+        launch::sandbox::Network::Open { .. } | launch::sandbox::Network::Direct { .. } => "open",
+        launch::sandbox::Network::Filtered { .. } => "filtered",
     }
 }
 

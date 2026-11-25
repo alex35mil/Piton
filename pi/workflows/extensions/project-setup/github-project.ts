@@ -2,8 +2,8 @@ import { createHash } from "node:crypto"
 
 import { type Static, Type } from "typebox"
 
-import { compile, describeErrors, parse } from "../../../extensions/__lib/schema.js"
-import { GitHubTrackerValidator } from "../integrations/config.js"
+import { compile, parse } from "../../../extensions/__lib/schema.js"
+import { validateIntegration } from "../integrations/config.js"
 
 const OneLineSchema = Type.String({ minLength: 1, pattern: "^[^\\r\\n]+$" })
 const ServerNameSchema = Type.String({ minLength: 1, pattern: "^[A-Za-z0-9_.-]+$" })
@@ -2210,11 +2210,12 @@ function trackerConfigFor(specification: GitHubProjectSpecification, projectNumb
             },
         },
     }
-    if (!GitHubTrackerValidator.check(config)) {
-        const details = describeErrors(GitHubTrackerValidator.errors(config)).join("; ")
+    try {
+        return validateIntegration("tracker", config)
+    } catch (error) {
+        const details = error instanceof Error ? error.message : String(error)
         throw new Error(`generated invalid GitHub tracker configuration: ${details}`)
     }
-    return config
 }
 
 function describeProjectField(field: ProjectFieldDefinition): string {
