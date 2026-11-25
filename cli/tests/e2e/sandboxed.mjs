@@ -81,6 +81,16 @@ export async function startDaemon(ctx) {
     return d;
 }
 
+/// `piton trust allow|deny` for the workspace: a repository with grants or pi project files needs a decision first.
+export function trust(ctx, decision = "allow") {
+    return new Promise((res, rej) => {
+        const p = spawn(piton, ["trust", decision, ctx.ws], { env: ctx.env, stdio: ["ignore", "pipe", "pipe"] });
+        let err = "";
+        p.stderr.on("data", (d) => (err += d));
+        p.on("exit", (code) => (code === 0 ? res() : rej(new Error(`piton trust ${decision}: ${err}`))));
+    });
+}
+
 /// `piton attach` in the workspace. `onRecord` sees every record as it arrives (to answer questions as they come).
 export function attach(ctx, { onRecord } = {}) {
     const child = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });

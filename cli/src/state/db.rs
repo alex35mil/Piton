@@ -16,6 +16,9 @@ pub const FILE: &str = "piton.db";
 pub(super) const MIGRATIONS: &[&str] = &[
     // 1: the host's identity.
     "CREATE TABLE host (id INTEGER PRIMARY KEY CHECK (id = 1), host_id TEXT NOT NULL);",
+    // 2: the user's trust decisions, per source checkout: the answer, the grants it was given for (JSON), and when.
+    "CREATE TABLE trust (source TEXT PRIMARY KEY, decision TEXT NOT NULL CHECK (decision IN ('trusted', 'declined')), \
+     grants TEXT NOT NULL, decided_at TEXT NOT NULL);",
 ];
 
 /// Tables whose rows are this host's identity rather than state an import would lose.
@@ -114,6 +117,40 @@ impl State {
             .map_err(|source| sqlite(&self.path, source))
     }
 
+    /// The decision recorded for a source checkout; `None` when there's none.
+    pub fn trust(&self, source: &Path) -> Result<Option<TrustRecord>, StateError> {
+        read_trust(&self.conn, &self.path, source)
+    }
+
+    /// Records the decision for a source checkout, replacing any earlier one.
+    pub fn set_trust(&self, source: &Path, record: &TrustRecord) -> Result<(), StateError> {
+        let grants = serde_json::to_string(&record.grants).map_err(|e| StateError::Encoding {
+            path: self.path.clone(),
+            reason: e.to_string(),
+        })?;
+        self.conn
+            .execute(
+                "INSERT INTO trust (source, decision, grants, decided_at) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (source) DO UPDATE SET decision = ?2, grants = ?3, decided_at = ?4",
+                params![
+                    source.to_string_lossy(),
+                    record.decision.name(),
+                    grants,
+                    record.decided_at
+                ],
+            )
+            .map_err(|source| sqlite(&self.path, source))?;
+        Ok(())
+    }
+
+    /// Forgets the decision for a source checkout: the next launch there asks again. Whether there was one.
+    pub fn reset_trust(&self, source: &Path) -> Result<bool, StateError> {
+        self.conn
+            .execute("DELETE FROM trust WHERE source = ?1", params![source.to_string_lossy()])
+            .map(|n| n > 0)
+            .map_err(|source| sqlite(&self.path, source))
+    }
+
     /// The tables with rows besides this host's identity: state an import over this database would lose.
     pub(super) fn tables_with_state(&self) -> Result<Vec<String>, StateError> {
         let path = &self.path;
@@ -142,6 +179,61 @@ impl State {
         }
         Ok(with_rows)
     }
+}
+
+/// What the user decided about a repository's grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Trusted,
+    Declined,
+}
+
+impl Decision {
+    fn name(self) -> &'static str {
+        match self {
+            Decision::Trusted => "trusted",
+            Decision::Declined => "declined",
+        }
+    }
+}
+
+/// One recorded decision: the answer, the grants the user was shown when giving it, and when (RFC 3339, UTC).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustRecord {
+    pub decision: Decision,
+    pub grants: crate::config::Grants,
+    pub decided_at: String,
+}
+
+/// The decision for `source` in an open database (also used read-only, outside the daemon).
+pub(super) fn read_trust(conn: &Connection, path: &Path, source: &Path) -> Result<Option<TrustRecord>, StateError> {
+    use rusqlite::OptionalExtension;
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT decision, grants, decided_at FROM trust WHERE source = ?1",
+            params![source.to_string_lossy()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| sqlite(path, e))?;
+    let Some((decision, grants, decided_at)) = row else {
+        return Ok(None);
+    };
+    let corrupt = |reason: String| StateError::Encoding {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let decision = match decision.as_str() {
+        "trusted" => Decision::Trusted,
+        "declined" => Decision::Declined,
+        other => return Err(corrupt(format!("trust decision {other:?}"))),
+    };
+    let grants = serde_json::from_str(&grants).map_err(|e| corrupt(format!("trusted grants: {e}")))?;
+    Ok(Some(TrustRecord {
+        decision,
+        grants,
+        decided_at,
+    }))
 }
 
 /// The copy of schema version `version` kept before migrating past it.
@@ -185,6 +277,51 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         // A new database has nothing to back up.
         assert!(!backup_path(&path, 0).exists());
+    }
+
+    #[test]
+    fn keeps_trust_per_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = State::open(&db(&dir)).unwrap();
+        let source = Path::new("/Users/a/repo");
+        assert_eq!(state.trust(source).unwrap(), None);
+        let record = TrustRecord {
+            decision: Decision::Trusted,
+            grants: [crate::config::GrantEntry::item("sandbox.presets", "rust")].into(),
+            decided_at: "2026-11-24T00:00:00Z".into(),
+        };
+        state.set_trust(source, &record).unwrap();
+        assert_eq!(state.trust(source).unwrap(), Some(record.clone()));
+        assert_eq!(state.trust(Path::new("/Users/a/other")).unwrap(), None);
+        let declined = TrustRecord {
+            decision: Decision::Declined,
+            grants: Default::default(),
+            decided_at: "2026-11-25T00:00:00Z".into(),
+        };
+        state.set_trust(source, &declined).unwrap();
+        assert_eq!(state.trust(source).unwrap(), Some(declined));
+        assert_eq!(state.tables_with_state().unwrap(), ["trust"]);
+        assert!(state.reset_trust(source).unwrap());
+        assert!(!state.reset_trust(source).unwrap());
+        assert_eq!(state.trust(source).unwrap(), None);
+    }
+
+    /// A database from before trust was kept gets the table, keeping its host.
+    #[test]
+    fn migrates_the_first_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = db(&dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute("INSERT INTO host (id, host_id) VALUES (1, 'h')", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        drop(conn);
+        let state = State::open(&path).unwrap();
+        assert_eq!(state.host_id().unwrap(), "h");
+        assert_eq!(state.trust(Path::new("/r")).unwrap(), None);
+        assert!(backup_path(&path, 1).exists());
     }
 
     #[test]

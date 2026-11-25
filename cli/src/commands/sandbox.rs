@@ -18,8 +18,8 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         | SandboxAction::Why { workspace, .. }
         | SandboxAction::Gate { workspace } => workspace.clone(),
     };
-    let (policy, profile, silence, ignored, catalog) = match policy(config, workspace).await {
-        Ok((resolution, warnings, catalog)) => {
+    let (policy, profile, silence, ignored, catalog, untrusted) = match policy(config, workspace).await {
+        Ok((resolution, warnings, catalog, untrusted)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
             }
@@ -29,12 +29,16 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
             for ignored in &resolution.ignored {
                 eprintln!("piton: warning: left out {ignored}");
             }
+            for grant in &untrusted {
+                eprintln!("piton: warning: left out {grant}: the repository isn't trusted for it (`piton trust`)");
+            }
             (
                 resolution.policy,
                 resolution.profile,
                 resolution.silence,
                 resolution.ignored,
                 catalog,
+                untrusted,
             )
         }
         Err(message) => {
@@ -56,6 +60,8 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
                     .collect::<Vec<_>>(),
                 // Entries a committed file wrote that would reopen what a credential or your own deny closes.
                 "ignored": ignored,
+                // The repository's committed grants left out because you haven't trusted them.
+                "untrusted": untrusted,
                 // Hosts pi reaches without asking under a filtered network, and the models pi discovered (listed,
                 // never trusted).
                 "pi_hosts": catalog.trusted(),
@@ -205,16 +211,26 @@ async fn serve_gate(
     ExitCode::SUCCESS
 }
 
-async fn policy(
-    config: &DaemonConfig,
-    workspace: Option<PathBuf>,
-) -> Result<(Resolution, Vec<launch::LaunchWarning>, crate::pi::catalog::Catalog), String> {
+type Described = (
+    Resolution,
+    Vec<launch::LaunchWarning>,
+    crate::pi::catalog::Catalog,
+    Vec<crate::config::GrantEntry>,
+);
+
+async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Described, String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     launch::check_workspace_links(&dir).map_err(|e| e.to_string())?;
     let workspace = launch::resolve_workspace(&dir).map_err(|e| e.to_string())?;
-    let resolved = launch::resolve_config(config, &workspace).map_err(|e| e.to_string())?;
+    // What a launch keeps: the session's filter inside one, the user's decision outside.
+    let filter = crate::config::trust_inputs(&workspace, &config.paths)
+        .map_or(crate::config::GrantFilter::None, |inputs| {
+            crate::trust::current_filter(&config.state_db(), &inputs)
+        });
+    let resolved = launch::resolve_config(config, &workspace, &filter).map_err(|e| e.to_string())?;
+    let untrusted = resolved.untrusted.clone();
     let base: launch::Env = match config.env.login_shell {
         true => launch::login_shell_env()
             .await
@@ -247,7 +263,7 @@ async fn policy(
             &resolved.levels,
         );
         let catalog = crate::pi::catalog::Catalog::new(builtin, files);
-        (sandboxed.resolution, sandboxed.warnings, catalog)
+        (sandboxed.resolution, sandboxed.warnings, catalog, untrusted)
     })
     .map_err(|e| e.to_string())
 }

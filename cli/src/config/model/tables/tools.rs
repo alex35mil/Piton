@@ -3,6 +3,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{TableValue, permissions::PermissionsTable};
+use crate::config::model::grants::{GrantEntry, GrantFilter, Grants};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -15,7 +16,15 @@ pub struct ToolsTable {
     pub permissions: PermissionsTable,
 }
 
-impl TableValue for ToolsTable {}
+impl TableValue for ToolsTable {
+    fn grants(&self) -> Grants {
+        self.permissions.grants()
+    }
+    fn gated(self, filter: &GrantFilter) -> (Self, Vec<GrantEntry>) {
+        let (permissions, out) = self.permissions.filtered(filter);
+        (Self { permissions }, out)
+    }
+}
 
 /// A value that must be written as a table: serde reads an empty array as an empty struct, so `permissions = []` would
 /// otherwise pass as no rules.

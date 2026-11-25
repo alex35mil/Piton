@@ -161,6 +161,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 if let Some(note) = ignored {
                     eprintln!("piton: warning: {note}");
                 }
+                print_trust(&resolved);
                 if errors.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -237,6 +238,7 @@ fn workspace_protected(
         source: workspace.source().to_path_buf(),
         checkout: workspace.checkout.clone(),
         levels: levels.clone(),
+        untrusted: Vec::new(),
     };
     let mut excluded = crate::launch::sandbox::never_configuration(&no_lists, &paths.home, &Default::default());
     excluded.extend(
@@ -270,6 +272,38 @@ fn runtime_or_host() -> Runtime {
     runtime_from_env().unwrap_or(Runtime::Host)
 }
 
+/// `piton config check`'s trust line: whether the repository's committed grants apply, and which are left out.
+fn print_trust(resolved: &Resolved) {
+    let Ok(workspace) = crate::launch::resolve_workspace(&resolved.workspace) else {
+        return;
+    };
+    let paths = Paths::current();
+    let Ok(inputs) = crate::config::trust_inputs(&workspace, &paths) else {
+        return;
+    };
+    let state = crate::trust::read_state(&state_db(&paths), &inputs);
+    let line = match &state {
+        Ok(crate::trust::TrustState::NothingToTrust) => "nothing to trust".to_string(),
+        Ok(crate::trust::TrustState::Trusted { .. }) => "trusted".to_string(),
+        Ok(crate::trust::TrustState::Declined { .. }) => "declined: its grants are left out".to_string(),
+        Ok(crate::trust::TrustState::Needed { added, .. }) => format!(
+            "not decided ({} grant(s) to decide): the next launch asks; `piton trust allow` answers ahead",
+            added.len()
+        ),
+        Err(e) => format!("unknown ({e})"),
+    };
+    println!("trust: {} {line}", inputs.source.display());
+    for grant in &resolved.untrusted {
+        println!("  untrusted  {grant}");
+    }
+}
+
+/// The state database, from the host file's socket (the daemon's state folder), as the daemon finds it.
+fn state_db(paths: &Paths) -> PathBuf {
+    let host = crate::config::host(paths).unwrap_or_default();
+    crate::config::DaemonConfig::new(&host, paths.clone()).state_db()
+}
+
 fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, ErrorBody> {
     let path = workspace
         .map(Path::to_path_buf)
@@ -277,7 +311,12 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         .unwrap_or_else(|| PathBuf::from("."));
     let workspace =
         crate::launch::resolve_workspace(&path).map_err(|e| ErrorBody::Workspace { message: e.to_string() })?;
-    crate::config::resolve(&workspace, &Paths::current(), runtime).map_err(|e| match e {
+    let paths = Paths::current();
+    // Inside a session: what its launch kept; outside: the user's recorded decision.
+    let filter = crate::config::trust_inputs(&workspace, &paths).map_or(crate::config::GrantFilter::None, |inputs| {
+        crate::trust::current_filter(&state_db(&paths), &inputs)
+    });
+    crate::config::resolve(&workspace, &paths, runtime, &filter).map_err(|e| match e {
         ConfigError::Read { .. }
         | ConfigError::Invalid { .. }
         | ConfigError::NotInProjectConfig { .. }
@@ -451,7 +490,8 @@ mod tests {
             checkout: repo.clone(),
             relation: Relation::Source,
         };
-        let resolved = crate::config::resolve(&workspace, &paths, Runtime::Sandbox).unwrap();
+        let resolved =
+            crate::config::resolve(&workspace, &paths, Runtime::Sandbox, &crate::config::GrantFilter::All).unwrap();
         let json = serde_json::to_value(Output {
             format: RESOLVE_FORMAT,
             resolved: &resolved,

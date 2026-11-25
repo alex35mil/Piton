@@ -230,8 +230,9 @@ mod tests {
         }
     }
 
-    /// "Allow and persist" appends exactly one `[[sandbox.commands]]` entry, keeping the rest of the file; a project's
-    /// committed `config.toml` refuses it (a loosening key), its `config.local.toml` takes it.
+    /// "Allow and persist" appends exactly one `[[sandbox.commands]]` entry, keeping the rest of the file. Piton saves
+    /// it only to the user's own files (a project's `config.local.toml`); a committed `config.toml` may hold one too,
+    /// applied only once the repository is trusted.
     #[test]
     fn appends_a_command_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -276,11 +277,9 @@ mod tests {
             level: WriteLevel::Repository { source: source.clone() },
             sharing,
         };
-        assert!(
-            project(Sharing::Shared)
-                .append_command_grant(&paths, &grant("x"))
-                .is_err()
-        );
+        project(Sharing::Shared)
+            .append_command_grant(&paths, &grant("x"))
+            .unwrap();
         project(Sharing::Local)
             .append_command_grant(&paths, &grant("x"))
             .unwrap();

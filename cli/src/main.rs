@@ -11,6 +11,7 @@ mod session;
 mod setup;
 mod state;
 mod tools;
+mod trust;
 
 use std::process::ExitCode;
 

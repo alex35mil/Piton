@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::nearer;
+use crate::config::model::grants::{GrantEntry, GrantFilter, Grants};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -60,6 +61,112 @@ impl PermissionRules {
 impl PermissionsTable {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// What the table grants: `allow` rules, `default_mode = "allow"`, and `skill_grants = true`, in each of its three
+    /// tables. `ask`, `deny`, and the stricter modes only restrict.
+    pub fn grants(&self) -> Grants {
+        let mut grants = Grants::new();
+        for (key, rules) in self.tables() {
+            grants.extend(rules.grants(key));
+        }
+        grants
+    }
+
+    /// The table with only the grants `filter` keeps; restrictions stay. Returns the grants left out.
+    pub fn filtered(self, filter: &GrantFilter) -> (Self, Vec<GrantEntry>) {
+        let PermissionsTable {
+            default_mode,
+            skill_grants,
+            allow,
+            ask,
+            deny,
+            host,
+            sandbox,
+        } = self;
+        let mut out = Vec::new();
+        let shared = PermissionRules {
+            default_mode,
+            skill_grants,
+            allow,
+            ask,
+            deny,
+        }
+        .filtered("tools.permissions", filter, &mut out);
+        let host = host.filtered("tools.permissions.host", filter, &mut out);
+        let sandbox = sandbox.filtered("tools.permissions.sandbox", filter, &mut out);
+        let PermissionRules {
+            default_mode,
+            skill_grants,
+            allow,
+            ask,
+            deny,
+        } = shared;
+        (
+            PermissionsTable {
+                default_mode,
+                skill_grants,
+                allow,
+                ask,
+                deny,
+                host,
+                sandbox,
+            },
+            out,
+        )
+    }
+
+    /// The three tables by their key, the shared one as rules.
+    fn tables(&self) -> [(&'static str, PermissionRules); 3] {
+        [
+            (
+                "tools.permissions",
+                PermissionRules {
+                    default_mode: self.default_mode,
+                    skill_grants: self.skill_grants,
+                    allow: self.allow.clone(),
+                    ask: self.ask.clone(),
+                    deny: self.deny.clone(),
+                },
+            ),
+            ("tools.permissions.host", self.host.clone()),
+            ("tools.permissions.sandbox", self.sandbox.clone()),
+        ]
+    }
+}
+
+fn mode_grant(key: &str, mode: PermissionMode) -> Option<GrantEntry> {
+    match mode {
+        PermissionMode::Allow => Some(GrantEntry::set(&format!("{key}.default_mode"), "allow")),
+        PermissionMode::Ask | PermissionMode::Deny => None,
+    }
+}
+
+fn skill_grants_grant(key: &str, on: bool) -> Option<GrantEntry> {
+    match on {
+        true => Some(GrantEntry::set(&format!("{key}.skill_grants"), true)),
+        false => None,
+    }
+}
+
+impl PermissionRules {
+    fn grants(&self, key: &str) -> Grants {
+        let mut grants: Grants = self
+            .allow
+            .iter()
+            .map(|rule| GrantEntry::item(&format!("{key}.allow"), rule.as_str()))
+            .collect();
+        grants.extend(self.default_mode.and_then(|mode| mode_grant(key, mode)));
+        grants.extend(self.skill_grants.and_then(|on| skill_grants_grant(key, on)));
+        grants
+    }
+
+    fn filtered(mut self, key: &str, filter: &GrantFilter, out: &mut Vec<GrantEntry>) -> Self {
+        let allow_key = format!("{key}.allow");
+        filter.retain(&mut self.allow, |rule| GrantEntry::item(&allow_key, rule.as_str()), out);
+        filter.retain_option(&mut self.default_mode, |mode| mode_grant(key, *mode), out);
+        filter.retain_option(&mut self.skill_grants, |on| skill_grants_grant(key, *on), out);
+        self
     }
 }
 
@@ -144,6 +251,49 @@ mod tests {
             Some(PermissionMode::Allow),
             "a table without default_mode keeps it"
         );
+    }
+
+    #[test]
+    fn grants_are_allow_rules_and_the_modes_that_open() {
+        let table: PermissionsTable = toml::from_str(
+            r#"
+allow = ["read"]
+deny = ["bash(rm *)"]
+default_mode = "allow"
+[sandbox]
+allow = ["bash(git *)"]
+skill_grants = true
+[host]
+default_mode = "ask"
+skill_grants = false
+"#,
+        )
+        .unwrap();
+        let grants: Vec<String> = table.grants().into_iter().map(|g| g.to_string()).collect();
+        assert_eq!(
+            grants,
+            [
+                r#"tools.permissions.allow "read""#,
+                r#"tools.permissions.default_mode = "allow""#,
+                r#"tools.permissions.sandbox.allow "bash(git *)""#,
+                "tools.permissions.sandbox.skill_grants = true",
+            ]
+        );
+        // Nothing kept: the restrictions stay.
+        let (none, out) = table.clone().filtered(&GrantFilter::None);
+        assert_eq!(out.len(), 4);
+        assert!(none.allow.is_empty() && none.sandbox.allow.is_empty());
+        assert_eq!(none.default_mode, None);
+        assert_eq!(none.deny, ["bash(rm *)"]);
+        assert_eq!(none.host.default_mode, Some(PermissionMode::Ask));
+        assert_eq!(none.host.skill_grants, Some(false));
+        assert_eq!(none.sandbox.skill_grants, None);
+        // Only what was trusted.
+        let only = GrantFilter::Only([GrantEntry::item("tools.permissions.allow", "read")].into());
+        let (some, out) = table.clone().filtered(&only);
+        assert_eq!(some.allow, ["read"]);
+        assert_eq!(out.len(), 3);
+        assert_eq!(table.clone().filtered(&GrantFilter::All).0, table);
     }
 
     #[test]

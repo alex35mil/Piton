@@ -22,7 +22,10 @@ impl Daemon {
                 workspace,
                 mode,
                 prompt,
-            } => match self.launch_in(&workspace, mode, SessionArg::New).await {
+            } => match self
+                .launch_in(&workspace, mode, SessionArg::New, super::TrustCheck::Ask)
+                .await
+            {
                 Ok(handle) => {
                     if let Some(text) = prompt {
                         let _ = handle.tx.send(SessionCmd::Internal(Internal::Prompt { text }));
@@ -31,8 +34,28 @@ impl Daemon {
                         session: handle.snapshot().info(),
                     }
                 }
+                Err(crate::launch::LaunchError::TrustNeeded(needed)) => {
+                    ControlResponse::TrustNeeded { needed: *needed }
+                }
                 Err(e) => ControlResponse::Error { message: e.to_string() },
             },
+            ControlRequest::TrustStatus { workspace } => {
+                let resolved = crate::launch::resolve_workspace(&workspace).map_err(|e| e.to_string());
+                match resolved.and_then(|ws| {
+                    self.trust_state(&ws)
+                        .map(|trust| (ws.source().to_path_buf(), trust))
+                        .map_err(|e| e.to_string())
+                }) {
+                    Ok((source, trust)) => ControlResponse::Trust { source, trust },
+                    Err(message) => ControlResponse::Error { message },
+                }
+            }
+            ControlRequest::TrustDecide {
+                workspace,
+                decision,
+                grants,
+            } => self.trust_response(&workspace, self.decide_trust(&workspace, decision.into(), &grants)),
+            ControlRequest::TrustReset { workspace } => self.trust_response(&workspace, self.reset_trust(&workspace)),
             ControlRequest::Stop { session } => {
                 let Some(handle) = self.find(&session) else {
                     return ControlResponse::Error {
@@ -66,8 +89,9 @@ impl Daemon {
                     Err(refusal) => return ControlResponse::WorkerRefused { refusal },
                 };
                 let paths = self.config().paths.clone();
+                let filter = self.source_filter(&source);
                 let created = tokio::task::spawn_blocking(move || {
-                    crate::project::create_worker(&request, mise.as_ref(), &paths, &git)
+                    crate::project::create_worker(&request, mise.as_ref(), &paths, &filter, &git)
                 })
                 .await;
                 match created {
@@ -110,13 +134,48 @@ impl Daemon {
         }
     }
 
+    /// Which of a source checkout's committed grants apply to work the daemon does there (worker Git, the update rule),
+    /// from the user's decision; none when it can't be read.
+    fn source_filter(&self, source: &std::path::Path) -> crate::config::GrantFilter {
+        crate::launch::resolve_workspace(source)
+            .ok()
+            .and_then(|ws| self.trust_state(&ws).ok())
+            .map_or(crate::config::GrantFilter::None, |state| state.filter())
+    }
+
+    fn trust_response(
+        &self,
+        workspace: &std::path::Path,
+        result: Result<crate::trust::TrustState, super::TrustError>,
+    ) -> ControlResponse {
+        let source = crate::launch::resolve_workspace(workspace).map(|ws| ws.source().to_path_buf());
+        match (result, source) {
+            (Ok(trust), Ok(source)) => ControlResponse::Trust { source, trust },
+            (Err(super::TrustError::Decide(crate::trust::DecideError::Changed { checkout, state })), _) => {
+                ControlResponse::TrustChanged {
+                    source: checkout,
+                    trust: *state,
+                }
+            }
+            (
+                Err(
+                    e @ (super::TrustError::Workspace(_)
+                    | super::TrustError::Decide(crate::trust::DecideError::State(_))),
+                ),
+                _,
+            ) => ControlResponse::Error { message: e.to_string() },
+            (Ok(_), Err(e)) => ControlResponse::Error { message: e.to_string() },
+        }
+    }
+
     /// Git for a source checkout, run in the sandbox a launch there gets. Creation needs it; deletion goes on without
     /// it.
     async fn source_git(
         &self,
         source: &std::path::Path,
     ) -> Result<crate::launch::git::SourceGit, crate::project::WorkerRefusal> {
-        crate::launch::git::SourceGit::for_source(&self.config(), &self.tools, &self.base_env, source)
+        let filter = self.source_filter(source);
+        crate::launch::git::SourceGit::for_source(&self.config(), &self.tools, &self.base_env, source, &filter)
             .await
             .map_err(|e| crate::project::WorkerRefusal::InvalidConfiguration {
                 message: format!("can't sandbox Git for {}: {e}", source.display()),
@@ -143,9 +202,10 @@ impl Daemon {
                 .map_err(|refusal| refusal.to_string()),
         );
         let paths = self.config().paths.clone();
+        let filter = self.source_filter(&worker.source);
         let planned = tokio::task::spawn_blocking({
             let git = git.clone();
-            move || crate::project::plan_removal(worker, force, &update, source_git(&git), &paths)
+            move || crate::project::plan_removal(worker, force, &update, source_git(&git), &paths, &filter)
         })
         .await;
         let removal = match planned {

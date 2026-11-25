@@ -58,6 +58,14 @@ pub enum ViewRequest {
         #[serde(default)]
         prompt: Option<String>,
     },
+    /// The user's answer to a start refused with `trust_needed`: `trusted` or `declined`, for the grants they were shown
+    /// (refused when the repository's grants changed since). Replies with the repository's trust state.
+    #[serde(rename = "trust.decide")]
+    TrustDecide {
+        workspace: PathBuf,
+        decision: TrustDecisionWire,
+        grants: crate::config::Grants,
+    },
     #[serde(rename = "session.stop")]
     SessionStop { session: u64 },
     /// Watch one session: a snapshot (or the changes since `from`), then every change. One watch per session per
@@ -111,6 +119,22 @@ pub enum ViewRequest {
         question: String,
         answer: serde_json::Value,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustDecisionWire {
+    Trusted,
+    Declined,
+}
+
+impl From<TrustDecisionWire> for crate::state::Decision {
+    fn from(wire: TrustDecisionWire) -> Self {
+        match wire {
+            TrustDecisionWire::Trusted => crate::state::Decision::Trusted,
+            TrustDecisionWire::Declined => crate::state::Decision::Declined,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

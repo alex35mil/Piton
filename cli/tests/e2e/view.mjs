@@ -219,6 +219,31 @@ const tests = {
         c.close();
     },
 
+    async "trust: a repository with grants is asked about first; the answer is for the grants shown"(ctx) {
+        const repo = join(ctx.root, "group", "inner");
+        mkdirSync(join(repo, ".piton"), { recursive: true });
+        writeFileSync(join(repo, ".piton/config.toml"), '[sandbox]\npresets = ["rust"]\n[tools.permissions]\ndeny = ["bash(rm *)"]\n');
+        const c = viewClient(ctx, "mac");
+        const asked = await c.req("session.start", { workspace: repo, mode: "host" });
+        assert.equal(asked.session, undefined, "nothing launched");
+        assert.deepEqual(asked.trust_needed.grants, ['sandbox.presets "rust"']);
+        assert.deepEqual(asked.trust_needed.added, asked.trust_needed.grants);
+        // The grants changed after they were shown: refused, so the user never trusts what they didn't see.
+        writeFileSync(join(repo, ".piton/config.toml"), '[sandbox]\npresets = ["rust", "node"]\n');
+        const stale = await c.reqRaw("trust.decide", { workspace: repo, decision: "trusted", grants: asked.trust_needed.grants });
+        assert.equal(stale.ok, false);
+        assert.match(stale.error, /changed since they were shown/);
+        const again = await c.req("session.start", { workspace: repo, mode: "host" });
+        const { trust } = await c.req("trust.decide", { workspace: repo, decision: "trusted", grants: again.trust_needed.grants });
+        assert.equal(trust.state, "trusted");
+        const { session } = await c.req("session.start", { workspace: repo, mode: "host" });
+        assert.ok(session.key, "launched once decided");
+        await c.req("session.stop", { session: session.key });
+        // A repository with nothing to trust starts without a question.
+        assert.ok((await c.req("session.start", { workspace: ctx.ws, mode: "host" })).session);
+        c.close();
+    },
+
     async "start, watch, prompt, stream, settle"(ctx) {
         const c = viewClient(ctx, "phone");
         await c.req("sessions.subscribe");

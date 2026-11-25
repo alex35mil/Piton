@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 #[cfg(test)]
 pub use self::settings::{AppliesInfo, ValueType};
 pub use self::{
-    protocol::{DaemonState, SendModeWire, ViewEnvelope, ViewRequest},
+    protocol::{DaemonState, SendModeWire, TrustDecisionWire, ViewEnvelope, ViewRequest},
     settings::{
         Change as SettingChange, SetError as SettingError, SettingInfo, Snapshot as SettingsSnapshot,
         validate as validate_setting, write as write_setting,
@@ -164,6 +164,30 @@ fn handle(
                 .map_err(|e| e.to_string())
                 .into()
         }
+        ViewRequest::TrustDecide {
+            workspace,
+            decision,
+            grants,
+        } => {
+            crate::log!("view client {watcher}: trust decision for {}", workspace.display());
+            let daemon = daemon.clone();
+            Handled::Later(
+                async move {
+                    let roots = crate::apps::workspaces::roots(&daemon.config().roots);
+                    let workspace =
+                        crate::apps::workspaces::check_start(&roots, &workspace).map_err(|e| e.to_string())?;
+                    tokio::task::spawn_blocking(move || {
+                        daemon
+                            .decide_trust(&workspace, decision.into(), &grants)
+                            .map(|state| json!({"trust": state}))
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                }
+                .boxed(),
+            )
+        }
         ViewRequest::SessionStart {
             workspace,
             mode,
@@ -176,10 +200,22 @@ fn handle(
                     let roots = crate::apps::workspaces::roots(&daemon.config().roots);
                     let workspace =
                         crate::apps::workspaces::check_start(&roots, &workspace).map_err(|e| e.to_string())?;
-                    let handle = daemon
-                        .launch_in(&workspace, mode.unwrap_or(LaunchMode::Sandbox), SessionArg::New)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let launched = daemon
+                        .launch_in(
+                            &workspace,
+                            mode.unwrap_or(LaunchMode::Sandbox),
+                            SessionArg::New,
+                            crate::daemon::TrustCheck::Ask,
+                        )
+                        .await;
+                    let handle = match launched {
+                        Ok(handle) => handle,
+                        // Not a failure: the user decides (`trust.decide`), then the app starts it again.
+                        Err(crate::launch::LaunchError::TrustNeeded(needed)) => {
+                            return Ok(json!({"trust_needed": needed}));
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    };
                     if let Some(text) = prompt {
                         let _ = handle.tx.send(SessionCmd::Internal(Internal::Prompt { text }));
                     }

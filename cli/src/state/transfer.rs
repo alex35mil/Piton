@@ -29,6 +29,28 @@ pub fn check(path: &Path) -> Result<(), StateError> {
     open_existing(path).map(drop)
 }
 
+/// The decision recorded for `source`, read-only, for `piton config` and `piton sandbox` outside the daemon: `None`
+/// when there's none, or no database yet.
+pub fn read_trust(path: &Path, source: &Path) -> Result<Option<super::TrustRecord>, StateError> {
+    let conn = match open_existing(path) {
+        Ok(conn) => conn,
+        Err(StateError::Missing { .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    // A database from before trust was kept has no table yet: nothing decided.
+    let has_table: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trust')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|source| sqlite(path, source))?;
+    match has_table {
+        true => super::db::read_trust(&conn, path, source),
+        false => Ok(None),
+    }
+}
+
 /// Opens an existing database read-only after checking its version.
 fn open_existing(path: &Path) -> Result<Connection, StateError> {
     use rusqlite::OpenFlags;

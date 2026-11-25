@@ -135,11 +135,20 @@ public actor Connection {
         try decode(try await send(.workspacesBrowse(path: path))["entries"], as: [WorkspaceEntry].self)
     }
 
-    public func start(workspace: String, mode: LaunchMode = .sandbox, prompt: String? = nil) async throws -> SessionInfo
+    /// Starts a session, or says the repository needs the user's trust first (nothing is launched then).
+    public func start(workspace: String, mode: LaunchMode = .sandbox, prompt: String? = nil) async throws
+        -> StartOutcome
     {
-        try decode(
-            try await send(.sessionStart(workspace: workspace, mode: mode, prompt: prompt))["session"],
-            as: SessionInfo.self)
+        let reply = try await send(.sessionStart(workspace: workspace, mode: mode, prompt: prompt))
+        if let needed = reply["trust_needed"] {
+            return .trustNeeded(try decode(needed, as: TrustNeeded.self))
+        }
+        return .started(try decode(reply["session"], as: SessionInfo.self))
+    }
+
+    /// Records the user's answer for the grants they were shown; refused when the grants changed since.
+    public func decideTrust(workspace: String, _ decision: TrustDecision, grants: [String]) async throws {
+        try await send(.trustDecide(workspace: workspace, decision: decision, grants: grants))
     }
 
     /// Watches a session. With `from` (a model's `seq` from an earlier connection) the daemon sends only the missed

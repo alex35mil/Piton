@@ -116,6 +116,8 @@ service install`. DMG packaging, signing, and notarization are tracked separatel
 
 For every pi it starts, Piton:
 
+0. decides the repository's trust ("Repository trust"): a launch a person started is refused with `TrustNeeded`
+   until the user decides, and pi gets `--approve` or `--no-approve` from the decision;
 1. builds the environment: the user's login-shell environment captured at daemon start (launchd's environment is
    minimal), plus the workspace's environment tools (`mise env -C <workspace> --json-extended`, when mise is used),
    computed once per launch. A sandboxed launch runs them inside its own sandbox (`<piton> sandbox-exec`, under the launch's policy
@@ -490,7 +492,8 @@ arrive out of request order.
 | `settings.set {scope, key, value, local?}` | `{state}`; the key in the global file of `scope`; `value: null` resets; `local` moves the key between the shared and `.local` file (refused for `client`, which has no local file) |
 | `daemon.logging {policy}` | `{state}`; until it expires or the daemon restarts |
 | `workspaces.browse {path?}` | `{entries}`; see "Workspace roots" |
-| `session.start {workspace, mode?, prompt?}` | `{session}`; mode defaults to `sandbox`; `workspace` must be a checkout under a root |
+| `session.start {workspace, mode?, prompt?}` | `{session}`, or `{trust_needed: {source, grants, added, resources: {pi, mcp_servers}}}` when the repository needs the user's trust first (nothing launched); mode defaults to `sandbox`; `workspace` must be a checkout under a root |
+| `trust.decide {workspace, decision, grants}` | `{trust}`: `decision` is `trusted` or `declined`, for the `grants` the user was shown; refused when the repository's grants changed since |
 | `session.stop {session}` | `{forced}` |
 | `session.watch {session, from?, limit?}` | `{}`; then a `snapshot` (or the changes since `from`) and every change |
 | `session.unwatch {session}` | `{}` |
@@ -698,7 +701,7 @@ Four stores, each with one job; every value has exactly one home.
 | Store | Where | Owns | Written by |
 | --- | --- | --- | --- |
 | Config files | `.piton/` and `.agents/` in the repository and its parent folders; the global tier `$XDG_CONFIG_HOME/piton/` | what you decide, preferences included; travels through dotfiles and repositories | the user; the daemon for app edits to the global files and for approved protected writes |
-| State database | `~/.local/state/piton/piton.db` | facts about this host and what happened on it: `host_id`; later sessions, drafts, recent projects. No preferences | the daemon |
+| State database | `~/.local/state/piton/piton.db` | facts about this host and what happened on it: `host_id`, the user's trust decision per repository; later sessions, drafts, recent projects. No preferences | the daemon |
 | Client storage | each app's container | hosts it connects to, a device's own preference values, imported fonts, log capture, unsent work | that app |
 | Memory | the daemon | live pis, session views, temporary switches, pending protected writes | the daemon |
 
@@ -718,8 +721,8 @@ $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
 <ancestor>/.piton/, .agents/     # shared by every repository below
 <repo>/
   .piton/
-    config.toml                  # committed: [sandbox] [workers] [tools] [branches] [tracker] [forge]
-    config.local.toml            # not committed: the same tables, plus [branches] username and [web_search] api_key
+    config.toml                  # committed: [sandbox] [workers] [tools] [branches] [tracker] [forge]; grants gated by trust
+    config.local.toml            # not committed: the same tables, plus [branches] username, [web_search] api_key, [trust]
     mcp[.local].json, policies.md
     .local/                      # workflow artifacts (gitignored); a worker links its source's
   .agents/rules/, skills/
@@ -753,17 +756,44 @@ the line. A host or client file has one schema and is read whole.
   mise environment; a pi started outside Piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
-  - Every `[sandbox]` entry that opens something, `profile`, a filesystem `"read"`, an `"allow"` in any network or
-    services table, a `true` switch (`allow_tcp_listening`, `allow_git_control_files`, `allow_launching_apps`), the
-    `pi-claude-code` preset, and `commands` (per-command grants): the global `config.toml` or a `config.local.toml`,
-    never a project's `config.toml`, which travels with the repository, so a repository can't open the sandbox for
-    whoever clones it. A committed `"write"` may be set anywhere but never reopens a credential or the user's own
-    `"deny"`: the sandbox leaves it out and `piton sandbox show` names it.
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
     repository's.
   - `web_search.api_key`: a `config.local.toml` only (a secret).
-  - `branches.username`: the same files, as a personal value.
-  - Everything else, keep-awake included: either file, any level.
+  - `branches.username` and `trust.reconfirm`: the user's own files, never a repository's committed `config.toml`
+    (a personal value; a repository can't choose how its own grants are re-checked).
+  - Everything else, every `[sandbox]` and `[tools.permissions]` key included: either file, any level. What a
+    repository's committed file grants is decided by trust instead (below).
+- **Repository trust** (#381). A repository's committed `config.toml` (the source checkout's `.piton/config.toml`;
+  parent folders' files, the global tier, and every `config.local.toml` are the user's own) always restricts; what it
+  grants applies only once the user trusts the repository:
+  - Restrictions: `"deny"` in every sandbox map, `false` switches, `silence`; tool-permission `ask` and `deny`,
+    `default_mode = "ask"`/`"deny"`, `skill_grants = false`.
+  - Grants (`config::GrantEntry`, one canonical line each): `"read"`, `"write"`, `"allow"` entries, `true` switches,
+    every preset, `profile`, `[[sandbox.commands]]`; tool-permission `allow`, `default_mode = "allow"`,
+    `skill_grants = true`, in each of the three permission tables.
+  - The decision is the user's, in the state database's `trust` table, keyed on the canonical source checkout (workers
+    share it): `trusted` or `declined`, with the grants shown when it was given. `crate::trust` decides a repository's
+    state from its grants, what pi would load (the checkout's `.pi/` resources pi's trust gates, `.agents/skills`, the
+    repository's `.piton/mcp.json` servers), the record, and `[trust] reconfirm`, a sum type matched where it's used:
+    `NothingToTrust` (no grants, no pi resources, no record: no question; grants committed later stay out),
+    `Trusted`, `Declined`, or `Needed` (never asked; or, with `reconfirm = "on-change"`, grants the user didn't
+    trust).
+  - `reconfirm = "never"` (default): trusted stays trusted, every grant applies, until `piton trust deny|reset`.
+    `"on-change"`: only the trusted grants apply; a launch that finds new ones asks again, showing them. Removing a
+    grant or adding a restriction never asks. Only the grant entries are compared; `.pi/` and skills are listed in
+    the question but never fingerprinted.
+  - Every resolution takes a `GrantFilter` (`All`, `Only(grants)`, `None`) and leaves out, and lists as `untrusted`,
+    the repository's grants it doesn't keep. A committed `"write"` still never reopens a credential or the user's own
+    `"deny"`.
+  - A launch a person started (`session.start`, `piton start`, `piton attach`) is refused with `TrustNeeded` while
+    the state is `Needed`; the client asks, records the answer (`trust.decide`, `piton trust allow|deny`), and starts
+    again. A decision is recorded only for the grants the user was shown. A launch the daemon starts on its own (a
+    restart, a switch inside a session) never asks: it keeps what was decided. With #208, opening a project runs the
+    same check before a draft exists.
+  - pi follows the same decision: the daemon passes `--approve` or `--no-approve` on every launch, so pi's own
+    `trust.json` is never used or written. The launch's filter goes to pi in `PITON_TRUST` (set after the workspace's
+    environment), so `piton config resolve` inside the session keeps exactly what the launch kept.
+  - Worker Git and the source-update rule use the source's decision too.
 - **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
   - `[sandbox]`: one map per resource (`filesystem`, `network.connections`, `network.unix_socket_connections`,
     `network.unix_socket_bindings`, `macos.services`); the nearest value wins per key, each entry keeping the file that
@@ -835,7 +865,8 @@ the line. A host or client file has one schema and is read whole.
 #### State database
 
 SQLite (`rusqlite`, bundled), WAL, owned by the daemon alone, in its `0700` state folder. Tables, each added by the
-work that needs it: `host` (`host_id`); later `projects` (canonical source path, last used); `sessions` (Piton's
+work that needs it: `host` (`host_id`); `trust` (per canonical source checkout: `trusted` or `declined`, the grants it
+was given for, when; see "Repository trust"); later `projects` (canonical source path, last used); `sessions` (Piton's
 session identity and its state `draft`, `creating`, `live`, `failed`, title, pi session file); `drafts` and
 `draft_attachments` (size-bounded). Rows decode into Rust sum types at the boundary.
 
@@ -931,7 +962,8 @@ denies:
    paths): `mise` writes its cache and install bookkeeping, never its installed tools or trusted configs; an install
    that needs them is asked about ("Asking when the sandbox blocks"). A preset's entries (`policy::preset_grants`:
    `"write"` and `"read"` paths, `"allow"` connections, `allow_tcp_listening`) join the base layer, named after the
-   preset. The `pi-claude-code` preset (the user's own files only) grants the pi-claude-code extension's `claude`: the folder `PI_CLAUDE_CODE_CONFIG_DIR`
+   preset. A repository's committed presets apply only once the user trusts the repository ("Repository trust").
+   The `pi-claude-code` preset grants the pi-claude-code extension's `claude`: the folder `PI_CLAUDE_CODE_CONFIG_DIR`
    names and its `<folder>.lock`, decided like pi's agent directory (accepted from the daemon's environment or a
    file the agent can't write, else only inside the checkout; never overlapping a configuration level, the daemon's
    state, a denied path, pi's agent directory, or the interactive Claude Code's folder), its log cache
@@ -1222,7 +1254,8 @@ with no helper and no policy, and only a saved `runtime = "host"` entry or the u
   command a per-command grant covers runs widened that way, and a rerun always asks the user.
 
 **Per-command entries** (`[[sandbox.commands]]`, `match = "bash(...)"`, a required `runtime`: `"sandbox"` with
-`grant = "all"` or a table of the `[sandbox]` grant lists, or `"host"` with no grant; the user's own files only;
+`grant = "all"` or a table of the `[sandbox]` grant lists, or `"host"` with no grant; in a repository's committed
+file, only once the user trusts it;
 `CommandRuntime` in the model, so a host entry with a grant can't be represented): a matching call runs where its
 entry says from the start, never failing first. The
 daemon matches with a Rust port of the permissions extension's Bash analysis and glob (`agent/command.rs`), held

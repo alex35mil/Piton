@@ -10,11 +10,12 @@ use crate::{
     config::{
         ConfigError,
         model::{
+            grants::{GrantEntry, GrantFilter, Grants},
             level::{Chain, Level, LevelKind},
             paths::{FilePair, Paths, Sharing},
             tables::{
                 BranchesTable, Integration, Merge, Origin, PermissionSettings, SandboxSettings, SandboxTable, Table,
-                TableValue, ToolsTable, WebSearchTable, WorkersTable,
+                TableValue, ToolsTable, TrustTable, WebSearchTable, WorkersTable,
             },
         },
     },
@@ -63,6 +64,9 @@ pub struct Resolved {
     pub forge: Section<Option<FileValue<serde_json::Value>>>,
     #[serde(serialize_with = "section")]
     pub web_search: Section<WebSearchTable>,
+    /// `[trust]` of the user's own files.
+    #[serde(serialize_with = "section")]
+    pub trust: Section<TrustTable>,
     /// Every level's servers.
     #[serde(serialize_with = "section")]
     pub mcp: Section<ResolvedMcp>,
@@ -76,6 +80,8 @@ pub struct Resolved {
     /// Rule and skill folders from the `.agents/` chain.
     #[serde(serialize_with = "section")]
     pub instructions: Section<Instructions>,
+    /// The repository's committed grants left out because the user hasn't trusted them (`crate::trust`).
+    pub untrusted: Vec<GrantEntry>,
     /// Every file read, with its level.
     pub files: Vec<FileOrigin>,
     /// Every path whose appearance, change, or removal changes the result: each level folder and each candidate
@@ -94,10 +100,12 @@ impl Resolved {
             tracker,
             forge,
             web_search,
+            trust,
             mcp,
             mcp_global,
             policies,
             instructions,
+            untrusted: _,
             workspace: _,
             source: _,
             checkout: _,
@@ -115,6 +123,7 @@ impl Resolved {
             ("tracker", tracker.as_ref().err()),
             ("forge", forge.as_ref().err()),
             ("web_search", web_search.as_ref().err()),
+            ("trust", trust.as_ref().err()),
             ("mcp", mcp.as_ref().err()),
             ("mcp_global", mcp_global.as_ref().err()),
             ("policies", policies.as_ref().err()),
@@ -244,13 +253,27 @@ impl Doc {
     }
 }
 
-/// Every level's configuration files, read once, in merge order: per level the shared file, then the local one.
-struct Docs {
+/// Every level's configuration files, read once, in merge order: per level the shared file, then the local one. The
+/// repository's committed file's grants are kept only as `filter` says (`crate::trust` decides it).
+struct Docs<'a> {
     docs: Vec<Doc>,
+    filter: &'a GrantFilter,
+    /// What the filter left out, per part: what `piton sandbox show` and `piton config check` name.
+    left_out: std::cell::RefCell<Vec<GrantEntry>>,
 }
 
-impl Docs {
-    fn read(levels: &[Level], files: &mut Vec<FileOrigin>) -> Self {
+/// Whether a file's grants are gated by trust: only a repository's committed `config.toml`. Parent folders' files, the
+/// global tier, and every `config.local.toml` are the user's own.
+fn gated(doc: &ConfigDoc) -> bool {
+    match (doc.origin.level, doc.sharing) {
+        (LevelKind::Repository, Sharing::Shared) => true,
+        (LevelKind::Global | LevelKind::Parent, Sharing::Shared | Sharing::Local)
+        | (LevelKind::Repository, Sharing::Local) => false,
+    }
+}
+
+impl<'a> Docs<'a> {
+    fn read(levels: &[Level], files: &mut Vec<FileOrigin>, filter: &'a GrantFilter) -> Self {
         let mut docs = Vec::new();
         for level in levels {
             let pair = FilePair::project(&level.dir);
@@ -279,19 +302,51 @@ impl Docs {
                 }
             }
         }
-        Self { docs }
+        Self {
+            docs,
+            filter,
+            left_out: std::cell::RefCell::new(Vec::new()),
+        }
     }
 
-    /// Each file's `table` part that it sets, in merge order. A file that can't be read fails every part.
+    /// Each file's `table` part that it sets, in merge order, the repository's committed one gated. A file that can't
+    /// be read fails every part.
     fn parts<T: TableValue>(&self, table: Table) -> Result<Vec<(T, &ConfigDoc)>, ConfigError> {
         let mut parts = Vec::new();
         for doc in &self.docs {
             let doc = doc.get()?;
             if let Some(value) = doc.part::<T>(table)? {
+                let value = match gated(doc) {
+                    true => {
+                        let (value, out) = value.gated(self.filter);
+                        self.left_out.borrow_mut().extend(out);
+                        value
+                    }
+                    false => value,
+                };
                 parts.push((value, doc));
             }
         }
         Ok(parts)
+    }
+
+    /// What the repository's committed file grants, in every gated part: what trust is asked about. A part that can't
+    /// be read grants nothing here; its error is the part's own.
+    fn grants(&self) -> Grants {
+        let mut grants = Grants::new();
+        for doc in &self.docs {
+            let Ok(doc) = doc.get() else { continue };
+            if !gated(doc) {
+                continue;
+            }
+            if let Ok(Some(table)) = doc.part::<SandboxTable>(Table::Sandbox) {
+                grants.extend(table.grants());
+            }
+            if let Ok(Some(table)) = doc.part::<ToolsTable>(Table::Tools) {
+                grants.extend(TableValue::grants(&table));
+            }
+        }
+        grants
     }
 
     /// One part merged across the chain, farthest first, by its table's merge rule.
@@ -319,17 +374,60 @@ impl Docs {
     }
 }
 
-/// Resolves a workspace: both chains, each part on its own. Fails as a whole only when a level folder exists but can't
-/// be listed, since skipping it could drop a deny rule.
-pub fn resolve(workspace: &Workspace, paths: &Paths, runtime: Runtime) -> Result<Resolved, ConfigError> {
+/// Resolves a workspace: both chains, each part on its own, the repository's committed grants kept as `filter` says.
+/// Fails as a whole only when a level folder exists but can't be listed, since skipping it could drop a deny rule.
+pub fn resolve(
+    workspace: &Workspace,
+    paths: &Paths,
+    runtime: Runtime,
+    filter: &GrantFilter,
+) -> Result<Resolved, ConfigError> {
     let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
-    read_chain(&chain, &workspace.path, &paths.home, runtime)
+    read_chain(&chain, &workspace.path, &paths.home, runtime, filter)
 }
 
 /// The global tier's `config.toml` alone: the defaults every project inherits, without any project's files.
 pub fn resolve_global_project(paths: &Paths) -> Result<Resolved, ConfigError> {
     let chain = Chain::global_only(&paths.global);
-    read_chain(&chain, &paths.global, &paths.home, Runtime::Host)
+    read_chain(&chain, &paths.global, &paths.home, Runtime::Host, &GrantFilter::All)
+}
+
+/// What trust is decided from, for a workspace: the repository's committed grants, and the nearest `[trust]` of the
+/// user's own files. Reads no other part, and never filters.
+#[derive(Debug, Clone)]
+pub struct TrustInputs {
+    /// The checkout whose `.piton/` was read (a worker's source): what the decision is keyed on.
+    pub source: PathBuf,
+    /// The workspace's own checkout, where pi reads `.pi/` and `.agents/skills/`.
+    pub checkout: PathBuf,
+    pub grants: Grants,
+    pub trust: TrustTable,
+    /// The repository's `.piton/mcp.json` servers, which pi loads only in a trusted project.
+    pub mcp_servers: Vec<String>,
+}
+
+pub fn trust_inputs(workspace: &Workspace, paths: &Paths) -> Result<TrustInputs, ConfigError> {
+    let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
+    let (piton, _) = existing_levels(&chain)?;
+    let docs = Docs::read(&piton, &mut Vec::new(), &GrantFilter::All);
+    let repository: Vec<Level> = piton
+        .iter()
+        .filter(|level| level.kind == LevelKind::Repository)
+        .cloned()
+        .collect();
+    // Only the committed file: `mcp.local.json` is the user's own.
+    let mcp_servers = repository
+        .iter()
+        .filter_map(|level| load_mcp(&level.dir.join("mcp.json")).ok().flatten())
+        .flat_map(|file| file.mcp_servers.keys().cloned().collect::<Vec<_>>())
+        .collect();
+    Ok(TrustInputs {
+        source: chain.source.clone(),
+        checkout: chain.checkout.clone(),
+        grants: docs.grants(),
+        trust: docs.merged(Table::Trust)?,
+        mcp_servers,
+    })
 }
 
 /// What a launch or a new worker needs from a workspace's configuration.
@@ -345,30 +443,33 @@ pub struct LaunchConfig {
     pub checkout: PathBuf,
     /// The existing level folders of both chains, farthest first: a sandbox reads its whole configuration.
     pub levels: Vec<PathBuf>,
+    /// The repository's committed `[sandbox]` grants the filter left out: what `piton sandbox show` names.
+    pub untrusted: Vec<GrantEntry>,
 }
 
 /// The parts of a workspace's configuration a launch reads: `[sandbox]` and `[workers]` merged along the `.piton/`
-/// chain, and the chains' existing folders. Only these two parts can refuse a launch; the pi package's parts are
-/// checked by [`resolve`] in the pi package.
-pub fn resolve_launch(workspace: &Workspace, paths: &Paths) -> Result<LaunchConfig, ConfigError> {
+/// chain, the repository's committed grants kept as `filter` says, and the chains' existing folders. Only these two
+/// parts can refuse a launch; the pi package's parts are checked by [`resolve`] in the pi package.
+pub fn resolve_launch(workspace: &Workspace, paths: &Paths, filter: &GrantFilter) -> Result<LaunchConfig, ConfigError> {
     let chain = Chain::for_workspace(workspace, &paths.home, &paths.global);
     let (piton, levels) = existing_levels(&chain)?;
-    let docs = Docs::read(&piton, &mut Vec::new());
+    let docs = Docs::read(&piton, &mut Vec::new(), filter);
     let mut sandbox = SandboxSettings::default();
     for (table, doc) in docs.parts::<SandboxTable>(Table::Sandbox)? {
-        let origin = match (doc.origin.level, doc.sharing) {
-            (LevelKind::Parent | LevelKind::Repository, Sharing::Shared) => Origin::Committed,
-            (LevelKind::Global, Sharing::Shared | Sharing::Local)
-            | (LevelKind::Parent | LevelKind::Repository, Sharing::Local) => Origin::UsersOwn,
+        let origin = match gated(doc) {
+            true => Origin::Committed,
+            false => Origin::UsersOwn,
         };
         sandbox.add(table, &doc.origin.path, origin);
     }
+    let workers = docs.merged(Table::Workers)?;
     Ok(LaunchConfig {
         sandbox,
-        workers: docs.merged(Table::Workers)?,
+        workers,
         source: chain.source.clone(),
         checkout: chain.checkout.clone(),
         levels,
+        untrusted: docs.left_out.take(),
     })
 }
 
@@ -413,7 +514,13 @@ fn check_level(level: &Level) -> Result<bool, ConfigError> {
     }
 }
 
-fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) -> Result<Resolved, ConfigError> {
+fn read_chain(
+    chain: &Chain,
+    workspace: &Path,
+    home: &Path,
+    runtime: Runtime,
+    filter: &GrantFilter,
+) -> Result<Resolved, ConfigError> {
     let mut watch = Vec::new();
     let mut files = Vec::new();
     let mut piton = Vec::new();
@@ -440,7 +547,7 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
         .filter(|level| level.kind == LevelKind::Global)
         .cloned()
         .collect();
-    let docs = Docs::read(&piton, &mut files);
+    let docs = Docs::read(&piton, &mut files, filter);
 
     let mcp = read_mcp(&mut files, &piton);
     let mcp_global = read_mcp(&mut Vec::new(), &global_levels);
@@ -471,10 +578,17 @@ fn read_chain(chain: &Chain, workspace: &Path, home: &Path, runtime: Runtime) ->
         tracker: docs.nearest(Table::Tracker),
         forge: docs.nearest(Table::Forge),
         web_search: docs.merged(Table::WebSearch),
+        trust: docs.merged(Table::Trust),
         mcp,
         mcp_global,
         policies,
         instructions,
+        untrusted: {
+            let mut left_out = docs.left_out.take();
+            left_out.sort();
+            left_out.dedup();
+            left_out
+        },
         files,
         watch,
     })
@@ -634,7 +748,7 @@ mod tests {
     }
 
     fn run(t: &Tree, ws: &Workspace, runtime: Runtime) -> Result<Resolved, ConfigError> {
-        resolve(ws, &t.paths, runtime)
+        resolve(ws, &t.paths, runtime, &GrantFilter::All)
     }
 
     /// The whole chain, every part: global tier, a parent folder, and the repository.
@@ -716,11 +830,14 @@ mcp_server = "linear"
         assert_eq!(fs("/local"), Write);
         assert_eq!(fs("/r"), Deny, "the nearer value wins");
         // A launch keeps each entry's file, and whether it's the user's own.
-        let launch = resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox;
+        let launch = resolve_launch(&source(repo.clone()), &t.paths, &GrantFilter::All)
+            .unwrap()
+            .sandbox;
         let entry = |key: &str| launch.filesystem[&crate::config::PathKey::new(key).unwrap()].clone();
         assert_eq!(entry("~/.cargo/registry").file, t.global.join("config.toml"));
         assert_eq!(entry("~/Projects/work/.pi").file, parent.join(".piton/config.toml"));
-        assert_eq!(entry("~/Projects/work/.pi").origin, Origin::Committed);
+        // A parent folder's file is the user's own; only the repository's committed one is gated.
+        assert_eq!(entry("~/Projects/work/.pi").origin, Origin::UsersOwn);
         assert_eq!(entry("/local").origin, Origin::UsersOwn);
         assert_eq!(entry("/r").origin, Origin::Committed);
         assert_eq!(r.workers.as_ref().unwrap().skip, ["apps/.build"]);
@@ -789,13 +906,18 @@ mcp_server = "linear"
     fn scope_rules_are_enforced() {
         let t = tree();
         let repo = t.home.join("repo");
+        // A committed grant is no longer a placement error: trust decides it (see `committed_grants_follow_the_filter`).
         write(
             &repo.join(".piton/config.toml"),
             "[sandbox.filesystem]\n\"~/.ssh\" = \"read\"\n",
         );
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
-        assert!(matches!(r.sandbox, Err(ConfigError::NotInProjectConfig { .. })));
+        assert!(r.sandbox.is_ok());
         assert!(r.tools.is_ok());
+        // How trust is re-checked is the user's own.
+        write(&repo.join(".piton/config.toml"), "[trust]\nreconfirm = \"on-change\"\n");
+        let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
+        assert!(matches!(r.trust, Err(ConfigError::NotInProjectConfig { .. })));
         // Integrations are project only: a global [tracker] fails its part.
         write(&t.global.join("config.toml"), "[tracker]\nprovider = \"github\"\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
@@ -809,6 +931,81 @@ mcp_server = "linear"
         write(&repo.join(".piton/config.toml"), "[branches]\nusername = \"me\"\n");
         let r = run(&t, &source(repo), Runtime::Host).unwrap();
         assert!(matches!(r.branches, Err(ConfigError::NotInProjectConfig { .. })));
+    }
+
+    /// The repository's committed grants apply only as the filter says; its restrictions, and every grant in the
+    /// user's own files (a parent folder's, a `config.local.toml`), always.
+    #[test]
+    fn committed_grants_follow_the_filter() {
+        let t = tree();
+        let parent = t.home.join("work");
+        let repo = parent.join("repo");
+        write(
+            &repo.join(".piton/config.toml"),
+            r#"
+[sandbox]
+presets = ["rust", "swift"]
+[sandbox.filesystem]
+"/w" = "write"
+"/d" = "deny"
+[tools.permissions]
+allow = ["bash(*)"]
+deny = ["bash(rm *)"]
+"#,
+        );
+        write(
+            &repo.join(".piton/config.local.toml"),
+            "[tools.permissions]\nallow = [\"read\"]\n",
+        );
+        write(&parent.join(".piton/config.toml"), "[sandbox]\npresets = [\"node\"]\n");
+        let ws = source(repo.clone());
+        let inputs = trust_inputs(&ws, &t.paths).unwrap();
+        let names: Vec<String> = inputs.grants.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            names,
+            [
+                r#"sandbox.filesystem."/w" = "write""#,
+                r#"sandbox.presets "rust""#,
+                r#"sandbox.presets "swift""#,
+                r#"tools.permissions.allow "bash(*)""#,
+            ],
+            "only the repository's committed file"
+        );
+
+        let none = resolve(&ws, &t.paths, Runtime::Host, &GrantFilter::None).unwrap();
+        let permissions = &none.tools.as_ref().unwrap().permissions.merged;
+        assert_eq!(permissions.allow, ["read"], "the user's own allow stays");
+        assert_eq!(permissions.deny, ["bash(rm *)"], "restrictions always apply");
+        let sandbox = none.sandbox.as_ref().unwrap();
+        assert_eq!(sandbox.presets, [crate::config::Preset::Node]);
+        assert_eq!(
+            sandbox.filesystem.get(&crate::config::PathKey::new("/d").unwrap()),
+            Some(&crate::config::FileAccess::Deny)
+        );
+        assert!(
+            !sandbox
+                .filesystem
+                .contains_key(&crate::config::PathKey::new("/w").unwrap())
+        );
+        assert_eq!(none.untrusted.len(), 4);
+
+        let rust = inputs
+            .grants
+            .iter()
+            .find(|g| g.as_str().contains("rust"))
+            .unwrap()
+            .clone();
+        let launch = resolve_launch(&ws, &t.paths, &GrantFilter::Only([rust].into())).unwrap();
+        let presets: Vec<_> = launch.sandbox.presets.iter().map(|p| p.value.name()).collect();
+        assert_eq!(presets, ["node", "rust"]);
+        assert_eq!(launch.untrusted.len(), 2, "swift and /w");
+
+        let all = resolve(&ws, &t.paths, Runtime::Host, &GrantFilter::All).unwrap();
+        assert_eq!(
+            all.tools.as_ref().unwrap().permissions.merged.allow,
+            ["bash(*)", "read"]
+        );
+        assert!(all.untrusted.is_empty());
     }
 
     #[test]
@@ -852,7 +1049,11 @@ mcp_server = "linear"
         assert!(matches!(r.branches, Err(ConfigError::Invalid { .. })));
         assert_eq!(r.sandbox.as_ref().unwrap().presets, [crate::config::Preset::Rust]);
         assert_eq!(
-            resolve_launch(&source(repo.clone()), &t.paths).unwrap().sandbox.presets[0].value,
+            resolve_launch(&source(repo.clone()), &t.paths, &GrantFilter::All)
+                .unwrap()
+                .sandbox
+                .presets[0]
+                .value,
             crate::config::Preset::Rust
         );
         std::fs::remove_file(t.global.join("config.toml")).unwrap();
@@ -888,7 +1089,7 @@ mcp_server = "linear"
                 name: "w".into(),
             },
         };
-        assert!(resolve_launch(&ws, &t.paths).is_ok());
+        assert!(resolve_launch(&ws, &t.paths, &GrantFilter::All).is_ok());
         let r = run(&t, &ws, Runtime::Sandbox).unwrap();
         assert!(r.errors().is_empty(), "{:?}", r.errors());
         let permissions = &r.tools.as_ref().unwrap().permissions.merged;

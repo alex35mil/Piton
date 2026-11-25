@@ -32,8 +32,8 @@ end
 
 ---@param agent {path: string, label: string}
 ---@param relative_file string?
----@param draft string? Text to pre-fill in the Pi prompt.
-function M.open(agent, relative_file, draft)
+---@param draft string?
+local function open(agent, relative_file, draft)
     local opts = config.get()
     opts.tabs.new()
     vim.cmd("tcd " .. vim.fn.fnameescape(agent.path))
@@ -48,6 +48,19 @@ function M.open(agent, relative_file, draft)
 
     log.info("Agent: " .. agent.path)
     require("pi").show({ layout = "float", draft = draft })
+end
+
+--- Opens the agent's tab and its Pi. A repository that needs the user's trust is asked about first, so its Pi starts
+--- with the decision made; cancelling the question, or a refusal (the daemon not running), opens nothing.
+---@param agent {path: string, label: string}
+---@param relative_file string?
+---@param draft string? Text to pre-fill in the Pi prompt.
+function M.open(agent, relative_file, draft)
+    require("piton.util").async(function()
+        if require("piton.trust").ensure(agent.path) then
+            open(agent, relative_file, draft)
+        end
+    end)
 end
 
 ---@param path string

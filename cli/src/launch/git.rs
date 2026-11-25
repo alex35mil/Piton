@@ -29,13 +29,14 @@ impl SourceGit {
         tools: &crate::tools::Tools,
         base: &Env,
         source: &Path,
+        filter: &crate::config::GrantFilter,
     ) -> Result<Self, LaunchError> {
         let workspace = Workspace {
             path: source.to_path_buf(),
             checkout: source.to_path_buf(),
             relation: Relation::Source,
         };
-        let resolved = resolve_config(config, &workspace)?;
+        let resolved = resolve_config(config, &workspace, filter)?;
         // A credential proxy that applies here is checked against this sandbox too (no keychain, no writable fnox
         // files), so the user's hooks don't run where launches are refused. Git itself doesn't run behind the proxy.
         let sandboxed = prepare_sandbox(config, tools, &resolved, base, source, ClaudeSockets::None).await?;

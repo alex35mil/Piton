@@ -227,7 +227,7 @@ struct IntegrationTests {
         defer { daemon.stop() }
         let connection = try await daemon.connect("pitonkit-test")
         try await connection.subscribeSessions()
-        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host)
+        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host).session()
         let listed = try await next(connection.events) { event -> [SessionInfo]? in
             guard case .sessions(let list) = event, list.contains(where: { $0.key == session.key }) else { return nil }
             return list
@@ -252,7 +252,7 @@ struct IntegrationTests {
         let daemon = try Daemon()
         defer { daemon.stop() }
         let connection = try await daemon.connect("pitonkit-test")
-        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host)
+        let session = try await connection.start(workspace: daemon.workspace.path, mode: .host).session()
         try await connection.watch(session.key)
         try await connection.sendMessage(session.key, text: "ask")
         let dialog = try await next(connection.events) { event -> Dialog? in
@@ -281,6 +281,7 @@ struct IntegrationTests {
         defer { daemon.stop() }
         var connection = try await daemon.connect("pitonkit-test")
         let session = try await connection.start(workspace: daemon.workspace.path, mode: .host, prompt: "first")
+            .session()
         try await connection.watch(session.key)
         let before = try await next(connection.events, settledModel(session.key) { assistantText($0) != nil })
         await connection.close()
@@ -324,6 +325,7 @@ struct IntegrationTests {
         defer { daemon.stop() }
         let local = try await daemon.connect("mac")
         let session = try await local.start(workspace: daemon.workspace.path, mode: .host, prompt: "from the mac")
+            .session()
 
         let phone = try await daemon.connectWebSocket("iphone")
         try await phone.subscribeSessions()
@@ -391,7 +393,7 @@ struct IntegrationTests {
         try await eventually(state: describe) { store.link == .connected }
 
         let key = try #require(
-            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "hello store"))
+            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "hello store")?.started)
         store.watch(key)
         try await eventually(state: describe) { store.models[key].flatMap(assistantText) == "echo: hello store" }
         try await eventually(state: describe) { store.sessions.first { $0.key == key }?.title == "hello store" }
@@ -412,7 +414,7 @@ struct IntegrationTests {
         try await eventually(state: describe) { store.sessions.isEmpty && store.models[key] == nil }
         // And it works again.
         let again = try #require(
-            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "after restart"))
+            await store.startSession(workspace: daemon.workspace.path, mode: .host, prompt: "after restart")?.started)
         store.watch(again)
         try await eventually { store.models[again].flatMap(assistantText) == "echo: after restart" }
     }
@@ -423,7 +425,7 @@ struct IntegrationTests {
         let daemon = try Daemon()
         defer { daemon.stop() }
         let local = try await daemon.connect("seed")
-        let session = try await local.start(workspace: daemon.workspace.path, mode: .host)
+        let session = try await local.start(workspace: daemon.workspace.path, mode: .host).session()
         let store = Store(endpoint: .local(socket: daemon.socket), client: "outbox")
         store.start()
         defer { store.stop() }
@@ -484,7 +486,7 @@ struct IntegrationTests {
         try await eventually { mac.daemon?.keepAwake == false && phone.daemon?.keepAwake == false }
         #expect(await mac.setKeepAwake(true))
         try await eventually { phone.daemon?.keepAwake == true && phone.daemon?.awake == false }
-        _ = try #require(await mac.startSession(workspace: daemon.workspace.path, mode: .host, prompt: nil))
+        _ = try #require(await mac.startSession(workspace: daemon.workspace.path, mode: .host, prompt: nil)?.started)
         try await eventually(
             state: { "\(String(describing: phone.daemon))" },
             { phone.daemon?.awake == true && phone.daemon?.sessions == 1 })
@@ -564,7 +566,7 @@ struct IntegrationTests {
         let daemon = try Daemon()
         defer { daemon.stop() }
         let local = try await daemon.connect("seed")
-        let session = try await local.start(workspace: daemon.workspace.path, mode: .host, prompt: "seed")
+        let session = try await local.start(workspace: daemon.workspace.path, mode: .host, prompt: "seed").session()
         let url = try await daemon.webSocketURL()
         for endpoint in [Endpoint.local(socket: daemon.socket), .remote(url: url)] {
             let store = Store(endpoint: endpoint, client: "reopen")

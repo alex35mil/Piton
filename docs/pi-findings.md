@@ -180,6 +180,18 @@ them to read a file as well as to write it.
     pi keeps running.
   - `trust.json`: written when the user answers the trust prompt (interactive only) or an extension's
     `project_trust` handler asks to remember; RPC sessions with no handler only read it.
+
+## Project trust in RPC mode
+
+Verified with pi 1.5.2 (`pi --mode rpc --offline --no-session`, a scratch agent directory, a project with a
+`.pi/extensions/` extension that records `ctx.isProjectTrusted()` at `session_start`):
+
+- `--approve`: the project's extension loads, and `ctx.isProjectTrusted()` is true.
+- `--no-approve`, or no flag with `defaultProjectTrust` unset (`"ask"`): it doesn't load. RPC mode can't show pi's
+  trust prompt, so without a flag a project's `.pi/` resources are skipped silently.
+- Neither writes `trust.json`.
+
+Piton passes one of the two flags on every launch, from the user's decision ("Repository trust" in design.md).
   - `mcp.json` (MCP servers; `/mcp` changes, `pi mcp add`), `keybindings.json` (a one-time format migration),
     `models.json`, `extensions/`, `skills/`, `prompts/`, `themes/`, `SYSTEM.md`, `APPEND_SYSTEM.md`.
   - `bin/` (managed `fd` and `rg`, downloaded when they aren't on `PATH`), `npm/` and `git/` (packages: installed

@@ -1880,7 +1880,7 @@ mod tests {
             checkout: f.repo.clone(),
             relation: Relation::Source,
         };
-        crate::config::resolve_launch(&ws, &paths).unwrap()
+        crate::config::resolve_launch(&ws, &paths, &crate::config::GrantFilter::All).unwrap()
     }
 
     fn policy_with(f: &Fixture, base: &Env, launch: &Env) -> Result<Policy, SandboxError> {
