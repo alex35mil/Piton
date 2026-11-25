@@ -176,7 +176,6 @@ describe("workflow reviewer isolation", () => {
                 const metadata = {
                     title: "Example",
                     slug: "example",
-                    createdAt: "2026-01-01T00:00:00Z",
                     entity: "gig",
                     kind: "feature",
                     branch: { state: "ready", name: "7-example", start: "main", target: "main", source: "generated" },
@@ -221,8 +220,8 @@ describe("workflow reviewer isolation", () => {
                 const candidate = (category: string, round: number) =>
                     path.join(reviewRoundDir(directory, category, round), "candidate.md")
 
-                // No review category requires a Phase: a plan review runs while the entity is in Execution.
-                const before = JSON.stringify({ ...metadata, phase: "execution" })
+                // No review category requires a Phase.
+                const before = JSON.stringify(metadata)
                 fs.writeFileSync(metadataPath, before)
                 await reachesReviewer({ phase: "plan" })
                 assert.equal(fs.readFileSync(metadataPath, "utf-8"), before)
@@ -353,7 +352,6 @@ describe("workflow reviewer isolation", () => {
                         title: "Example",
                         // The directory is named `7-<slug>`.
                         slug: path.basename(directory).replace(/^7-/, ""),
-                        createdAt: "2026-01-01T00:00:00Z",
                         branch: {
                             state: "ready",
                             name: path.basename(directory),
@@ -398,38 +396,29 @@ describe("workflow reviewer isolation", () => {
                     : []
                 return after.filter((entry) => !before.includes(entry))
             }
-            const gig = (kind: string, phase: string, files: Record<string, string>, slug: string) =>
-                entity(`.piton/.local/gigs/7-${slug}`, { entity: "gig", kind, phase }, files)
+            const gig = (kind: string, files: Record<string, string>, slug: string) =>
+                entity(`.piton/.local/gigs/7-${slug}`, { entity: "gig", kind }, files)
             const result = { "result.md": "# Result\n\nDone.\n" }
 
             // Each rejected precondition leaves no new round behind.
             for (const [tool, directory, phase, message] of [
-                ["review_gig", gig("feature", "planning", {}, "no-plan"), "plan", /plan review requires plan\.md/],
+                ["review_gig", gig("feature", {}, "no-plan"), "plan", /plan review requires plan\.md/],
                 [
                     "review_gig",
-                    gig("feature", "selfReview", { "report.md": "# Report\n\nDone.\n" }, "no-result"),
+                    gig("feature", { "report.md": "# Report\n\nDone.\n" }, "no-result"),
                     "final",
                     /requires a non-empty result\.md/,
                 ],
+                ["review_gig", gig("research", result, "no-report"), "final", /requires a non-empty report\.md/],
                 [
                     "review_gig",
-                    gig("research", "selfReview", result, "no-report"),
-                    "final",
-                    /requires a non-empty report\.md/,
-                ],
-                [
-                    "review_gig",
-                    gig("feature", "selfReview", { ...result, "pending.md": "# Pending\n\n- [ ] Open\n" }, "pending"),
+                    gig("feature", { ...result, "pending.md": "# Pending\n\n- [ ] Open\n" }, "pending"),
                     "final",
                     /requires zero unchecked pending entries/,
                 ],
                 [
                     "review_epic",
-                    entity(
-                        ".piton/.local/epics/7-example",
-                        { entity: "epic", phase: "planning" },
-                        { "epic.md": "# Epic\n" },
-                    ),
+                    entity(".piton/.local/epics/7-example", { entity: "epic" }, { "epic.md": "# Epic\n" }),
                     "plan",
                     /review requires brief\.md/,
                 ],
@@ -437,7 +426,7 @@ describe("workflow reviewer isolation", () => {
                     "review_task",
                     entity(
                         ".piton/.local/gigs/orphan/tasks/7-example",
-                        { entity: "task", kind: "feature", phase: "planning" },
+                        { entity: "task", kind: "feature" },
                         { "plan.md": "# Plan\n" },
                     ),
                     "plan",
@@ -448,7 +437,7 @@ describe("workflow reviewer isolation", () => {
                 assert.deepEqual(await run(tool, directory, phase, message), [], `${tool} ${phase}: ${message}`)
 
             // Once fixed, the first real review takes round 001.
-            const fixed = gig("feature", "selfReview", {}, "fixed")
+            const fixed = gig("feature", {}, "fixed")
             assert.deepEqual(await run("review_gig", fixed, "final", /requires a non-empty result\.md/), [])
             fs.writeFileSync(path.join(fixed, "result.md"), result["result.md"])
             assert.deepEqual(await run("review_gig", fixed, "final", stopBeforeRunner), ["final-001"])
@@ -843,8 +832,6 @@ describe("workflow reviewer isolation", () => {
                 path.join(gigDir, "metadata.json"),
                 JSON.stringify({
                     title: "Example",
-                    createdAt: "2026-01-01T00:00:00.000Z",
-                    phase: "selfReview",
                     branch: { state: "ready", name: "7-example", start: "main", target: "main", source: "generated" },
                     slug: "example",
                     tracker: {
@@ -1037,8 +1024,6 @@ describe("workflow reviewer isolation", () => {
                 JSON.stringify({
                     title: "Example",
                     slug: "example",
-                    createdAt: "2026-01-01T00:00:00Z",
-                    phase: "selfReview",
                     entity: "gig",
                     kind: "feature",
                     branch: { state: "ready", name: branch, start: "main", target: "main", source: "generated" },

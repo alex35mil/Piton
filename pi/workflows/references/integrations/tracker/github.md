@@ -70,14 +70,14 @@ When a create result is uncertain, read [recovery](../recovery.md#uncertain-trac
 
 **What's projected:**
 
-- Native Phase exists only during In Progress and equals the metadata Phase.
+- Native Phase exists only during In Progress and shows the current activity ([Phase](../../phase.md)).
 - With a configured `kind` group, exactly one `kind` label matches the workflow Kind; without it, no Kind is projected.
 - Keep unrelated labels. Reuse this operation's reads and write only when the intended set differs. Confirm labels when a mutation's success doesn't show the full applied set; no full label-catalog preflight is needed.
 
 **Changing values:**
 
 - Use `prepare_tracker_mutation` with exactly one change: `lifecycle`, `priority`, or Task `hierarchy`. Labels change through `prepare_label_mutation`, with the issue's label names as its current facts, and apply as one `issue_write` update.
-- For Phase, use `prepare_github_phase_mutation` with an item read taken after any Status change ([fresh native facts](../../phase.md#fresh-native-facts)), and run its returned call.
+- For Phase, use `prepare_github_phase_mutation` with the target Phase and an item read taken after any Status change ([fresh native facts](../../phase.md#fresh-native-facts)), and run its returned call.
 - Priority follows its configured Project or issue scope.
 - Lifecycle and Priority are provider authority: never cached and never replaced by a local fallback.
 - A user's request to assign an issue is an ordinary `issue_write` update; resume never reads or repairs assignees.

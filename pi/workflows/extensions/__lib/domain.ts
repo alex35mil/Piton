@@ -51,8 +51,24 @@ export const PhaseSchema = Type.Enum(["planning", "execution", "selfReview"], {
 export const PhaseValidator = compile(PhaseSchema)
 export type Phase = Static<typeof PhaseSchema>
 
-export function projectedPhase(lifecycle: LifecycleState, phase: Phase): Phase | null {
-    return lifecycle === "inProgress" ? phase : null
+/** The requested native Phase, checked against fresh lifecycle: a Phase only In Progress, `null` otherwise. */
+export function projectedPhase(lifecycle: LifecycleState, phase: Phase | null): Phase | null {
+    switch (lifecycle) {
+        case "inProgress":
+            if (phase === null)
+                throw new Error("In Progress work shows a Phase: pass planning, execution, or selfReview")
+            return phase
+        case "backlog":
+        case "todo":
+        case "inReview":
+        case "done":
+        case "canceled":
+            if (phase !== null)
+                throw new Error(
+                    `Phase shows only In Progress work, and this item is ${lifecycle}: pass none to clear it`,
+                )
+            return null
+    }
 }
 
 export const PRIORITY_NOT_SET = "not set" as const

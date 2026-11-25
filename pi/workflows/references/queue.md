@@ -90,7 +90,7 @@ Follow [core outcome rules](./core.md#outcomes-and-recovery). Keep a known objec
 
 When the user starts a Backlog or Todo object through `/epic`, `/task`, or `/gig`:
 
-- Reuse that object and its Priority, create the workflow entity and branch contract, and move straight to In Progress, with `phase: planning` when Phase is configured. Todo is never required between Backlog and In Progress.
+- Reuse that object and its Priority, create the workflow entity and branch contract, and move straight to In Progress, with Planning when Phase is configured. Todo is never required between Backlog and In Progress.
 - Both providers keep the request's title or name and description.
 - The first plan publishes as one managed GitHub comment or one Linear document attached to the issue or Project, and later updates reuse it. This is the same for workflow-created and externally submitted items; no ownership question is needed. Queue intake itself publishes no plan.
 - **Phase** ([Phase](./phase.md)), when configured: GitHub uses the Project Phase field, Linear the configured label group. Other system metadata stays private.

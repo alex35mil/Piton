@@ -20,7 +20,6 @@ import { epicTaskList, hasEpicTasksSection, parseEpicRouting, parseEpicTasks } f
 import { writeTextAtomically } from "../__lib/files.js"
 import { assertArtifactPersistencePrepared, assertWorkerArtifactsLinked } from "../__lib/project-config.js"
 import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "../integrations/config.js"
-import { initialPhase } from "../integrations/phase.js"
 import { stripPublicationSignature } from "../integrations/publication.js"
 import type { RecoveryReads } from "../integrations/plan-publication.js"
 import {
@@ -65,7 +64,6 @@ interface EpicFacts {
     object: TrackerObject
     title: string
     description: string
-    createdAt: string
 }
 
 function epicFacts(tracker: TrackerConfig, evidence: ProviderEvidence, tools: McpToolCatalog): EpicFacts {
@@ -93,7 +91,6 @@ function epicFacts(tracker: TrackerConfig, evidence: ProviderEvidence, tools: Mc
             },
             title: text(response.title, "title"),
             description: typeof response.body === "string" ? response.body : "",
-            createdAt: text(response.created_at, "creation time"),
         }
     }
     requireMcpTool(evidence.tool, tracker.mcpServer, "get_project", tools, "Epic evidence")
@@ -107,7 +104,6 @@ function epicFacts(tracker: TrackerConfig, evidence: ProviderEvidence, tools: Mc
         },
         title: text(response.name, "name"),
         description: typeof response.description === "string" ? response.description : "",
-        createdAt: text(response.createdAt, "creation time"),
     }
 }
 
@@ -210,8 +206,6 @@ export function restoreEpic(cwd: string, input: RestoreEpicInput, tools: McpTool
         entity: "epic",
         slug,
         title: facts.title.trim(),
-        createdAt: new Date(facts.createdAt).toISOString(),
-        ...initialPhase(configured, "execution"),
         branch: readyBranch(plan.routing.epicBranch, defaultBranch, "generated"),
         tracker,
         // The published plan's Task list was accepted before it was published.

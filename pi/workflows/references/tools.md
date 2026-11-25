@@ -48,8 +48,7 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 | Prepare an item's label change | `prepare_label_mutation` |
 | Decide whether a Task or Gig waits for approval at a gate | `inspect_gate` |
 | Check whether a finished workflow ends with session analysis | `inspect_session_analysis` |
-| Calculate native Phase without changing metadata | `prepare_github_phase_mutation`, `prepare_linear_phase_mutation` |
-| Set metadata Phase and calculate native Phase | `set_github_workflow_phase`, `set_linear_workflow_phase` |
+| Set or clear native Phase | `prepare_github_phase_mutation`, `prepare_linear_phase_mutation` |
 
 Context tools return configuration, addressing, evidence requirements, or native call arguments. They never call providers or grant approval.
 

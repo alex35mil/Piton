@@ -10,8 +10,6 @@ allowed-tools:
     - "record_review_response"
     - "accept_epic_tasks"
     - "prepare_artifacts"
-    - "set_github_workflow_phase"
-    - "set_linear_workflow_phase"
     - "restore_epic"
     - "restore_epic_plan_source"
     - "plan_epic_task_issues"
@@ -176,7 +174,7 @@ Changing the Task list needs another review and acceptance ([accepted Task list]
 When the user explicitly resumes the Epic and asks to complete it:
 
 1. Resolve every Task through its issue's lifecycle. When any Task is untagged, queued, or started but neither `done` nor `canceled`, report them and stop.
-2. Set native Status straight from In Progress to the configured `done` value and, when Phase is configured, clear native Phase ([Phase](../../references/phase.md)) and keep the last metadata Phase.
+2. Set native Status straight from In Progress to the configured `done` value and, when Phase is configured, clear native Phase ([Phase](../../references/phase.md)).
 3. Report the completion evidence. Change no committed file; Epic completion never creates a commit, push, PR, or CI run.
 4. Call `inspect_session_analysis`. When it returns `enabled`, read [session analysis](../../references/session-analysis.md).
 

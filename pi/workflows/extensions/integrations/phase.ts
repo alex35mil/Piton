@@ -1,12 +1,11 @@
 import { type Static, Type } from "typebox"
 
-import { compile, parse } from "../../../extensions/__lib/schema.js"
-import { LifecycleStateSchema, PhaseSchema, type LifecycleState, type Phase, projectedPhase } from "../__lib/domain.js"
+import { compile } from "../../../extensions/__lib/schema.js"
+import { type LifecycleState, type Phase, projectedPhase } from "../__lib/domain.js"
 import type { EntityType } from "../__lib/domain.js"
 import type { EntityStatus } from "../__lib/entity.js"
 import type { GitHubPhaseField, LinearTracker, TrackerConfig } from "./config.js"
 import type { LinearPhaseGroup, LinearPhaseGroups } from "./labels.js"
-import { assertEntityTracker } from "./policy.js"
 import { requireTrackerItem, type TrackerRecord } from "./records.js"
 
 const NameSchema = Type.String({ minLength: 1 })
@@ -48,12 +47,27 @@ export const NativePhaseFactsValidator = compile(NativePhaseFactsSchema)
 export type NativePhaseFacts = Static<typeof NativePhaseFactsSchema>
 type LinearFacts = Extract<NativePhaseFacts, { provider: "linear" }>
 
-export const SetWorkflowPhaseSchema = Type.Object(
-    { entityDir: NameSchema, phase: PhaseSchema, lifecycle: LifecycleStateSchema, native: NativePhaseFactsSchema },
-    { additionalProperties: false },
-)
-export const SetWorkflowPhaseValidator = compile(SetWorkflowPhaseSchema)
-export type SetWorkflowPhaseInput = Static<typeof SetWorkflowPhaseSchema>
+/**
+ * The native Phase to show: one while In Progress, `none` to clear it otherwise. A string enum, not a
+ * nullable union, so every harness keeps the choice in the model-facing schema.
+ */
+export const TargetPhaseSchema = Type.Enum(["planning", "execution", "selfReview", "none"], {
+    type: "string",
+    description:
+        "The Phase to show: planning, execution, or selfReview while the item is In Progress; none otherwise, which clears it.",
+})
+export type TargetPhase = Static<typeof TargetPhaseSchema>
+
+export function targetPhase(target: TargetPhase): Phase | null {
+    switch (target) {
+        case "planning":
+        case "execution":
+        case "selfReview":
+            return target
+        case "none":
+            return null
+    }
+}
 
 export const LinearPhaseInputSchema = Type.Object(
     {
@@ -115,17 +129,6 @@ export function trackerPhase(tracker: TrackerConfig): TrackerPhase {
 
 export const PHASE_NOT_CONFIGURED = "Phase isn't configured for this tracker; skip every Phase step"
 
-/** The metadata `phase` property a new entity starts with: none when Phase isn't configured. */
-export function initialPhase(tracker: TrackerConfig, phase: Phase): { phase?: Phase } {
-    const configured = trackerPhase(tracker)
-    switch (configured.state) {
-        case "configured":
-            return { phase }
-        case "notConfigured":
-            return {}
-    }
-}
-
 export function requirePhase(tracker: TrackerConfig): PhaseRepresentation {
     const phase = trackerPhase(tracker)
     switch (phase.state) {
@@ -136,28 +139,8 @@ export function requirePhase(tracker: TrackerConfig): PhaseRepresentation {
     }
 }
 
-export function setWorkflowPhase(
-    status: EntityStatus,
-    tracker: TrackerConfig,
-    input: SetWorkflowPhaseInput,
-    resolveTool: McpToolResolver,
-) {
-    parse(SetWorkflowPhaseValidator, input)
-    assertEntityTracker(status, tracker)
-    if (input.lifecycle !== "inProgress") throw new Error("setting workflow Phase requires fresh native In Progress")
-    const mutation = planPhaseMutation(
-        tracker,
-        phaseItem(status, "set workflow Phase"),
-        input.phase,
-        input.lifecycle,
-        input.native,
-        resolveTool,
-    )
-    return { status: { ...status, phase: input.phase }, metadataChanged: status.phase !== input.phase, ...mutation }
-}
-
-/** `phase` is the entity's metadata Phase: absent until set, and always absent without configured Phase. */
-export function phaseProjectionContract(phase: Phase | undefined, tracker: TrackerConfig, entity: EntityType) {
+/** How the tracker shows the entity's Phase, when it does. The Phase itself lives only on the tracker. */
+export function phaseProjectionContract(tracker: TrackerConfig, entity: EntityType) {
     const configured = trackerPhase(tracker)
     switch (configured.state) {
         case "notConfigured":
@@ -172,12 +155,9 @@ export function phaseProjectionContract(phase: Phase | undefined, tracker: Track
             : { provider: native.provider, labels: linearGroup(native.groups, entity) }
     return {
         state: "configured" as const,
-        phase: phase ?? null,
-        inProgress: phase === undefined ? null : projectedPhase("inProgress", phase),
-        otherwise: null,
         representation,
-        ...(phase === undefined ? { next: "metadata has no Phase yet; set it with the Phase tool" } : {}),
-        authority: "read fresh native lifecycle; do not infer it from metadata or cached facts",
+        authority:
+            "native Phase shows only In Progress work; read fresh native lifecycle and Phase, never cached facts",
     }
 }
 
@@ -277,7 +257,7 @@ function phaseMutation(
 export function planPhaseMutation(
     tracker: TrackerConfig,
     item: PhaseItem,
-    phase: Phase | undefined,
+    phase: Phase | null,
     lifecycle: LifecycleState,
     facts: NativePhaseFacts,
     resolveTool: McpToolResolver,
@@ -287,11 +267,7 @@ export function planPhaseMutation(
         tool: resolveTool(tracker.mcpServer, operation),
         arguments: args,
     })
-    // Outside In Progress native Phase is cleared, so a metadata Phase isn't needed to clear it.
-    let projected: Phase | null = null
-    if (phase !== undefined) projected = projectedPhase(lifecycle, phase)
-    else if (lifecycle === "inProgress")
-        throw new Error("metadata has no Phase yet; set it with the Phase tool instead of projecting it")
+    const projected = projectedPhase(lifecycle, phase)
     if (
         tracker.provider === "github" &&
         native.provider === "github" &&

@@ -13,7 +13,6 @@ import {
     GIG_ROOT,
     type LifecycleState,
     slugify,
-    PhaseSchema,
     trackerReferenceLabel,
 } from "./domain.js"
 import { AcceptedTaskSchema, readEpicTasks } from "./epic-tasks.js"
@@ -71,13 +70,10 @@ export function readPendingEntries(entityDirectory: string): PendingEntry[] {
         )
 }
 
-// Lifecycle and Priority always live on the tracker; metadata never caches them.
+// Lifecycle, Priority, and Phase always live on the tracker; metadata never caches them.
 const baseMetadataProperties = {
     slug: OneLineSchema,
     title: OneLineSchema,
-    createdAt: OneLineSchema,
-    // Absent when the tracker doesn't configure Phase, and until the first Phase is set.
-    phase: Type.Optional(PhaseSchema),
     branch: ReadyBranchContractSchema,
     // The tracker item, or `local` for a Gig kept off the tracker.
     tracker: EntityTrackerSchema,

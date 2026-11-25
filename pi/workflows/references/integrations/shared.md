@@ -39,7 +39,7 @@ These tools read local configuration, authority, and entity state. They never ca
 | Submit a PR (forge only) | `prepare_integration_pull_request` |
 | Correct lifecycle, Priority, or Task hierarchy (tracker only) | `prepare_tracker_mutation` |
 | Set an item's labels from a selection, or follow a Kind change (tracker only) | `prepare_label_mutation` |
-| Reconcile native Phase | `prepare_github_phase_mutation`, `prepare_linear_phase_mutation`, with the fresh facts in [Phase](../phase.md#fresh-native-facts) |
+| Set or clear native Phase | `prepare_github_phase_mutation`, `prepare_linear_phase_mutation`, with the fresh facts in [Phase](../phase.md#fresh-native-facts) |
 | Ship a Task or Gig | `prepare_integration_shipping`, then `prepare_integration_merge` only when a merge is needed |
 
 - `target: "current"` covers ordinary work. `target: "workflow"` is only for workflow-problem reports through Todo and for [session analysis](../session-analysis.md) searches; when reporting, read [queue](../queue.md#prepare-a-workflow-report). Use the returned tracker configuration.
@@ -167,9 +167,9 @@ Every initialized entity has a ready branch contract: exact `name`, `start`, `ta
 
 ## Workflow-first updates
 
-For initialized entities, update workflow kind, `phase`, and artifacts first.
+For initialized entities, update workflow kind and artifacts first.
 
-- Lifecycle and Priority are native tracker Status and Priority.
+- Lifecycle, Priority, and Phase are native tracker values.
 - For the tracker object, read the required fresh values, then set only the intended absolute lifecycle, Priority, or changed labels. Verify required outcome facts that a clear-success response didn't include. Reconcile uncertain or partial results before retrying.
 - With a configured `kind` label group, keep the item's `kind` label in step with the workflow kind, on both trackers.
 - A provider failure never rolls back workflow artifacts.

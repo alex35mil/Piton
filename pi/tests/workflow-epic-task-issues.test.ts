@@ -980,7 +980,7 @@ describe("Epic routing and restore", () => {
             assert.equal(restored.directory, ".piton/.local/epics/10-renamed")
             const status = readEntityStatus(path.join(root, restored.directory))
             assert.equal(status.branch.name, branch)
-            assert.equal(status.phase, "execution")
+            assert.equal("phase" in status, false)
             assert.deepEqual(status.tracker.provider === "github" && status.tracker.planComment, {
                 state: "published",
                 token,

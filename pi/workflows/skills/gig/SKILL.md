@@ -10,8 +10,6 @@ allowed-tools:
     - "review_gig"
     - "record_review_response"
     - "prepare_artifacts"
-    - "set_github_workflow_phase"
-    - "set_linear_workflow_phase"
     - "render_provider_body"
     - "prepare_tracker_publication"
     - "prepare_tracker_publication_update"

@@ -139,8 +139,6 @@ function writeEntity(cwd: string, entity: "epic" | "gig", name: string, tracker:
         title: slug,
         entity,
         ...(entity === "epic" ? {} : { kind: "feature" }),
-        createdAt: "2026-01-02T03:06:00.000Z",
-        phase: "execution",
         branch: {
             state: "ready",
             name: name.toLowerCase(),
@@ -1264,6 +1262,7 @@ describe("workflow integration configuration", () => {
                     operation: "trackerMutation",
                     entityDir,
                     change: "phase",
+                    phase: "execution",
                     lifecycle: "inProgress",
                     native: {
                         provider: "github",
@@ -1310,10 +1309,10 @@ describe("workflow integration configuration", () => {
                 repository: { owner: "alex", repo: "example" },
                 issueNumber: 42,
             }
-            const prepare = (native: unknown) =>
+            const prepare = (native: unknown, phase = "execution") =>
                 tools.get("prepare_github_phase_mutation")!.execute(
                     "phase",
-                    { entityDir, native },
+                    { entityDir, phase, native },
                     undefined,
                     undefined,
                     withToolExecution({
@@ -1341,13 +1340,16 @@ describe("workflow integration configuration", () => {
                 mutation: update("Execution"),
             })
             // Lifecycle comes from the item's Status.
-            const cleared = await prepare(githubPhaseReads(target, null, "Done"))
+            const cleared = await prepare(githubPhaseReads(target, null, "Done"), "none")
             assert.partialDeepStrictEqual(cleared.details, {
                 assignment: { provider: "github", field: "Phase", value: null },
                 nativeChanged: false,
             })
             assert.equal("mutation" in (cleared.details as object), false)
-            const inReview = await prepare(githubPhaseReads(target, "Execution", "In Review"))
+            // Phase shows only In Progress work, and In Progress work always shows one.
+            await assert.rejects(prepare(githubPhaseReads(target, null, "Done")), /none/)
+            await assert.rejects(prepare(githubPhaseReads(target), "none"), /In Progress/)
+            const inReview = await prepare(githubPhaseReads(target, "Execution", "In Review"), "none")
             assert.partialDeepStrictEqual(inReview.details, {
                 assignment: { provider: "github", field: "Phase", value: null },
                 nativeChanged: true,
@@ -1434,6 +1436,7 @@ describe("workflow integration configuration", () => {
                     operation: "trackerMutation",
                     entityDir,
                     change: "phase",
+                    phase: "execution",
                     lifecycle: "inProgress",
                     native: {
                         provider: "linear",

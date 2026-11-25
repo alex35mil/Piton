@@ -42,6 +42,9 @@ import {
     phaseItem,
     phaseProjectionContract,
     planPhaseMutation,
+    type TargetPhase,
+    TargetPhaseSchema,
+    targetPhase,
 } from "./phase.js"
 import { GitHubPhaseInputSchema, GitHubPhaseInputValidator, githubPhaseFacts } from "./github-phase-evidence.js"
 import { gateOutcome } from "./gate.js"
@@ -58,7 +61,6 @@ import { isResourceIdsKind, OperationResourceIdsMemo, readCachedResourceIds } fr
 import { shippingReadDecision, resolveResourceIdsContext } from "./resource-id-operations.js"
 import type { GitHubMergeDecision } from "./forge/github/merge.js"
 import { EvidenceSchema, registerResourceIds } from "./resource-id-tool.js"
-import { registerWorkflowOperations } from "./operations.js"
 import { registerWorkflowPublication } from "./publication-mcp.js"
 import { registerTrackerPublication } from "./tracker-publication.js"
 import { registerWorkflowContext } from "./workflow-context.js"
@@ -188,6 +190,7 @@ export const IntegrationContextSchema = Type.Union([
             operation: Type.Literal("trackerMutation"),
             entityDir: Type.String({ minLength: 1 }),
             change: Type.Literal("phase"),
+            phase: TargetPhaseSchema,
             lifecycle: LifecycleStateSchema,
             native: NativePhaseFactsSchema,
         },
@@ -214,7 +217,6 @@ export default function (pi: ExtensionAPI): void {
     const resourceIdsMemo = new OperationResourceIdsMemo()
     registerResourceIds(pi, resourceIdsMemo, tools)
     registerTrackerPublication(pi, tools)
-    registerWorkflowOperations(pi, tools)
     registerWorkflowContext(pi)
     pi.on("session_shutdown", async () => resourceIdsMemo.reset())
 
@@ -431,6 +433,7 @@ export default function (pi: ExtensionAPI): void {
     const phaseMutation = (
         ctx: ExtensionContext,
         entityDir: string,
+        phase: TargetPhase,
         lifecycle: LifecycleState,
         native: NativePhaseFacts,
     ) => {
@@ -438,6 +441,7 @@ export default function (pi: ExtensionAPI): void {
             operation: "trackerMutation",
             change: "phase",
             entityDir,
+            phase,
             lifecycle,
             native,
         })
@@ -450,9 +454,9 @@ export default function (pi: ExtensionAPI): void {
         name: githubPhase,
         label: githubPhase,
         description:
-            "Calculate the native Phase assignment from the actual Project item read, which gives both lifecycle (its Status) and the current Phase. A changed assignment carries the registered provider call as `mutation`, to run unchanged. Never execute a provider mutation or change lifecycle.",
+            "Set native Phase: a Phase while the item is In Progress, none to clear it otherwise. Checks the target against the actual Project item read, which gives both lifecycle (its Status) and the current Phase. A changed assignment carries the registered provider call as `mutation`, to run unchanged. Never execute a provider mutation or change lifecycle.",
         parameters: Type.Object(
-            { entityDir: phase.properties.entityDir, native: GitHubPhaseInputSchema },
+            { entityDir: phase.properties.entityDir, phase: phase.properties.phase, native: GitHubPhaseInputSchema },
             { additionalProperties: false },
         ),
         async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -462,7 +466,7 @@ export default function (pi: ExtensionAPI): void {
                 parse(GitHubPhaseInputValidator, params.native),
                 tools,
             )
-            return phaseMutation(ctx, params.entityDir, facts.lifecycle, facts.native)
+            return phaseMutation(ctx, params.entityDir, params.phase, facts.lifecycle, facts.native)
         },
     })
     const linearPhase = "prepare_linear_phase_mutation"
@@ -470,10 +474,11 @@ export default function (pi: ExtensionAPI): void {
         name: linearPhase,
         label: linearPhase,
         description:
-            "Calculate the native Phase assignment from fresh lifecycle and provider-specific label catalog and selection facts; omit only observed empty native leaves. A changed assignment carries the registered provider call as `mutation`, to run unchanged. Never execute a provider mutation or change lifecycle.",
+            "Set native Phase: a Phase while the item is In Progress, none to clear it otherwise. Checks the target against fresh lifecycle and the label catalog and selection facts; omit only observed empty native leaves. A changed assignment carries the registered provider call as `mutation`, to run unchanged. Never execute a provider mutation or change lifecycle.",
         parameters: Type.Object(
             {
                 entityDir: phase.properties.entityDir,
+                phase: phase.properties.phase,
                 lifecycle: phase.properties.lifecycle,
                 native: LinearPhaseInputSchema,
             },
@@ -481,7 +486,7 @@ export default function (pi: ExtensionAPI): void {
         ),
         async execute(_id, params, _signal, _onUpdate, ctx) {
             const native = linearPhaseFacts(parse(LinearPhaseInputValidator, params.native))
-            return phaseMutation(ctx, params.entityDir, params.lifecycle, native)
+            return phaseMutation(ctx, params.entityDir, params.phase, params.lifecycle, native)
         },
     })
     const [intake, projectAction] = IncomingProjectContextSchema.anyOf
@@ -717,11 +722,7 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
                 ...base(input.operation),
                 ...(entityTracker
                     ? {
-                          phaseProjection: phaseProjectionContract(
-                              entity!.status.phase,
-                              entityTracker,
-                              entity!.status.entity,
-                          ),
+                          phaseProjection: phaseProjectionContract(entityTracker, entity!.status.entity),
                       }
                     : {}),
                 roles: { tracker: tracker(trackerBoard), forge: forge() },
@@ -750,7 +751,7 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
                     ? planPhaseMutation(
                           configuredTracker!,
                           phaseItem(entity!.status, name),
-                          entity!.status.phase,
+                          targetPhase(input.phase),
                           input.lifecycle,
                           input.native,
                           (server, operation) => getMcpToolName(server, operation, tools),

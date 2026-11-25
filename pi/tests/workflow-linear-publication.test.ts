@@ -301,7 +301,6 @@ describe("managed Linear plan documents", () => {
             const results = await Promise.all([f.prepare(), f.prepare()])
             assert.equal(results.filter((r) => r.state === "mutation-needed").length, 1)
             assert.equal(results.filter((r) => r.state === "recovery-required").length, 1)
-            assert.equal(f.saved().phase, "planning")
         } finally {
             f.dispose()
         }
