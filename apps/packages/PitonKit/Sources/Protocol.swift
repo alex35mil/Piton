@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(UIKit)
+    import UIKit
+#endif
+
 // The `view` protocol, mirrored from the daemon (cli/src/apps/protocol.rs, cli/src/session/view.rs; spec in docs/design.md,
 // "Session view" and "The `view` protocol"). Kept in sync by fixtures the daemon's tests write
 // (Tests/Fixtures) and PitonKitTests decode.
@@ -597,7 +601,7 @@ public struct DaemonState: Codable, Sendable, Hashable {
 public enum SettingScope: String, Codable, Sendable, Hashable {
     /// `config.host.toml` / `config.host.local.toml`: how the daemon runs and this host's preferences.
     case host
-    /// `config.client.toml`: the apps' preferences, shared by every client. It has no local file.
+    /// `config.client.toml`: the apps' preferences, each for every device or per device section. It has no local file.
     case client
     /// The global `config.toml` / `config.local.toml`: the defaults every project inherits.
     case project
@@ -614,17 +618,112 @@ public enum SettingScope: String, Codable, Sendable, Hashable {
     }
 }
 
+/// The device a client runs on, as its hello tells the host: it decides which of the client file's device sections
+/// apply.
+public enum ClientDevice: String, Codable, Sendable, Hashable {
+    case mac
+    case iphone
+    case ipad
+
+    /// The device this app runs on: the Mac app is `mac`; the iOS app tells an iPad from an iPhone by its idiom.
+    @MainActor public static var current: ClientDevice {
+        #if os(macOS)
+            .mac
+        #else
+            switch UIDevice.current.userInterfaceIdiom {
+            case .pad: .ipad
+            // The iOS app runs on iPhone and iPad only; any other idiom it might report is a phone-sized one.
+            case .phone, .mac, .tv, .carPlay, .vision, .unspecified: .iphone
+            @unknown default: .iphone
+            }
+        #endif
+    }
+
+    /// The sections that apply to this device, broadest first.
+    public var sections: [DeviceSection] {
+        switch self {
+        case .mac: [.default, .mac]
+        case .iphone: [.default, .mobile, .iphone]
+        case .ipad: [.default, .mobile, .ipad]
+        }
+    }
+}
+
+/// One section of a client setting's value: every device, or the devices it names. Named by device, never by OS.
+public enum DeviceSection: String, Codable, Sendable, Hashable, CaseIterable {
+    /// Every device.
+    case `default`
+    case mac
+    /// iPhone and iPad.
+    case mobile
+    case iphone
+    case ipad
+}
+
+/// Where a setting's value is set.
+public enum SettingLocation: Codable, Sendable, Hashable {
+    /// A host or project setting: the file of its pair that sets it; nil when neither does (the default applies).
+    case file(placement: SettingPlacement?)
+    /// A client setting: every section the client file sets, and the one in effect on this device (nil: none applies,
+    /// the default does).
+    case devices(sections: [DeviceSection: JSON], section: DeviceSection?)
+
+    enum CodingKeys: String, CodingKey { case kind, placement, sections, section }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .kind) {
+        case "file": self = .file(placement: try c.decodeIfPresent(SettingPlacement.self, forKey: .placement))
+        case "devices":
+            let raw = try c.decode([String: JSON].self, forKey: .sections)
+            var sections: [DeviceSection: JSON] = [:]
+            for (name, value) in raw {
+                guard let section = DeviceSection(rawValue: name) else {
+                    throw DecodingError.dataCorruptedError(
+                        forKey: .sections, in: c, debugDescription: "unknown device section \(name)")
+                }
+                sections[section] = value
+            }
+            self = .devices(sections: sections, section: try c.decodeIfPresent(DeviceSection.self, forKey: .section))
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind, in: c, debugDescription: "unknown setting location \(other)")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .file(let placement):
+            try c.encode("file", forKey: .kind)
+            try c.encode(placement, forKey: .placement)
+        case .devices(let sections, let section):
+            try c.encode("devices", forKey: .kind)
+            try c.encode(
+                Dictionary(uniqueKeysWithValues: sections.map { ($0.key.rawValue, $0.value) }), forKey: .sections)
+            try c.encode(section, forKey: .section)
+        }
+    }
+}
+
+/// Where a settings change goes: a file of a host or project setting's pair, or a client setting's device section.
+public enum SettingTarget: Sendable, Hashable {
+    /// `local`: move it to the `.local` file (`true`) or the shared one (`false`); nil keeps it where it is.
+    case file(local: Bool?)
+    /// Set (or, with `null`, remove) this section; the host also removes this device's narrower sections, so the chosen
+    /// one is in effect here.
+    case section(DeviceSection)
+}
+
 /// One setting of the host: a key of one of its global files.
 public struct Setting: Codable, Sendable, Hashable, Identifiable {
     /// The key as written in its file (`stop.kill_after` is `[stop] kill_after`).
     public let key: String
     public let scope: SettingScope
-    /// The value in effect: the file's, else the default.
+    /// The value in effect: the file's (for a client setting, on this device), else the default.
     public let value: JSON
-    /// Which file of the scope's pair sets it; nil when neither does (the default applies).
-    public let placement: SettingPlacement?
-    /// Whether the apps offer the Local choice: the scope has a local file.
-    public let localChoice: Bool
+    /// Where the value is set.
+    public let location: SettingLocation
     public let valueType: SettingValueType
     public let applies: SettingApplies
     /// Whether the apps may change it.
@@ -635,9 +734,16 @@ public struct Setting: Codable, Sendable, Hashable, Identifiable {
     public var id: String { "\(scope.rawValue).\(key)" }
 
     enum CodingKeys: String, CodingKey {
-        case key, scope, value, placement, applies, editable, warning
-        case localChoice = "local_choice"
+        case key, scope, value, location, applies, editable, warning
         case valueType = "value_type"
+    }
+
+    /// The file of its pair a host or project setting is in; nil for a client setting, or when no file sets it.
+    public var placement: SettingPlacement? {
+        switch location {
+        case .file(let placement): placement
+        case .devices: nil
+        }
     }
 }
 
@@ -894,9 +1000,9 @@ public enum Request: Sendable, Hashable {
     case sessionsList
     case sessionsSubscribe
     case daemonState
-    /// Changes one setting of `scope`; `value: .null` returns it to the default. `local` moves it to the scope's
-    /// `.local` file (`true`) or the shared one (`false`); nil keeps it where it is.
-    case settingsSet(scope: SettingScope, key: String, value: JSON, local: Bool?)
+    /// Changes one setting of `scope`; `value: .null` returns it to the default (for a client setting, removes the
+    /// section). `target` is a file for host and project settings, a device section for client ones.
+    case settingsSet(scope: SettingScope, key: String, value: JSON, target: SettingTarget)
     /// Switches host logging until the policy expires or the daemon restarts.
     case daemonLogging(LoggingPolicy)
     /// Folders under the daemon's roots, one level (the roots when `path` is nil).
@@ -927,12 +1033,15 @@ public enum Request: Sendable, Hashable {
             fields["type"] = .string("sessions.list")
         case .daemonState:
             fields["type"] = .string("daemon.state")
-        case .settingsSet(let scope, let key, let value, let local):
+        case .settingsSet(let scope, let key, let value, let target):
             fields["type"] = .string("settings.set")
             fields["scope"] = .string(scope.rawValue)
             fields["key"] = .string(key)
             fields["value"] = value
-            if let local { fields["local"] = .bool(local) }
+            switch target {
+            case .file(let local): if let local { fields["local"] = .bool(local) }
+            case .section(let section): fields["section"] = .string(section.rawValue)
+            }
         case .daemonLogging(let policy):
             fields["type"] = .string("daemon.logging")
             // Encoding a plain Codable enum can't fail.
@@ -1000,7 +1109,10 @@ public enum Request: Sendable, Hashable {
     }
 }
 
-/// The hello that opens a `view` connection.
-public func viewHello(client: String) -> JSON {
-    .object(["protocol": .string("view"), "version": .integer(Int64(protocolVersion)), "client": .string(client)])
+/// The hello that opens a `view` connection from a client on `device`.
+public func viewHello(client: String, device: ClientDevice) -> JSON {
+    .object([
+        "protocol": .string("view"), "version": .integer(Int64(protocolVersion)), "client": .string(client),
+        "device": .string(device.rawValue),
+    ])
 }

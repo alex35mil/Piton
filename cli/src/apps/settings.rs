@@ -8,7 +8,10 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::config::{DaemonConfig, EditError, GlobalConfig, KeyChange, Paths, Placement, Resolved, Scope, Sharing};
+use crate::config::{
+    DaemonConfig, Device, DeviceSection, EditError, GlobalConfig, KeyChange, Paths, PerDevice, Placement, Resolved,
+    Scope, Sharing,
+};
 
 /// When a changed value takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -175,8 +178,8 @@ pub static CATALOG: &[Entry] = &[
         Live,
         |c| json!(c.logging.mode),
     ),
-    entry_of(Scope::Client, "text_font", Text, Live, null),
-    entry_of(Scope::Client, "code_font", Text, Live, null),
+    entry_of(Scope::Client, "appearance.text_font", Text, Live, null),
+    entry_of(Scope::Client, "appearance.code_font", Text, Live, null),
     project(
         "sandbox.presets",
         ValueType::ChoiceList {
@@ -226,18 +229,30 @@ pub fn entry(scope: Scope, key: &str) -> Option<&'static Entry> {
 pub struct SettingInfo {
     pub key: &'static str,
     pub scope: Scope,
-    /// The value in effect: the file's, else the default.
+    /// The value in effect: the file's (for a client setting, on the connection's device), else the default.
     pub value: Value,
-    /// Which file of the scope's pair sets it; `None` when neither does (the default applies).
-    pub placement: Option<Sharing>,
-    /// Whether the apps offer the Local choice: the scope has a local file.
-    pub local_choice: bool,
+    /// Where the value is set.
+    pub location: Location,
     pub value_type: ValueType,
     pub applies: AppliesInfo,
     pub editable: bool,
     /// Something the user should fix, shown with the setting: an integration enabled but not installed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+/// Where a setting's value is set: which file of its scope's pair, or which device sections of the client file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Location {
+    /// A host or project setting: the file of the pair that sets it; `None` when neither does (the default applies).
+    File { placement: Option<Sharing> },
+    /// A client setting: the value of every section the file sets, and the one in effect on the connection's device
+    /// (`None`: no section applies, the default does).
+    Devices {
+        sections: BTreeMap<DeviceSection, Value>,
+        section: Option<DeviceSection>,
+    },
 }
 
 /// When a change takes effect, and for a restart-only key whether it changed since the daemon started.
@@ -254,7 +269,7 @@ type Id = (Scope, &'static str);
 /// What the files said at the last good read, and why they can't be used now if they can't.
 #[derive(Debug)]
 pub struct Snapshot {
-    /// Values in effect.
+    /// Values as the files set them (a client setting with its device sections), else the default.
     values: BTreeMap<Id, Value>,
     placements: BTreeMap<Id, Option<Sharing>>,
     /// Restart-only values the daemon started with.
@@ -340,20 +355,29 @@ impl Snapshot {
 
     /// Refuses a change to a value the apps show read-only because the file gives it options.
     pub fn check_editable(&self, change: &Change) -> Result<(), SetError> {
-        let key = change.change.key.to_string();
-        let current = self.values.get(&(change.scope, key.as_str()));
-        match (entry(change.scope, &key), current) {
+        let current = self.values.get(&(change.scope, change.key));
+        match (entry(change.scope, change.key), current) {
             (Some(entry), Some(value)) if has_options(value) => Err(SetError::NotEditable { key: entry.key }),
             (Some(_) | None, _) => Ok(()),
         }
     }
 
-    pub fn info(&self) -> Vec<SettingInfo> {
+    /// The list as a client on `device` sees it: client settings resolved for that device.
+    pub fn info(&self, device: Device) -> Vec<SettingInfo> {
         CATALOG
             .iter()
             .map(|entry| {
                 let id = (entry.scope, entry.key);
-                let value = self.values.get(&id).cloned().unwrap_or(Value::Null);
+                let written = self.values.get(&id).cloned().unwrap_or(Value::Null);
+                let (value, location) = match entry.scope {
+                    Scope::Host | Scope::Project => (
+                        written,
+                        Location::File {
+                            placement: self.placements.get(&id).copied().flatten(),
+                        },
+                    ),
+                    Scope::Client => resolve_client(&written, device),
+                };
                 let applies = match entry.applies {
                     Live => AppliesInfo::Live,
                     Restart => AppliesInfo::Restart {
@@ -363,8 +387,7 @@ impl Snapshot {
                 SettingInfo {
                     key: entry.key,
                     scope: entry.scope,
-                    placement: self.placements.get(&id).copied().flatten(),
-                    local_choice: entry.scope.local_name().is_some(),
+                    location,
                     value_type: entry.value_type,
                     applies,
                     editable: entry.editable && !has_options(&value),
@@ -389,6 +412,39 @@ fn integration_warnings(integrations: &crate::integrations::Integrations) -> BTr
             }
         })
         .collect()
+}
+
+/// A client setting's value as the file writes it (`null`: unset), read per device section.
+fn per_device(written: &Value) -> Option<PerDevice<Value>> {
+    match written {
+        Value::Null => None,
+        // The file was parsed with this schema, so its value reads back.
+        Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) | Value::Object(_) => {
+            serde_json::from_value(written.clone()).ok()
+        }
+    }
+}
+
+/// A client setting as `device` sees it: its value there (`null`: the default) and every section the file sets.
+fn resolve_client(written: &Value, device: Device) -> (Value, Location) {
+    let value = per_device(written);
+    let sections = DeviceSection::ALL
+        .iter()
+        .filter_map(|section| {
+            value
+                .as_ref()
+                .and_then(|value| value.get(*section))
+                .map(|v| (*section, v.clone()))
+        })
+        .collect();
+    let resolved = value.as_ref().and_then(|value| value.resolve(device));
+    (
+        resolved.map_or(Value::Null, |(value, _)| value.clone()),
+        Location::Devices {
+            sections,
+            section: resolved.map(|(_, section)| section),
+        },
+    )
 }
 
 /// A file's values in its own shape.
@@ -416,8 +472,12 @@ pub enum SetError {
     NotEditable { key: &'static str },
     #[error("{key}: expected {expected}")]
     WrongType { key: &'static str, expected: &'static str },
-    #[error("{key} has no Local choice: every client shares it")]
+    #[error("{key} has no Local choice: a client setting is set per device section")]
     NoLocal { key: &'static str },
+    #[error("{key} is a client setting: say which device section to set")]
+    NoSection { key: &'static str },
+    #[error("{key} isn't a client setting: it has no device sections")]
+    NotPerDevice { key: &'static str },
     #[error(transparent)]
     Edit(#[from] EditError),
 }
@@ -426,13 +486,34 @@ pub enum SetError {
 #[derive(Debug)]
 pub struct Change {
     pub scope: Scope,
-    pub change: KeyChange,
-    pub placement: Placement,
+    pub key: &'static str,
+    /// The new value; `None` returns it to the default (for a client setting, removes the section).
+    pub value: Option<Value>,
+    pub target: Target,
+}
+
+/// Where a change goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// A host or project setting: the file of its pair.
+    File(Placement),
+    /// A client setting: one device section, set from a client on `device` (see [`PerDevice::with_section`]).
+    Section { section: DeviceSection, device: Device },
+}
+
+/// How the apps say where a change goes: `local` for a host or project setting, `section` for a client one. The
+/// device is the connection's own.
+#[derive(Debug, Clone, Copy)]
+pub struct Destination {
+    pub local: Option<bool>,
+    pub section: Option<DeviceSection>,
+    pub device: Device,
 }
 
 /// Checks a change from the apps: the key exists in its scope and may change, the value has its type (`null` resets
-/// it), and `local` is given only where the scope has a local file.
-pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> Result<Change, SetError> {
+/// it), and the destination fits the scope: `local` only for a host or project setting, a `section` always and only
+/// for a client one.
+pub fn validate(scope: Scope, key: &str, value: &Value, destination: Destination) -> Result<Change, SetError> {
     let entry = entry(scope, key).ok_or_else(|| SetError::Unknown {
         scope,
         key: key.to_string(),
@@ -447,19 +528,23 @@ pub fn validate(scope: Scope, key: &str, value: &Value, local: Option<bool>) -> 
             Some(value.clone())
         }
     };
-    let placement = match (local, scope.local_name()) {
-        (None, _) => Placement::Current,
-        (Some(_), None) => return Err(SetError::NoLocal { key: entry.key }),
-        (Some(true), Some(_)) => Placement::Move(Sharing::Local),
-        (Some(false), Some(_)) => Placement::Move(Sharing::Shared),
+    let target = match (scope, destination.local, destination.section) {
+        (Scope::Host | Scope::Project, _, Some(_)) => return Err(SetError::NotPerDevice { key: entry.key }),
+        (Scope::Host | Scope::Project, None, None) => Target::File(Placement::Current),
+        (Scope::Host | Scope::Project, Some(true), None) => Target::File(Placement::Move(Sharing::Local)),
+        (Scope::Host | Scope::Project, Some(false), None) => Target::File(Placement::Move(Sharing::Shared)),
+        (Scope::Client, Some(_), _) => return Err(SetError::NoLocal { key: entry.key }),
+        (Scope::Client, None, None) => return Err(SetError::NoSection { key: entry.key }),
+        (Scope::Client, None, Some(section)) => Target::Section {
+            section,
+            device: destination.device,
+        },
     };
     Ok(Change {
         scope,
-        change: KeyChange {
-            key: catalog_key(entry.key),
-            value,
-        },
-        placement,
+        key: entry.key,
+        value,
+        target,
     })
 }
 
@@ -526,9 +611,26 @@ fn check_type(entry: &Entry, value: &Value) -> Result<(), SetError> {
     }
 }
 
-/// Writes a change to its global file.
+/// Writes a change to its global file. A client setting's section change rewrites the setting's whole value from the
+/// file's current one.
 pub fn write(paths: &Paths, change: &Change) -> Result<(), SetError> {
-    crate::config::set_global(paths, change.scope, &change.change, change.placement)?;
+    let key = catalog_key(change.key);
+    match change.target {
+        Target::File(placement) => {
+            let edit = KeyChange {
+                key,
+                value: change.value.clone(),
+            };
+            crate::config::set_global(paths, change.scope, &edit, placement)?;
+        }
+        Target::Section { section, device } => {
+            let file = crate::config::client(paths).map_err(EditError::from)?;
+            let current = lookup(&file_value(&file), change.key).and_then(per_device);
+            let value =
+                PerDevice::with_section(current, section, change.value.clone(), device).map(|value| file_value(&value));
+            crate::config::set_global(paths, Scope::Client, &KeyChange { key, value }, Placement::Current)?;
+        }
+    }
     Ok(())
 }
 
@@ -547,6 +649,31 @@ mod tests {
 
     fn info<'a>(list: &'a [SettingInfo], scope: Scope, key: &str) -> &'a SettingInfo {
         list.iter().find(|s| s.scope == scope && s.key == key).unwrap()
+    }
+
+    /// A host or project setting's file destination: `local` as the apps send it.
+    fn file(local: Option<bool>) -> Destination {
+        Destination {
+            local,
+            section: None,
+            device: Device::Mac,
+        }
+    }
+
+    /// A client setting's section, from a client on `device`.
+    fn section(section: DeviceSection, device: Device) -> Destination {
+        Destination {
+            local: None,
+            section: Some(section),
+            device,
+        }
+    }
+
+    fn placement(setting: &SettingInfo) -> Option<Sharing> {
+        match &setting.location {
+            Location::File { placement } => *placement,
+            Location::Devices { .. } => panic!("{} is a client setting", setting.key),
+        }
     }
 
     /// Every integration off: no warnings.
@@ -570,7 +697,7 @@ mod tests {
             integration: Integration::Tailscale,
             program: "tailscale".into(),
         });
-        let list = Snapshot::new(&paths, &integrations).info();
+        let list = Snapshot::new(&paths, &integrations).info(Device::Mac);
         let warning = info(&list, Scope::Host, "integrations.tailscale.enabled")
             .warning
             .clone()
@@ -619,19 +746,24 @@ mod tests {
             // `check_type` is what `validate` uses; calling it directly covers the non-editable `socket` too.
             check_type(entry, &sample).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
             let _ = std::fs::remove_file(&paths.global_files(entry.scope).shared);
+            let target = match entry.scope {
+                Scope::Host | Scope::Project => Target::File(Placement::Current),
+                Scope::Client => Target::Section {
+                    section: DeviceSection::Default,
+                    device: Device::Mac,
+                },
+            };
             let change = Change {
                 scope: entry.scope,
-                change: KeyChange {
-                    key: catalog_key(entry.key),
-                    value: Some(sample.clone()),
-                },
-                placement: Placement::Current,
+                key: entry.key,
+                value: Some(sample.clone()),
+                target,
             };
             write(&paths, &change).unwrap_or_else(|e| panic!("{}: {e}", entry.key));
             let snapshot = Snapshot::new(&paths, &no_tools());
             assert_eq!(snapshot.error, None, "{}", entry.key);
             assert_eq!(
-                info(&snapshot.info(), entry.scope, entry.key).value,
+                info(&snapshot.info(Device::Mac), entry.scope, entry.key).value,
                 sample,
                 "{}",
                 entry.key
@@ -646,16 +778,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
         let set = |value: Value| -> Result<SettingInfo, SetError> {
-            let change = validate(Scope::Project, "sandbox.filesystem", &value, None)?;
+            let change = validate(Scope::Project, "sandbox.filesystem", &value, file(None))?;
             write(&paths, &change)?;
             let snapshot = Snapshot::new(&paths, &no_tools());
             assert_eq!(snapshot.error, None);
-            Ok(info(&snapshot.info(), Scope::Project, "sandbox.filesystem").clone())
+            Ok(info(&snapshot.info(Device::Mac), Scope::Project, "sandbox.filesystem").clone())
         };
         let map = json!({ "~/.cache/x": "write", "~/secrets": "deny" });
         let on = set(map.clone()).unwrap();
         assert_eq!(on.value, map);
-        assert_eq!(on.placement, Some(Sharing::Shared));
+        assert_eq!(placement(&on), Some(Sharing::Shared));
         let text = std::fs::read_to_string(paths.global.join("config.toml")).unwrap();
         assert!(text.contains("\"~/.cache/x\" = \"write\""), "{text}");
         assert!(matches!(
@@ -665,7 +797,7 @@ mod tests {
         assert!(set(json!({ "relative": "write" })).is_err(), "the file's own check");
         assert_eq!(
             info(
-                &Snapshot::new(&paths, &no_tools()).info(),
+                &Snapshot::new(&paths, &no_tools()).info(Device::Mac),
                 Scope::Project,
                 "sandbox.filesystem"
             )
@@ -675,7 +807,7 @@ mod tests {
         );
         let off = set(Value::Null).unwrap();
         assert_eq!(off.value, json!({}));
-        assert_eq!(off.placement, None, "no file sets it");
+        assert_eq!(placement(&off), None, "no file sets it");
     }
 
     #[test]
@@ -687,23 +819,23 @@ mod tests {
         let mut snapshot = Snapshot::new(&paths, &no_tools());
 
         assert!(matches!(
-            validate(Scope::Host, "nope", &json!(1), None),
+            validate(Scope::Host, "nope", &json!(1), file(None)),
             Err(SetError::Unknown { .. })
         ));
         assert!(matches!(
-            validate(Scope::Client, "roots", &json!([]), None),
+            validate(Scope::Client, "roots", &json!([]), file(None)),
             Err(SetError::Unknown { .. })
         ));
         assert!(matches!(
-            validate(Scope::Host, "socket", &json!("/s"), None),
+            validate(Scope::Host, "socket", &json!("/s"), file(None)),
             Err(SetError::NotEditable { .. })
         ));
         assert!(matches!(
-            validate(Scope::Host, "roots", &json!("~/a"), None),
+            validate(Scope::Host, "roots", &json!("~/a"), file(None)),
             Err(SetError::WrongType { .. })
         ));
         assert!(matches!(
-            validate(Scope::Host, "debugging.log_level", &json!("loud"), None),
+            validate(Scope::Host, "debugging.log_level", &json!("loud"), file(None)),
             Err(SetError::WrongType { .. })
         ));
         // Durations are text in their grammar; only the question's timeout may be `never`.
@@ -716,48 +848,67 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    validate(Scope::Host, key, &value, None),
+                    validate(Scope::Host, key, &value, file(None)),
                     Err(SetError::WrongType { .. })
                 ),
                 "{key} = {value}"
             );
         }
-        assert!(validate(Scope::Host, "approval_timeout", &json!("never"), None).is_ok());
-        // The client file has no local one: a device keeps its own value in its app.
+        assert!(validate(Scope::Host, "approval_timeout", &json!("never"), file(None)).is_ok());
+        // A client setting is set per device section: no Local, and a section is required; only it takes one.
+        let font = "appearance.text_font";
         assert!(matches!(
-            validate(Scope::Client, "text_font", &json!("Inter"), Some(true)),
+            validate(Scope::Client, font, &json!("Inter"), file(Some(true))),
             Err(SetError::NoLocal { .. })
+        ));
+        assert!(matches!(
+            validate(Scope::Client, font, &json!("Inter"), file(None)),
+            Err(SetError::NoSection { .. })
+        ));
+        assert!(matches!(
+            validate(
+                Scope::Host,
+                "roots",
+                &json!([]),
+                section(DeviceSection::Mac, Device::Mac)
+            ),
+            Err(SetError::NotPerDevice { .. })
         ));
 
         write(
             &paths,
-            &validate(Scope::Host, "roots", &json!(["~/b"]), Some(true)).unwrap(),
+            &validate(Scope::Host, "roots", &json!(["~/b"]), file(Some(true))).unwrap(),
         )
         .unwrap();
         write(
             &paths,
-            &validate(Scope::Host, "integrations.tailscale.port", &json!(9000), None).unwrap(),
+            &validate(Scope::Host, "integrations.tailscale.port", &json!(9000), file(None)).unwrap(),
         )
         .unwrap();
         write(
             &paths,
-            &validate(Scope::Host, "keep_awake", &json!(false), None).unwrap(),
+            &validate(Scope::Host, "keep_awake", &json!(false), file(None)).unwrap(),
         )
         .unwrap();
         write(
             &paths,
-            &validate(Scope::Host, "approval_timeout", &json!("10m"), None).unwrap(),
+            &validate(Scope::Host, "approval_timeout", &json!("10m"), file(None)).unwrap(),
         )
         .unwrap();
         snapshot.reload(&paths);
         assert_eq!(snapshot.error, None);
 
-        let list = snapshot.info();
+        let list = snapshot.info(Device::Mac);
         let roots = info(&list, Scope::Host, "roots");
         assert_eq!(roots.value, json!(["~/b"]));
-        assert_eq!(roots.placement, Some(Sharing::Local));
-        assert!(roots.local_choice);
-        assert!(!info(&list, Scope::Client, "text_font").local_choice);
+        assert_eq!(placement(roots), Some(Sharing::Local));
+        assert_eq!(
+            info(&list, Scope::Client, font).location,
+            Location::Devices {
+                sections: BTreeMap::new(),
+                section: None
+            }
+        );
         assert_eq!(
             info(&list, Scope::Host, "integrations.tailscale.port").applies,
             AppliesInfo::Restart { pending: true }
@@ -785,7 +936,7 @@ mod tests {
         assert!(
             write(
                 &paths,
-                &validate(Scope::Host, "integrations.tailscale.port", &json!(70000), None).unwrap()
+                &validate(Scope::Host, "integrations.tailscale.port", &json!(70000), file(None)).unwrap()
             )
             .is_err()
         );
@@ -796,12 +947,91 @@ mod tests {
 
         // A broken hand edit keeps that file's last good values and says why; the other files still update.
         std::fs::write(paths.global.join("config.host.local.toml"), "roots = [\n").unwrap();
-        std::fs::write(paths.global.join("config.client.toml"), "text_font = \"Inter\"\n").unwrap();
+        std::fs::write(
+            paths.global.join("config.client.toml"),
+            "[appearance]\ntext_font = \"Inter\"\n",
+        )
+        .unwrap();
         snapshot.reload(&paths);
         assert!(snapshot.error.is_some());
-        let list = snapshot.info();
+        let list = snapshot.info(Device::Mac);
         assert_eq!(info(&list, Scope::Host, "roots").value, json!(["~/b"]));
-        assert_eq!(info(&list, Scope::Client, "text_font").value, json!("Inter"));
+        assert_eq!(info(&list, Scope::Client, font).value, json!("Inter"));
+    }
+
+    /// One client file, seen from each device: the value in effect, every section, and the one that applies. A section
+    /// set from a device is in effect there: the narrower sections that would hide it go, other devices' stay. Written
+    /// inline, on the setting's line.
+    #[test]
+    fn client_settings_are_per_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::create_dir_all(&paths.global).unwrap();
+        let path = paths.global.join("config.client.toml");
+        std::fs::write(
+            &path,
+            "# fonts\n[appearance]\ntext_font = \"Inter\" # body\ncode_font = { default = \"D\", mobile = \"M\", ipad = \"P\" }\n",
+        )
+        .unwrap();
+        let key = "appearance.code_font";
+        let seen = |device| {
+            let snapshot = Snapshot::new(&paths, &no_tools());
+            assert_eq!(snapshot.error, None);
+            let setting = info(&snapshot.info(device), Scope::Client, key).clone();
+            match setting.location {
+                Location::Devices { sections, section } => (setting.value, sections, section),
+                Location::File { .. } => panic!("a client setting"),
+            }
+        };
+        let (value, sections, in_effect) = seen(Device::Mac);
+        assert_eq!((value, in_effect), (json!("D"), Some(DeviceSection::Default)));
+        assert_eq!(
+            sections,
+            BTreeMap::from([
+                (DeviceSection::Default, json!("D")),
+                (DeviceSection::Mobile, json!("M")),
+                (DeviceSection::Ipad, json!("P")),
+            ])
+        );
+        assert_eq!(seen(Device::Iphone).2, Some(DeviceSection::Mobile));
+        assert_eq!(
+            (seen(Device::Ipad).0, seen(Device::Ipad).2),
+            (json!("P"), Some(DeviceSection::Ipad))
+        );
+
+        let set = |value: Value, to: DeviceSection, device| {
+            write(
+                &paths,
+                &validate(Scope::Client, key, &value, section(to, device)).unwrap(),
+            )
+            .unwrap();
+        };
+        // From the iPad, every device: `ipad` and `mobile` go, so the iPad sees `default`.
+        set(json!("E"), DeviceSection::Default, Device::Ipad);
+        assert_eq!(
+            (seen(Device::Ipad).0, seen(Device::Ipad).2),
+            (json!("E"), Some(DeviceSection::Default))
+        );
+        // From the Mac, every Mac: the others keep `default`.
+        set(json!("C"), DeviceSection::Mac, Device::Mac);
+        assert_eq!(seen(Device::Mac).0, json!("C"));
+        assert_eq!(seen(Device::Iphone).0, json!("E"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "# fonts\n[appearance]\ntext_font = \"Inter\" # body\ncode_font = { default = \"E\", mac = \"C\" }\n"
+        );
+        // Removing `mac` leaves only `default`: a plain value again. Removing that, nothing.
+        set(Value::Null, DeviceSection::Mac, Device::Mac);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("code_font = \"E\"\n"), "{text}");
+        set(Value::Null, DeviceSection::Default, Device::Mac);
+        assert_eq!(seen(Device::Mac), (Value::Null, BTreeMap::new(), None));
+        // A section set from scratch is a table on the setting's line, not a `[table]`.
+        set(json!("I"), DeviceSection::Iphone, Device::Iphone);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("code_font = { iphone = \"I\" }\n"), "{text}");
+        assert_eq!(seen(Device::Mac).0, Value::Null, "no section applies to the Mac");
     }
 
     /// Presets with options are edited in the file: the apps' list control would drop the options.
@@ -813,9 +1043,9 @@ mod tests {
         let config = paths.global.join("config.toml");
         std::fs::write(&config, "[sandbox]\npresets = [\"rust\", \"pi-claude-code\"]\n").unwrap();
         let mut snapshot = Snapshot::new(&paths, &no_tools());
-        let presets = |s: &Snapshot| info(&s.info(), Scope::Project, "sandbox.presets").clone();
+        let presets = |s: &Snapshot| info(&s.info(Device::Mac), Scope::Project, "sandbox.presets").clone();
         assert!(presets(&snapshot).editable);
-        let change = validate(Scope::Project, "sandbox.presets", &json!(["rust", "swift"]), None).unwrap();
+        let change = validate(Scope::Project, "sandbox.presets", &json!(["rust", "swift"]), file(None)).unwrap();
         assert!(snapshot.check_editable(&change).is_ok());
 
         std::fs::write(

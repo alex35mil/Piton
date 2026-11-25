@@ -21,12 +21,12 @@ use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(test)]
-pub use self::settings::{AppliesInfo, ValueType};
+pub use self::settings::{AppliesInfo, Location as SettingLocation, ValueType};
 pub use self::{
     protocol::{DaemonState, SendModeWire, TrustDecisionWire, ViewEnvelope, ViewRequest},
     settings::{
-        Change as SettingChange, SetError as SettingError, SettingInfo, Snapshot as SettingsSnapshot,
-        validate as validate_setting, write as write_setting,
+        Change as SettingChange, Destination as SettingDestination, SetError as SettingError, SettingInfo,
+        Snapshot as SettingsSnapshot, validate as validate_setting, write as write_setting,
     },
     tailnet::{SelfNode, TailnetError, self_node as tailnet_self_node},
     websocket::serve_tailnet,
@@ -40,9 +40,11 @@ use crate::{
     },
 };
 
-/// Serves one view connection: `lines` are its requests, `out` its outgoing lines. Returns when `lines` ends.
+/// Serves one view connection from a client on `device`: `lines` are its requests, `out` its outgoing lines. Returns
+/// when `lines` ends.
 pub async fn serve(
     daemon: Arc<Daemon>,
+    device: crate::config::Device,
     mut lines: mpsc::UnboundedReceiver<String>,
     out: mpsc::UnboundedSender<Arc<str>>,
 ) {
@@ -67,7 +69,7 @@ pub async fn serve(
                 };
                 let id = envelope.id.clone();
                 let subscribes = matches!(envelope.request, ViewRequest::SessionsSubscribe);
-                match handle(&daemon, watcher, &mut watching, &out, envelope.request) {
+                match handle(&daemon, device, watcher, &mut watching, &out, envelope.request) {
                     Handled::Now(result) => {
                         let _ = out.send(reply(&id, result));
                     }
@@ -92,7 +94,7 @@ pub async fn serve(
                 let _ = out.send(list.clone().into());
                 last_list = Some(list);
             }
-            let state = json!({"type": "daemon", "state": daemon.state()}).to_string();
+            let state = json!({"type": "daemon", "state": daemon.state(device)}).to_string();
             if last_state.as_deref() != Some(state.as_str()) {
                 let _ = out.send(state.clone().into());
                 last_state = Some(state);
@@ -118,6 +120,7 @@ impl From<Result<Value, String>> for Handled {
 
 fn handle(
     daemon: &Arc<Daemon>,
+    device: crate::config::Device,
     watcher: ClientId,
     watching: &mut BTreeMap<u64, SessionHandle>,
     out: &mpsc::UnboundedSender<Arc<str>>,
@@ -126,12 +129,13 @@ fn handle(
     let find = |key: u64| daemon.session(key).ok_or_else(|| format!("no live session {key}"));
     match request {
         ViewRequest::SessionsList => Ok(sessions_value(daemon)).into(),
-        ViewRequest::DaemonState => Ok(json!({"state": daemon.state()})).into(),
+        ViewRequest::DaemonState => Ok(json!({"state": daemon.state(device)})).into(),
         ViewRequest::SettingsSet {
             scope,
             key,
             value,
             local,
+            section,
         } => {
             crate::log!("view client {watcher}: set {key} ({scope:?})");
             let daemon = daemon.clone();
@@ -139,9 +143,10 @@ fn handle(
             Handled::Later(
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        crate::apps::validate_setting(scope, &key, &value, local)
+                        let destination = crate::apps::SettingDestination { local, section, device };
+                        crate::apps::validate_setting(scope, &key, &value, destination)
                             .and_then(|change| daemon.set_app_setting(change))
-                            .map(|()| json!({"state": daemon.state()}))
+                            .map(|()| json!({"state": daemon.state(device)}))
                             .map_err(|e| e.to_string())
                     })
                     .await
@@ -153,7 +158,7 @@ fn handle(
         ViewRequest::DaemonLogging { policy } => {
             crate::log!("view client {watcher}: logging change");
             daemon.set_logging(policy);
-            Ok(json!({"state": daemon.state()})).into()
+            Ok(json!({"state": daemon.state(device)})).into()
         }
         // The connection pushes the list after the reply (see `serve`).
         ViewRequest::SessionsSubscribe => Ok(json!({})).into(),

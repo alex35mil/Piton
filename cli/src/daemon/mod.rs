@@ -301,7 +301,8 @@ impl Daemon {
     /// Daemon-wide state for the apps. `awake` is what keep-awake does with the current sessions; `awake` follows
     /// the same rule (a failed `caffeinate` is logged), so a reply never shows a stale value from before that task
     /// caught up.
-    pub fn state(&self) -> crate::apps::DaemonState {
+    /// Client settings are resolved for `device`, the asking connection's.
+    pub fn state(&self, device: crate::config::Device) -> crate::apps::DaemonState {
         let sessions = self.session_count();
         let keep_awake = self.keep_awake();
         let app_settings = lock(&self.app_settings);
@@ -312,7 +313,7 @@ impl Daemon {
             awake: keep_awake && sessions > 0,
             sessions,
             logging: crate::logging::current_policy(),
-            settings: app_settings.info(),
+            settings: app_settings.info(device),
             settings_error: app_settings.error.clone(),
         }
     }
@@ -403,11 +404,7 @@ impl Daemon {
         // names would drop the options.
         snapshot.check_editable(&change)?;
         crate::apps::write_setting(&self.config().paths, &change)?;
-        crate::log!(
-            "config: {} ({:?}) changed from the apps",
-            change.change.key,
-            change.scope
-        );
+        crate::log!("config: {} ({:?}) changed from the apps", change.key, change.scope);
         self.reload_locked(&mut snapshot);
         Ok(())
     }

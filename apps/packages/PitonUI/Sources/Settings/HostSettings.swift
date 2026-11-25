@@ -97,7 +97,7 @@ struct HostSettingRow: View {
                 }
                 Spacer()
                 // Local moves a value between the files; a key no file sets has nothing to move yet.
-                if setting.localChoice, setting.placement != nil, setting.editable {
+                if case .file(placement: .some) = setting.location, setting.editable {
                     Toggle("Local", isOn: local).font(.caption)
                         #if os(macOS)
                             .toggleStyle(.checkbox)
@@ -160,7 +160,8 @@ struct HostSettingRow: View {
             set: { isLocal in
                 saving = true
                 Task {
-                    _ = await store.setSetting(setting.scope, setting.key, to: setting.value, local: isLocal)
+                    _ = await store.setSetting(
+                        setting.scope, setting.key, to: setting.value, target: .file(local: isLocal))
                     saving = false
                 }
             })

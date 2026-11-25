@@ -96,7 +96,7 @@ final class Connection {
         let endpoint = endpoint
         guard store?.endpoint != endpoint else { return }
         store?.stop()
-        store = endpoint.map { Store(endpoint: $0, client: "mac") }
+        store = endpoint.map { Store(endpoint: $0, client: "mac", device: .mac) }
         store?.start()
     }
 }

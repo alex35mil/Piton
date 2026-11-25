@@ -177,8 +177,12 @@ async fn serve(
             Some(Ok(Message::Binary(_) | Message::Close(_)) | Err(_)) | None => return,
         }
     };
-    let client = match hello {
-        Ok(Hello::View { version, client }) if version == PROTOCOL_VERSION => client,
+    let (client, device) = match hello {
+        Ok(Hello::View {
+            version,
+            client,
+            device,
+        }) if version == PROTOCOL_VERSION => (client, device),
         Ok(Hello::View { .. }) => {
             let _ = ws.close(None).await;
             crate::log!("tailnet client {} speaks another protocol version", who.name);
@@ -191,7 +195,7 @@ async fn serve(
         }
     };
     crate::log!(
-        "view client connected over the tailnet: {} ({}, {})",
+        "view client connected over the tailnet: {} ({device:?}; {}, {})",
         client.as_deref().unwrap_or("unnamed"),
         who.name,
         who.login
@@ -247,7 +251,7 @@ async fn serve(
         stop_reading.abort();
         let _ = sink.close().await;
     });
-    crate::apps::serve(daemon, in_rx, out_tx).await;
+    crate::apps::serve(daemon, device, in_rx, out_tx).await;
     reader.abort();
     let _ = writer.await;
     crate::log!("view client disconnected from the tailnet: {}", who.name);

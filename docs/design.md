@@ -476,7 +476,8 @@ The same model drives the session list's titles and status; notifications next.
 
 ### The `view` protocol
 
-One JSON object per line after the hello `{"protocol":"view","version":1,"client":"<name>"}`. Requests carry an
+One JSON object per line after the hello `{"protocol":"view","version":1,"client":"<name>","device":"mac"|"iphone"|"ipad"}`
+(`device` required: it decides which client settings the connection sees). Requests carry an
 `id` and get exactly one `{"type":"reply","id","ok":true,"data"}` or `{"type":"reply","id","ok":false,"error"}`.
 Pushed lines have no id: `sessions {sessions}` (after `sessions.subscribe`, then on every change),
 `snapshot {session, seq, items, has_more, state}`, `change {session, seq, change}`.
@@ -490,8 +491,8 @@ arrive out of request order.
 | --- | --- |
 | `sessions.list` | `{sessions}`: live sessions (key, id, file, workspace, checkout, mode, status, clients, pid, title) |
 | `sessions.subscribe` | `{}`; then pushes `sessions` and `daemon {state}` lines on change |
-| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `scope` (`host`, `client`, `project`), `value`, `placement` (`shared`, `local`, or null), `local_choice`, `value_type` (`bool`, `text`, `text_list`, `integer`, `duration` with `never`, `choice` and `choice_list` with `options`, `map` with `values`), `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
-| `settings.set {scope, key, value, local?}` | `{state}`; the key in the global file of `scope`; `value: null` resets; `local` moves the key between the shared and `.local` file (refused for `client`, which has no local file) |
+| `daemon.state` | `{state}`: `host_id`, `keep_awake` (enabled), `awake` (held now), `sessions` (live count), `logging` (`policy`, `default`), `settings` (each with `key`, `scope` (`host`, `client`, `project`), `value` (a client setting's on this connection's device), `location` (`file` with `placement` `shared`, `local`, or null; or, for a client setting, `devices` with `sections`, the value of each section the file sets, and `section`, the one in effect on this device or null), `value_type` (`bool`, `text`, `text_list`, `integer`, `duration` with `never`, `choice` and `choice_list` with `options`, `map` with `values`), `applies` (`live`, or `restart` with `pending`), `editable`), `settings_error` |
+| `settings.set {scope, key, value, local?, section?}` | `{state}`; the key in the global file of `scope`; `value: null` resets. `host`, `project`: `local` moves the key between the shared and `.local` file; `section` is refused. `client`: `section` (`default`, `mac`, `mobile`, `iphone`, `ipad`) is required and `local` refused; a value sets that section and removes the narrower sections that apply to this connection's device, so it's the one in effect there; `null` removes only that section |
 | `daemon.logging {policy}` | `{state}`; until it expires or the daemon restarts |
 | `workspaces.browse {path?}` | `{entries}`; see "Workspace roots" |
 | `session.start {workspace, mode?, prompt?}` | `{session}`, or `{trust_needed: {source, grants, added, resources: {pi, mcp_servers}}}` when the repository needs the user's trust first (nothing launched); mode defaults to `sandbox`; `workspace` must be a checkout under a root |
@@ -573,7 +574,7 @@ Every connection starts with a hello declaring its protocol:
 
 ```json
 {"type": "hello", "protocol": "rpc", "version": 1, "workspace": "/abs/path", "client": {"name": "nvim"}}
-{"type": "hello", "protocol": "view", "version": 1, "client": {"name": "iPhone", "device": "…"}}
+{"type": "hello", "protocol": "view", "version": 1, "client": {"name": "iPhone"}, "device": "iphone"}
 ```
 
 - **`rpc`:** after the hello, raw pi RPC for one session. Used by `piton attach`. Possible later over the tailnet.
@@ -676,8 +677,8 @@ the roomier reading line spacing apply to the session list and conversations, no
 system chrome (bars, alerts, menus): iOS 27 has no opt-out.
 
 Fonts are client preferences (Settings > Appearance): a text font and a code font, each the system font or any family
-available to the app, scaled with Dynamic Type. Each is shared through the host (`config.client.toml`,
-the same on every device, cached for offline start) unless Local keeps a value on this device; a shared font a
+available to the app, scaled with Dynamic Type. Each is set through the host (`config.client.toml`, for every device
+or per device section, the value for this device cached for offline start) or kept on this device only; a font a
 device lacks shows as the system font there. Settings > Host shows every host setting with where it comes from. The Mac lists its installed fonts. On the phone, fonts the user owns
 (a paid one like Berkeley Mono can't be bundled) are imported from .otf/.ttf files: copied into the app's Application
 Support and registered for the process at launch. Fonts installed system-wide through configuration-profile apps need
@@ -716,7 +717,7 @@ that the user approved as a diff ("Protected files").
 $XDG_CONFIG_HOME/piton/          # global tier (default ~/.config/piton/)
   config[.local].toml            # the chain's farthest level: defaults every project inherits
   config.host[.local].toml       # how the daemon runs on this host, this host's preferences, [debugging]
-  config.client.toml             # the apps' preferences, served to every client (no local file)
+  config.client.toml             # the apps' preferences, per device section (no local file)
   mcp[.local].json               # MCP servers, in the format other harnesses read
   policies.md
   agents/rules/, agents/skills/  # global agent instructions
@@ -743,8 +744,11 @@ Three families of files, each read by its own consumer:
   log level, and switches for a development install in [development.md](development.md), which the pi package reads
   through `piton config resolve --global` on whichever machine pi runs). Durations are strings: a whole number and
   one unit (`"500ms"`, `"10s"`, `"10m"`, `"1h"`); `approval_timeout` also takes `"never"`.
-- **`config.client.toml`, global only:** the apps' preferences (`text_font`, `code_font`; themes and keybindings
-  later), served by the host to every client. It has no local file: a device keeps its own value in its app.
+- **`config.client.toml`, global only:** the apps' preferences, grouped (`[appearance]` `text_font`, `code_font`;
+  themes and keybindings later). Each is one value for every device or a table of device sections (`default`, `mac`,
+  `mobile` for iPhone and iPad, `iphone`, `ipad`); the most specific section that applies to a device wins, and the
+  host serves each client the values for the device its hello names. Sections are named by device, never by OS. It
+  has no local file: a device keeps a value of its own in its app.
 
 Keys are snake_case. A project file's tables are each parsed on their own, so a bad value in `[tracker]` never stops
 permission checks; a syntax error, or an unknown top-level key, fails every table of that file, and the message names
@@ -849,15 +853,16 @@ the line. A host or client file has one schema and is read whole.
 - **Config or state.** Config is what you decide, preferences included: roots, favorites, appearance, keep-awake,
   the logging default, sandbox grants, permissions. State is facts and history on this host: its identity, and later
   sessions, drafts, recent projects. The database holds no preferences.
-- **Shared unless Local.** Each preference has one Local checkbox where its file has a local one. Unchecked, a host
+- **Shared unless Local, or by device.** Each host preference has one Local checkbox where its file has a local one. Unchecked, a host
   preference lives in `config.host.toml` (every host through dotfiles); checked, in `config.host.local.toml` (this
-  host). A client preference unchecked lives in `config.client.toml`, served to every client (which caches it for
-  offline start); checked, in that app (this device). A shared client choice a client can't honor (a font it lacks)
-  falls back there only.
+  host). A client preference has a scope instead: a device section of `config.client.toml` (every device, every Mac,
+  iPhone and iPad, every iPhone, every iPad; each client gets its device's value and caches it for offline start), or
+  only this device, in that app. A client choice a client can't honor (a font it lacks) falls back there only.
 - **The apps' settings list** (`daemon.state` `settings`) shows global config keys, each with `key` as written in its
-  file, `scope` (`host`, `client`, or `project` for the global `config.toml`), `placement` (`shared`, `local`, or
-  unset), whether its scope has a local file, its type, whether it applies live or after a restart, and whether the
-  apps may change it. `settings.set {scope, key, value, local?}` writes it. The daemon edits with `toml_edit`, keeping
+  file, `scope` (`host`, `client`, or `project` for the global `config.toml`), its `location` (the file of the pair
+  that sets it; for a client setting, every device section set and the one in effect on the asking device), its type,
+  whether it applies live or after a restart, and whether the apps may change it. `settings.set {scope, key, value,
+  local?, section?}` writes it (`section` for a client setting). The daemon edits with `toml_edit`, keeping
   comments and order, writes through a dotfiles symlink, and rereads before writing so a hand edit isn't lost. The
   apps edit the host file's keys (`socket` shown read-only), the client file, and the global `[sandbox]` and
   `[workers]`; `[debugging] session_analysis`, `[tools.permissions]`, `[branches]`, `[web_search]`, `[tracker]`, and `[forge]` are edited
@@ -883,7 +888,8 @@ session identity and its state `draft`, `creating`, `live`, `failed`, title, pi 
 
 #### Client storage
 
-The hosts it connects to and local client preferences in `UserDefaults`; the cached shared client preferences;
+The hosts it connects to and this device's own client preferences in `UserDefaults`; the cached host values for
+this device;
 imported fonts in Application Support; the phone's log capture in its `settings.json`; durable unsent work (outbox,
 local drafts) as versioned Codable files in Application Support, moved aside when they don't decode.
 

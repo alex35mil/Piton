@@ -42,8 +42,15 @@ impl Daemon {
                 };
                 let _ = write_json_line(&mut write, &response).await;
             }
-            Ok(Hello::View { version, client }) if version == PROTOCOL_VERSION => {
-                crate::log!("view client connected ({})", client.as_deref().unwrap_or("unnamed"));
+            Ok(Hello::View {
+                version,
+                client,
+                device,
+            }) if version == PROTOCOL_VERSION => {
+                crate::log!(
+                    "view client connected ({}, {device:?})",
+                    client.as_deref().unwrap_or("unnamed")
+                );
                 let (in_tx, in_rx) = mpsc::unbounded_channel::<String>();
                 let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Arc<str>>();
                 let writer = tokio::spawn(async move {
@@ -60,7 +67,7 @@ impl Daemon {
                         }
                     }
                 });
-                crate::apps::serve(self.clone(), in_rx, out_tx).await;
+                crate::apps::serve(self.clone(), device, in_rx, out_tx).await;
                 reader.abort();
                 let _ = writer.await;
                 crate::log!("view client disconnected");

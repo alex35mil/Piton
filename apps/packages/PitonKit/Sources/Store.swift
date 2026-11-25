@@ -56,6 +56,8 @@ public final class Store {
 
     public let endpoint: Endpoint
     private let client: String
+    /// The device this app runs on: the host resolves client settings for it.
+    public let device: ClientDevice
     private var connection: Connection?
     /// How many screens are watching each session. SwiftUI can show a new screen (watch) before it removes the old
     /// one (unwatch) for the same session, so a set would drop the newer screen's watch.
@@ -69,9 +71,10 @@ public final class Store {
     /// How long a connection check waits for the daemon: a live tailnet answers in milliseconds.
     static let verifyTimeout: Duration = .seconds(2)
 
-    public init(endpoint: Endpoint, client: String) {
+    public init(endpoint: Endpoint, client: String, device: ClientDevice) {
         self.endpoint = endpoint
         self.client = client
+        self.device = device
     }
 
     /// Starts connecting (and keeps reconnecting) until `stop`.
@@ -304,9 +307,11 @@ public final class Store {
     }
 
     /// Changes one of the host's settings (see `Request.settingsSet`).
-    public func setSetting(_ scope: SettingScope, _ key: String, to value: JSON, local: Bool? = nil) async -> Bool {
+    public func setSetting(
+        _ scope: SettingScope, _ key: String, to value: JSON, target: SettingTarget = .file(local: nil)
+    ) async -> Bool {
         do {
-            let state = try await require().setSetting(scope, key, to: value, local: local)
+            let state = try await require().setSetting(scope, key, to: value, target: target)
             daemon = state
             ClientPreferences().cache(state)
             return true
@@ -411,7 +416,7 @@ public final class Store {
             do {
                 let connection = try await Connection(
                     transport: try await endpoint.transport(diagnosticID: trace.id), client: client,
-                    diagnosticID: trace.id)
+                    device: device, diagnosticID: trace.id)
                 trace.record("connect.transport_ready elapsed=\(started.duration(to: .now))")
                 self.connection = connection
                 attempt = 0

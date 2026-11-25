@@ -83,7 +83,7 @@ function viewClient(ctx, name) {
             for (const w of [...c.waiters]) if (w.pred(msg)) { c.waiters.splice(c.waiters.indexOf(w), 1); w.resolve(msg); }
         }
     });
-    sock.write(JSON.stringify({ protocol: "view", version: 1, client: name }) + "\n");
+    sock.write(JSON.stringify({ protocol: "view", version: 1, device: "mac", client: name }) + "\n");
     c.wait = (pred, ms = 15000) => {
         const hit = c.lines.find(pred);
         if (hit) return Promise.resolve(hit);

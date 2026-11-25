@@ -51,6 +51,15 @@ impl WriteLevel {
         }
     }
 
+    /// Whether a table value is written inline on its key's line (`code_font = { mac = "A" }`) rather than as a
+    /// `[table]`: the client file's per-device values, so each setting reads on one line.
+    fn inline_tables(&self) -> bool {
+        match self {
+            WriteLevel::Client => true,
+            WriteLevel::Global | WriteLevel::Repository { .. } | WriteLevel::Host => false,
+        }
+    }
+
     /// A file's new text, checked as every reader will read it.
     fn validate(&self, text: &str, path: &Path, sharing: Sharing) -> Result<(), ConfigError> {
         match self {
@@ -127,7 +136,7 @@ impl ConfigFile {
     /// writes the file another way (a protected file, through the daemon).
     pub fn plan(&self, paths: &Paths, changes: &[KeyChange]) -> Result<Option<String>, EditError> {
         let path = self.path(paths)?;
-        let items = Items::new(changes, &path)?;
+        let items = Items::new(changes, &path, self.level.inline_tables())?;
         let current = match std::fs::read_to_string(&path) {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -164,7 +173,7 @@ impl ConfigFile {
     /// Writes `changes`, keeping comments and layout.
     pub fn write(&self, paths: &Paths, changes: &[KeyChange]) -> Result<(), EditError> {
         let path = self.path(paths)?;
-        let items = Items::new(changes, &path)?;
+        let items = Items::new(changes, &path, self.level.inline_tables())?;
         let sharing = self.sharing;
         write_changes(&path, &items.changes(), &|text, path| {
             self.level.validate(text, path, sharing)
@@ -177,7 +186,7 @@ impl ConfigFile {
 pub fn set_global(paths: &Paths, scope: Scope, change: &KeyChange, placement: Placement) -> Result<Sharing, EditError> {
     let level = WriteLevel::global(scope);
     let files = level.files(paths);
-    let items = Items::new(std::slice::from_ref(change), &files.shared)?;
+    let items = Items::new(std::slice::from_ref(change), &files.shared, level.inline_tables())?;
     let (key, item) = &items.0[0];
     files.set(key, item.clone(), placement, &|text, path, sharing| {
         level.validate(text, path, sharing)
@@ -188,7 +197,7 @@ pub fn set_global(paths: &Paths, scope: Scope, change: &KeyChange, placement: Pl
 struct Items<'a>(Vec<(Vec<&'a str>, Option<toml_edit::Item>)>);
 
 impl<'a> Items<'a> {
-    fn new(changes: &'a [KeyChange], path: &Path) -> Result<Self, EditError> {
+    fn new(changes: &'a [KeyChange], path: &Path, inline_tables: bool) -> Result<Self, EditError> {
         let mut items = Vec::new();
         for change in changes {
             let parts: Vec<&str> = change.key.parts().iter().map(String::as_str).collect();
@@ -199,7 +208,26 @@ impl<'a> Items<'a> {
                 });
             }
             let item = match &change.value {
-                Some(value) => Some(item_from_json(&parts, value, path)?),
+                Some(value) => {
+                    let item = item_from_json(&parts, value, path)?;
+                    Some(match (inline_tables, item) {
+                        (true, item @ toml_edit::Item::Table(_)) => {
+                            let mut value = item.into_value().map_err(|_| EditError::Value {
+                                path: path.to_path_buf(),
+                                reason: format!("{}: not a value", change.key),
+                            })?;
+                            value.decor_mut().clear();
+                            toml_edit::Item::Value(value)
+                        }
+                        (
+                            true | false,
+                            item @ (toml_edit::Item::None
+                            | toml_edit::Item::Value(_)
+                            | toml_edit::Item::Table(_)
+                            | toml_edit::Item::ArrayOfTables(_)),
+                        ) => item,
+                    })
+                }
                 None => None,
             };
             items.push((parts, item));
