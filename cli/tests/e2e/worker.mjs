@@ -87,9 +87,9 @@ function cli(ctx, args, cwd) {
 const tests = {
     async "create, launch in the sandbox with the source's settings, delete"(ctx) {
         // The source's committed grant applies only once the user trusts the source; its workers share the decision.
-        const refused = await cli(ctx, ["start", ctx.source]);
-        assert.equal(refused.code, 1);
-        assert.match(refused.err, /needs your trust before a launch/);
+        const needsTrust = await cli(ctx, ["start", ctx.source]);
+        assert.equal(needsTrust.code, 1);
+        assert.match(needsTrust.err, /needs your trust before a launch/);
         const untrusted = JSON.parse((await cli(ctx, ["sandbox", "show"])).out);
         assert.ok(untrusted.untrusted.some((g) => g.includes("/source-grant")), "left out until trusted");
         // A decision for grants other than the repository's now is refused, naming the change (exit 4).

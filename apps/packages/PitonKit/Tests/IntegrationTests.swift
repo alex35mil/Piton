@@ -52,7 +52,8 @@ private final class Daemon: @unchecked Sendable {
             .write(to: whois, atomically: true, encoding: .utf8)
         log = dir.appendingPathComponent("piton.log")
         // The global configuration folder's host file: how the daemon runs, and the host preferences. Keep-awake starts
-        // off, so no caffeinate runs.
+        // off, so no caffeinate runs. fnox is off: unset, it's used when installed, and the user's own fnox config (with
+        // secrets behind it) would then wrap every test session.
         let config = dir.appendingPathComponent("config")
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
         try """
@@ -70,6 +71,8 @@ private final class Daemon: @unchecked Sendable {
         terminate_after = "3s"
         kill_after = "1s"
         [integrations.mise]
+        enabled = false
+        [integrations.fnox]
         enabled = false
         [integrations.tailscale]
         enabled = true
