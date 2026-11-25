@@ -83,7 +83,7 @@ const FIXED_FOLDER_DENY: &str = "a folder on the way to configuration: renaming 
 const GIT_CONTROL_DENY: &str = "Git's hooks and configuration: Git on the host runs what they name; \
                                 `allow_git_control_files = true` opens them (global config.toml or a config.local.toml)";
 
-/// Why a socket a `connect` entry names, or a folder on its way, can't be written.
+/// Why a socket a `[sandbox.network.unix_socket_connections]` entry names, or a folder on its way, can't be written.
 const SOCKET_PATH_DENY: &str = "a socket an entry allows, or a folder on its way: kept in place so no other socket can \
                                 be moved there";
 
@@ -752,9 +752,10 @@ fn build(
         rules.push(Effect::Deny, &[Access::Write], literal(&entry), Source::FnoxConfig);
     }
 
-    // 4c. Each socket a `connect` entry names, and each folder entry on its way, kept in place: otherwise a session
-    // could move the real socket aside and another one (Neovim's) in its place. `$SSH_AUTH_SOCK` lives in `/private/tmp`,
-    // which every launch writes. What's in a listed folder stays as the other rules decide.
+    // 4c. Each socket a `[sandbox.network.unix_socket_connections]` entry names, and each folder entry on its way, kept
+    // in place: otherwise a session could move the real socket aside and another one (Neovim's) in its place.
+    // `$SSH_AUTH_SOCK` lives in `/private/tmp`, which every launch writes. What's in a listed folder stays as the other
+    // rules decide.
     let named: Vec<PathBuf> = grants
         .sockets
         .iter()
@@ -2463,9 +2464,9 @@ mod tests {
         assert!(!allowed(&p, &h.home.join(".gnupg/S.gpg-agent"), Access::Connect));
     }
 
-    /// A socket a `connect` entry names, and every folder on its way, can't be written, renamed, or replaced: otherwise
-    /// a session could move the real `$SSH_AUTH_SOCK` (under temp, which it writes) aside and link another socket in its
-    /// place. A sibling in its folder stays writable.
+    /// A socket a `[sandbox.network.unix_socket_connections]` entry names, and every folder on its way, can't be
+    /// written, renamed, or replaced: otherwise a session could move the real `$SSH_AUTH_SOCK` (under temp, which it
+    /// writes) aside and link another socket in its place. A sibling in its folder stays writable.
     #[test]
     fn a_named_socket_stays_in_place() {
         let tmp = "/private/tmp/piton-test-launchd";

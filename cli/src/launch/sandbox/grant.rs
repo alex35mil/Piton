@@ -194,7 +194,8 @@ fn all_below(policy: &Policy, credentials: Credentials, roots: &[PathBuf]) -> Po
             source: source(),
         })
         .collect();
-    // nono validates file rules only: a socket allow on `/` is accepted (yolo's `connect = ["/"]` emits it too).
+    // nono validates file rules only: a socket allow on `/` is accepted (yolo's `"/" = "allow"` Unix socket entry emits
+    // it too).
     rules.push(Rule {
         effect: Effect::Allow,
         access: vec![Access::Connect, Access::Bind],
@@ -1259,7 +1260,8 @@ mod tests {
             lift("network-bind", "/w/x.sock"),
             Ok(only(Lift::Bind("/w/x.sock".into())))
         );
-        // A socket in a credential folder: its `connect` entry opens it (for connecting only), so it's offered.
+        // A socket in a credential folder: its `[sandbox.network.unix_socket_connections]` entry opens it (for
+        // connecting only), so it's offered.
         assert_eq!(
             lift("network-outbound", "/h/.ssh/agent.sock"),
             Ok(only(Lift::Connect("/h/.ssh/agent.sock".into())))
@@ -1278,7 +1280,7 @@ mod tests {
             lift("network-outbound", "/h/.local/state/piton/piton.sock"),
             decided(DeniedBy::Floor)
         );
-        // Git's control files, after every user entry: reported, with the `git` preset.
+        // Git's control files, after every user entry: reported, with `allow_git_control_files`.
         assert_eq!(
             lift("file-write-unlink", "/w/.git/config"),
             decided(DeniedBy::GitControl)

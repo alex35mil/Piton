@@ -5,8 +5,8 @@
 //! - Each sandbox the daemon starts for a session (pi's, each bash call's) gets its own proxy user and credential, so a
 //!   connection names the sandbox it came from and can't borrow another's network. Anything without a known user and
 //!   its credential gets `407`.
-//! - The session decides (its [`Decide`]): the sandbox's `connect` entries, pi's trusted hosts, the session's answers,
-//!   `silence`, else the user is asked while the connection waits.
+//! - The session decides (its [`Decide`]): the sandbox's `[sandbox.network.connections]` entries, pi's trusted hosts,
+//!   the session's answers, `silence`, else the user is asked while the connection waits.
 //! - An allowed name is resolved once, and an address that reaches this Mac or its link isn't dialed
 //!   ([`addresses`]), unless an IP entry lists it.
 //! - Through an upstream proxy (fnox's), every allowed tunnel is a `CONNECT` to it; the upstream dials.

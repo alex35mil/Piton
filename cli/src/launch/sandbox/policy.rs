@@ -234,7 +234,8 @@ pub fn agent_dir_runtime(relative: &std::path::Path) -> bool {
 
 /// The Mach services every launch may look up, each with why: what command-line tools reach without a window. Claude
 /// Code's list for its command sandbox, plus what Piton's whole-process sandbox needs for pi, its MCP servers, and
-/// their tools (TLS, proxies and reachability, preferences). Anything else is a `services` entry, or `standard`'s `*`.
+/// their tools (TLS, proxies and reachability, preferences). Anything else is a `[sandbox.macos.services]` entry, or
+/// `standard`'s `*`.
 pub const BASE_SERVICES: &[(&str, &str)] = &[
     ("com.apple.logd", "logging"),
     ("com.apple.system.logger", "logging (syslog)"),

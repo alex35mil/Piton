@@ -231,7 +231,8 @@ with `.piton/.local` linked to the source's.
   The daemon fetches the default branch and fast-forwards inside the sandbox a launch in the source gets, with every
   hook on: the user's hooks keep running, contained, and no Git that could run them runs on the host. The fetch
   authenticates the way the agent's Git does (SSH through the SSH agent with `~/.ssh/config` and `known_hosts`
-  readable, as the `standard` profile grants; HTTPS with the keychain in `read`); when it can't, creation is refused naming that. The target is the commit `git ls-remote`
+  readable, as the `standard` profile grants; HTTPS with the keychain readable, a `"read"` entry in
+  `[sandbox.filesystem]`); when it can't, creation is refused naming that. The target is the commit `git ls-remote`
   reports, never a remote-tracking ref an agent could have rewritten. Read-only Git commands run on the host with
   hooks and fsmonitor off.
   - An update that changes protected files (`.piton/`, `.pi/`) needs the user, since the sandbox can't write them. The

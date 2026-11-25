@@ -91,13 +91,14 @@ pub struct Rule {
 pub struct Policy {
     /// In order; the last matching rule decides.
     pub rules: Vec<Rule>,
-    /// Keychain Mach services allowed: a `read` entry covers the user's keychains. Decided after `services`.
+    /// Keychain Mach services allowed: a `"read"` entry covers the user's keychains. Decided after `services`.
     pub keychain: bool,
     /// The Mach services the sandbox may look up.
     pub services: Services,
     /// Whether processes may launch apps and send Apple Events.
     pub apps: Apps,
-    /// TCP and UDP: open, or only what `connect` lists (ports in Seatbelt, named hosts through the gate).
+    /// TCP and UDP: open, or only what `[sandbox.network.connections]` allows (ports in Seatbelt, named hosts through
+    /// the gate).
     pub network: Network,
     /// TCP listening, on every address or none.
     pub listen: Listen,
@@ -459,7 +460,7 @@ impl Policy {
                 true => Decision {
                     allowed: true,
                     source: Source::BuiltIn {
-                        what: "the keychain: a `read` entry covers it".into(),
+                        what: "the keychain: a `\"read\"` entry covers it".into(),
                     },
                 },
                 false => Decision {

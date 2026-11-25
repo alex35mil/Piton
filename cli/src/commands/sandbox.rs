@@ -171,7 +171,7 @@ async fn serve_gate(
         let verdict = match decider.decide_network(&to).allowed || catalog.allows(&to.host, to.port).is_some() {
             true => crate::launch::sandbox::network::Verdict::Allow { literal },
             false => crate::launch::sandbox::network::Verdict::Deny {
-                reason: format!("Piton's sandbox refused {to}: no connect entry lists it"),
+                reason: format!("Piton's sandbox refused {to}: no entry in [sandbox.network.connections] allows it"),
             },
         };
         Box::pin(async move { verdict })

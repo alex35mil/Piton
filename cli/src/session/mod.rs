@@ -217,8 +217,8 @@ pub enum SessionCmd {
     GateUpstream {
         url: String,
     },
-    /// A `connect` entry the user saved from a network question (in any session) in `file`: a session whose
-    /// configuration reads `file` lets every sandbox reach it from now on, without a restart.
+    /// A `[sandbox.network.connections]` entry the user saved from a network question (in any session) in `file`: a
+    /// session whose configuration reads `file` lets every sandbox reach it from now on, without a restart.
     NetworkEntrySaved {
         target: crate::config::NetworkTarget,
         file: PathBuf,
@@ -325,7 +325,7 @@ pub struct Hooks {
     pub status_changed: Arc<Notify>,
     /// Wakes view connections to re-send the session list (they skip unchanged lists).
     pub list_changed: tokio::sync::broadcast::Sender<()>,
-    /// A `connect` entry was saved from a network question: the daemon tells every live session.
+    /// A `[sandbox.network.connections]` entry was saved from a network question: the daemon tells every live session.
     pub network_entry_saved: Box<dyn Fn(crate::config::NetworkTarget, PathBuf) + Send + Sync>,
 }
 

@@ -113,9 +113,9 @@ pub enum SourceGit<'a> {
 pub enum UpdateError {
     #[error(
         "can't fetch {checkout} inside the sandbox: {stderr}. Sandboxed Git authenticates the way an agent's does: over \
-         SSH, through the SSH agent (`connect = [\"$SSH_AUTH_SOCK\"]`), with `~/.ssh/config`, `~/.ssh/known_hosts`, and \
-         the public keys readable, which the standard profile grants; over HTTPS through the keychain, \
-         `~/Library/Keychains` in [sandbox] read"
+         SSH, through the SSH agent (`\"$SSH_AUTH_SOCK\" = \"allow\"` in [sandbox.network.unix_socket_connections]), \
+         with `~/.ssh/config`, `~/.ssh/known_hosts`, and the public keys readable, which the standard profile grants; \
+         over HTTPS through the keychain, `\"~/Library/Keychains\" = \"read\"` in [sandbox.filesystem]"
     )]
     Fetch { checkout: PathBuf, stderr: String },
     #[error("origin has no branch {branch} for {checkout}")]
@@ -719,8 +719,10 @@ pub mod tests {
         assert!(matches!(failed, UpdateError::Fetch { .. }));
         assert!(failed.to_string().contains("~/.ssh/known_hosts"), "{failed}");
         assert!(
-            failed.to_string().contains("connect = [\"$SSH_AUTH_SOCK\"]"),
-            "names the connect entry: {failed}"
+            failed
+                .to_string()
+                .contains("`\"$SSH_AUTH_SOCK\" = \"allow\"` in [sandbox.network.unix_socket_connections]"),
+            "names the socket entry: {failed}"
         );
     }
 

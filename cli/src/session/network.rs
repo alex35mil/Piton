@@ -1,7 +1,8 @@
 //! A sandboxed session's filtered network: its gate, the proxy user of each sandbox it runs (pi's and each bash call's),
-//! and the decision for each connection the gate holds. The decision, in order: the sandbox's `connect` entries, pi's
-//! trusted hosts (`pi::catalog`), the hosts the user allowed for this session, a `silence` entry (refused without asking),
-//! else the user is asked while the connection waits, one question at a time, sharing the session's question slot.
+//! and the decision for each connection the gate holds. The decision, in order: the sandbox's
+//! `[sandbox.network.connections]` entries, pi's trusted hosts (`pi::catalog`), the hosts the user allowed for this
+//! session, a `silence` entry (refused without asking), else the user is asked while the connection waits, one question
+//! at a time, sharing the session's question slot.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -133,8 +134,8 @@ impl Network {
         }
     }
 
-    /// Lets every policy's network allow `to` from now on, as a saved `connect` entry would after a restart. The gate
-    /// decides named hosts, so nothing in Seatbelt changes.
+    /// Lets every policy's network allow `to` from now on, as a saved `[sandbox.network.connections]` entry would after
+    /// a restart. The gate decides named hosts, so nothing in Seatbelt changes.
     pub fn add_entry(&mut self, target: crate::config::NetworkTarget, source: crate::launch::sandbox::Source) {
         for policy in self.policies.values_mut() {
             if let crate::launch::sandbox::Network::Filtered { grants, .. } = &mut policy.network {

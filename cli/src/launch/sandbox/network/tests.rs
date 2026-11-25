@@ -35,7 +35,7 @@ fn decide(allow: &'static [&'static str], literal: bool) -> Decide {
         let verdict = match allow.contains(&to.to_string().as_str()) {
             true => Verdict::Allow { literal },
             false => Verdict::Deny {
-                reason: format!("Piton's sandbox refused {to}: no connect entry allows it"),
+                reason: format!("Piton's sandbox refused {to}: no entry in [sandbox.network.connections] allows it"),
             },
         };
         Box::pin(async move { verdict })

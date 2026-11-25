@@ -959,8 +959,8 @@ mod tests {
         c.after_failure(calls, req, last, false)
     }
 
-    /// A `connect` entry saved from a network question reaches calls that start afterwards, at the session's policy and
-    /// a grant's; only a session whose configuration reads the file takes it.
+    /// A `[sandbox.network.connections]` entry saved from a network question reaches calls that start afterwards, at
+    /// the session's policy and a grant's; only a session whose configuration reads the file takes it.
     #[test]
     fn a_saved_network_entry_reaches_later_calls() {
         let dir = tempfile::tempdir().unwrap();

@@ -213,7 +213,7 @@ attempt denied "write through a granted symlink"        'touch cache/x'
 attempt ok     "read system files"                      'cat /etc/hosts'
 attempt ok     "read git config"                        "test ! -e $HOME/.gitconfig || cat $HOME/.gitconfig"
 attempt "$EXPECT_SSH_KEY" "read an SSH key"              "cat '$SSH_KEY'"
-# Denied by default; allowed when the configuration lists the keychains in `read`.
+# Denied by default; allowed when the configuration has a `"read"` entry for the keychains in `[sandbox.filesystem]`.
 attempt "$EXPECT_KEYCHAIN" "read the login keychain"     "cat $KEYCHAIN"
 attempt "$EXPECT_HISTORY" "read shell history"           "cat $HOME/.zsh_history"
 # Other case: APFS is case-insensitive, and so is Seatbelt's matching there; denies and the allows inside them hold.
@@ -416,17 +416,17 @@ wait "$gate_pid" 2>/dev/null || true
 cat "$scratch/strict-out"
 cat "$scratch/strict-out" >> "$scratch/out"
 
-# The apps preset: a link opens in the browser (from a strict checkout whose config.local.toml lists it, so the preset's
-# own services are what open uses).
+# Launching apps: a link opens in the browser (from a strict checkout whose config.local.toml sets
+# allow_launching_apps, so the services that switch opens are what open uses).
 apps="$scratch/apps"
 mkdir -p "$apps/.piton/.local"
 git -C "$apps" init -q
-printf '[sandbox]\nprofile = "strict"\npresets = ["apps"]\n' > "$apps/.piton/config.local.toml"
+printf '[sandbox]\nprofile = "strict"\nallow_launching_apps = true\n' > "$apps/.piton/config.local.toml"
 apps_policy=$("$piton" sandbox show --workspace "$apps" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
 if (cd "$apps" && PITON_SANDBOX_POLICY="$apps_policy" "$piton" sandbox-exec -- open -g https://example.com </dev/null >/dev/null 2>"$scratch/err"); then
-    echo "pass  ok      strict + apps preset: open a link" | tee -a "$scratch/out"
+    echo "pass  ok      strict + allow_launching_apps: open a link" | tee -a "$scratch/out"
 else
-    echo "FAIL  denied  strict + apps preset: open a link" | tee -a "$scratch/out"
+    echo "FAIL  denied  strict + allow_launching_apps: open a link" | tee -a "$scratch/out"
     printf '      %s\n' "$(tail -n 1 "$scratch/err")"
 fi
 # Every refusal reaches its call: with a tag, the default deny carries it too, so the kernel's record of a refusal no

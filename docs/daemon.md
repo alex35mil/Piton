@@ -36,7 +36,8 @@ below).
 Creating or deleting a worker fast-forwards its source checkout. The fetch and the fast-forward run in the sandbox a
 session in the source gets, with your hooks on; nothing of it runs outside the sandbox. The fetch authenticates the way
 an agent's Git does: over SSH through your SSH agent with `~/.ssh/config` and `~/.ssh/known_hosts` readable (the
-`standard` profile's entries), over HTTPS with the keychain in `read`. When it can't, creating a worker fails naming that; deleting one leaves the source as it is, with a warning.
+`standard` profile's entries), over HTTPS with the keychain readable (`"~/Library/Keychains" = "read"` in
+`[sandbox.filesystem]`). When it can't, creating a worker fails naming that; deleting one leaves the source as it is, with a warning.
 
 An update that changes protected files (`.piton/`, `.pi/`) needs your approval, since the sandbox can't write them.
 Piton asks before changing anything, naming the files. Approved, Piton writes exactly those files from the upstream

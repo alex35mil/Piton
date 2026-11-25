@@ -52,8 +52,8 @@ impl SourceGit {
     }
 }
 
-/// A gate for Git under a filtered network: the policy's `connect` entries decide; a host they don't list is refused
-/// and logged (no session to ask). Git doesn't run behind fnox, so the gate dials directly.
+/// A gate for Git under a filtered network: the policy's `[sandbox.network.connections]` entries decide; a host they
+/// don't list is refused and logged (no session to ask). Git doesn't run behind fnox, so the gate dials directly.
 fn gate_for(
     policy: &mut Policy,
     config: &DaemonConfig,
@@ -73,11 +73,13 @@ fn gate_for(
             },
             false => {
                 crate::log!(
-                    "git in {}: the network gate refused {to} (no connect entry lists it)",
+                    "git in {}: the network gate refused {to} (no entry in [sandbox.network.connections] allows it)",
                     source.display()
                 );
                 crate::launch::sandbox::network::Verdict::Deny {
-                    reason: format!("Piton's sandbox refused {to}: no `connect` entry lists it"),
+                    reason: format!(
+                        "Piton's sandbox refused {to}: no entry in [sandbox.network.connections] allows it"
+                    ),
                 }
             }
         };
