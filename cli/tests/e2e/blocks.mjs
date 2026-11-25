@@ -212,7 +212,10 @@ const tests = {
 
         // A `"deny"` the user wrote: the block is only logged, never asked about or noticed.
         const target = `${ctx.outside}-silenced`;
-        writeFileSync(join(ctx.config, "config.toml"), `[sandbox.filesystem]\n"${target}" = "deny"\n`);
+        // Added to the suite's global config, which keeps its `[tools.permissions] default_mode = "allow"`: without it
+        // the permissions extension stops the tool call before it runs, and nothing reaches the sandbox.
+        const global = join(ctx.config, "config.toml");
+        writeFileSync(global, `${readFileSync(global, "utf8")}\n[sandbox.filesystem]\n"${target}" = "deny"\n`);
         const b = attach(ctx);
         b.send({ type: "prompt", message: `write ${target}` });
         await b.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
