@@ -1,16 +1,18 @@
 import { type Static, type TSchema, Type } from "typebox"
 
 import { compile, describeErrors } from "../../../extensions/__lib/schema.js"
-import { resolveSettings, section } from "../../../extensions/__lib/settings.js"
-import { integrationsFromFile, type TrackerConfig, TrackerConfigValidator } from "../integrations/config.js"
 import {
-    assertGitHubLabels,
-    assertLinearLabels,
-    GitHubLabelsSchema,
+    type GitHubTracker,
+    GitHubTrackerSchema,
+    loadIntegrationRoles,
+    type LinearTracker,
+    LinearTrackerSchema,
+    type TrackerConfig,
+    validateIntegration,
+} from "../integrations/config.js"
+import {
     LinearLabelCatalogSchema,
     LinearLabelScopeSchema,
-    LinearLabelsSchema,
-    LinearPhaseGroupsSchema,
     type GitHubLabels,
     type LinearLabels,
 } from "../integrations/labels.js"
@@ -86,24 +88,32 @@ const remapDescription =
     "Existing labels the user maps onto configured values; setup renames, moves, and restyles each in place, so items keep it. Each value takes at most one label."
 const approvedPlanHash = Type.String({ pattern: "^[a-f0-9]{64}$" })
 
+const credentialEnv = Type.String({
+    pattern: "^[A-Za-z_][A-Za-z0-9_]*$",
+    description: "The environment variable holding the tracker's API credential",
+})
+
+/*
+ * Preview and apply take the complete candidate tracker: the saved one, or the one earlier setup steps returned, with
+ * the desired `labels` (and on Linear the desired `phase` groups). piton checks the whole tracker before any provider
+ * write, since the label rules depend on the rest of it (which tracker, which Phase labels).
+ */
 const GitHubDesired = {
-    target: GitHubTargetSchema,
-    labels: GitHubLabelsSchema,
+    credentialEnv,
+    tracker: GitHubTrackerSchema,
     remap: Type.Optional(Type.Array(GitHubRemapSchema)),
     answers: Type.Optional(AnswersSchema),
 }
 const LinearDesired = {
-    target: LinearTargetSchema,
-    labels: LinearLabelsSchema,
-    // Absent when the project doesn't track Phase.
-    phase: Type.Optional(LinearPhaseGroupsSchema),
+    credentialEnv,
+    tracker: LinearTrackerSchema,
     remap: Type.Optional(Type.Array(LinearRemapSchema)),
     answers: Type.Optional(AnswersSchema),
 }
 const object = <T extends Record<string, TSchema>>(properties: T) =>
     Type.Object(properties, { additionalProperties: false })
 
-/** The exact input for each operation and provider; validation picks one by `target.provider`. */
+/** The exact input for each operation and provider; validation picks one by `target.provider` or `tracker.provider`. */
 const providerSchemas = {
     inspect: { github: object({ target: GitHubTargetSchema }), linear: object({ target: LinearTargetSchema }) },
     preview: { github: object(GitHubDesired), linear: object(LinearDesired) },
@@ -136,17 +146,15 @@ export type LabelSetupOperation = LabelSetupToolInput["operation"]
 
 /*
  * The registered parameters describe both providers for the model. They're deliberately loose:
- * `parseLabelSetupInput` validates against the target provider's exact schema, so errors come
+ * `parseLabelSetupInput` validates against the provider's exact schema, so errors come
  * from that provider only, never from the other branch of a union.
  */
 const desiredProperties = {
-    target: TargetSchema,
-    labels: Type.Union([GitHubLabelsSchema, LinearLabelsSchema], {
-        description: "The complete desired `tracker.labels` section, including the current keep and retired lists",
+    credentialEnv,
+    tracker: Type.Union([GitHubTrackerSchema, LinearTrackerSchema], {
+        description:
+            "The complete tracker to save, with the desired `labels` (including the current keep and retired lists) and, on Linear, the desired `phase` groups",
     }),
-    phase: Type.Optional(
-        Type.Union([LinearPhaseGroupsSchema], { description: "Linear only: the desired `tracker.phase` groups" }),
-    ),
     remap: Type.Optional(
         Type.Union([Type.Array(GitHubRemapSchema), Type.Array(LinearRemapSchema)], {
             description: `${remapDescription} GitHub entries name the label, group, and value; Linear entries also name the catalog and scope, and omit value to map a label group onto the group's native label group.`,
@@ -163,13 +171,14 @@ export const ApplyLabelSetupSchema = Type.Object(
 )
 
 /**
- * Validates tool input against the exact schema for its operation and `target.provider`, and
- * reports only that schema's errors.
+ * Validates tool input against the exact schema for its operation and provider (`target.provider` for inspect,
+ * `tracker.provider` otherwise), and reports only that schema's errors.
  */
 export function parseLabelSetupInput(operation: LabelSetupOperation, raw: unknown): LabelSetupToolInput {
-    const provider = (raw as { target?: { provider?: unknown } } | null)?.target?.provider
+    const field = operation === "inspect" ? "target" : "tracker"
+    const provider = (raw as Record<string, { provider?: unknown } | undefined> | null)?.[field]?.provider
     if (provider !== "github" && provider !== "linear")
-        throw new Error('label setup input is invalid: target.provider must be "github" or "linear"')
+        throw new Error(`label setup input is invalid: ${field}.provider must be "github" or "linear"`)
     const validator = providerValidators[operation][provider]
     if (!validator.check(raw)) {
         const errors = [...new Set(describeErrors(validator.errors(raw)))].map((line) => `  - ${line}`)
@@ -197,10 +206,10 @@ export async function runLabelSetup(
     options: LabelSetupOptions,
 ): Promise<Record<string, unknown>> {
     parseLabelSetupInput(input.operation, withoutOperation(input))
-    const adapter = adapterFor(input.target, options)
-    const previous = await readPrevious(options.cwd, adapter)
-    const catalog = await adapter.readCatalog()
     if (input.operation === "inspect") {
+        const adapter = adapterFor(input.target, options)
+        const previous = await readPrevious(options.cwd, adapter)
+        const catalog = await adapter.readCatalog()
         return {
             target: describeTarget(input.target),
             catalog,
@@ -209,7 +218,12 @@ export async function runLabelSetup(
                 : null,
         }
     }
+    const target = targetOf(input)
+    // Checked before any provider call: an invalid result never follows tracker changes.
     const desired = desiredFor(input)
+    const adapter = adapterFor(target, options)
+    const previous = await readPrevious(options.cwd, adapter)
+    const catalog = await adapter.readCatalog()
     const plan = planCatalog({
         catalog,
         desired: desired.entries,
@@ -220,7 +234,7 @@ export async function runLabelSetup(
         remap: desired.remap,
     })
     const hash = planHash({
-        target: input.target,
+        target,
         desired: desired.raw,
         remap: input.remap ?? [],
         answers: input.answers ?? {},
@@ -232,7 +246,7 @@ export async function runLabelSetup(
     const configuration = plan.decisions.length === 0 ? configurationFor(input, plan) : undefined
     const preview = {
         state: plan.decisions.length > 0 ? ("decisions-needed" as const) : ("ready" as const),
-        target: describeTarget(input.target),
+        target: describeTarget(target),
         actions: plan.actions.filter((action) => action.kind !== "retire" && action.kind !== "delete"),
         removals,
         keyMoves: plan.keyMoves,
@@ -251,7 +265,7 @@ export async function runLabelSetup(
     verify(desired.entries, verifiedCatalog)
     return {
         state: "applied",
-        target: describeTarget(input.target),
+        target: describeTarget(target),
         applied: plan.actions.map((action) => action.description),
         ...(result.recovered.length > 0 ? { recovered: result.recovered } : {}),
         created: result.created,
@@ -264,7 +278,23 @@ function withoutOperation<T extends { operation: string }>(input: T): Omit<T, "o
     return rest
 }
 
-function describeTarget(target: LabelSetupToolInput["target"]) {
+type Target = Static<typeof TargetSchema>
+
+/** The tracker whose labels change, and the credential setup reads and writes them with. */
+function targetOf(input: DesiredInput): Target {
+    switch (input.tracker.provider) {
+        case "github":
+            return {
+                provider: "github",
+                credentialEnv: input.credentialEnv,
+                repository: input.tracker.repository,
+            }
+        case "linear":
+            return { provider: "linear", credentialEnv: input.credentialEnv, team: input.tracker.team }
+    }
+}
+
+function describeTarget(target: Target) {
     return target.provider === "github"
         ? { provider: "github", repository: target.repository }
         : { provider: "linear", team: target.team }
@@ -273,8 +303,7 @@ function describeTarget(target: LabelSetupToolInput["target"]) {
 /**
  * The desired input is the current configuration plus the user's change, so its keep and retired
  * lists may still name a label the change makes managed again. The planner drops those entries and
- * shows the drop; validation here checks everything else, and the returned configuration is
- * validated in full.
+ * shows the drop; piton checks everything else here, and the returned configuration in full.
  */
 function withoutManagedListEntries<T extends GitHubLabels | LinearLabels>(
     labels: T,
@@ -298,10 +327,11 @@ function withoutManagedListEntries<T extends GitHubLabels | LinearLabels>(
 }
 
 function desiredFor(input: DesiredInput) {
-    if (input.target.provider === "github") {
-        const { labels, remap } = input as GitHubPreviewInput
+    if (input.tracker.provider === "github") {
+        const { tracker, remap } = input as GitHubPreviewInput
+        const labels = tracker.labels ?? {}
         const entries = githubManagedEntries(labels)
-        assertGitHubLabels(withoutManagedListEntries(labels, entries))
+        validateIntegration("tracker", { ...tracker, labels: withoutManagedListEntries(labels, entries) })
         return {
             raw: labels,
             entries,
@@ -317,8 +347,13 @@ function desiredFor(input: DesiredInput) {
             ),
         }
     }
-    const { labels, phase, remap } = input as LinearPreviewInput
-    assertLinearLabels(withoutManagedListEntries(labels, linearManagedEntries(labels, phase)), phase)
+    const { tracker, remap } = input as LinearPreviewInput
+    const { phase } = tracker
+    const labels = tracker.labels ?? {}
+    validateIntegration("tracker", {
+        ...tracker,
+        labels: withoutManagedListEntries(labels, linearManagedEntries(labels, phase)),
+    })
     return {
         raw: { labels, ...(phase ? { phase } : {}) },
         entries: linearManagedEntries(labels, phase),
@@ -336,20 +371,19 @@ function desiredFor(input: DesiredInput) {
 }
 
 /**
- * The managed set setup last applied: the nearest `[tracker]`, committed or not, when it validates and describes the
- * same tracker target. Anything else, such as an older shape or another repository or team, means there's none.
+ * The managed set setup last applied: the nearest `[tracker]`, committed or not, when piton accepts it and it
+ * describes the same tracker target. Anything else, such as an invalid table or another repository or team, means
+ * there's none.
  */
 async function readPrevious(cwd: string, adapter: ProviderAdapter) {
-    let value: unknown
+    let tracker: TrackerConfig
     try {
-        const found = section(resolveSettings(cwd).tracker)
-        if (!found) return null
-        value = integrationsFromFile(found.value)
+        const role = loadIntegrationRoles(cwd).tracker
+        if (role.state === "off") return null
+        tracker = role.config
     } catch {
         return null
     }
-    if (!TrackerConfigValidator.check(value)) return null
-    const tracker: TrackerConfig = value
     if (!(await adapter.sameTarget(tracker))) return null
     return tracker.provider === "github"
         ? { labels: tracker.labels ?? {}, phase: undefined, entries: githubManagedEntries(tracker.labels) }
@@ -466,7 +500,8 @@ function verify(desired: readonly ManagedEntry[], catalog: readonly TrackerLabel
     if (problems.length > 0) throw new Error(`label setup verification failed: ${problems.join("; ")}`)
 }
 
-function configurationFor(input: DesiredInput, plan: CatalogPlan) {
+/** The complete tracker to save, its keep and retired lists from the plan, as piton accepts it. */
+function configurationFor(input: DesiredInput, plan: CatalogPlan): TrackerConfig {
     const withLists = <T extends GitHubLabels | LinearLabels>(labels: T, keep: unknown[], retired: unknown[]): T => {
         const { unmanaged: _unmanaged, retired: _retired, ...rest } = labels
         return {
@@ -475,21 +510,20 @@ function configurationFor(input: DesiredInput, plan: CatalogPlan) {
             ...(retired.length > 0 ? { retired } : {}),
         } as T
     }
-    if (input.target.provider === "github") {
+    if (input.tracker.provider === "github") {
         const strip = (entries: ListEntry[]) => entries.map((entry) => ({ name: entry.name }))
-        const labels = withLists((input as GitHubPreviewInput).labels, strip(plan.keep), strip(plan.retired))
-        assertGitHubLabels(labels)
-        return { labels }
+        const { tracker } = input as GitHubPreviewInput
+        const labels = withLists(tracker.labels ?? {}, strip(plan.keep), strip(plan.retired))
+        return validateIntegration<GitHubTracker>("tracker", { ...tracker, labels })
     }
     const linear = (entries: ListEntry[]) =>
         entries.map((entry) => ({ name: entry.name, catalog: entry.catalog, scope: entry.scope }))
-    const { phase, labels: desired } = input as LinearPreviewInput
-    const labels = withLists(desired, linear(plan.keep), linear(plan.retired))
-    assertLinearLabels(labels, phase)
-    return { labels, ...(phase ? { phase } : {}) }
+    const { tracker } = input as LinearPreviewInput
+    const labels = withLists(tracker.labels ?? {}, linear(plan.keep), linear(plan.retired))
+    return validateIntegration<LinearTracker>("tracker", { ...tracker, labels })
 }
 
-function adapterFor(target: LabelSetupToolInput["target"], options: LabelSetupOptions): ProviderAdapter {
+function adapterFor(target: Target, options: LabelSetupOptions): ProviderAdapter {
     return target.provider === "github"
         ? githubAdapter(clientFor(target.credentialEnv, options), target.repository)
         : linearAdapter(linearClientFor(target.credentialEnv, options), target.team)

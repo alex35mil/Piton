@@ -1,5 +1,5 @@
 import "./host-runtime.ts"
-import { writeProjectConfig } from "./config-fixture.ts"
+import { writeInvalidIntegrations, writeProjectConfig } from "./config-fixture.ts"
 import { writeConfig } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
@@ -267,9 +267,13 @@ describe("incoming PR identity and context", () => {
                 }),
                 false,
             )
-            writeConfig(f.root, { tracker: {} })
-            assert.throws(() => incomingPullRequestContext(f.root, "#12", mcpTools))
-            writeConfig(f.root, { tracker: null })
+            const forge = { provider: "github", mcpServer: "fixture", repository: { owner: "upstream", repo: "app" } }
+            writeInvalidIntegrations(f.root, { tracker: {}, forge })
+            assert.throws(
+                () => incomingPullRequestContext(f.root, "#12", mcpTools),
+                /tracker: missing field `provider`/,
+            )
+            writeInvalidIntegrations(f.root, { forge })
             const forgeOnly = incomingPullRequestContext(f.root, "#12", mcpTools)
             if (forgeOnly.project.state !== "disabled") assert.fail("Expected no Project without a tracker")
             assert.match(forgeOnly.project.reason, /Skip Project intake/)

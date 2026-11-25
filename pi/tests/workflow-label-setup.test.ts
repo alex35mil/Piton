@@ -1,5 +1,5 @@
 import "./host-runtime.ts"
-import { type ProjectConfigFixture, writeProjectConfig } from "./config-fixture.ts"
+import { type ProjectConfigFixture, writeInvalidIntegrations, writeProjectConfig } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -8,6 +8,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { describe, it } from "node:test"
 
+import type { GitHubTracker, LinearTracker } from "../workflows/extensions/integrations/config.ts"
 import { parseLabelSetupInput, runLabelSetup } from "../workflows/extensions/project-setup/label-setup.ts"
 import { kindLabels } from "./workflow-phase-fixtures.ts"
 import { registeredWorkflowTools } from "./workflow-tools-fixture.ts"
@@ -149,6 +150,12 @@ const area = (name: string) => ({
     },
 })
 
+/** What preview and apply take: the credential and the complete candidate tracker, with `labels` as desired. */
+const desired = (labels: unknown) => ({
+    credentialEnv: target.credentialEnv,
+    tracker: trackerConfig(labels).tracker as GitHubTracker,
+})
+
 describe("label setup tools", () => {
     it("previews, applies by the approved hash, verifies, and returns the configuration to save", async () => {
         const github = new FakeGitHubLabels()
@@ -160,21 +167,18 @@ describe("label setup tools", () => {
             assert.equal((inspected.catalog as unknown[]).length, 1)
             assert.equal(inspected.previous, null)
 
-            const blocked = await runLabelSetup({ operation: "preview", target, labels: kindLabels() }, options)
+            const blocked = await runLabelSetup({ operation: "preview", ...desired(kindLabels()) }, options)
             assert.equal(blocked.state, "decisions-needed")
             const [decision] = blocked.decisions as { id: string; options: string[] }[]
             assert.deepEqual(decision.options, ["remove", "keep"])
 
             const answers = { [decision.id]: "keep" }
-            const preview = await runLabelSetup(
-                { operation: "preview", target, labels: kindLabels(), answers },
-                options,
-            )
+            const preview = await runLabelSetup({ operation: "preview", ...desired(kindLabels()), answers }, options)
             assert.equal(preview.state, "ready")
             assert.equal((preview.actions as unknown[]).length, 7)
             await assert.rejects(
                 runLabelSetup(
-                    { operation: "apply", target, labels: kindLabels(), answers, approvedPlanHash: "0".repeat(64) },
+                    { operation: "apply", ...desired(kindLabels()), answers, approvedPlanHash: "0".repeat(64) },
                     options,
                 ),
                 /changed after approval/,
@@ -184,8 +188,7 @@ describe("label setup tools", () => {
             const applied = await runLabelSetup(
                 {
                     operation: "apply",
-                    target,
-                    labels: kindLabels(),
+                    ...desired(kindLabels()),
                     answers,
                     approvedPlanHash: String(preview.planHash),
                 },
@@ -194,8 +197,10 @@ describe("label setup tools", () => {
             assert.equal(applied.state, "applied")
             const writes: readonly string[] = github.writes
             assert.equal(writes.filter((write) => write.startsWith("POST")).length, 7)
-            const saved = applied.configuration as { labels: { unmanaged?: { keep: unknown[] } } }
-            assert.deepEqual(saved.labels.unmanaged, { keep: [{ name: "bug" }] })
+            // The complete tracker to save, as piton accepts it.
+            const saved = applied.configuration as GitHubTracker
+            assert.deepEqual(saved.labels?.unmanaged, { keep: [{ name: "bug" }] })
+            assert.deepEqual(saved.project, desired({}).tracker.project)
             assert.doesNotMatch(JSON.stringify(applied), /secret-token/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
@@ -207,10 +212,11 @@ describe("label setup tools", () => {
         github.add("Area: Fronted")
         const options = (cwd: string) => ({ cwd, fetch: github.fetch, env: { GITHUB_TOKEN_FOR_TEST: "t" } })
         const valid = project(trackerConfig(area("Area: Fronted")))
-        const invalid = project({ tracker: { labels: { kind: { epic: "Kind: Epic" } } } })
+        const invalid = project()
+        writeInvalidIntegrations(invalid, { tracker: { labels: { kind: { epic: "Kind: Epic" } } } })
         try {
             const rename = await runLabelSetup(
-                { operation: "preview", target, labels: area("Area: Frontend") },
+                { operation: "preview", ...desired(area("Area: Frontend")) },
                 options(valid),
             )
             assert.match(JSON.stringify(rename.actions), /rename to \\"Area: Frontend\\"/)
@@ -230,11 +236,11 @@ describe("label setup tools", () => {
         const options = { cwd, fetch: github.fetch, env: { GITHUB_TOKEN_FOR_TEST: "t" } }
         const labels = { ...kindLabels(), unmanaged: { keep: [{ name: "bug" }] } }
         try {
-            const preview = await runLabelSetup({ operation: "preview", target, labels }, options)
+            const preview = await runLabelSetup({ operation: "preview", ...desired(labels) }, options)
             assert.equal(preview.state, "ready")
             github.loseNextWriteResponse = true
             const applied = await runLabelSetup(
-                { operation: "apply", target, labels, approvedPlanHash: String(preview.planHash) },
+                { operation: "apply", ...desired(labels), approvedPlanHash: String(preview.planHash) },
                 options,
             )
             assert.equal(applied.state, "applied")
@@ -250,17 +256,13 @@ describe("label setup tools", () => {
         const cwd = project()
         const options = { cwd, fetch: github.fetch, env: { GITHUB_TOKEN_FOR_TEST: "t" } }
         try {
-            const preview = await runLabelSetup(
-                { operation: "preview", target, labels: area("Area: Frontend") },
-                options,
-            )
+            const preview = await runLabelSetup({ operation: "preview", ...desired(area("Area: Frontend")) }, options)
             github.failNextWrite = true
             await assert.rejects(
                 runLabelSetup(
                     {
                         operation: "apply",
-                        target,
-                        labels: area("Area: Frontend"),
+                        ...desired(area("Area: Frontend")),
                         approvedPlanHash: String(preview.planHash),
                     },
                     options,
@@ -268,7 +270,7 @@ describe("label setup tools", () => {
                 /503/,
             )
             assert.deepEqual(github.labels, [], "nothing was created")
-            const again = await runLabelSetup({ operation: "preview", target, labels: area("Area: Frontend") }, options)
+            const again = await runLabelSetup({ operation: "preview", ...desired(area("Area: Frontend")) }, options)
             assert.equal((again.actions as unknown[]).length, 1, "a failed create is planned again, never assumed")
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
@@ -294,7 +296,7 @@ describe("label setup tools", () => {
         const cwd = project(trackerConfig(both))
         const options = { cwd, fetch: github.fetch, env: { GITHUB_TOKEN_FOR_TEST: "t" } }
         try {
-            const preview = await runLabelSetup({ operation: "preview", target, labels: {} }, options)
+            const preview = await runLabelSetup({ operation: "preview", ...desired({}) }, options)
             assert.deepEqual(
                 (preview.removals as { kind: string; name: string }[]).map((action) => [action.kind, action.name]),
                 [
@@ -303,7 +305,7 @@ describe("label setup tools", () => {
                 ],
             )
             const applied = await runLabelSetup(
-                { operation: "apply", target, labels: {}, approvedPlanHash: String(preview.planHash) },
+                { operation: "apply", ...desired({}), approvedPlanHash: String(preview.planHash) },
                 options,
             )
             assert.deepEqual(github.writes, ["PATCH /Area: Frontend", "DELETE /Area: Backend"])
@@ -323,7 +325,7 @@ describe("label setup tools", () => {
         const options = { cwd, fetch: github.fetch, env: { GITHUB_TOKEN_FOR_TEST: "t" } }
         const labels = { ...area("Area: Legacy"), retired: [{ name: "Area: Legacy" }] }
         try {
-            const preview = await runLabelSetup({ operation: "preview", target, labels }, options)
+            const preview = await runLabelSetup({ operation: "preview", ...desired(labels) }, options)
             assert.equal(preview.state, "ready")
             assert.deepEqual(
                 (preview.droppedEntries as { list: string; reason: string }[]).map((entry) => [
@@ -333,10 +335,34 @@ describe("label setup tools", () => {
                 [["retired", "the configuration now manages it"]],
             )
             const applied = await runLabelSetup(
-                { operation: "apply", target, labels, approvedPlanHash: String(preview.planHash) },
+                { operation: "apply", ...desired(labels), approvedPlanHash: String(preview.planHash) },
                 options,
             )
             assert.equal((applied.configuration as { labels: { retired?: unknown } }).labels.retired, undefined)
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("refuses a tracker piton refuses before any provider call", async () => {
+        const github = new FakeGitHubLabels()
+        let calls = 0
+        const fetch: typeof globalThis.fetch = (input, init) => {
+            calls++
+            return github.fetch(input, init)
+        }
+        const cwd = project()
+        try {
+            const bad = area("Area: Frontend")
+            const values = { myArea: bad.groups.area.values.frontend }
+            await assert.rejects(
+                runLabelSetup(
+                    { operation: "preview", ...desired({ groups: { area: { ...bad.groups.area, values } } }) },
+                    { cwd, fetch, env: { GITHUB_TOKEN_FOR_TEST: "t" } },
+                ),
+                /tracker\.labels\.groups\.area\.values\.myArea/,
+            )
+            assert.equal(calls, 0)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -446,13 +472,26 @@ describe("Linear label setup", () => {
         },
     }
     const phases = { issues: phase.issues, projects: phase.issues }
+    const statuses = { backlog: "B", todo: "T", inProgress: "P", inReview: "R", done: "D", canceled: "C" }
     const linearTarget = (team: string) => ({ provider: "linear" as const, credentialEnv: "LINEAR_KEY", team })
+    /** What preview and apply take on Linear: the credential and the complete candidate tracker. */
+    const linearDesired = (team: string, labels: unknown, phase?: typeof phases) => ({
+        credentialEnv: "LINEAR_KEY",
+        tracker: {
+            provider: "linear",
+            mcpServer: "linear",
+            team,
+            ...(phase ? { phase } : {}),
+            labels,
+            statuses: { issues: statuses, projects: statuses },
+        } as LinearTracker,
+    })
 
     it("treats an untyped Project Phase group as single-select, as runtime does", async () => {
         const cwd = project()
         try {
             const preview = await runLabelSetup(
-                { operation: "preview", target: linearTarget("ALE"), labels: {}, phase: phases },
+                { operation: "preview", ...linearDesired("ALE", {}, phases) },
                 { cwd, fetch: fakeLinear(linearPhaseCatalog("p", null)), env: { LINEAR_KEY: "k" } },
             )
             assert.equal(preview.state, "ready")
@@ -479,13 +518,12 @@ describe("Linear label setup", () => {
             },
         }
         try {
-            const preview = await runLabelSetup({ operation: "preview", target: linearTarget("ALE"), labels }, options)
+            const preview = await runLabelSetup({ operation: "preview", ...linearDesired("ALE", labels) }, options)
             assert.equal(preview.state, "ready", JSON.stringify(preview.decisions))
             const applied = await runLabelSetup(
                 {
                     operation: "apply",
-                    target: linearTarget("ALE"),
-                    labels,
+                    ...linearDesired("ALE", labels),
                     approvedPlanHash: preview.planHash as string,
                 },
                 options,
@@ -499,7 +537,6 @@ describe("Linear label setup", () => {
     })
 
     it("uses the previous managed set only when its team is the target team", async () => {
-        const statuses = { backlog: "B", todo: "T", inProgress: "P", inReview: "R", done: "D", canceled: "C" }
         const saved = (team: string) => ({
             tracker: {
                 provider: "linear",
@@ -527,7 +564,7 @@ describe("Linear label setup", () => {
         const options = (cwd: string) => ({ cwd, fetch: fakeLinear(catalog), env: { LINEAR_KEY: "k" } })
         try {
             const same = await runLabelSetup(
-                { operation: "preview", target: linearTarget("ALE"), labels: {}, phase: phases },
+                { operation: "preview", ...linearDesired("ALE", {}, phases) },
                 options(sameTeam),
             )
             assert.deepEqual(
@@ -573,9 +610,7 @@ describe("Linear label setup", () => {
         const cwd = project()
         const options = { cwd, fetch: fakeLinear(catalog, writes), env: { LINEAR_KEY: "k" } }
         const request = {
-            target: linearTarget("ALE"),
-            labels,
-            phase: phases,
+            ...linearDesired("ALE", labels, phases),
             remap: [
                 {
                     name: "Improvement",
@@ -629,17 +664,23 @@ describe("label setup input validation", () => {
         },
     }
 
-    it("reports only the target provider's errors", () => {
+    it("reports only the tracker provider's errors", () => {
+        const statuses = { backlog: "B", todo: "T", inProgress: "P", inReview: "R", done: "D", canceled: "C" }
         const input = {
-            target: { provider: "linear", credentialEnv: "LINEAR_KEY", team: "ALE" },
-            phase: { issues: phase, projects: phase },
-            labels: {
-                groups: {
-                    area: {
-                        appliesTo: ["deliverable"],
-                        cardinality: "zeroOrMore",
-                        scope: "team",
-                        values: { myArea: { name: "A", color: "#1D76DB", description: "" } },
+            credentialEnv: "LINEAR_KEY",
+            tracker: {
+                provider: "linear",
+                mcpServer: "linear",
+                team: "ALE",
+                phase: { issues: phase, projects: phase },
+                statuses: { issues: statuses, projects: statuses },
+                labels: {
+                    groups: {
+                        area: {
+                            appliesTo: ["deliverable"],
+                            cardinality: "zeroOrMore",
+                            values: { a: { name: "A", color: "#1D76DB", description: "" } },
+                        },
                     },
                 },
             },
@@ -648,25 +689,28 @@ describe("label setup input validation", () => {
             () => parseLabelSetupInput("preview", input),
             (error: Error) =>
                 /for linear is invalid/.test(error.message) &&
-                /myArea/.test(error.message) &&
-                !/scope|nativeGroup|anyOf/.test(error.message),
+                /scope/.test(error.message) &&
+                !/fields|project|anyOf/.test(error.message),
         )
     })
 
     it("rejects a GitHub remap entry shaped for Linear", () => {
         const input = {
-            target,
-            labels: area("Area: Frontend"),
+            ...desired(area("Area: Frontend")),
             remap: [{ name: "bug", catalog: "issue", scope: "workspace", group: "area", value: "frontend" }],
         }
         assert.throws(() => parseLabelSetupInput("preview", input), /for github is invalid[\s\S]*remap/)
     })
 
     it("validates in prepareArguments, before Pi's union check", () => {
-        for (const name of ["inspect_label_setup", "preview_label_setup", "apply_label_setup"]) {
+        for (const [name, field] of [
+            ["inspect_label_setup", "target"],
+            ["preview_label_setup", "tracker"],
+            ["apply_label_setup", "tracker"],
+        ]) {
             const prepare = registeredWorkflowTools().find((tool) => tool.name === name)?.prepareArguments
             assert.ok(prepare, name)
-            assert.throws(() => prepare({ target: { provider: "linear" } }), /for linear is invalid/)
+            assert.throws(() => prepare({ [field]: { provider: "linear" } }), /for linear is invalid/)
         }
     })
 })

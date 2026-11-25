@@ -1,7 +1,6 @@
 import "./host-runtime.ts"
 import { writeProjectConfig } from "./config-fixture.ts"
-import { resolveSettings, section } from "../extensions/__lib/settings.ts"
-import { integrationsFromFile } from "../workflows/extensions/integrations/config.ts"
+import { loadIntegrationRoles, requireTracker } from "../workflows/extensions/integrations/config.ts"
 
 import assert from "node:assert/strict"
 import * as cp from "node:child_process"
@@ -285,7 +284,7 @@ describe("workflow domain", () => {
         for (const provider of ["github", "linear"] as const) {
             const cwd = temporaryRepository(provider)
             try {
-                const tracker = integrationsFromFile(section(resolveSettings(cwd).tracker)!.value) as {
+                const tracker = structuredClone(requireTracker(loadIntegrationRoles(cwd), "test")) as {
                     phase?: unknown
                     fields?: { phase?: unknown }
                 }
@@ -614,9 +613,7 @@ describe("workflow domain", () => {
     it("returns the labels to create new work with, from its Kind and selection", () => {
         const cwd = temporaryRepository()
         try {
-            const tracker = integrationsFromFile(section(resolveSettings(cwd).tracker)!.value) as {
-                labels?: unknown
-            }
+            const tracker = requireTracker(loadIntegrationRoles(cwd), "test")
             const area = {
                 appliesTo: ["epic", "deliverable"],
                 cardinality: "zeroOrMore",
@@ -641,7 +638,7 @@ describe("workflow domain", () => {
     it("creates a Linear Epic without a Kind label, and its Deliverables with one", () => {
         const cwd = temporaryRepository("linear")
         try {
-            const tracker = integrationsFromFile(section(resolveSettings(cwd).tracker)!.value) as object
+            const tracker = requireTracker(loadIntegrationRoles(cwd), "test")
             writeProjectConfig(cwd, { tracker: { ...tracker, labels: { groups: { kind: linearKindGroup() } } } })
             const base = { title: "Work", slug: "work", request: "Work" }
             assert.deepEqual(preflightEntity({ ...base, entity: "epic" }, { cwd }).labels, [])

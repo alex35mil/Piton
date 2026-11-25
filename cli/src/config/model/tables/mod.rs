@@ -5,15 +5,22 @@
 //! value. Every table is strict: unknown keys are refused.
 
 pub mod branches;
+pub mod forge;
+pub mod integration;
 pub mod permissions;
 pub mod sandbox;
 pub mod tools;
+pub mod tracker;
 pub mod trust;
 pub mod web_search;
 pub mod workers;
 
+use toml::{Spanned, de::DeValue};
+
 pub use self::{
     branches::BranchesTable,
+    forge::ForgeTable,
+    integration::RoleTable,
     permissions::PermissionSettings,
     sandbox::{
         AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Effect, FileAccess,
@@ -21,10 +28,12 @@ pub use self::{
         ServiceKey, ServiceName, Silence, SilenceTarget,
     },
     tools::ToolsTable,
+    tracker::TrackerTable,
     trust::{Reconfirm, TrustTable},
     web_search::WebSearchTable,
     workers::WorkersTable,
 };
+use crate::config::model::key::Issue;
 
 /// The tables of `config.toml`. Each is parsed on its own, so a broken `[tracker]` never stops permission checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,15 +126,56 @@ impl Rule {
     };
 }
 
-/// A table's value: the keys it sets with their rules, and the checks the schema can't express.
+/// Why a table's value doesn't match its schema, and where in the file: the byte range of the value or key at fault,
+/// when known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadError {
+    pub message: String,
+    pub span: Option<std::ops::Range<usize>>,
+}
+
+impl ReadError {
+    pub fn at(span: std::ops::Range<usize>, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            span: Some(span),
+        }
+    }
+}
+
+impl From<toml::de::Error> for ReadError {
+    fn from(error: toml::de::Error) -> Self {
+        Self {
+            message: error.message().to_string(),
+            span: error.span(),
+        }
+    }
+}
+
+/// A table's value: how it's read, the keys it sets with their rules, and the checks the schema can't express.
 pub trait TableValue: serde::de::DeserializeOwned {
+    /// The table from its value in a parsed file, with each error's position. A table that serde reads directly
+    /// keeps the default.
+    fn read(value: Spanned<DeValue<'_>>) -> Result<Self, ReadError> {
+        // serde reads an empty array as an empty struct: a table key must hold a table.
+        match value.get_ref() {
+            DeValue::Table(_) => {}
+            DeValue::String(_)
+            | DeValue::Integer(_)
+            | DeValue::Float(_)
+            | DeValue::Boolean(_)
+            | DeValue::Datetime(_)
+            | DeValue::Array(_) => return Err(ReadError::at(value.span(), "must be a table")),
+        }
+        Self::deserialize(toml::de::ValueDeserializer::from(value)).map_err(ReadError::from)
+    }
     /// The keys this value sets (dotted, from the top of the file) with a rule; every other key may be set in any file
     /// at any level.
     fn ruled_keys(&self) -> Vec<(&'static str, Rule)> {
         Vec::new()
     }
     /// Values the schema accepts but piton can't use.
-    fn check(&self) -> Result<(), String> {
+    fn check(&self) -> Result<(), Issue> {
         Ok(())
     }
     /// What this table grants, in a repository's committed file. Tables that grant nothing have none.
@@ -146,20 +196,6 @@ pub trait TableValue: serde::de::DeserializeOwned {
 pub trait Merge: Default {
     /// Folds a nearer level's value into this one.
     fn merge(&mut self, nearer: Self);
-}
-
-/// `[tracker]` or `[forge]` as written: the pi package validates it. The nearest table replaces a farther one whole.
-/// Project only: a global one would become the tracker of every repository that has none.
-#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(transparent)]
-pub struct Integration(pub toml::Table);
-
-impl TableValue for Integration {}
-
-impl Merge for Integration {
-    fn merge(&mut self, nearer: Self) {
-        *self = nearer;
-    }
 }
 
 /// The keys of `keys` that are set, with their rule.

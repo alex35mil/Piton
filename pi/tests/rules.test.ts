@@ -75,7 +75,7 @@ describe("native rules model delivery", () => {
                 extensions: [...extensions, registerIntegrations],
                 setup(root) {
                     setup(root)
-                    if (integrations === "configured") writeConfig(root, { tracker: {} })
+                    if (integrations === "configured") writeConfig(root, { tracker: { provider: "none" } })
                     // A tracker that isn't a table fails only the integrations part (top-level, before any table).
                     if (integrations === "unreadable") {
                         const file = path.join(root, ".piton/config.toml")
@@ -123,7 +123,7 @@ describe("native rules model delivery", () => {
                 extensions: [...extensions, registerIntegrations],
                 setup(root) {
                     setup(root)
-                    if (policies !== "without integrations") writeConfig(root, { tracker: {} })
+                    if (policies !== "without integrations") writeConfig(root, { tracker: { provider: "none" } })
                     const file = path.join(root, ".piton/policies.md")
                     fs.mkdirSync(path.dirname(file), { recursive: true })
                     switch (policies) {

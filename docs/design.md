@@ -751,8 +751,18 @@ Three families of files, each read by its own consumer:
   has no local file: a device keeps a value of its own in its app.
 
 Keys are snake_case. A project file's tables are each parsed on their own, so a bad value in `[tracker]` never stops
-permission checks; a syntax error, or an unknown top-level key, fails every table of that file, and the message names
-the line. A host or client file has one schema and is read whole.
+permission checks; a syntax error, or an unknown top-level key, fails every table of that file. Every error names the
+line, and a table's error also names the dotted key at fault (`line 42, tracker.fields.status.values.in_progress:
+...`). A host or client file has one schema and is read whole.
+
+`[tracker]` and `[forge]` are typed like every other table (`model/tables/tracker/`, `forge.rs`): a sum type over
+`provider` (`none`, `github`, `linear` for the tracker; `none`, `github` for the forge), with the rules the schema can't
+express checked there too: distinct Status and Phase options, distinct Project fields, the reserved `kind` and `gate`
+label groups, unique label names where an item sees them (the GitHub repository; each Linear catalog, Phase labels
+included), Linear's reserved names, GitHub's 100-character label descriptions, and keep and retired lists that name
+each unmanaged label once. Their rules have no other implementation: setup checks a table before changing anything at
+a provider with `piton config validate tracker|forge <json>`, which reads one table's value with the same code, no
+file or placement rules involved.
 
 - **Chains.** `.piton/` is read from the source checkout (a worker's source; the checkout around a subfolder), then
   each ancestor strictly below the home folder, then the global tier. `.agents/` starts from the workspace's own
@@ -813,7 +823,8 @@ the line. A host or client file has one schema and is read whole.
   - `mcp.json`: the nearer entry replaces the whole entry of the same server.
   - `[branches]`, `[web_search]`, the host file's keys: the nearer value per key.
   - `[tracker]` and `[forge]`: each the nearest table, whole. Both are optional; `provider = "none"` turns one off,
-    including one a farther level sets (the pi package reads it).
+    including one a farther level sets. Each resolves to a role: `on` with its file and validated config, or `off`
+    because no level has the table (`absent`) or the nearest says `provider = "none"` (`disabled`, with its file).
   - `policies.md` and rules: combined, farthest first.
 - **Writes.** The apps and `piton config set` change keys with `toml_edit`, keeping comments and layout
   (`--global` for the global `config.toml`, `--scope host|client` for the host and client files). The pi package
@@ -826,7 +837,8 @@ the line. A host or client file has one schema and is read whole.
   reported as pending); the project chain at every launch and `worker create`; the pi package's files at pi start and
   `/reload`. `piton config check` validates the workspace's chain and the host and client files, lists the files
   read, and warns about what doesn't travel (below); `piton config get` serves one resolved part to other tools (the
-  Neovim plugin's queue reads `tracker`, `forge`, and `mcp`).
+  Neovim plugin's queue reads `tracker`, `forge`, and `mcp`); `piton config validate` checks one table's value without
+  a file.
 - **One resolver.** The daemon crate's `config` module is the only implementation (layout below). The pi package and
   the Neovim plugin call `piton config resolve` / `piton config get`, which read files and don't need the daemon
   running. The daemon passes the binary's path in `PITON_BIN` after the mise environment; the pi package caches the

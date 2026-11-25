@@ -366,7 +366,8 @@ describe("workflow project configuration", () => {
                 const expected = {
                     missing: [],
                     existing: [],
-                    incompatible: ["branches"],
+                    // piton validates the tracker: a GitHub tracker with only its provider is incomplete.
+                    incompatible: ["branches", "tracker"],
                     malformed: ["tools", "web_search", "branches", "tracker", "forge"],
                 }
                 assert.deepEqual(
@@ -614,11 +615,11 @@ describe("workflow project configuration", () => {
                 clearSettingsCache()
             }
             raw('[branches]\nformat = "identifier-title"\nextra = true\n')
-            assert.throws(() => loadProjectConfig(root), /config\.toml: \[branches\] unknown field `extra`/)
+            assert.throws(() => loadProjectConfig(root), /config\.toml: line 3, branches\.extra: unknown field `extra`/)
             raw('[branches]\nformat = "feature/identifier"\n')
             assert.throws(
                 () => loadProjectConfig(root),
-                /config\.toml: \[branches\] unknown variant `feature\/identifier`/,
+                /config\.toml: line 2, branches\.format: unknown variant `feature\/identifier`/,
             )
             raw('[branches.format]\nepic = "identifier"\n')
             assert.throws(() => loadProjectConfig(root), /config\.toml/)

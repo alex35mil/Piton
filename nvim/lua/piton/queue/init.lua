@@ -3,7 +3,8 @@
 -- pull requests from the nearest `[forge]`, each read with the credential its
 -- own MCP registration names, supplied to curl by the user's
 -- `queue.with_credential` hook. All of it comes from `piton config get`; the
--- plugin reads no configuration file itself. Keys are as the file has them
+-- plugin reads no configuration file itself, and piton validates both roles,
+-- so an `on` role's config is complete. Keys are as the file has them
 -- (snake_case: `mcp_server`, `owner_type`).
 
 ---@class QueueParent
@@ -49,8 +50,14 @@
 ---| { kind: "linear", connection: QueueConnection }
 
 ---@alias QueueForgeRole
----| { kind: "none", reason: string } No forge that has pull requests to list: missing, off, or not GitHub.
+---| { kind: "none", reason: string } No forge to list pull requests from: missing or off.
 ---| { kind: "github", connection: QueueConnection }
+
+--- A role as `piton config get tracker|forge` returns it.
+---@alias ResolvedRole
+---| { state: "on", path: string, config: table }
+---| { state: "off", reason: "absent" }
+---| { state: "off", reason: "disabled", path: string }
 
 --- What a tracker contributes: its queued issues in listing order, and the
 --- pull requests on its board (a GitHub Project), in board order.
@@ -107,68 +114,55 @@ function M.pull_requests(forge, board)
     error("unknown forge role: " .. vim.inspect(forge))
 end
 
---- The nearest `[tracker]`; refuses when it's unusable.
+--- A role's configuration, or why it's off. Refuses (through `cli.config`)
+--- when the role's files can't be used, with piton's message.
+---@param part "tracker"|"forge"
+---@param source string
+---@return table? config
+---@return string? off Why the role is off.
+local function role(part, source)
+    ---@type ResolvedRole
+    local resolved = cli.config(part, source)
+    if resolved.state == "on" then
+        return resolved.config, nil
+    elseif resolved.state == "off" and resolved.reason == "absent" then
+        return nil, ("no [%s] in %s/.piton/config.toml or its parent folders"):format(part, source)
+    elseif resolved.state == "off" and resolved.reason == "disabled" then
+        return nil, ("the %s is turned off (provider = \"none\" in %s)"):format(part, resolved.path)
+    end
+    error("unknown " .. part .. " role: " .. vim.inspect(resolved))
+end
+
+--- The nearest `[tracker]`.
 ---@param source string
 ---@return QueueTrackerRole
 function M.tracker(source)
-    local found = cli.config("tracker", source)
-    if type(found) ~= "table" then
-        return { kind = "off", reason = "no [tracker] in " .. source .. "/.piton/config.toml or its parent folders" }
+    local tracker, off = role("tracker", source)
+    if not tracker then
+        return { kind = "off", reason = off }
+    elseif tracker.provider == "github" or tracker.provider == "linear" then
+        return { kind = tracker.provider, connection = M.connect(source, tracker) }
     end
-    local file = tostring(found.path)
-    local tracker = found.value
-    if type(tracker) ~= "table" then
-        util.refuse("Invalid [tracker] in " .. file)
-    end
-    if tracker.provider == "none" then
-        return { kind = "off", reason = "the tracker is turned off (provider = \"none\" in " .. file .. ")" }
-    end
-    if tracker.provider ~= "github" and tracker.provider ~= "linear" then
-        util.refuse("Unsupported tracker provider in " .. file .. ": " .. tostring(tracker.provider))
-    end
-    return { kind = tracker.provider, connection = M.connect(source, "tracker", file, tracker) }
+    error("unknown tracker provider: " .. vim.inspect(tracker.provider))
 end
 
---- The nearest `[forge]`. Only a GitHub forge lists pull requests; any other
---- is none. Refuses when a GitHub forge is unusable.
+--- The nearest `[forge]`.
 ---@param source string
 ---@return QueueForgeRole
 function M.forge(source)
-    local found = cli.config("forge", source)
-    if type(found) ~= "table" then
-        return { kind = "none", reason = "no [forge] in " .. source .. "/.piton/config.toml or its parent folders" }
+    local forge, off = role("forge", source)
+    if not forge then
+        return { kind = "none", reason = off }
+    elseif forge.provider == "github" then
+        return { kind = "github", connection = M.connect(source, forge) }
     end
-    local file = tostring(found.path)
-    local forge = found.value
-    if type(forge) ~= "table" then
-        util.refuse("Invalid [forge] in " .. file)
-    end
-    if forge.provider ~= "github" then
-        return {
-            kind = "none",
-            reason = ("the forge isn't GitHub (provider = %s in %s)"):format(vim.inspect(forge.provider), file),
-        }
-    end
-    local repository = forge.repository
-    if
-        type(repository) ~= "table"
-        or type(repository.owner) ~= "string"
-        or type(repository.repo) ~= "string"
-    then
-        util.refuse("The [forge] in " .. file .. " has no repository (owner and repo)")
-    end
-    return { kind = "github", connection = M.connect(source, "forge", file, forge) }
+    error("unknown forge provider: " .. vim.inspect(forge.provider))
 end
 
 ---@param source string
----@param role "tracker"|"forge"
----@param file string
----@param config table
+---@param config table A role's validated configuration.
 ---@return QueueConnection
-function M.connect(source, role, file, config)
-    if type(config.mcp_server) ~= "string" then
-        util.refuse("The [" .. role .. "] in " .. file .. " has no mcp_server")
-    end
+function M.connect(source, config)
     return { source = source, config = config, credential = M.credential(source, config.mcp_server) }
 end
 

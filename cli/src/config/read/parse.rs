@@ -7,17 +7,22 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use toml::{
+    Spanned,
+    de::{DeTable, DeValue},
+};
 
 use crate::config::{
     ConfigError,
     model::{
         client::ClientFile,
         host::HostFile,
+        key::{Issue, Key, KeyPart, Location},
         level::LevelKind,
         paths::{Scope, Sharing},
         tables::{
-            BranchesTable, Files, Integration, Levels, Rule, SandboxTable, Table, TableValue, ToolsTable, TrustTable,
-            WebSearchTable, WorkersTable,
+            BranchesTable, Files, ForgeTable, Levels, ReadError, Rule, SandboxTable, Table, TableValue, ToolsTable,
+            TrackerTable, TrustTable, WebSearchTable, WorkersTable,
         },
     },
 };
@@ -40,64 +45,114 @@ pub struct McpFile {
     pub auto_enable_codemode: Option<bool>,
 }
 
-/// One `config[.local].toml`, syntax-checked, its top-level keys known, ready to read table by table.
+/// One `config[.local].toml`, syntax-checked, its top-level keys known, ready to read table by table. Keeps the text:
+/// each table is read from the parsed document, so an error names its key and line.
 #[derive(Debug, Clone)]
 pub struct ConfigDoc {
     pub origin: FileOrigin,
     pub sharing: Sharing,
-    table: toml::Table,
+    text: String,
+    /// Whether errors give the line: a file's do; a value checked on its own was written by Piton (`validate`).
+    lines: bool,
 }
 
 impl ConfigDoc {
     /// Parses `text` as the file at `path`: TOML, and only top-level keys a part owns.
     pub fn parse(text: &str, path: &Path, level: LevelKind, sharing: Sharing) -> Result<Self, ConfigError> {
-        let invalid = |reason: String| ConfigError::Invalid {
-            path: path.to_path_buf(),
-            reason,
-        };
-        let table: toml::Table = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
-        if let Some(key) = table.keys().find(|key| Table::of(key).is_none()) {
-            return Err(invalid(format!("unknown key `{key}`")));
-        }
-        Ok(Self {
+        let doc = Self {
             origin: FileOrigin {
                 path: path.to_path_buf(),
                 level,
             },
             sharing,
-            table,
+            text: text.to_string(),
+            lines: true,
+        };
+        let table = doc.document()?;
+        if let Some(key) = table.get_ref().keys().find(|key| Table::of(key.get_ref()).is_none()) {
+            return Err(doc.error(key.span(), format!("unknown key `{}`", key.get_ref())));
+        }
+        Ok(doc)
+    }
+
+    /// One table's value on its own (`piton config validate`): read and checked as in a file, without the file's
+    /// placement rules, its errors naming keys but no lines. `value` is the table's JSON, keys as the file has them.
+    pub fn table_value(table: Table, value: &serde_json::Value) -> Result<Self, ConfigError> {
+        let path = PathBuf::from(format!("[{}]", table.name()));
+        let mut document = toml::Table::new();
+        let value: toml::Value = toml::Value::try_from(value)
+            .map_err(|e| ConfigError::invalid(&path, format!("can't be a TOML table: {e}")))?;
+        document.insert(table.name().to_string(), value);
+        let text = toml::to_string(&document).map_err(|e| ConfigError::invalid(&path, e.to_string()))?;
+        // A repository's `config.local.toml` may hold every key (project only, local only, the user's own), so read as
+        // one, no placement rule refuses the value.
+        let mut doc = Self::parse(&text, &path, LevelKind::Repository, Sharing::Local)?;
+        doc.lines = false;
+        Ok(doc)
+    }
+
+    fn document(&self) -> Result<Spanned<DeTable<'_>>, ConfigError> {
+        DeTable::parse(&self.text).map_err(|e| {
+            let mut e = e;
+            e.set_input(Some(&self.text));
+            ConfigError::invalid(&self.origin.path, e.to_string().trim_end())
         })
+    }
+
+    /// An error at byte `span` of the file: its key, and its line.
+    fn error(&self, span: std::ops::Range<usize>, reason: impl Into<String>) -> ConfigError {
+        let at = self.document().ok().map(|document| {
+            let mut key = Vec::new();
+            locate(document.get_ref(), span.start, &mut key);
+            Location {
+                key: Key::new(key),
+                line: self.lines.then(|| line_of(&self.text, span.start)),
+            }
+        });
+        ConfigError::Invalid {
+            path: self.origin.path.clone(),
+            at,
+            reason: reason.into(),
+        }
+    }
+
+    /// A check's issue: its key, and the line that sets it.
+    fn issue(&self, issue: Issue) -> ConfigError {
+        let line = match self.lines {
+            true => self
+                .document()
+                .ok()
+                .and_then(|document| span_of(document.get_ref(), issue.key.parts()))
+                .map(|span| line_of(&self.text, span.start)),
+            false => None,
+        };
+        ConfigError::Invalid {
+            path: self.origin.path.clone(),
+            at: Some(Location { key: issue.key, line }),
+            reason: issue.reason,
+        }
     }
 
     /// One table of the file, strictly, with each key's rule checked against the file's level and sharing; `None` when
     /// the file doesn't set it.
     pub fn part<T: TableValue>(&self, table: Table) -> Result<Option<T>, ConfigError> {
-        let path = &self.origin.path;
-        let invalid = |reason: String| ConfigError::Invalid {
-            path: path.clone(),
-            reason,
-        };
-        let name = table.name();
-        let Some(value) = self.table.get(name) else {
+        let document = self.document()?;
+        let Some(value) = document.get_ref().get(table.name()) else {
             return Ok(None);
         };
-        // serde reads an empty array as an empty struct: a table key must hold a table.
-        if !value.is_table() {
-            return Err(invalid(format!("`{name}` must be a table")));
-        }
-        let value: T = value
-            .clone()
-            .try_into()
-            .map_err(|e: toml::de::Error| invalid(format!("[{name}] {e}")))?;
-        value.check().map_err(invalid)?;
-        // `[tracker]` and `[forge]` are project only as a whole.
-        let table_rule = match table {
-            Table::Tracker | Table::Forge => vec![(name, Rule::PROJECT)],
-            Table::Sandbox | Table::Workers | Table::Tools | Table::Branches | Table::WebSearch | Table::Trust => {
-                Vec::new()
-            }
-        };
-        for (key, rule) in table_rule.into_iter().chain(value.ruled_keys()) {
+        let value: T = T::read(value.clone()).map_err(|ReadError { message, span }| match span {
+            Some(span) => self.error(span, message),
+            None => ConfigError::Invalid {
+                path: self.origin.path.clone(),
+                at: Some(Location {
+                    key: Key::of(&[table.name()]),
+                    line: None,
+                }),
+                reason: message,
+            },
+        })?;
+        value.check().map_err(|issue| self.issue(issue))?;
+        for (key, rule) in value.ruled_keys() {
             self.check_rule(key, rule)?;
         }
         Ok(Some(value))
@@ -140,13 +195,122 @@ impl ConfigDoc {
                 Table::Workers => self.part::<WorkersTable>(table).map(drop_value)?,
                 Table::Tools => self.part::<ToolsTable>(table).map(drop_value)?,
                 Table::Branches => self.part::<BranchesTable>(table).map(drop_value)?,
-                Table::Tracker | Table::Forge => self.part::<Integration>(table).map(drop_value)?,
+                Table::Tracker => self.part::<TrackerTable>(table).map(drop_value)?,
+                Table::Forge => self.part::<ForgeTable>(table).map(drop_value)?,
                 Table::WebSearch => self.part::<WebSearchTable>(table).map(drop_value)?,
                 Table::Trust => self.part::<TrustTable>(table).map(drop_value)?,
             }
         }
         Ok(())
     }
+}
+
+/// `value` (JSON, keys as the file has them) read and checked as `table` of a `config.toml`, without the file's
+/// placement rules; returned as the file would hold it. What setup checks before changing anything at a provider.
+pub fn validate_table(table: &str, value: &serde_json::Value) -> Result<serde_json::Value, ConfigError> {
+    let Some(table) = Table::of(table) else {
+        return Err(ConfigError::invalid(
+            format!("[{table}]"),
+            format!(
+                "not a table of config.toml; expected one of {}",
+                Table::ALL.map(Table::name).join(", ")
+            ),
+        ));
+    };
+    let doc = ConfigDoc::table_value(table, value)?;
+    fn back<T: TableValue + Serialize>(doc: &ConfigDoc, table: Table) -> Result<serde_json::Value, ConfigError> {
+        let value = doc.part::<T>(table)?;
+        serde_json::to_value(value).map_err(|e| ConfigError::invalid(&doc.origin.path, e.to_string()))
+    }
+    match table {
+        Table::Sandbox => back::<SandboxTable>(&doc, table),
+        Table::Workers => back::<WorkersTable>(&doc, table),
+        Table::Tools => back::<ToolsTable>(&doc, table),
+        Table::Branches => back::<BranchesTable>(&doc, table),
+        Table::Tracker => back::<TrackerTable>(&doc, table),
+        Table::Forge => back::<ForgeTable>(&doc, table),
+        Table::WebSearch => back::<WebSearchTable>(&doc, table),
+        Table::Trust => back::<TrustTable>(&doc, table),
+    }
+}
+
+/// The key at byte `offset`: the deepest key whose key or value holds it.
+fn locate(table: &DeTable<'_>, offset: usize, key: &mut Vec<KeyPart>) {
+    for (name, value) in table.iter() {
+        let holds = |span: std::ops::Range<usize>| span.contains(&offset);
+        if holds(name.span()) {
+            key.push(KeyPart::Name(name.get_ref().to_string()));
+            return;
+        }
+        if holds(value.span()) || contains_offset(value, offset) {
+            key.push(KeyPart::Name(name.get_ref().to_string()));
+            locate_value(value, offset, key);
+            return;
+        }
+    }
+}
+
+fn locate_value(value: &Spanned<DeValue<'_>>, offset: usize, key: &mut Vec<KeyPart>) {
+    match value.get_ref() {
+        DeValue::Table(table) => locate(table, offset, key),
+        DeValue::Array(items) => {
+            if let Some((i, item)) = items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| item.span().contains(&offset) || contains_offset(item, offset))
+            {
+                key.push(KeyPart::Index(i));
+                locate_value(item, offset, key);
+            }
+        }
+        DeValue::String(_) | DeValue::Integer(_) | DeValue::Float(_) | DeValue::Boolean(_) | DeValue::Datetime(_) => {}
+    }
+}
+
+/// Whether any key or value inside `value` holds `offset`: a `[table]` header's span covers only the header, not the
+/// keys under it.
+fn contains_offset(value: &Spanned<DeValue<'_>>, offset: usize) -> bool {
+    match value.get_ref() {
+        DeValue::Table(table) => table.iter().any(|(name, inner)| {
+            name.span().contains(&offset) || inner.span().contains(&offset) || contains_offset(inner, offset)
+        }),
+        DeValue::Array(items) => items
+            .iter()
+            .any(|item| item.span().contains(&offset) || contains_offset(item, offset)),
+        DeValue::String(_) | DeValue::Integer(_) | DeValue::Float(_) | DeValue::Boolean(_) | DeValue::Datetime(_) => {
+            false
+        }
+    }
+}
+
+/// Where `key` is set: its key's span, or the nearest enclosing one when part of it isn't in the file.
+fn span_of(table: &DeTable<'_>, key: &[KeyPart]) -> Option<std::ops::Range<usize>> {
+    let (KeyPart::Name(first), rest) = key.split_first()? else {
+        return None;
+    };
+    let (name, value) = table.get_key_value(first.as_str())?;
+    Some(value_span(value, rest).unwrap_or(name.span()))
+}
+
+fn value_span(value: &Spanned<DeValue<'_>>, key: &[KeyPart]) -> Option<std::ops::Range<usize>> {
+    let (part, rest) = key.split_first()?;
+    match (part, value.get_ref()) {
+        (KeyPart::Name(_), DeValue::Table(table)) => span_of(table, key),
+        (KeyPart::Index(i), DeValue::Array(items)) => {
+            let item = items.get(*i)?;
+            Some(value_span(item, rest).unwrap_or(item.span()))
+        }
+        (KeyPart::Name(_) | KeyPart::Index(_), _) => None,
+    }
+}
+
+/// The 1-based line of byte `offset`.
+fn line_of(text: &str, offset: usize) -> usize {
+    text.as_bytes()[..offset.min(text.len())]
+        .iter()
+        .filter(|b| **b == b'\n')
+        .count()
+        + 1
 }
 
 /// A global tier file of its own scope (host or client), parsed whole: one schema, so a mistake fails the file.
@@ -180,10 +344,7 @@ impl GlobalFile for ClientFile {
 
 /// Parses `text` as the global file at `path`, checked.
 pub fn parse_global<T: GlobalFile>(text: &str, path: &Path) -> Result<T, ConfigError> {
-    let invalid = |reason: String| ConfigError::Invalid {
-        path: path.to_path_buf(),
-        reason,
-    };
+    let invalid = |reason: String| ConfigError::invalid(path, reason);
     let value: T = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
     value.check().map_err(invalid)?;
     Ok(value)
@@ -207,10 +368,7 @@ pub fn read_text(path: &Path) -> Result<Option<String>, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Err(ConfigError::Invalid {
-            path: path.to_path_buf(),
-            reason: "must be a file".into(),
-        }),
+        Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => Err(ConfigError::invalid(path, "must be a file")),
         Err(source) => Err(ConfigError::Read {
             path: path.to_path_buf(),
             source,
@@ -223,10 +381,7 @@ pub fn load_mcp(path: &Path) -> Result<Option<McpFile>, ConfigError> {
     let Some(text) = read_text(path)? else {
         return Ok(None);
     };
-    let invalid = |reason: String| ConfigError::Invalid {
-        path: path.to_path_buf(),
-        reason,
-    };
+    let invalid = |reason: String| ConfigError::invalid(path, reason);
     // serde reads a JSON array into a struct too; the file must be an object.
     let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| invalid(e.to_string()))?;
     if !value.is_object() {
@@ -280,7 +435,49 @@ mod tests {
             assert!(d.part::<ToolsTable>(Table::Tools).is_err(), "{text}");
         }
         let d = doc("tracker = 1\n", LevelKind::Repository, Sharing::Shared).unwrap();
-        assert!(d.part::<Integration>(Table::Tracker).is_err());
+        assert!(d.part::<TrackerTable>(Table::Tracker).is_err());
+    }
+
+    /// A table's error names its key and the line that sets it; a syntax error keeps toml's own message.
+    #[test]
+    fn errors_name_the_key_and_line() {
+        let located = |text: &str, read: &dyn Fn(&ConfigDoc) -> Result<(), ConfigError>| {
+            let d = doc(text, LevelKind::Repository, Sharing::Shared).unwrap();
+            match read(&d) {
+                Err(ConfigError::Invalid { at: Some(at), .. }) => (at.key.to_string(), at.line),
+                other => panic!("{text}: {other:?}"),
+            }
+        };
+        let tracker = |d: &ConfigDoc| d.part::<TrackerTable>(Table::Tracker).map(drop);
+        let workers = |d: &ConfigDoc| d.part::<WorkersTable>(Table::Workers).map(drop);
+        let branches = |d: &ConfigDoc| d.part::<BranchesTable>(Table::Branches).map(drop);
+        // A schema error: an unknown key, a wrong value.
+        assert_eq!(
+            located(
+                "[branches]\nformat = \"x\"\n\n[tracker]\nprovider = \"github\"\nmcp_servr = \"g\"\n",
+                &tracker
+            ),
+            ("tracker.mcp_servr".into(), Some(6))
+        );
+        assert_eq!(
+            located("[branches]\n\nformat = \"x\"\n", &branches),
+            ("branches.format".into(), Some(3))
+        );
+        assert_eq!(
+            located("[tracker]\nprovider = \"jira\"\n", &tracker),
+            ("tracker.provider".into(), Some(2))
+        );
+        // A check's issue, inside an array.
+        assert_eq!(
+            located("[workers]\nskip = [\n  \"ok\",\n  \"../out\",\n]\n", &workers),
+            ("workers.skip[1]".into(), Some(4))
+        );
+        // A whole-file error has no location.
+        let err = doc("[tracker\n", LevelKind::Repository, Sharing::Shared).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { at: None, .. }), "{err}");
+        assert!(err.to_string().contains("line 1"), "{err}");
+        let err = doc("\n[tols]\n", LevelKind::Repository, Sharing::Shared).unwrap_err();
+        assert!(err.to_string().contains("line 2, tols: unknown key `tols`"), "{err}");
     }
 
     /// A broken table fails only its part.
@@ -301,8 +498,8 @@ mod tests {
             d.part::<SandboxTable>(Table::Sandbox).unwrap().unwrap().presets,
             [crate::config::Preset::Rust]
         );
-        assert!(d.part::<Integration>(Table::Tracker).unwrap().is_some());
-        assert!(d.part::<Integration>(Table::Forge).unwrap().is_none());
+        assert!(d.part::<TrackerTable>(Table::Tracker).is_err());
+        assert!(d.part::<ForgeTable>(Table::Forge).unwrap().is_none());
     }
 
     /// Each key's rule, per level and file.
@@ -314,7 +511,8 @@ mod tests {
                 Table::Sandbox => d.part::<SandboxTable>(table).map(drop),
                 Table::Branches => d.part::<BranchesTable>(table).map(drop),
                 Table::WebSearch => d.part::<WebSearchTable>(table).map(drop),
-                Table::Tracker | Table::Forge => d.part::<Integration>(table).map(drop),
+                Table::Tracker => d.part::<TrackerTable>(table).map(drop),
+                Table::Forge => d.part::<ForgeTable>(table).map(drop),
                 Table::Trust => d.part::<TrustTable>(table).map(drop),
                 Table::Workers | Table::Tools => Ok(()),
             }
@@ -345,7 +543,7 @@ mod tests {
         }
         // Integrations: project only.
         for table in [Table::Tracker, Table::Forge] {
-            let text = format!("[{}]\nprovider = \"github\"\n", table.name());
+            let text = format!("[{}]\nprovider = \"none\"\n", table.name());
             assert!(matches!(
                 part(&text, Global, Shared, table),
                 Err(ConfigError::ProjectOnly { .. })

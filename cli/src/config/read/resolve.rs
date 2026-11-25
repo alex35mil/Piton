@@ -11,11 +11,13 @@ use crate::{
         ConfigError,
         model::{
             grants::{GrantEntry, GrantFilter, Grants},
+            key::Location,
             level::{Chain, Level, LevelKind},
             paths::{FilePair, Paths, Sharing},
             tables::{
-                BranchesTable, Integration, Merge, Origin, PermissionSettings, SandboxSettings, SandboxTable, Table,
-                TableValue, ToolsTable, TrustTable, WebSearchTable, WorkersTable,
+                BranchesTable, Merge, Origin, PermissionSettings, RoleTable, SandboxSettings, SandboxTable, Table,
+                TableValue, ToolsTable, TrustTable, WebSearchTable, WorkersTable, forge::ForgeProvider,
+                tracker::TrackerProvider,
             },
         },
     },
@@ -28,6 +30,25 @@ use crate::{
 pub enum Runtime {
     Host,
     Sandbox,
+}
+
+/// An integration role (`[tracker]` or `[forge]`) as the nearest table sets it. Serialized as `{"state": "on", "path",
+/// "config"}`, `{"state": "off", "reason": "absent"}`, or `{"state": "off", "reason": "disabled", "path"}`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Role<P> {
+    On { path: PathBuf, config: P },
+    Off(RoleOff),
+}
+
+/// Why a role is off.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum RoleOff {
+    /// No table in the chain.
+    Absent,
+    /// `provider = "none"` in the nearest table.
+    Disabled { path: PathBuf },
 }
 
 /// One part of a workspace's configuration: its merged value, or why its files can't be used. Each consumer fails only
@@ -56,12 +77,12 @@ pub struct Resolved {
     pub tools: Section<ResolvedTools>,
     #[serde(serialize_with = "section")]
     pub branches: Section<BranchesTable>,
-    /// The nearest `[tracker]`, whole and as written (the pi package validates it).
+    /// The tracker: the nearest `[tracker]`, whole and validated.
     #[serde(serialize_with = "section")]
-    pub tracker: Section<Option<FileValue<serde_json::Value>>>,
-    /// The nearest `[forge]`, likewise.
+    pub tracker: Section<Role<TrackerProvider>>,
+    /// The forge: the nearest `[forge]`, likewise.
     #[serde(serialize_with = "section")]
-    pub forge: Section<Option<FileValue<serde_json::Value>>>,
+    pub forge: Section<Role<ForgeProvider>>,
     #[serde(serialize_with = "section")]
     pub web_search: Section<WebSearchTable>,
     /// `[trust]` of the user's own files.
@@ -232,7 +253,7 @@ enum Doc {
 
 enum FailedRead {
     Io(std::io::ErrorKind, String),
-    Invalid(String),
+    Invalid { at: Option<Location>, reason: String },
 }
 
 impl Doc {
@@ -244,8 +265,9 @@ impl Doc {
                     path: path.clone(),
                     source: std::io::Error::new(*kind, message.clone()),
                 },
-                FailedRead::Invalid(reason) => ConfigError::Invalid {
+                FailedRead::Invalid { at, reason } => ConfigError::Invalid {
                     path: path.clone(),
+                    at: at.clone(),
                     reason: reason.clone(),
                 },
             }),
@@ -291,11 +313,14 @@ impl<'a> Docs<'a> {
                     Err(error) => {
                         let error = match error {
                             ConfigError::Read { source, .. } => FailedRead::Io(source.kind(), source.to_string()),
-                            ConfigError::Invalid { reason, .. } => FailedRead::Invalid(reason),
+                            ConfigError::Invalid { at, reason, .. } => FailedRead::Invalid { at, reason },
                             other @ (ConfigError::NotInProjectConfig { .. }
                             | ConfigError::ProjectOnly { .. }
                             | ConfigError::LocalOnly { .. }
-                            | ConfigError::Conflict { .. }) => FailedRead::Invalid(other.to_string()),
+                            | ConfigError::Conflict { .. }) => FailedRead::Invalid {
+                                at: None,
+                                reason: other.to_string(),
+                            },
                         };
                         docs.push(Doc::Failed { path, error });
                     }
@@ -358,19 +383,21 @@ impl<'a> Docs<'a> {
         Ok(merged)
     }
 
-    /// The nearest file's table, whole, as JSON.
-    fn nearest(&self, table: Table) -> Section<Option<FileValue<serde_json::Value>>> {
-        let Some((Integration(value), doc)) = self.parts::<Integration>(table)?.pop() else {
-            return Ok(None);
-        };
-        let value = serde_json::to_value(value).map_err(|e| ConfigError::Invalid {
-            path: doc.origin.path.clone(),
-            reason: e.to_string(),
-        })?;
-        Ok(Some(FileValue {
-            path: doc.origin.path.clone(),
-            value,
-        }))
+    /// An integration role: the nearest file's table, whole.
+    fn role<P>(&self, table: Table) -> Section<Role<P>>
+    where
+        RoleTable<P>: TableValue,
+    {
+        Ok(match self.parts::<RoleTable<P>>(table)?.pop() {
+            None => Role::Off(RoleOff::Absent),
+            Some((RoleTable::Off(_), doc)) => Role::Off(RoleOff::Disabled {
+                path: doc.origin.path.clone(),
+            }),
+            Some((RoleTable::On(config), doc)) => Role::On {
+                path: doc.origin.path.clone(),
+                config,
+            },
+        })
     }
 }
 
@@ -503,10 +530,9 @@ fn check_level(level: &Level) -> Result<bool, ConfigError> {
     match std::fs::read_dir(&level.dir) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(ConfigError::Invalid {
-            path: level.dir.clone(),
-            reason: "must be a folder".into(),
-        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
+            Err(ConfigError::invalid(&level.dir, "must be a folder"))
+        }
         Err(source) => Err(ConfigError::Read {
             path: level.dir.clone(),
             source,
@@ -575,8 +601,8 @@ fn read_chain(
         tools: read_tools(&docs, runtime),
         branches: docs.merged(Table::Branches),
         // Each table whole: a nearer level's replaces a farther one's.
-        tracker: docs.nearest(Table::Tracker),
-        forge: docs.nearest(Table::Forge),
+        tracker: docs.role::<TrackerProvider>(Table::Tracker),
+        forge: docs.role::<ForgeProvider>(Table::Forge),
         web_search: docs.merged(Table::WebSearch),
         trust: docs.merged(Table::Trust),
         mcp,
@@ -659,10 +685,10 @@ fn read_mcp(files: &mut Vec<FileOrigin>, levels: &[Level]) -> Section<ResolvedMc
             }
             for (name, config) in file.mcp_servers {
                 let serde_json::Value::Object(config) = config else {
-                    return Err(ConfigError::Invalid {
-                        path: origin.path.clone(),
-                        reason: format!("mcpServers.{name} must be an object"),
-                    });
+                    return Err(ConfigError::invalid(
+                        &origin.path,
+                        format!("mcpServers.{name} must be an object"),
+                    ));
                 };
                 add_mcp_server(&mut mcp, name, config, &origin)?;
             }
@@ -787,7 +813,7 @@ default_mode = "ask"
         write(&t.global.join("agents/rules/a.md"), "rule\n");
         write(
             &parent.join(".piton/config.toml"),
-            "[sandbox.filesystem]\n\"~/Projects/work/.pi\" = \"write\"\n[tracker]\nprovider = \"github\"\n[forge]\nprovider = \"github\"\n",
+            "[sandbox.filesystem]\n\"~/Projects/work/.pi\" = \"write\"\n[tracker]\nprovider = \"none\"\n[forge]\nprovider = \"github\"\nmcp_server = \"github\"\nrepository = { owner = \"o\", repo = \"r\" }\n",
         );
         write(
             &repo.join(".piton/config.toml"),
@@ -806,6 +832,21 @@ format = "username/identifier-title"
 [tracker]
 provider = "linear"
 mcp_server = "linear"
+team = "ENG"
+[tracker.statuses.issues]
+backlog = "Backlog"
+todo = "Todo"
+in_progress = "In Progress"
+in_review = "In Review"
+done = "Done"
+canceled = "Canceled"
+[tracker.statuses.projects]
+backlog = "Backlog"
+todo = "Planned"
+in_progress = "In Progress"
+in_review = "In Review"
+done = "Completed"
+canceled = "Canceled"
 "#,
         );
         write(
@@ -871,16 +912,19 @@ mcp_server = "linear"
         assert_eq!(branches.username.as_deref(), Some("me"));
         assert_eq!(r.web_search.as_ref().unwrap().api_key.as_deref(), Some("k"));
 
-        // [tracker] is replaced whole by the nearer level; [forge] comes from the parent.
-        let tracker = r.tracker.as_ref().unwrap().as_ref().unwrap();
-        assert_eq!(tracker.path, repo.join(".piton/config.toml"));
+        // [tracker] is replaced whole by the nearer level (the parent's turns it off); [forge] comes from the parent.
+        let tracker = serde_json::to_value(r.tracker.as_ref().unwrap()).unwrap();
+        assert_eq!(tracker["state"], "on");
+        assert_eq!(tracker["path"], repo.join(".piton/config.toml").to_str().unwrap());
+        assert_eq!(tracker["config"]["team"], "ENG");
+        assert_eq!(tracker["config"]["statuses"]["projects"]["todo"], "Planned");
         assert_eq!(
-            tracker.value,
-            serde_json::json!({"provider": "linear", "mcp_server": "linear"})
-        );
-        assert_eq!(
-            r.forge.as_ref().unwrap().as_ref().unwrap().path,
-            parent.join(".piton/config.toml")
+            serde_json::to_value(r.forge.as_ref().unwrap()).unwrap(),
+            serde_json::json!({
+                "state": "on",
+                "path": parent.join(".piton/config.toml"),
+                "config": {"provider": "github", "mcp_server": "github", "repository": {"owner": "o", "repo": "r"}},
+            })
         );
 
         let policies: Vec<_> = r.policies.as_ref().unwrap().iter().map(|p| p.value.as_str()).collect();
@@ -919,10 +963,20 @@ mcp_server = "linear"
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.trust, Err(ConfigError::NotInProjectConfig { .. })));
         // Integrations are project only: a global [tracker] fails its part.
-        write(&t.global.join("config.toml"), "[tracker]\nprovider = \"github\"\n");
+        write(&t.global.join("config.toml"), "[tracker]\nprovider = \"none\"\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
         assert!(matches!(r.tracker, Err(ConfigError::ProjectOnly { .. })));
         std::fs::remove_file(t.global.join("config.toml")).unwrap();
+        // No table anywhere: the role is off, absent; `provider = "none"` turns it off with its file.
+        write(&repo.join(".piton/config.toml"), "[tracker]\nprovider = \"none\"\n");
+        let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();
+        assert_eq!(r.forge.unwrap(), Role::Off(RoleOff::Absent));
+        assert_eq!(
+            r.tracker.unwrap(),
+            Role::Off(RoleOff::Disabled {
+                path: repo.join(".piton/config.toml")
+            })
+        );
         // A secret in a shared file.
         write(&repo.join(".piton/config.toml"), "[web_search]\napi_key = \"k\"\n");
         let r = run(&t, &source(repo.clone()), Runtime::Host).unwrap();

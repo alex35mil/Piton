@@ -79,9 +79,10 @@ your comments and order, writing through a symlink into a dotfiles repository, a
 when you check Local. A list they write goes one item per line once it has two items, and its items keep their
 comments. The whole layout, including repository and parent-folder levels and where each key may be set,
 is in "Configuration and state" in [design.md](design.md); `piton config check` validates a workspace's configuration
-and the host and client files, lists the files it reads, and warns about a path under another user's home or a secret
-in a file Git tracks; `piton config set KEY VALUE [--global | --scope host|client] [--local]` changes one key the same
-way the apps do.
+(`[tracker]` and `[forge]` included) and the host and client files, naming each error's line and key, lists the files
+it reads, and warns about a path under another user's home or a secret in a file Git tracks; `piton config set KEY
+VALUE [--global | --scope host|client] [--local]` changes one key the same way the apps do; `piton config validate
+TABLE VALUE` checks one table's JSON value (`piton config validate forge '{"provider": "none"}'`) without a file.
 
 `config.host.toml`:
 

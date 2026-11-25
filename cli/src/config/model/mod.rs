@@ -6,6 +6,7 @@ pub mod daemon;
 pub mod duration;
 pub mod grants;
 pub mod host;
+pub mod key;
 pub mod level;
 pub mod paths;
 pub mod tables;

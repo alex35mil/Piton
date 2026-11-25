@@ -243,7 +243,7 @@ For either tracker, after its configuration, read [label groups](../../reference
 2. **Inspect and preview.** Call `inspect_label_setup` and show the existing labels. Ask whether any should become configured values, and pass those as `remap`. Then call `preview_label_setup`.
 3. **Decisions.** Ask the user about each returned decision, exactly as listed, and preview again with the answers until none remain. Present each conflict with its `resolution`.
 4. **Approve and apply.** Present every action, with removals and their usage called out separately. Require approval of that exact `planHash`, then call `apply_label_setup`.
-5. **Save.** Save only the returned `configuration` as the tracker's labels.
+5. **Save.** Save only the returned `configuration` as the tracker.
 
 A rerun can change only labels. Reuse the saved groups and lists as the desired starting point.
 

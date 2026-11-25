@@ -173,6 +173,14 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 ExitCode::from(EXIT_INVALID)
             }
         },
+        ConfigAction::Validate { table, value } => match validate(table, value) {
+            Ok(value) => {
+                let output = serde_json::json!({"format": RESOLVE_FORMAT, "ok": value});
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => print_error(ErrorBody::Invalid { message }),
+        },
         ConfigAction::Protected { path, workspace } => {
             let dir = workspace
                 .clone()
@@ -324,6 +332,13 @@ fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, Error
         | ConfigError::LocalOnly { .. }
         | ConfigError::Conflict { .. } => ErrorBody::Invalid { message: e.to_string() },
     })
+}
+
+/// `piton config validate`: `value` read and checked as `table`, and printed back as the file would hold it. Its errors
+/// name the key; a key that isn't a table, or text that isn't JSON, is an error too.
+fn validate(table: &str, value: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(value).map_err(|e| format!("VALUE isn't JSON: {e}"))?;
+    crate::config::validate_table(table, &value).map_err(|e| e.to_string())
 }
 
 /// One resolved part, for tools that need only that (the Neovim plugin's tracker queue): its value, or why its files
@@ -506,8 +521,9 @@ mod tests {
             get(&resolved, "tools").unwrap().unwrap()["permissions"]["merged"]["allow"][0],
             "read"
         );
-        assert!(json["tracker"]["ok"].is_null());
-        assert_eq!(get(&resolved, "tracker").unwrap().unwrap(), serde_json::Value::Null);
+        let absent = serde_json::json!({"state": "off", "reason": "absent"});
+        assert_eq!(json["tracker"]["ok"], absent);
+        assert_eq!(get(&resolved, "tracker").unwrap().unwrap(), absent);
         assert!(get(&resolved, "branches").unwrap().is_err());
         assert!(get(&resolved, "watch").is_none());
         assert!(

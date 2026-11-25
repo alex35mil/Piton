@@ -384,12 +384,21 @@ local LINEAR_TRACKER = {
 }
 local GITHUB_FORGE = { provider = "github", mcp_server = "github", repository = { owner = "o", repo = "r" } }
 
+--- A role as `piton config get tracker|forge` prints it: nil is absent, `{ provider = "none" }` disabled, any other
+--- table on with that config (piton validated it).
+local function role(source, value)
+    local path = source .. "/.piton/config.toml"
+    if value == nil then
+        return { state = "off", reason = "absent" }
+    elseif value.provider == "none" then
+        return { state = "off", reason = "disabled", path = path }
+    end
+    return { state = "on", path = path, config = value }
+end
+
 local function fake_roles(source, tracker, forge)
     local function part(value)
-        if value == nil then
-            return { code = 0, stdout = "null" }
-        end
-        return { code = 0, stdout = vim.json.encode({ path = source .. "/.piton/config.toml", value = value }) }
+        return { code = 0, stdout = vim.json.encode(role(source, value)) }
     end
     local responses = {
         tracker = part(tracker),
@@ -544,13 +553,13 @@ test("without a GitHub forge the queue lists no pull requests, board ones includ
         board_item("Todo", "Issue", 3, "An issue"),
         board_item("Backlog", "PullRequest", 7, "Board PR"),
     }
-    for _, forge in ipairs({ vim.NIL, { provider = "none" }, { provider = "gitlab", mcp_server = "github" } }) do
+    for _, forge in ipairs({ vim.NIL, { provider = "none" } }) do
         fake_roles(source, GITHUB_TRACKER, forge ~= vim.NIL and forge or nil)
         local requests = fake_providers({ board = board, open = OPEN })
         equal({ { "github:o/r#3", "todo", "gig", nil } }, summary(queue.load(source)))
         equal({ { "board", "TRACKER_TOKEN" } }, requests)
     end
-    fake_roles(source, LINEAR_TRACKER, { provider = "gitlab" })
+    fake_roles(source, LINEAR_TRACKER, { provider = "none" })
     fake_providers({ linear = {}, open = OPEN })
     equal({}, queue.load(source))
 end)
@@ -574,14 +583,12 @@ test("queue reads its tracker and credential through piton config get", function
     local source = directory("config source")
     local queue = require("piton.queue")
     local calls = {}
+    local function get(value)
+        return { code = 0, stdout = vim.json.encode(role(source, value)) }
+    end
     local responses = {
-        tracker = {
-            code = 0,
-            stdout = vim.json.encode({
-                path = source .. "/.piton/config.toml",
-                value = { provider = "other", mcp_server = "linear" },
-            }),
-        },
+        tracker = get(LINEAR_TRACKER),
+        forge = get(nil),
         mcp = {
             code = 0,
             stdout = vim.json.encode({
@@ -598,32 +605,18 @@ test("queue reads its tracker and credential through piton config get", function
         return responses[cmd[4]]
     end)
     equal("LINEAR_KEY", queue.credential(source, "linear"))
-    fails("Unsupported tracker provider in " .. source .. "/.piton/config.toml", function() queue.load(source) end)
-    equal({ "mcp", "tracker" }, calls)
+    -- An on role connects with its registration's credential.
+    local tracker = queue.tracker(source)
+    equal({ "linear", "LINEAR_KEY", "ENG" }, { tracker.kind, tracker.connection.credential, tracker.connection.config.team })
+    equal({ "mcp", "tracker", "mcp" }, calls)
 
-    -- Neither a tracker nor a GitHub forge: the queue is unavailable.
-    responses.forge = { code = 0, stdout = "null" }
-    responses.tracker = { code = 0, stdout = "null" }
+    -- Neither a tracker nor a GitHub forge: the queue is unavailable, saying why each is off.
+    responses.tracker = get(nil)
     fails("No tracker or GitHub forge configured: no [tracker] in " .. source, function() queue.load(source) end)
-    responses.tracker = {
-        code = 0,
-        stdout = vim.json.encode({ path = source .. "/.piton/config.toml", value = { provider = "none" } }),
-    }
-    fails("the tracker is turned off", function() queue.load(source) end)
-    -- A GitHub forge must name its registration and repository.
-    responses.forge = {
-        code = 0,
-        stdout = vim.json.encode({ path = source .. "/.piton/config.toml", value = { provider = "github" } }),
-    }
-    fails("has no repository", function() queue.load(source) end)
-    responses.forge = {
-        code = 0,
-        stdout = vim.json.encode({
-            path = source .. "/.piton/config.toml",
-            value = { provider = "github", repository = { owner = "o", repo = "r" } },
-        }),
-    }
-    fails("The [forge] in " .. source .. "/.piton/config.toml has no mcp_server", function() queue.load(source) end)
+    responses.tracker = get({ provider = "none" })
+    fails("the tracker is turned off (provider = \"none\" in " .. source .. "/.piton/config.toml)", function()
+        queue.load(source)
+    end)
     -- A broken file: the resolver's message, unchanged.
     responses.tracker = {
         code = 3,
