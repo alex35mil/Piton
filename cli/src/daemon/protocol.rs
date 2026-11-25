@@ -29,11 +29,12 @@ pub enum Hello {
     /// One control request and its response.
     Control { version: u32 },
     /// The native clients' protocol: requests with ids, replies, and pushed session-list and session-view updates.
-    /// See [`ViewRequest`].
+    /// See [`ViewRequest`]. `device` decides which of the client file's device sections the connection sees.
     View {
         version: u32,
         #[serde(default)]
         client: Option<String>,
+        device: crate::config::Device,
     },
 }
 

@@ -210,7 +210,7 @@ private let decoder = JSONDecoder()
     #expect(state.settingsError == nil)
     #expect(state.setting(.host, "keep_awake")?.placement == .local)
     let roots = try #require(state.setting(.host, "roots"))
-    #expect(roots.placement == .shared && roots.localChoice)
+    #expect(roots.location == .file(placement: .shared))
     #expect(roots.valueType == .textList && roots.value == .array([.string("~/Projects")]))
     #expect(state.setting(.host, "debugging.log_level")?.valueType == .choice(options: ["info", "debug"]))
     #expect(state.setting(.host, "debugging.log_level")?.placement == nil)
@@ -221,8 +221,12 @@ private let decoder = JSONDecoder()
     #expect(port.applies == .restart(pending: true))
     #expect(roots.applies == .live)
     #expect(state.setting(.host, "socket")?.editable == false)
-    // The client file has no local one; the global config.toml is the projects' defaults.
-    #expect(state.setting(.client, "text_font")?.localChoice == false)
+    // Client settings are per device section: every section the file sets, and the one in effect here.
+    #expect(
+        state.setting(.client, "appearance.text_font")?.location
+            == .devices(sections: [.default: .string("Inter"), .ipad: .string("Berkeley Mono")], section: .default))
+    #expect(state.setting(.client, "appearance.code_font")?.location == .devices(sections: [:], section: nil))
+    #expect(state.setting(.client, "appearance.code_font")?.value == .null)
     #expect(state.setting(.project, "workers.skip")?.value == .array([.string(".build")]))
     // An integration enabled but not installed carries its warning; other settings have none.
     #expect(state.setting(.host, "integrations.tailscale.enabled")?.warning?.contains("tailscale") == true)

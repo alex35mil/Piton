@@ -14,11 +14,13 @@ private func state(textFont: JSON) throws -> DaemonState {
         "settings_error": .null,
         "settings": .array([
             .object([
-                "key": .string("text_font"),
+                "key": .string("appearance.text_font"),
                 "scope": .string("client"),
                 "value": textFont,
-                "placement": .null,
-                "local_choice": .bool(false),
+                "location": .object([
+                    "kind": .string("devices"), "sections": .object(["ipad": textFont]),
+                    "section": .string("ipad"),
+                ]),
                 "value_type": .object(["kind": .string("text")]),
                 "applies": .object(["kind": .string("live")]),
                 "editable": .bool(true),
@@ -28,22 +30,24 @@ private func state(textFont: JSON) throws -> DaemonState {
     return try json.decode(DaemonState.self)
 }
 
-@Test func sharedPreferencesAreCachedAndLocalOnesWin() throws {
+@Test func hostValuesAreCachedAndThisDevicesWin() throws {
     let suite = "piton.tests.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let preferences = ClientPreferences(defaults: defaults)
 
-    #expect(preferences.source(.textFont) == .shared(nil))
+    #expect(preferences.source(.textFont) == .host(nil))
     preferences.cache(try state(textFont: .string("Iosevka")))
-    #expect(preferences.source(.textFont) == .shared("Iosevka"))
+    #expect(preferences.source(.textFont) == .host("Iosevka"))
 
     preferences.setLocal(.textFont, "Berkeley Mono")
     preferences.cache(try state(textFont: .string("Fira Code")))
-    #expect(preferences.source(.textFont) == .local("Berkeley Mono"))
+    #expect(preferences.source(.textFont) == .thisDevice("Berkeley Mono"))
 
-    preferences.useShared(.textFont)
-    #expect(preferences.source(.textFont) == .shared("Fira Code"))
+    preferences.useHost(.textFont)
+    #expect(preferences.source(.textFont) == .host("Fira Code"))
     preferences.cache(try state(textFont: .null))
-    #expect(preferences.source(.textFont) == .shared(nil))
+    #expect(preferences.source(.textFont) == .host(nil))
+    // The UserDefaults keys of this device's own value didn't change with the file key.
+    #expect(ClientPreference.textFont.isLocalKey == "preference.isLocal.client.text_font")
 }

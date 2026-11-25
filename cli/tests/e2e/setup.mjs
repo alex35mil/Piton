@@ -53,7 +53,7 @@ const tests = {
         for (const [file, text, expected] of [
             ["config.host.toml", "roots = [\n", /config\.host\.toml/],
             ["config.host.toml", "roots = 1\n", /roots/],
-            ["config.client.toml", "text_font = 1\n", /client/],
+            ["config.client.toml", "[appearance]\ntext_font = { ipda = \"x\" }\n", /client/],
             ["config.toml", "[tracker]\nprovider = \"github\"\n", /project/],
         ]) {
             const h = home();

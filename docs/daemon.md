@@ -67,7 +67,8 @@ or `PITON_CONFIG_HOME` for tests). Every key has the default shown.
 
 - **`config.host.toml`** (and `config.host.local.toml`, not committed): how the daemon runs on this host and this
   host's preferences. Only this file can stop the daemon from starting; a typo in it does.
-- **`config.client.toml`:** the apps' preferences, served to every client.
+- **`config.client.toml`:** the apps' preferences, grouped (`[appearance]`), each for every device or per device
+  (below); the host serves each client the values for its device.
 - **`config.toml`** (and `config.local.toml`): the defaults every project inherits, the chain's farthest level. The
   daemon reads its `[sandbox]` and `[workers]` for each launch.
 
@@ -133,6 +134,21 @@ session_analysis = true   # development installs only (development.md)
 
 Durations are a whole number and one unit: `ms`, `s`, `m`, or `h` (`"500ms"`, `"10s"`, `"10m"`, `"1h"`). Only
 `approval_timeout` also takes `"never"`; zero isn't a duration.
+
+`config.client.toml`:
+
+```toml
+[appearance]
+text_font = "Inter"       # one value: every device
+code_font = { default = "Iosevka", mobile = "Fira Code", ipad = "Berkeley Mono" }
+```
+
+A client setting is one value for every device, or a table of device sections: `default` (every device), `mac`,
+`mobile` (iPhone and iPad), `iphone`, `ipad`. The most specific section that applies wins: a Mac reads `mac`, then
+`default`; an iPhone `iphone`, then `mobile`, then `default`; an iPad likewise with `ipad`. With no section for a
+device, the app's default applies. Unset, the fonts are the system font. Settings > Appearance sets a font's scope
+(Every device, Every Mac, iPhone and iPad, Every iPhone or iPad, or only this device, kept in the app); choosing a
+section there also removes the narrower sections that would hide it on that device.
 
 A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after the workspace's mise
 environment.

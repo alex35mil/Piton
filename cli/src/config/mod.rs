@@ -22,6 +22,7 @@ pub use self::model::tables::{SandboxTable, TrustTable};
 pub use self::{
     check::portability::warnings as portability_warnings,
     model::{
+        client::{Device, DeviceSection, PerDevice},
         daemon::{Build, DaemonConfig, IntegrationChoice, IntegrationConfig, TailnetConfig, default_socket},
         duration::{ConfigDuration, Timeout},
         grants::{GrantEntry, GrantFilter, Grants},

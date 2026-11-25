@@ -71,7 +71,7 @@ function viewClient() {
             for (const w of [...c.waiters]) if (w.pred(msg)) { c.waiters.splice(c.waiters.indexOf(w), 1); w.resolve(msg); }
         }
     });
-    sock.write(JSON.stringify({ protocol: "view", version: 1, client: "test" }) + "\n");
+    sock.write(JSON.stringify({ protocol: "view", version: 1, device: "mac", client: "test" }) + "\n");
     // Also matches lines already received: spawnSync (the CLI) blocks the event loop, so pushes can arrive first.
     c.wait = (pred, ms = 5000) =>
         c.lines.find(pred) ??

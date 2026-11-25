@@ -378,8 +378,14 @@ mod tests {
         assert!(parse_global::<HostFile>("[sandbox]\ncommand = [\"nono\"]\n", path).is_err());
         assert!(parse_global::<HostFile>("[pi]\ncommand = []\n", path).is_err());
         assert!(parse_global::<HostFile>("[host]\nroots = []\n", path).is_err());
-        let client: ClientFile = parse_global("text_font = \"Inter\"\n", Path::new("config.client.toml")).unwrap();
-        assert_eq!(client.text_font.as_deref(), Some("Inter"));
+        let client_path = Path::new("config.client.toml");
+        let client: ClientFile = parse_global("[appearance]\ntext_font = \"Inter\"\n", client_path).unwrap();
+        assert_eq!(
+            client.appearance.text_font,
+            Some(crate::config::PerDevice::Every("Inter".into()))
+        );
+        // Ungrouped keys are gone: unknown keys.
+        assert!(parse_global::<ClientFile>("text_font = \"Inter\"\n", client_path).is_err());
     }
 
     #[test]

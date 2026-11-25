@@ -2,9 +2,9 @@ import PitonKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The Appearance settings section: the text and code fonts. Each is shared through the host (the same on every
-/// device, kept in the host's config.client.toml) unless its Local box is checked, which keeps a value on this
-/// device only. A shared change needs the connection; a local one doesn't.
+/// The Appearance settings section: the text and code fonts. Each applies where its scope says: a section of the host's
+/// config.client.toml (every device, every Mac, iPhone and iPad, every iPhone, every iPad), or this device only, kept
+/// in the app. A change on the host needs the connection; one for this device only doesn't.
 public struct AppearanceSettings: View {
     /// The host connection, for shared values; nil while there's none (the phone before setup).
     let store: Store?
@@ -27,7 +27,7 @@ public struct AppearanceSettings: View {
                 Text("Fonts")
             } footer: {
                 Text(
-                    "Shared fonts are the same on every device connected to this host. Check Local to choose one for this device only. A font this device doesn't have shows as the system font."
+                    "A font applies to the devices its scope names, through the host; Only this device keeps it in this app. A font this device doesn't have shows as the system font."
                 )
             }
             Section("Preview") {
@@ -108,14 +108,76 @@ public struct AppearanceSettings: View {
             }
         }
         .disabled(!canChange(source))
-        Toggle("Local to this device", isOn: local(preference))
+        Picker("Applies to", selection: scope(preference)) {
+            ForEach(scopes, id: \.self) { scope in
+                Text(scopeTitle(scope)).tag(scope)
+                    // A section is the host's: it needs the connection. This device's own value doesn't.
+                    .selectionDisabled(!canChoose(scope))
+            }
+        }
+        if let others = otherSections(preference) {
+            Text(others).font(.caption).foregroundStyle(.secondary)
+        }
     }
 
-    /// A shared value changes on the host: it needs the connection.
+    /// The device this app runs on.
+    private var device: ClientDevice { store?.device ?? .current }
+
+    /// The scopes a font can have on this device, broadest first.
+    private var scopes: [FontScope] { device.sections.map(FontScope.section) + [.thisDevice] }
+
+    private func scopeTitle(_ scope: FontScope) -> String {
+        switch scope {
+        case .section(.default): "Every device"
+        case .section(.mac): "Every Mac"
+        case .section(.mobile): "iPhone and iPad"
+        case .section(.iphone): "Every iPhone"
+        case .section(.ipad): "Every iPad"
+        case .thisDevice:
+            switch device {
+            case .mac: "Only this Mac"
+            case .iphone: "Only this iPhone"
+            case .ipad: "Only this iPad"
+            }
+        }
+    }
+
+    /// The host's setting for `preference`, as this device sees it.
+    private func setting(_ preference: ClientPreference) -> Setting? {
+        store?.daemon?.setting(.client, preference.key)
+    }
+
+    /// The section the host's value comes from on this device; every device when none applies yet.
+    private func section(_ preference: ClientPreference) -> DeviceSection {
+        switch setting(preference)?.location {
+        case .devices(_, let section): section ?? .default
+        case .file, nil: .default
+        }
+    }
+
+    /// What the other sections of the file set, so a value hidden on this device isn't a surprise.
+    private func otherSections(_ preference: ClientPreference) -> String? {
+        guard case .devices(let sections, let inEffect) = setting(preference)?.location else { return nil }
+        let others = DeviceSection.allCases.filter { $0 != inEffect }.compactMap { section -> String? in
+            guard let value = sections[section]?.string else { return nil }
+            return "\(scopeTitle(.section(section))): \(value)"
+        }
+        return others.isEmpty ? nil : "Also set: " + others.joined(separator: ", ")
+    }
+
+    /// A section is written on the host: it needs the connection.
+    private func canChoose(_ scope: FontScope) -> Bool {
+        switch scope {
+        case .thisDevice: true
+        case .section: store?.daemon != nil
+        }
+    }
+
+    /// A host value changes on the host: it needs the connection.
     private func canChange(_ source: PreferenceSource) -> Bool {
         switch source {
-        case .local: true
-        case .shared: store?.daemon != nil
+        case .thisDevice: true
+        case .host: store?.daemon != nil
         }
     }
 
@@ -124,31 +186,46 @@ public struct AppearanceSettings: View {
             get: { FontChoice(preference: fonts.source(preference).value) },
             set: { choice in
                 switch fonts.source(preference) {
-                case .local: ClientPreferences().setLocal(preference, choice.preference)
-                case .shared:
-                    let value: JSON = choice.preference.map(JSON.string) ?? .null
-                    Task { _ = await store?.setSetting(.client, preference.key, to: value) }
+                case .thisDevice: ClientPreferences().setLocal(preference, choice.preference)
+                case .host: write(preference, choice.preference, to: section(preference))
                 }
             })
     }
 
-    /// Checking Local keeps the font in use on this device; unchecking returns to the host's shared one.
-    private func local(_ preference: ClientPreference) -> Binding<Bool> {
+    /// Sets `value` in `section` of the host's file (nil, the system font, removes that section).
+    private func write(_ preference: ClientPreference, _ value: String?, to section: DeviceSection) {
+        let json: JSON = value.map(JSON.string) ?? .null
+        Task { _ = await store?.setSetting(.client, preference.key, to: json, target: .section(section)) }
+    }
+
+    /// The font's scope. Choosing a section writes the font in use there (the host makes it the one in effect on this
+    /// device); choosing this device keeps the font in use in the app.
+    private func scope(_ preference: ClientPreference) -> Binding<FontScope> {
         Binding(
             get: {
                 switch fonts.source(preference) {
-                case .local: true
-                case .shared: false
+                case .thisDevice: .thisDevice
+                case .host: .section(section(preference))
                 }
             },
-            set: { isLocal in
+            set: { scope in
+                guard canChoose(scope) else { return }
                 let preferences = ClientPreferences()
-                switch isLocal {
-                case true: preferences.setLocal(preference, fonts.source(preference).value)
-                case false: preferences.useShared(preference)
+                let current = fonts.source(preference).value
+                switch scope {
+                case .thisDevice: preferences.setLocal(preference, current)
+                case .section(let section):
+                    preferences.useHost(preference)
+                    write(preference, current, to: section)
                 }
             })
     }
+}
+
+/// Where a font applies: a section of the host's client file, or this device only.
+enum FontScope: Hashable {
+    case section(DeviceSection)
+    case thisDevice
 }
 
 /// Every available family, each shown in its own face; a search field narrows the list.

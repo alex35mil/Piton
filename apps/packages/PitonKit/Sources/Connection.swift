@@ -47,8 +47,11 @@ public actor Connection {
     /// and two messages to pi would then arrive swapped.
     private let outgoing: AsyncStream<(id: RequestID, line: Data)>.Continuation
 
-    /// Opens a connection over `transport` and sends the hello. `client` names this client in the daemon's log.
-    public init(transport: any Transport, client: String, diagnosticID: String = UUID().uuidString) async throws {
+    /// Opens a connection over `transport` and sends the hello. `client` names this client in the daemon's log; `device`
+    /// decides which client settings the host sends it.
+    public init(
+        transport: any Transport, client: String, device: ClientDevice, diagnosticID: String = UUID().uuidString
+    ) async throws {
         self.transport = transport
         diagnostics = Diagnostics(id: diagnosticID)
         let (events, continuation) = AsyncStream<Event>.makeStream()
@@ -57,7 +60,7 @@ public actor Connection {
         let (lines, outgoing) = AsyncStream<(id: RequestID, line: Data)>.makeStream()
         self.outgoing = outgoing
         diagnostics.record("rpc.hello_sending")
-        try await transport.send(JSONEncoder().encode(viewHello(client: client)))
+        try await transport.send(JSONEncoder().encode(viewHello(client: client, device: device)))
         diagnostics.record("rpc.hello_sent")
         Task { await self.readLoop() }
         Task { await self.writeLoop(lines) }
@@ -117,10 +120,10 @@ public actor Connection {
     /// Changes one setting (see `Request.settingsSet`); returns the new state.
     @discardableResult
     public func setSetting(
-        _ scope: SettingScope, _ key: String, to value: JSON, local: Bool? = nil
+        _ scope: SettingScope, _ key: String, to value: JSON, target: SettingTarget = .file(local: nil)
     ) async throws -> DaemonState {
         try decode(
-            try await send(.settingsSet(scope: scope, key: key, value: value, local: local))["state"],
+            try await send(.settingsSet(scope: scope, key: key, value: value, target: target))["state"],
             as: DaemonState.self)
     }
 
