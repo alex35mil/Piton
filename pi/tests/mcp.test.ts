@@ -6,6 +6,7 @@ import * as path from "node:path"
 import { describe, it } from "node:test"
 
 import type { McpServerConfig } from "@earendil-works/pi-coding-agent"
+import { LIFT_GRANTED_EVENT } from "../extensions/__lib/lift.ts"
 import { clearSettingsCache } from "../extensions/__lib/settings.ts"
 import {
     mcpResponsePayload,
@@ -297,6 +298,45 @@ describe("native MCP integration", () => {
             await assert.rejects(h.start(), /team_tools.*conflicts.*team-tools/)
             assert.equal(h.registrations.size, 0)
             assert.equal(h.connects(), 0)
+        } finally {
+            await h.cleanup()
+        }
+    })
+
+    it("registers its stdio servers again when a child's block is lifted, leaving others to a notice", async () => {
+        const h = nativeMcpFixture()
+        try {
+            write(getMcpSettingsPaths(h.root).global, {
+                mcpServers: { local: { command: "tool", args: ["--x"] }, remote: server.config },
+            })
+            await h.install()
+            await h.start()
+            h.pi.registerMcpServer("foreign", { command: "other" })
+            const calls: string[] = []
+            const register = h.pi.registerMcpServer.bind(h.pi)
+            const unregister = h.pi.unregisterMcpServer.bind(h.pi)
+            h.pi.registerMcpServer = (name, config) => {
+                calls.push(`register:${name}`)
+                register(name, config)
+            }
+            h.pi.unregisterMcpServer = (name) => {
+                calls.push(`unregister:${name}`)
+                unregister(name)
+            }
+            const before = h.notifications.length
+            // A grant for pi's own process: nothing restarts.
+            h.events.emit(LIFT_GRANTED_EVENT, { lift: { kind: "write", path: "/x" }, forChild: false })
+            assert.deepEqual(calls, [])
+            assert.equal(h.notifications.length, before)
+            // A grant for a process pi started: its own stdio servers start again; another extension's are named.
+            h.events.emit(LIFT_GRANTED_EVENT, { lift: { kind: "write", path: "/x" }, forChild: true })
+            assert.deepEqual(calls, ["unregister:local", "register:local"])
+            assert.deepEqual(h.registrations.get("local")?.config, { command: "tool", args: ["--x"] })
+            assert.ok(h.registrations.has("foreign") && h.registrations.has("remote"))
+            const shown = h.notifications.slice(before)
+            assert.equal(shown.length, 1)
+            assert.match(shown[0], /foreign/)
+            assert.match(shown[0], /\/mcp reconnect/)
         } finally {
             await h.cleanup()
         }

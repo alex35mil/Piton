@@ -27,7 +27,10 @@ pub use self::{
         ClaudeCodeFolder, ClaudeCodeSockets, Facts, Resolution, Silenced, agent_dir, never_configuration, resolve,
         silenced,
     },
-    rules::{Access, Destination, Gate, Network, NetworkGrant, Policy, TAG_PREFIX, is_listen},
+    rules::{
+        Access, Destination, Gate, LIFT_LISTEN, LIFT_MACH, LIFT_READ, LIFT_WRITE, Lifts, Network, NetworkGrant, Policy,
+        TAG_PREFIX, is_listen,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]

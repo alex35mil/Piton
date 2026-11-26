@@ -377,6 +377,10 @@ pub async fn prepare_sandbox(
     );
     let warnings = launch_warnings(&resolution, &env, proxy.as_ref());
     let sockets = with_claude_sockets(&mut env, &resolution);
+    // pi's own sandbox carries the companion rules a lift token reopens; the commands' policies above (bash calls) never
+    // do, since a call is never given a token.
+    let mut resolution = resolution;
+    resolution.policy.lifts = sandbox::Lifts::Pi { credentials };
     Ok(Sandboxed {
         env,
         resolution,
@@ -647,6 +651,7 @@ mod tests {
                 },
                 listen: crate::launch::sandbox::Listen::Closed,
                 tag: String::new(),
+                lifts: Default::default(),
             },
             links: Vec::new(),
             agent_dirs: ["/h/.pi/agent".into(), "/h/.pi/agent".into()],

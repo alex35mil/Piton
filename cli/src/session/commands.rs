@@ -151,13 +151,19 @@ pub struct ProcessBlocks {
     waiting: std::collections::VecDeque<ProcessQuestion>,
 }
 
-/// One process question.
+/// One process question: the block, what it can lift in pi's live sandbox, and what it can save.
 #[derive(Debug, Clone)]
 pub struct ProcessQuestion {
     pub id: String,
     pub process: String,
+    pub operation: String,
+    pub target: String,
+    /// The refused process's pid: pi's own, or a process pi started.
+    pub pid: i32,
     pub refusal: String,
-    pub offer: crate::launch::sandbox::grant::Offer,
+    pub live: crate::agent::block::Live,
+    /// The `[sandbox]` entry each scope saves, when a saved form exists.
+    pub offer: Option<crate::launch::sandbox::grant::Offer>,
 }
 
 impl ProcessBlocks {
@@ -165,10 +171,17 @@ impl ProcessBlocks {
         self.asking.as_ref().is_some_and(|q| q.id == id)
     }
 
-    /// Whether this refusal is new: each (process, operation, target) is offered once per session.
+    /// Whether this refusal is new: each (process, operation, target) is offered once per session, until a live grant
+    /// that answered it ends ([`Self::forget`]).
     pub fn first(&mut self, process: &str, operation: &str, target: &str) -> bool {
         self.offered
             .insert((process.to_string(), operation.to_string(), target.to_string()))
+    }
+
+    /// The block may be asked about again: the grant that answered it ended.
+    pub fn forget(&mut self, process: &str, operation: &str, target: &str) {
+        self.offered
+            .remove(&(process.to_string(), operation.to_string(), target.to_string()));
     }
 
     /// Every blocked process is asked about, in order: none is dropped.
@@ -212,6 +225,35 @@ impl Commands {
         )
         .map_err(|e| e.to_string())?;
         Ok(path)
+    }
+
+    /// A saved process entry joins the session's command policies (the launch's, `all`, each narrowed grant's), so
+    /// calls started from now on get it, as after a restart. pi's own sandbox got it live. Only when this session's
+    /// configuration reads `file`.
+    pub fn add_saved_entry(&mut self, lift: &crate::launch::sandbox::grant::Lift, file: &Path) -> Result<(), String> {
+        use crate::launch::sandbox::grant::{Resolver, command_policies, widened_config};
+        if !self.reads(file) {
+            return Ok(());
+        }
+        let policies = &self.policies;
+        let config = widened_config(&policies.resolver.config, &lift.entries(), file);
+        let mut launch = policies.resolver.with(&lift.entries(), file)?;
+        launch.tag = policies.launch.tag.clone();
+        let resolver = Resolver {
+            config,
+            ..policies.resolver.clone()
+        };
+        let mut updated = command_policies(
+            &launch,
+            policies.credentials,
+            resolver,
+            policies.silence.clone(),
+            policies.claude_login,
+            policies.writable_vars.clone(),
+        );
+        updated.set_tag(&policies.launch.tag);
+        self.policies = updated;
+        Ok(())
     }
 
     /// Whether this session's configuration reads `file`: one of the files a network question saves to (its own
@@ -838,6 +880,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         }
     }
 
@@ -1451,14 +1494,23 @@ mod tests {
         assert!(blocks.first("node", "file-write-create", "/h/x"));
         assert!(!blocks.first("node", "file-write-create", "/h/x"));
         assert!(blocks.first("node", "file-write-create", "/h/y"));
+        // A grant that answered a block ended: it's asked about again.
+        blocks.forget("node", "file-write-create", "/h/x");
+        assert!(blocks.first("node", "file-write-create", "/h/x"));
         let question = |id: &str| ProcessQuestion {
             id: id.into(),
             process: "node".into(),
+            operation: "file-write-create".into(),
+            target: "/h/x".into(),
+            pid: 1,
             refusal: "file-write-create /h/x".into(),
-            offer: crate::launch::sandbox::grant::Offer {
+            live: crate::agent::block::Live::Lift(crate::launch::sandbox::grant::LiveLift::Write {
+                path: "/h/x".into(),
+            }),
+            offer: Some(crate::launch::sandbox::grant::Offer {
                 project: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
                 everywhere: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
-            },
+            }),
         };
         blocks.queue(question("a"));
         blocks.queue(question("b"));

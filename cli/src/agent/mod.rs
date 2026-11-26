@@ -13,6 +13,7 @@
 //!   channel.
 //! - [`answer`]: the answers every approval-gated request shares.
 //! - [`write`]: a protected write an agent asks for: the user's dialog, and the daemon's write once approved.
+//! - [`lift`]: tokens that widen pi's live sandbox, and the addon pi consumes them with.
 
 pub mod answer;
 pub mod block;
@@ -21,6 +22,7 @@ pub mod client;
 mod command;
 pub mod facts;
 mod git;
+pub mod lift;
 pub mod open;
 mod protected;
 pub mod question;

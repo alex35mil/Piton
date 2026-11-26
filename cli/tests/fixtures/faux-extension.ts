@@ -8,6 +8,8 @@
 //   "write <path>" call the `faux_write` tool: pi's own process writes <path> (a block that isn't a bash call), once a
 //                second for up to 10 s while it's refused: macOS may not report a process's first refusals for a
 //                few seconds (docs/pi-findings.md)
+//   "lift <path>" call the `faux_lift` tool: asks the daemon to widen pi's sandbox for writing <path>, writes it, and
+//                releases (piton's `lift`), then checks the write is refused again
 //   "ask"        ask a select dialog through the `faux_ask` tool, then answer with the choice
 //   "picture"    call the `faux_picture` tool, which returns a 2 MB image (larger than a phone's WebSocket message)
 //   "status"     call the `faux_status` tool, which sets a status line and a widget, then clears them on "status clear"
@@ -99,6 +101,10 @@ export default async function (pi: ExtensionAPI) {
         const write = /^write (.+)$/.exec(text);
         if (write) {
             return fauxAssistantMessage([fauxToolCall("faux_write", { path: write[1] })], { stopReason: "toolUse" });
+        }
+        const lifted = /^lift (.+)$/.exec(text);
+        if (lifted) {
+            return fauxAssistantMessage([fauxToolCall("faux_lift", { path: lifted[1] })], { stopReason: "toolUse" });
         }
         if (text.startsWith("tool")) {
             return fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 2; echo done" })], {
@@ -192,6 +198,33 @@ export default async function (pi: ExtensionAPI) {
                 }
             }
             return { content: [{ type: "text", text: String(failure) }], details: {} };
+        },
+    });
+
+    pi.registerTool({
+        name: "faux_lift",
+        label: "Faux lift",
+        description: "Write a file through an explicit lift of pi's sandbox (test tool).",
+        parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+        async execute(_id, params) {
+            const fs = await import("node:fs");
+            // Piton's pi package, loaded from the same checkout in the e2e setup (its path comes from the daemon's
+            // test configuration).
+            const lib = process.env.PITON_FAUX_LIFT_LIB;
+            if (!lib) return { content: [{ type: "text", text: "no lift library" }], details: {} };
+            const { lift } = await import(lib);
+            const target = String(params.path);
+            const outcome = await lift([{ kind: "write", path: target }], "test write", async () => {
+                fs.writeFileSync(target, "lifted");
+            });
+            let after = "open";
+            try {
+                fs.writeFileSync(`${target}.after`, "x");
+            } catch {
+                after = "closed";
+            }
+            const text = JSON.stringify({ outcome: outcome.kind, after });
+            return { content: [{ type: "text", text }], details: {} };
         },
     });
 

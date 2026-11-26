@@ -82,7 +82,7 @@ pub enum DaemonError {
 pub enum TrustCheck {
     /// Refuse with [`LaunchError::TrustNeeded`], so the client asks: every launch a person started.
     Ask,
-    /// Launch with what was decided (a restart the daemon starts on its own).
+    /// Launch with what was decided (a launch the daemon starts on its own).
     KeepDecided,
 }
 
@@ -164,6 +164,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
 
     // Socket folders of sessions that ended without their hook running (a crash, a kill).
     launch::claude_sockets::sweep(base_env.get("TMPDIR").map(Path::new), &config.state_dir());
+    // The addon pi consumes lift tokens with, matching this build; a session without it offers no live lifts.
+    match crate::agent::lift::install(&config.state_dir()) {
+        Ok(Some(path)) => crate::log!("lifts: addon at {}", path.display()),
+        Ok(None) => crate::log!("lifts: not on this platform"),
+        Err(e) => crate::log!("lifts: can't write the addon: {e}; pi's sandbox can't be widened live"),
+    }
     let state = crate::state::State::open(&config.state_db())?;
     let host_id = state.host_id()?;
     crate::log!("state: {} (host {host_id})", config.state_db().display());
@@ -557,7 +563,6 @@ impl Daemon {
             workspace: crate::agent::facts::FactWorkspace::of(&workspace),
         };
         let weak = Arc::downgrade(self);
-        let restarting = Arc::downgrade(self);
         let hooks = Hooks {
             ended: Box::new(move |key| {
                 if let Some(folder) = &sockets {
@@ -567,11 +572,6 @@ impl Daemon {
                     daemon.agent_tokens.forget(key);
                     lock(&daemon.sessions).remove(&key);
                     let _ = daemon.list_changed.send(());
-                }
-            }),
-            restart: Box::new(move |key| {
-                if let Some(daemon) = restarting.upgrade() {
-                    tokio::spawn(async move { daemon.restart_session(key).await });
                 }
             }),
             status_changed: self.status_changed.clone(),
@@ -766,31 +766,6 @@ impl Daemon {
             crate::log!("trust: {} reset", inputs.source.display());
         }
         Ok(crate::trust::TrustState::decide(&inputs, None))
-    }
-
-    /// Stops a session and launches it again from its file, in the same workspace and mode, with the configuration as
-    /// it is now (a sandbox entry the user just saved).
-    async fn restart_session(self: &Arc<Self>, key: SessionKey) {
-        let Some(handle) = self.session(key) else { return };
-        let shared = handle.snapshot();
-        let Some(file) = shared.file.clone() else {
-            crate::log!("session {key}: not restarted: it has no session file yet");
-            return;
-        };
-        handle.stop(StopReason::Requested).await;
-        // A restart nobody asked for never asks: it keeps what was decided.
-        match self
-            .launch_in(
-                &shared.workspace,
-                shared.mode,
-                SessionArg::Resume(file.into()),
-                TrustCheck::KeepDecided,
-            )
-            .await
-        {
-            Ok(new) => crate::log!("session {key}: restarted as session {}", new.key),
-            Err(e) => crate::log!("session {key}: restart failed: {e}"),
-        }
     }
 
     /// The live session that has `file` open, other than `except`.

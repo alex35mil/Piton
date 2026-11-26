@@ -1,6 +1,7 @@
-// End-to-end tests of #241 on the host: a sandboxed session's bash calls run through the daemon, each in its own
-// sandbox; a rerun the agent asks for is asked of the user and runs with everything but the floor; a persisted grant
-// runs the next matching call without asking; a blocked process that isn't a bash call is offered as a sandbox entry.
+// End-to-end tests of #241 and #408 on the host: a sandboxed session's bash calls run through the daemon, each in its
+// own sandbox; a rerun the agent asks for is asked of the user and runs with everything but the floor; a persisted grant
+// runs the next matching call without asking; a block in pi's own process is lifted in its running sandbox (until the
+// run settles, for the session, or saved), and code in pi's process can ask for a lift itself.
 // Real pi in sandbox mode, loading Piton's pi package (`pi/`, whose permissions extension sends bash to the daemon;
 // its dependencies come from `mise run pi:install`) and the faux extension (the scripted model and its test tools).
 // The test's `[tools.permissions] default_mode = "allow"` keeps the extension from asking before each call.
@@ -146,9 +147,9 @@ const tests = {
         await b.close();
     },
 
-    async "a blocked process that isn't a bash call is offered as a sandbox entry"(ctx) {
+    async "a blocked process that isn't a bash call is offered live and as a sandbox entry"(ctx) {
         // pi's own process writes outside its grants (an extension's tool): the kernel's record carries the session's
-        // tag, never a call's, so it's offered as the entry that lifts it.
+        // tag, never a call's, so it's offered live and as the entry that lifts it.
         const a = attach(ctx);
         const target = `${ctx.outside}-process`;
         const offered = a.waitNew(
@@ -157,11 +158,13 @@ const tests = {
         );
         a.send({ type: "prompt", message: `write ${target}` });
         const req = await offered;
-        // Offered as `"<path>" = "write"` in [sandbox.filesystem]; no answer saves a denial.
+        // Offered as `"<path>" = "write"` in [sandbox.filesystem]; no answer saves a denial or restarts.
         assert.ok(req.title.includes(`filesystem."${target}" = "write"`), req.title);
         assert.equal(req.options[0], "Choose an answer below");
-        assert.ok(req.options.includes("Not now"));
-        assert.ok(!req.options.some((o) => o.startsWith("Deny")), req.options.join(", "));
+        for (const option of ["Allow until the end of this turn", "Allow for this session", "Not now"]) {
+            assert.ok(req.options.includes(option), req.options.join(", "));
+        }
+        assert.ok(!req.options.some((o) => o.startsWith("Deny") || /restart/.test(o)), req.options.join(", "));
         // The run ends before an answer: the question is asked again, not lost. Both waits start now: the repeat can
         // arrive in the same chunk as `agent_settled`.
         const settled = a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
@@ -191,25 +194,95 @@ const tests = {
         await a.close();
     },
 
-    async "git's control files are reported, not asked; the user's own deny is only logged"(ctx) {
+    async "until the run settles lifts pi's sandbox live, closes it again, and asks again next run"(ctx) {
         const a = attach(ctx);
-        // pi's own process writes the workspace's .git/config: no entry lifts it, so a notice, never a question.
-        const notice = a.waitNew(
-            (r) => r.type === "extension_ui_request" && r.method === "notify" && /Git's hooks and configuration/.test(r.message ?? ""),
+        // pi's own process writes the workspace's .git/config: no entry saves it, but pi's sandbox is widened live.
+        const config = join(ctx.ws, ".git/config");
+        const asked = () =>
+            a.waitNew(
+                (r) => r.type === "extension_ui_request" && r.method === "select" && (r.title ?? "").includes(".git/config"),
+                30000,
+            );
+        let question = asked();
+        let settled = a.waitNew((r) => r.type === "agent_settled", 45000);
+        a.send({ type: "prompt", message: `write ${config}` });
+        let req = await question;
+        assert.ok(!req.options.some((o) => o.startsWith("Always")), "no saved form for Git's files");
+        assert.match(req.title, /write and edit tools/, "the risk is named");
+        a.send({ type: "extension_ui_response", id: req.id, value: "Allow until the end of this turn" });
+        await settled;
+        // The tool kept retrying: once the grant was consumed, its write went through, with no restart.
+        assert.equal(readFileSync(config, "utf8"), "x");
+        const tool = a.records.find((r) => r.type === "tool_execution_end" && r.toolName === "faux_write");
+        assert.match(JSON.stringify(tool?.result ?? {}), /written/);
+        // Closed after the run settled: the next run's same write is blocked and asked about again.
+        rmSync(config);
+        question = asked();
+        settled = a.waitNew((r) => r.type === "agent_settled", 45000);
+        a.send({ type: "prompt", message: `write ${config}` });
+        req = await question;
+        a.send({ type: "extension_ui_response", id: req.id, value: "Not now" });
+        await settled;
+        assert.ok(!existsSync(config), "closed again after the first run settled");
+        await a.close();
+    },
+
+    async "always saves the entry and lifts it now, without a restart"(ctx) {
+        const a = attach(ctx);
+        const target = `${ctx.outside}-always`;
+        const offered = a.waitNew(
+            (r) => r.type === "extension_ui_request" && r.method === "select" && (r.title ?? "").includes(target),
             30000,
         );
-        a.send({ type: "prompt", message: `write ${join(ctx.ws, ".git/config")}` });
-        const shown = await notice;
-        assert.ok(shown.message.includes(join(ctx.ws, ".git/config")), shown.message);
-        assert.match(shown.message, /Git skipped that step/);
-        await a.waitNew((r) => r.type === "agent_settled", 30000).catch(() => {});
-        assert.ok(
-            !a.records.some((r) => r.type === "extension_ui_request" && r.method === "select" && (r.title ?? "").includes(".git/config")),
-            "no question",
-        );
-
+        const settled = a.waitNew((r) => r.type === "agent_settled", 45000);
+        a.send({ type: "prompt", message: `write ${target}` });
+        const req = await offered;
+        a.send({ type: "extension_ui_response", id: req.id, value: "Always everywhere" });
+        await settled;
+        assert.ok(existsSync(target), "written in the same run");
+        assert.ok(readFileSync(join(ctx.config, "config.toml"), "utf8").includes(`"${target}" = "write"`));
+        // The same session, not a restarted one: a later bash call in it gets the saved entry too.
+        const ran = await a.bash(`bash echo y >> ${target} && echo appended`);
+        assert.match(ran, /appended/);
+        assert.ok(!readFileSync(join(ctx.dir, "piton.log"), "utf8").includes("restart"), "no restart");
         await a.close();
+    },
 
+    async "code in pi's process asks for a lift, gets it once, and it's released; the floor is refused"(ctx) {
+        const a = attach(ctx);
+        const question = a.waitNew(
+            (r) => r.type === "extension_ui_request" && r.method === "select" && /widen its sandbox for one action/.test(r.title ?? ""),
+            30000,
+        );
+        const settled = a.waitNew((r) => r.type === "agent_settled", 45000);
+        a.send({ type: "prompt", message: `lift ${ctx.outside}-lifted` });
+        const req = await question;
+        assert.match(req.title, /test write/);
+        a.send({ type: "extension_ui_response", id: req.id, value: "Allow once" });
+        await settled;
+        const tool = a.records.find((r) => r.type === "tool_execution_end" && r.toolName === "faux_lift");
+        const text = JSON.stringify(tool?.result ?? {});
+        assert.match(text, /\\"outcome\\":\\"done\\"/, text);
+        assert.match(text, /\\"after\\":\\"closed\\"/, "released after the action");
+        assert.equal(readFileSync(`${ctx.outside}-lifted`, "utf8"), "lifted");
+        // A protected file: refused without asking.
+        const before = a.records.length;
+        const done = a.waitNew((r) => r.type === "agent_settled", 45000);
+        a.send({ type: "prompt", message: `lift ${join(ctx.ws, ".pi/settings.json")}` });
+        await done;
+        const refused = a.records.slice(before).find((r) => r.type === "tool_execution_end" && r.toolName === "faux_lift");
+        assert.match(JSON.stringify(refused?.result ?? {}), /refused/);
+        // Never asked about the lift. (The tool's check that the path is closed again is itself a block, asked about.)
+        assert.ok(
+            !a.records
+                .slice(before)
+                .some((r) => r.type === "extension_ui_request" && /widen its sandbox for one action/.test(r.title ?? "")),
+            "never asked",
+        );
+        await a.close();
+    },
+
+    async "the user's own deny is only logged"(ctx) {
         // A `"deny"` the user wrote: the block is only logged, never asked about or noticed.
         const target = `${ctx.outside}-silenced`;
         // Added to the suite's global config, which keeps its `[tools.permissions] default_mode = "allow"`: without it
@@ -236,7 +309,19 @@ const tests = {
 await runSuite("blocks.mjs", tests, {
     prepare,
     cleanup(ctx) {
-        for (const suffix of ["-plain", "-asked", "-rerun", "-rerun2", "-persist", "-process", "-process2", "-silenced"]) {
+        for (const suffix of [
+            "-plain",
+            "-asked",
+            "-rerun",
+            "-rerun2",
+            "-persist",
+            "-process",
+            "-process2",
+            "-silenced",
+            "-always",
+            "-lifted",
+            "-lifted.after",
+        ]) {
             rmSync(`${ctx.outside}${suffix}`, { force: true });
         }
     },

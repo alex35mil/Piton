@@ -35,6 +35,7 @@ Use `/reload` after configuration changes in a compatible harness. See the [brea
 - `codemode` and deferred discovery reach the same native definitions and permission hooks as direct calls.
 - Native structured results, errors, progress, resource handling, namespaces, renderers, and output schemas are preserved.
 - Native tool names can be normalized or shortened with hashes. The catalog records actual registered names and original server/tool identity separately.
+- In a Piton session, when pi's sandbox is widened while it runs for a block in a process pi started (`piton:lift-granted` with `forChild`), every stdio server this extension registered is registered again, so it starts again and inherits the new access. Servers other extensions registered keep their sandbox; a notice names them and points to `/mcp reconnect <name>`. A grant for pi's own process restarts nothing.
 - A fresh catalog snapshot is published before each available definition is registered. Hidden and withdrawn definitions leave the available catalog; shutdown clears it.
 - Annotation hints are untrusted declarations. Read-only permission selectors match only an explicitly true hint.
 
