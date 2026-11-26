@@ -304,6 +304,8 @@ private let decoder = JSONDecoder()
     #expect(decide["type"]?.string == "session.decide")
     #expect(decide["question"]?.string == "q1")
     #expect(decide["answer"]?["once"]?.string == "host")
+    let session = Request.sessionDecide(7, question: "q1", decision: .session(.sandbox)).json(id: "z")
+    #expect(session["answer"]?["session"]?.string == "sandbox")
     #expect(Request.sessionDecide(7, question: "q1", decision: .deny).json(id: "z")["answer"]?.string == "deny")
     let always = Request.sessionDecide(7, question: "q1", decision: .always(.sandbox, scope: .global, pattern: "git *"))
         .json(id: "z")["answer"]?["always"]

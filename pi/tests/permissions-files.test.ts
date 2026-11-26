@@ -457,20 +457,25 @@ function fakeDaemon(outcomes: unknown[]) {
         connection.on("data", (chunk: string) => {
             buf += chunk
             if (!buf.includes("\n")) return
-            requests.push(JSON.parse(buf))
+            const envelope = JSON.parse(buf) as {
+                token: string
+                request: { type: string; path: string; content: string }
+            }
+            assert.equal(envelope.request.type, "protected_write")
+            requests.push({ token: envelope.token, path: envelope.request.path, content: envelope.request.content })
             connection.end(`${JSON.stringify({ type: "protected_write", ...(outcomes.shift() as object) })}\n`)
         })
     })
     const env = {
         PITON_AGENT_SOCKET: process.env.PITON_AGENT_SOCKET,
-        PITON_SESSION_TOKEN: process.env.PITON_SESSION_TOKEN,
+        PITON_AGENT_TOKEN: process.env.PITON_AGENT_TOKEN,
     }
     return {
         requests,
         async start() {
             await new Promise<void>((resolve) => server.listen(socket, resolve))
             process.env.PITON_AGENT_SOCKET = socket
-            process.env.PITON_SESSION_TOKEN = "t0ken"
+            process.env.PITON_AGENT_TOKEN = "t0ken"
         },
         async stop() {
             for (const [key, value] of Object.entries(env)) {

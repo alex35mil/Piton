@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::answer::{Never, Once};
+use crate::{daemon::Daemon, session::SessionCmd};
+
 /// A request from the agent.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WriteRequest {
@@ -42,51 +45,76 @@ pub enum WriteOutcome {
     },
 }
 
-/// What the user decided, from a client's answer to the dialog.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteDecision {
-    Approve {
-        /// The user's own version, when they changed it.
-        content: Option<String>,
-        notes: Vec<Value>,
-    },
-    Reject {
-        notes: Vec<Value>,
-    },
+/// What `protected_write` answers: the write's outcome, or that the session ended before the user answered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WriteResponse {
+    ProtectedWrite(WriteOutcome),
+    /// The session ended before the user answered.
+    Ended,
 }
 
-impl WriteDecision {
-    /// Reads a client's `extension_ui_response` fields: `value` from a select (pi.nvim's JSON or a plain option),
-    /// `cancelled` or a missing value as a rejection.
-    pub fn from_answer(answer: &serde_json::Map<String, Value>) -> WriteDecision {
-        let Some(value) = answer.get("value").and_then(Value::as_str) else {
-            return WriteDecision::Reject { notes: Vec::new() };
-        };
-        match value {
-            "Accept" => WriteDecision::Approve {
-                content: None,
-                notes: Vec::new(),
-            },
-            text => {
-                let parsed: Option<serde_json::Map<String, Value>> = serde_json::from_str(text).ok();
-                let notes = parsed
-                    .as_ref()
-                    .and_then(|p| p.get("notes"))
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                match parsed.as_ref().and_then(|p| p.get("result")).and_then(Value::as_str) {
-                    Some("Accepted") => WriteDecision::Approve { content: None, notes },
-                    Some("AcceptModified") => WriteDecision::Approve {
-                        content: parsed
-                            .as_ref()
-                            .and_then(|p| p.get("content"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        notes,
-                    },
-                    Some(_) | None => WriteDecision::Reject { notes },
-                }
+/// Asks `session` to write: the user answers in a client, as long as it takes. The agent's tool call holds the
+/// connection meanwhile; when it closes, the caller drops this future, and the session closes the dialog.
+pub async fn protected_write(
+    daemon: &Daemon,
+    session: crate::session::SessionKey,
+    request: WriteRequest,
+) -> WriteResponse {
+    let Some(handle) = daemon.session(session) else {
+        return WriteResponse::Ended;
+    };
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    if handle.tx.send(SessionCmd::ProtectedWrite { request, reply }).is_err() {
+        return WriteResponse::Ended;
+    }
+    // Wakes the session when the agent stops waiting, so it closes the dialog at once.
+    let _wake = super::socket::WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleProtectedWrite);
+    match outcome.await {
+        Ok(outcome) => WriteResponse::ProtectedWrite(outcome),
+        Err(_) => WriteResponse::Ended,
+    }
+}
+
+/// What the user decided, from a client's answer to the dialog: once (the write is one operation the daemon bounds),
+/// or deny, each with the user's notes. A write changes what later sessions may do, so nothing broader is offered.
+pub type WriteAnswer = super::answer::Answer<Once<WriteApproval>, Never, Never, Vec<Value>>;
+
+/// An approved write: the user's own version, when they changed it, and their notes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteApproval {
+    pub content: Option<String>,
+    pub notes: Vec<Value>,
+}
+
+/// Reads a client's `extension_ui_response` fields: `value` from a select (pi.nvim's JSON or a plain option),
+/// `cancelled` or a missing value as a rejection.
+pub fn read_answer(answer: &serde_json::Map<String, Value>) -> WriteAnswer {
+    let approve = |content, notes| WriteAnswer::Narrowest(Once(WriteApproval { content, notes }));
+    let Some(value) = answer.get("value").and_then(Value::as_str) else {
+        return WriteAnswer::Deny(Vec::new());
+    };
+    match value {
+        "Accept" => approve(None, Vec::new()),
+        text => {
+            let parsed: Option<serde_json::Map<String, Value>> = serde_json::from_str(text).ok();
+            let notes = parsed
+                .as_ref()
+                .and_then(|p| p.get("notes"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            match parsed.as_ref().and_then(|p| p.get("result")).and_then(Value::as_str) {
+                Some("Accepted") => approve(None, notes),
+                Some("AcceptModified") => approve(
+                    parsed
+                        .as_ref()
+                        .and_then(|p| p.get("content"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    notes,
+                ),
+                Some(_) | None => WriteAnswer::Deny(notes),
             }
         }
     }
@@ -301,36 +329,33 @@ mod tests {
 
     #[test]
     fn reads_pi_nvim_and_plain_answers() {
+        let approved = |content: Option<&str>, notes| {
+            WriteAnswer::Narrowest(Once(WriteApproval {
+                content: content.map(str::to_string),
+                notes,
+            }))
+        };
+        assert_eq!(read_answer(&answer(json!({"value": "Accept"}))), approved(None, vec![]));
         assert_eq!(
-            WriteDecision::from_answer(&answer(json!({"value": "Accept"}))),
-            WriteDecision::Approve {
-                content: None,
-                notes: vec![]
-            }
+            read_answer(&answer(json!({"value": "Reject"}))),
+            WriteAnswer::Deny(vec![])
         );
         assert_eq!(
-            WriteDecision::from_answer(&answer(json!({"value": "Reject"}))),
-            WriteDecision::Reject { notes: vec![] }
-        );
-        assert_eq!(
-            WriteDecision::from_answer(&answer(json!({"cancelled": true}))),
-            WriteDecision::Reject { notes: vec![] }
+            read_answer(&answer(json!({"cancelled": true}))),
+            WriteAnswer::Deny(vec![])
         );
         let note = json!({"path": "p", "note": "why"});
         assert_eq!(
-            WriteDecision::from_answer(&answer(json!({
+            read_answer(&answer(json!({
                 "value": json!({"result": "AcceptModified", "content": "mine", "notes": [note]}).to_string()
             }))),
-            WriteDecision::Approve {
-                content: Some("mine".into()),
-                notes: vec![note.clone()]
-            }
+            approved(Some("mine"), vec![note.clone()])
         );
         assert_eq!(
-            WriteDecision::from_answer(&answer(json!({
+            read_answer(&answer(json!({
                 "value": json!({"result": "Rejected", "notes": [note]}).to_string()
             }))),
-            WriteDecision::Reject { notes: vec![note] }
+            WriteAnswer::Deny(vec![note])
         );
     }
 

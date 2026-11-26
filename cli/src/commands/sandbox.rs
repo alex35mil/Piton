@@ -306,7 +306,7 @@ fn explain(source: &Source) -> String {
             "built-in credential deny (nono's {group}); `\"<path>\" = \"read\"` in [sandbox.filesystem] (global \
              config.toml or a config.local.toml) reopens reading a path inside it"
         ),
-        Source::Piton { what } => format!("Piton: {what}"),
+        Source::Piton { area } => format!("Piton: {}", area.describe()),
         Source::FnoxConfig => {
             "a file fnox loads, or a folder on its path: which secrets go where; the file changes only \
                                through a write the user approves (the edit or write tool), its folders never"

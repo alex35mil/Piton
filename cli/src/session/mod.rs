@@ -335,6 +335,9 @@ pub struct LaunchSpec {
     pub mode: LaunchMode,
     pub session: SessionArg,
     pub env: Env,
+    /// Behind fnox: the one-time token the helper that becomes pi reports its start with, in the helper's own
+    /// environment.
+    pub launch_token: Option<String>,
     /// The sandbox, for sandboxed launches: `piton sandbox-exec` reads it from the environment and removes it before
     /// pi starts.
     pub policy: Option<launch::sandbox::Policy>,
@@ -366,8 +369,6 @@ pub struct NetworkSpec {
     pub route: Option<crate::launch::sandbox::network::Route>,
     /// The `ssh` wrapper's folder, when the daemon made it.
     pub ssh: Option<PathBuf>,
-    /// Behind fnox: the one-time token the helper reports fnox's proxy with, in the helper's own environment.
-    pub upstream_token: Option<String>,
 }
 
 /// The gate of a session with a filtered network, deciding through the session's channel.
@@ -414,13 +415,11 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
     let (tx, rx) = mpsc::unbounded_channel();
     // A filtered network's gate, with pi's own proxy user in its policy.
     let mut extra = Env::new();
+    if let Some(token) = &spec.launch_token {
+        extra.insert(crate::agent::LAUNCH_TOKEN_ENV.into(), token.clone());
+    }
     let mut network = match spec.network.take() {
-        Some(network) => {
-            if let Some(token) = &network.upstream_token {
-                extra.insert(crate::agent::GATE_TOKEN_ENV.into(), token.clone());
-            }
-            Some(start_gate(network, &tx)?)
-        }
+        Some(network) => Some(start_gate(network, &tx)?),
         None => None,
     };
     if let (Some(network), Some(policy)) = (&mut network, &mut spec.policy) {
@@ -533,6 +532,7 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         paths: config.paths.clone(),
         grants: spec.grants.clone(),
         levels: spec.levels.clone(),
+        session_grants: HashMap::new(),
     });
     let task = SessionTask {
         config,
@@ -986,13 +986,13 @@ impl SessionTask {
 
     /// A client's answer to the pending protected write's dialog: write or not, and tell the agent.
     fn answer_protected_write(&mut self, answer: &Map<String, Value>) {
-        use crate::agent::{WriteDecision, WriteOutcome, write_approved};
+        use crate::agent::{WriteAnswer, WriteApproval, WriteOutcome, answer::Once, read_write_answer, write_approved};
         let Some(pending) = self.protected_write.take() else {
             return;
         };
         let key = lock(&self.shared).key;
-        let outcome = match WriteDecision::from_answer(answer) {
-            WriteDecision::Approve { content, notes } => {
+        let outcome = match read_write_answer(answer) {
+            WriteAnswer::Narrowest(Once(WriteApproval { content, notes })) => {
                 let modified = content.as_ref().is_some_and(|c| *c != pending.content);
                 let content = content.unwrap_or(pending.content);
                 match write_approved(&pending.root, &pending.path, &content) {
@@ -1009,10 +1009,11 @@ impl SessionTask {
                     },
                 }
             }
-            WriteDecision::Reject { notes } => {
+            WriteAnswer::Deny(notes) => {
                 crate::log!("session {key}: protected write to {} rejected", pending.path.display());
                 WriteOutcome::Rejected { notes }
             }
+            WriteAnswer::Session(never) | WriteAnswer::Always(never) => match never {},
         };
         let _ = pending.reply.send(outcome);
         self.ask_next_process();
@@ -1596,7 +1597,7 @@ impl SessionTask {
             Target::Host => "on the host",
         };
         let decision = match answer {
-            Answer::Deny => {
+            Answer::Deny(()) => {
                 crate::log!("session {key}: the user denied running a command outside the sandbox");
                 // The agent mustn't ask again in this run for what the user just declined.
                 self.calls.decline(&pending.request.call_id);
@@ -1604,7 +1605,7 @@ impl SessionTask {
                     reason: "the user declined to run it outside the sandbox; don't ask again for this command".into(),
                 }
             }
-            Answer::Once(target) => match &self.commands {
+            Answer::Narrowest(crate::agent::answer::Once(target)) => match &self.commands {
                 Some(commands) => {
                     crate::log!("session {key}: the user approved running a command {}", where_(target));
                     RunDecision::Run(Box::new(commands.approved_rerun(
@@ -1615,10 +1616,26 @@ impl SessionTask {
                 }
                 None => return,
             },
-            Answer::Always { target, scope, pattern } => match &self.commands {
+            Answer::Session(target) => match &mut self.commands {
                 Some(commands) => {
-                    let shown = pattern.pattern().to_string();
-                    let note = match commands.persist(scope, pattern, target) {
+                    crate::log!(
+                        "session {key}: the user approved running a command {} for this session",
+                        where_(target)
+                    );
+                    commands.allow_for_session(&pending.request.command, target);
+                    RunDecision::Run(Box::new(commands.approved_rerun(
+                        &pending.request,
+                        &pending.tag,
+                        target,
+                    )))
+                }
+                None => return,
+            },
+            Answer::Always(always) => match &self.commands {
+                Some(commands) => {
+                    let target = always.target;
+                    let shown = always.pattern.pattern().to_string();
+                    let note = match commands.persist(always) {
                         Ok(path) => format!(" (saved `bash({shown})` in {}; new sessions use it)", path.display()),
                         Err(e) => format!(" (couldn't save the entry for `{shown}`: {e})"),
                     };

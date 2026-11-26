@@ -79,8 +79,10 @@ The binary's crate (`cli/`) is one module per concept. Each module's `mod.rs` is
   resolved rules, and applying them with the `nono` library; the only code that knows the backend).
 - `apps/`: serving the native apps: the `view` protocol, the tailnet WebSocket, browsing roots, the Settings list.
 - `agent/`: the bridge between a sandboxed agent and the daemon: which files are protected and their Seatbelt rules
-  (`protected`), `agent.sock` (`socket`), a protected write asked of the user (`write`), bash calls the daemon runs
-  (`run`) and the per-command grants it matches (`command`), the block question (`block`), and `open` (`open`).
+  (`protected`), the channel's contract (`channel`: callers, tokens, requests) and its transport `agent.sock`
+  (`socket`) and Rust client (`client`), the answers approval-gated requests share (`answer`), a protected write asked
+  of the user (`write`), bash calls the daemon runs (`run`) and the per-command grants it matches (`command`), the block
+  question (`block`, `question`), and `open` (`open`).
 - `project/`: a workspace's source or worker relation, and worker clones.
 - `integrations/`: the external programs piton runs (mise, fnox, tailscale) and whether each is used.
 - `setup/`: `piton setup` and the launchd agent. `logging/`: Piton's own logs, the logging policy, the collector.
@@ -1092,7 +1094,8 @@ grants the real path. A link outside the checkout made by a session elsewhere wh
 followed when this launch's grants don't cover it. A sandboxed launch is refused when the workspace path given goes
 through a symlink inside a git checkout that leads out of it; the user's own links outside any checkout work.
 
-`PITON_RUNTIME`, `PITON_CONFIG_HOME`, and `PITON_SESSION_TOKEN` are set by the daemon after the mise environment.
+`PITON_RUNTIME`, `PITON_CONFIG_HOME`, `PITON_AGENT_SOCKET`, and `PITON_AGENT_TOKEN` are set by the daemon after the mise
+environment.
 
 **The network gate** (`launch/sandbox/network/`, `session/network.rs`, `pi/catalog.rs`). A session whose network is filtered gets a gate:
 an HTTP proxy on 127.0.0.1 in the daemon (`CONNECT` any port, plus absolute-form plain HTTP). `piton sandbox-exec`
@@ -1131,9 +1134,9 @@ writable from the sandbox, which runs the real `ssh` with `ProxyCommand=piton ga
   `network-outbound host:port`), so a failed call lists them without asking again. A direct connection the sandbox
   refused (a program that ignores the proxy variables) is the kernel's `network-outbound <ip>:<port>` record: an
   approved rerun lifts it (`grant::all` opens the network).
-- **fnox.** Behind fnox's proxy, `piton sandbox-exec` reports fnox's `HTTPS_PROXY` over `agent.sock` with a one-time
-  token (`PITON_GATE_TOKEN`, the helper's own variable) before applying the sandbox, and the gate then forwards each
-  allowed tunnel as a `CONNECT` to fnox (`Route::Upstream`); connections wait up to 10 s for it. fnox 1.50 with
+- **fnox.** Behind fnox's proxy, `piton sandbox-exec` reports fnox's `HTTPS_PROXY` in its `launched` request ("The
+  channel to the daemon") before applying the sandbox, and the gate then forwards each allowed tunnel as a `CONNECT` to
+  fnox (`Route::Upstream`); connections wait up to 10 s for it. fnox 1.50 with
   permissive egress tunnels any port (checked: `CONNECT github.com:22` returns the SSH banner).
 - **Git for workers** (`launch/git.rs`) gets a gate of its own while it runs, decided by the source's policy alone
   (nobody to ask), dialing directly.
@@ -1188,7 +1191,7 @@ Changes are gated where they're written:
    other cases, and the rest of the policy).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
    the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
-   over `~/.local/state/piton/agent.sock` (identified by the session token); the daemon checks the path, shows the confirmation with the diff in the apps
+   as a `protected_write` request ("The channel to the daemon"); the daemon checks the path, shows the confirmation with the diff in the apps
    and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
    approve: answers come only from clients. One pending request per session; it ends when the agent stops waiting or
    its run ends. Every protected write asks. The dialog carries the file's current content, so the
@@ -1201,7 +1204,7 @@ Changes are gated where they're written:
    or a linked file's real folder) without following any symlink, so a folder the agent swapped for a link while the
    user decided can't redirect the write; the folders above a root outside the checkout are fixed in place by the
    sandbox.
-   Only a pi running outside Piton (no session token) has the permissions extension ask itself and write directly,
+   Only a pi running outside Piton (no channel) has the permissions extension ask itself and write directly,
    whatever `defaultMode` or auto-accept says.
 
 A rejected change never reaches disk. Limits: shell writes in host sessions aren't gated (as in Claude Code without
@@ -1216,6 +1219,81 @@ credential deny groups, since broad reads make the ~120 system-path allow entrie
 with nested re-allow is requested upstream ([nono#2310](https://github.com/nolabs-ai/nono/issues/2310)). A custom
 Seatbelt launcher is rejected: keeping the credential lists correct across macOS releases is security work nono
 shares.
+
+### The channel to the daemon
+
+Everything a process in a session asks of the daemon is a typed request on one socket, `agent.sock` in the daemon's
+state folder, with a typed answer (#395). The sandbox can connect to this one socket and never to the control socket.
+
+**Principles.**
+
+- **Every block has a way out.** The user can always choose a wider sandbox or the host for the operation, unless a
+  floor item forbids it; each floor item states why (below).
+- **One channel, one contract.** Requests, callers, answers, and liftability are sum types, matched exhaustively in
+  the operation that needs the answer.
+- **The daemon decides, and only the user approves.** A request can't approve itself; answers come only from clients.
+- **Facts are asked, not inherited**: a session asks the daemon instead of reading launch snapshots (#405).
+
+**Callers** (`agent/channel.rs`, `Caller`). Every request names its caller with a token, and the daemon also checks
+the process on the other end of the connection: on macOS its audit token (`LOCAL_PEERTOKEN`, whose pid is the
+process's), elsewhere its credentials. A token presented by the wrong process is refused.
+
+| Caller | Token | Accepted from |
+| --- | --- | --- |
+| pi's process | the session token, issued at launch, forgotten when the session ends | pi's process |
+| a bash call | a call token, issued when the daemon starts a sandboxed call, forgotten when it ends | the call's process group |
+| the launch helper | the one-time launch token, behind fnox only | any process (spent once) |
+
+- `PITON_AGENT_TOKEN` carries the process's own token: pi gets the session token, a sandboxed call its call token.
+  The daemon puts the call token in place of pi's in every call's environment, and the extension leaves pi's token out
+  of the environment it sends, so a call never holds pi's. A host run gets no socket and no token: it has no sandbox.
+- pi's process is the one the daemon started (the sandbox helper and pi's launcher `exec`, keeping the pid). Behind
+  fnox, pi is fnox's child: the helper (`sandbox-exec` or `launch-exec`) sends `launched` with the launch token
+  (`PITON_LAUNCH_TOKEN`, its own variable) just before it becomes pi, and the daemon records that connection's
+  process as pi's. Until then, the session token is refused.
+- A process pi starts (a `piton` subcommand, the reviewer subprocess) can't use pi's token.
+
+**Requests.** One request per connection, `{"token": "…", "request": {"type": "…", …}}` on one line, every field
+strict. Each has its own answer, line by line; a request refused before it's handled gets one line,
+`{"type": "refused", "why": "invalid" | "unidentified" | "token" | "not_allowed" | "ended", "message"}` (`token`
+adds `reason`: `unknown_token`, `wrong_process`, or `not_yet`; `not_allowed` adds the `caller` and the request).
+
+| Request | Callers | Asks the user | Narrowest answer |
+| --- | --- | --- | --- |
+| `protected_write` | pi | yes (diff) | once |
+| `run_command` | pi | for a rerun | once |
+| `launched` | launch helper | no | — |
+
+A bash call may send none of these yet; `Fact` (#405) is its first. The socket server (`agent/socket.rs`) only
+reads the peer, parses, accepts the token, authorizes the request for its caller (`channel::authorize`, exhaustive), and
+dispatches to the request's handler (`write.rs`, `run.rs`, the launch). The pi package's one client is
+`pi/extensions/__lib/agent.ts` (outside a session, `{kind: "noSession"}`); the Rust one is `agent/client.rs`.
+
+**Answers** (`agent/answer.rs`). Every approval-gated request shares one shape; a kind fills in what each carries, and
+one it doesn't offer can't be built.
+
+- **Narrowest:** "once" when the daemon can bound the operation (one rerun of a bash call, one write, one lift for one
+  action), or "until the run settles" when it can't (a block in pi's own process), ending at pi's `agent_settled`,
+  not `agent_end` (retries, compaction, steering, and follow-ups continue after it). A kind offers one, never both.
+- **For this session:** until the session ends; nothing saved.
+- **Always:** saved where the kind says, only for kinds that have a saved form.
+- **Deny.**
+
+**The floor** (`launch/sandbox/grant.rs`, `Liftability`): what no approval lifts from a sandbox, each with its reason.
+Liftability is one typed classification of each deny, read both by the widened sandbox (`all` keeps exactly the floor)
+and by block reports; the daemon checks it again before granting anything.
+
+| Item | Why | Way out |
+| --- | --- | --- |
+| The control socket | A sandbox that reached it could approve its own requests and start host sessions | None; the daemon's operations go through the channel |
+| The state folder, for writing | It holds trust decisions and the agent socket | None; reads go through fact requests |
+| Configuration levels, pi's agent directory, protected files, fnox's files, and the folders on their way | They decide what later sessions may do | An approved write (diff) through the channel |
+| A socket an entry allows, and the folders on its way | Moved aside, another socket could take its place | None |
+| The user's own `"deny"`, `"read"`, and `false` switches | The user's explicit choice | None; the user edits the entry |
+| Credentials while fnox is on | The sandbox could run `fnox get` | A host run the user approves |
+
+Everything else is liftable once the user approves it: Git's control files, credentials while fnox is off, sockets,
+services, TCP listens, and paths outside every grant.
 
 ### Asking when the sandbox blocks
 
@@ -1232,7 +1310,7 @@ run on the host passes it, since a host run has no sandbox at all. `all` is the 
 below every entry of `/` (nono refuses a write grant on `/` itself), every socket connect and bind allowed first, and
 TCP listening open, then the launch's
 rules with every liftable deny left out, so the floor still decides last
-(`launch/sandbox/grant.rs`, where each deny's source and target say whether it's floor, matched exhaustively). Git's
+(`grant::liftability`, from each deny's source and target, matched exhaustively). Git's
 control files and the credential denies (fnox off) aren't floor: `husky install` and Git's keychain sign-in work once
 approved.
 
@@ -1248,7 +1326,7 @@ it, or the host with what put it there), so nothing runs on the host by default:
 with no helper and no policy, and only a saved `runtime = "host"` entry or the user's answer makes one.
 
 - The permissions extension registers pi's own bash tool definition (rendering, truncation, session environment) with
-  operations that send `run_command {token, call_id, command, cwd, timeout, env, reason?, rerun?}` over `agent.sock`
+  operations that send `run_command {call_id, command, cwd, timeout, env, reason?, rerun?}` on the channel
   and stream the answer (output chunks, then the exit, a timeout, or why it didn't run), and handles `user_bash` the
   same way (`call_id: "user:<n>"`). Outside a daemon-launched sandboxed session pi's own bash stays.
 - The daemon accepts a request only for a bash call pi reported running (`tool_execution_start`) with exactly that
@@ -1262,12 +1340,13 @@ with no helper and no policy, and only a saved `runtime = "host"` entry or the u
   its own variables and carries the command's environment in `PITON_LAUNCH_ENV`, which it unpacks after applying the
   sandbox. On the host, the command gets the session's launch environment, the workspace's environment tools'
   values included (as Claude Code passes its own environment to an unsandboxed command), without `PITON_RUNTIME`,
-  `PITON_SESSION_TOKEN`, and `PITON_AGENT_SOCKET`, so it isn't taken for the session's pi. At launch the daemon
+  `PITON_AGENT_TOKEN`, and `PITON_AGENT_SOCKET`, so it isn't taken for the session's pi. A sandboxed call gets its own
+  call token instead of pi's ("The channel to the daemon"). At launch the daemon
   records which of those values came from a file the launch's sandbox can write (`launch/env.rs`,
   `SandboxEnv::agent_writable`; a tool that names no file counts as writable), and the block question shows them on its
   host side.
 - When a call runs anywhere but the session's own sandbox, the daemon sends `{type: "ran", runtime: "sandbox" |
-  "host", by: "grant" | "approval"}` before its output, and the extension adds a line saying where to the result. A
+  "host", by: "grant" | "approval" | "session"}` before its output, and the extension adds a line saying where to the result. A
   sandbox run by a saved entry only says the entry widened it (its grant may be narrowed); an approved rerun says
   everything but the floor was open.
 - As in pi's bash, the call ends when the shell exits and its background jobs keep running; the agent's stop (the
@@ -1314,10 +1393,13 @@ anything else in `rerun`, such as a grant, is refused. The question is Piton's o
 (`agent/question.rs`): the command, who asked (`Asker`: the agent with its reason, or Piton, which opens in the
 sandbox), the refusals the kernel recorded for the call's last run, what `open` would do, the session's
 agent-writable variables, and the runtime it opens on (the hint: sandbox at `all`, or the host; both are always
-offered). Answers: once, deny, or always
-for this command or an edited pattern, in this project (its source checkout's `.piton/config.local.toml`) or
-everywhere (the global `config.toml`), each in the chosen runtime; always appends one `[[sandbox.commands]]` entry,
-`runtime = "sandbox"` with `grant = "all"` or `runtime = "host"`, and new sessions use it. The daemon renders the
+offered). Answers, each in the chosen runtime: once; this command for the session, after which later calls of exactly
+that command run there without failing or asking until the session ends (after a saved entry that matches, nothing
+saved, `by: "session"`); deny; or always for this command or an edited pattern, in this project (its source
+checkout's `.piton/config.local.toml`) or everywhere (the global `config.toml`). Always appends one
+`[[sandbox.commands]]` entry, `runtime = "sandbox"` with `grant = "all"` or `runtime = "host"`, and new sessions use
+it. `session.decide` takes `{"once": runtime}`, `{"session": runtime}`, `"deny"`, or
+`{"always": {runtime, scope, pattern}}`. The daemon renders the
 question per connection, by the protocol its hello chose, so the view protocol isn't shaped by pi's dialogs:
 
 - `view` clients (the apps) get it typed in the session state (`questions`) and answer with `session.decide`. The apps

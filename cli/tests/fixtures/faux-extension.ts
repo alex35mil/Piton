@@ -12,11 +12,39 @@
 //   "picture"    call the `faux_picture` tool, which returns a 2 MB image (larger than a phone's WebSocket message)
 //   "status"     call the `faux_status` tool, which sets a status line and a widget, then clears them on "status clear"
 //   "env"        call the `faux_env` tool, which returns the daemon's variables for this pi (token, agent socket, and
-//                what the fake fnox set)
+//                what the fake fnox set), and the relay: a socket that forwards each connection to the agent socket
+//                from pi's own process, so a test can send requests as pi (the daemon checks the connecting process)
+import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export default function (pi: ExtensionAPI) {
+/** Forwards each connection to `target` from this process; either side closing closes the other. */
+async function relay(target: string): Promise<string> {
+    const at = path.join(os.tmpdir(), `faux-relay-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`);
+    const server = net.createServer((downstream) => {
+        const upstream = net.connect(target);
+        downstream.pipe(upstream);
+        upstream.pipe(downstream);
+        downstream.on("close", () => upstream.destroy());
+        upstream.on("close", () => downstream.destroy());
+        downstream.on("error", () => upstream.destroy());
+        upstream.on("error", () => downstream.destroy());
+    });
+    await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(at, resolve);
+    });
+    server.unref();
+    process.on("exit", () => server.close());
+    return at;
+}
+
+export default async function (pi: ExtensionAPI) {
+    const agentSocket = process.env.PITON_AGENT_SOCKET;
+    const relayed = agentSocket ? await relay(agentSocket).catch(() => null) : null;
     const faux = fauxProvider({
         provider: "faux",
         models: [{ id: "faux-1", name: "Faux 1", contextWindow: 100000, maxTokens: 4096 }],
@@ -109,8 +137,9 @@ export default function (pi: ExtensionAPI) {
         parameters: { type: "object", properties: {} },
         async execute() {
             const env = {
-                token: process.env.PITON_SESSION_TOKEN ?? null,
+                token: process.env.PITON_AGENT_TOKEN ?? null,
                 socket: process.env.PITON_AGENT_SOCKET ?? null,
+                relay: relayed,
                 fnox: process.env.FAKE_FNOX ?? null,
                 githubToken: process.env.GITHUB_TOKEN ?? null,
                 fnoxProfile: process.env.FNOX_PROFILE ?? null,

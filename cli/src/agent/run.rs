@@ -7,11 +7,15 @@
 
 use std::{path::Path, process::Stdio, time::Duration};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use tokio::{io::AsyncReadExt, process::Command, sync::mpsc};
 
+use super::socket::{WakeOnDrop, Writer, send};
 use crate::{
     config::CommandPattern,
+    daemon::Daemon,
     launch::{Env, sandbox::Policy},
+    session::{SessionCmd, SessionKey},
 };
 
 /// How long output may still arrive after the shell exits, as pi waits for its pipes (`EXIT_STDIO_GRACE_MS`).
@@ -97,6 +101,8 @@ pub enum Why {
     Grant(CommandPattern),
     /// The user approved it in the block question.
     Approval,
+    /// The user approved this exact command for the session in an earlier block question.
+    Session,
 }
 
 impl Runtime {
@@ -105,6 +111,7 @@ impl Runtime {
         let by = |why: &Why| match why {
             Why::Grant(_) => RanBy::Grant,
             Why::Approval => RanBy::Approval,
+            Why::Session => RanBy::Session,
         };
         match self {
             Runtime::Session(_) => None,
@@ -140,11 +147,238 @@ pub enum RanRuntime {
 pub enum RanBy {
     Grant,
     Approval,
+    /// Approved for this session.
+    Session,
 }
 
-/// The variables a launch sets that mark a sandboxed pi and reach `agent.sock` as the session: never given to a host
-/// run, which isn't the session's pi and has no sandbox.
+/// The variables a launch sets that mark a sandboxed pi and reach `agent.sock`: never given to a host run, which has
+/// no sandbox and nothing to ask the channel.
 const SESSION_ONLY: [&str; 3] = ["PITON_RUNTIME", super::TOKEN_ENV, super::SOCKET_ENV];
+
+/// What `run_command` answers, line by line: where it runs, its output, then how it ended.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunLine {
+    /// Where a widened or host run runs, before its output: the agent's result says so.
+    Ran(Ran),
+    /// A chunk of the running command's output, base64.
+    Output {
+        data: String,
+    },
+    /// The daemon's run ended: the exit code, or 128 + the signal.
+    Exit {
+        code: i32,
+    },
+    /// The blocks the daemon recorded for a failed run (`operation target`, with why one isn't asked about), and a note.
+    Blocks {
+        blocks: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// The run failed on a block and the user is asked to run it again: what follows is the rerun's, or `not_rerun`.
+    Blocked,
+    /// The user didn't approve running it again: the first run's exit follows.
+    NotRerun {
+        reason: String,
+    },
+    TimedOut,
+    /// Not run, with why: the user denied it, didn't answer, or the request doesn't match a running call.
+    NotRun {
+        reason: String,
+    },
+    /// The run couldn't happen: the session ended, or the command couldn't be started.
+    Error {
+        message: String,
+    },
+}
+
+/// How long a failed call waits for the kernel's record of its blocks: it usually comes within ~5 ms
+/// (docs/pi-findings.md), and the wait ends at the first look that finds one.
+const BLOCK_WAIT: Duration = Duration::from_millis(50);
+/// How often a failed call looks for its blocks while it waits.
+const BLOCK_POLL: Duration = Duration::from_millis(10);
+
+/// Decides a bash call with its session (a grant, the user's answer), runs it when approved, and streams it back. A
+/// call that fails in the session's own sandbox on a block an approved rerun lifts is asked about, and the rerun's
+/// result is the call's.
+pub async fn serve(daemon: &Daemon, session: SessionKey, request: RunRequest, write: &mut Writer) {
+    let ended = || RunLine::Error {
+        message: "unknown or ended session".into(),
+    };
+    let Some(handle) = daemon.session(session) else {
+        send(write, &ended()).await;
+        return;
+    };
+    let (reply, decision) = tokio::sync::oneshot::channel();
+    let asked_for = request.clone();
+    if handle.tx.send(SessionCmd::RunCommand { request, reply }).is_err() {
+        send(write, &ended()).await;
+        return;
+    }
+    // Wakes the session when the agent stops waiting, so it closes the question at once.
+    let _wake = WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleQuestion);
+    let unanswered = || RunLine::Error {
+        message: "the session ended before the user answered".into(),
+    };
+    let approved = match decision.await {
+        Ok(RunDecision::Run(approved)) => approved,
+        Ok(RunDecision::NotRun { reason }) => {
+            send(write, &RunLine::NotRun { reason }).await;
+            return;
+        }
+        Err(_) => {
+            send(write, &unanswered()).await;
+            return;
+        }
+    };
+    let Some(end) = execute(daemon, &approved, session, write).await else {
+        return;
+    };
+    let code = match (&approved.runtime, end) {
+        (Runtime::Session(_), RunLine::Exit { code }) if code != 0 => code,
+        (_, last) => {
+            send(write, &last).await;
+            return;
+        }
+    };
+    // Failed in the session's own sandbox: the session decides whether to ask, after the kernel's record had its time.
+    let started = tokio::time::Instant::now();
+    let nothing = || Failed::Report {
+        blocks: Vec::new(),
+        note: None,
+    };
+    let failed = loop {
+        let last = started.elapsed() >= BLOCK_WAIT;
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let asked = SessionCmd::RunFailed {
+            request: asked_for.clone(),
+            last,
+            reply,
+        };
+        if handle.tx.send(asked).is_err() {
+            break nothing();
+        }
+        match answer.await {
+            Ok(Failed::Wait) => tokio::time::sleep(BLOCK_POLL).await,
+            Ok(failed @ (Failed::Report { .. } | Failed::Asked { .. })) => break failed,
+            Err(_) => break nothing(),
+        }
+    };
+    let first_exit = RunLine::Exit { code };
+    match failed {
+        // The loop above waits it out.
+        Failed::Wait => {}
+        Failed::Report { blocks, note } => {
+            if (!blocks.is_empty() || note.is_some()) && !send(write, &RunLine::Blocks { blocks, note }).await {
+                return;
+            }
+            send(write, &first_exit).await;
+        }
+        Failed::Asked { blocks, decision } => {
+            if !send(write, &RunLine::Blocks { blocks, note: None }).await || !send(write, &RunLine::Blocked).await {
+                return;
+            }
+            let reason = match decision.await {
+                Ok(RunDecision::Run(rerun)) => {
+                    if let Some(last) = execute(daemon, &rerun, session, write).await {
+                        send(write, &last).await;
+                    }
+                    return;
+                }
+                Ok(RunDecision::NotRun { reason }) => reason,
+                Err(_) => "the session ended before the user answered".to_string(),
+            };
+            if send(write, &RunLine::NotRerun { reason }).await {
+                send(write, &first_exit).await;
+            }
+        }
+    }
+}
+
+/// Runs `approved` and streams its output: the `ran` line first when it isn't the session's own sandbox. A sandboxed
+/// run gets a call token of its own in place of pi's, valid for its process group until it ends. Returns the line that
+/// ends it (not sent yet); `None` when the agent stopped listening.
+async fn execute(daemon: &Daemon, approved: &Approved, session: SessionKey, write: &mut Writer) -> Option<RunLine> {
+    let helper = match crate::launch::helper() {
+        Ok(helper) => helper,
+        Err(e) => return Some(RunLine::Error { message: e.to_string() }),
+    };
+    if let Some(ran) = approved.runtime.ran()
+        && !send(write, &RunLine::Ran(ran)).await
+    {
+        return None;
+    }
+    let call = match &approved.runtime {
+        Runtime::Session(_) | Runtime::Widened { .. } => match daemon.agent_tokens().issue_call(session) {
+            Ok(call) => Some(call),
+            Err(e) => {
+                return Some(RunLine::Error {
+                    message: format!("can't make the call's token: {e}"),
+                });
+            }
+        },
+        Runtime::Host { .. } => None,
+    };
+    let env = call_env(&approved.env, call.as_ref());
+    let (events, mut output) = mpsc::unbounded_channel();
+    let spec = RunSpec {
+        helper: &helper,
+        runtime: &approved.runtime,
+        shell: &approved.shell,
+        command: &approved.command,
+        cwd: &approved.cwd,
+        env: &env,
+        timeout: approved.timeout,
+        call: call.as_ref(),
+    };
+    let run = run(spec, events);
+    tokio::pin!(run);
+    let output_line = |chunk: &[u8]| RunLine::Output {
+        data: STANDARD.encode(chunk),
+    };
+    let end = loop {
+        tokio::select! {
+            end = &mut run => break end,
+            Some(RunEvent::Output(chunk)) = output.recv() => {
+                if !send(write, &output_line(&chunk)).await {
+                    return None;
+                }
+            }
+        }
+    };
+    // What the command printed before it ended.
+    while let Ok(RunEvent::Output(chunk)) = output.try_recv() {
+        if !send(write, &output_line(&chunk)).await {
+            return None;
+        }
+    }
+    let last = match end {
+        RunEnd::Exited { code } => {
+            crate::log!("session {session}: command run by the daemon exited with {code}");
+            RunLine::Exit { code }
+        }
+        RunEnd::TimedOut => {
+            crate::log!("session {session}: command run by the daemon timed out");
+            RunLine::TimedOut
+        }
+        RunEnd::Failed { reason } => {
+            crate::log!("session {session}: command run by the daemon failed: {reason}");
+            RunLine::Error { message: reason }
+        }
+    };
+    Some(last)
+}
+
+/// A run's environment: `env` with the call's own token in place of whatever token it held (pi's, from the launch
+/// environment or the extension's), or with no token at all when the run has none (a host run).
+fn call_env(env: &Env, call: Option<&super::channel::CallToken>) -> Env {
+    let mut env = env.clone();
+    match call {
+        Some(call) => env.insert(super::TOKEN_ENV.into(), call.token.clone()),
+        None => env.remove(super::TOKEN_ENV),
+    };
+    env
+}
 
 /// A host run's environment: the session's launch environment (the workspace's environment tools included, as the
 /// user's own shell would have them) without [`SESSION_ONLY`].
@@ -229,6 +463,8 @@ pub struct RunSpec<'a> {
     pub cwd: &'a Path,
     pub env: &'a Env,
     pub timeout: Option<Duration>,
+    /// The call's token, bound to the run's process group once it starts.
+    pub call: Option<&'a super::channel::CallToken>,
 }
 
 /// What a run sends while it runs.
@@ -284,6 +520,10 @@ pub async fn run(spec: RunSpec<'_>, events: mpsc::UnboundedSender<RunEvent>) -> 
         }
     };
     let group = child.id().map(|pid| nix::unistd::Pid::from_raw(pid as i32));
+    // The group is the child's pid (`process_group(0)`): the call's token is its processes' from now on.
+    if let (Some(call), Some(group)) = (spec.call, group) {
+        call.started(group.as_raw());
+    }
     // Kills the whole group when the run is stopped or times out: background processes the command started too. A
     // finished command disarms it, leaving its background jobs running.
     let mut guard = KillGroup(group);
@@ -479,6 +719,7 @@ mod tests {
             cwd: dir.path(),
             env: &env,
             timeout: None,
+            call: None,
         })
         .await;
         assert!(
@@ -501,12 +742,70 @@ mod tests {
             cwd: dir.path(),
             env: &env,
             timeout: None,
+            call: None,
         })
         .await;
         assert!(!out.contains("own-x"), "the helper didn't run: {out}");
         assert!(out.contains("policy=none cmd-x=1"), "{out}");
         assert!(out.contains(&cwd.display().to_string()), "{out}");
         assert_eq!(end, RunEnd::Exited { code: 4 });
+    }
+
+    /// A call's token is bound to the run's own process group once it starts; its processes may use it, others may not.
+    #[tokio::test]
+    async fn a_run_binds_its_call_token_to_its_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = fake_helper(dir.path());
+        let tokens = std::sync::Arc::new(super::super::Tokens::default());
+        let call = tokens.issue_call(1).unwrap();
+        let env: Env = [("PATH".to_string(), "/usr/bin:/bin".to_string())]
+            .into_iter()
+            .collect();
+        let host = Runtime::Host { by: Why::Approval };
+        let (out, end) = collect(RunSpec {
+            helper: &helper,
+            runtime: &host,
+            shell: "/bin/sh",
+            // On the host the shell is the run's first process: its pid is the group's.
+            command: "echo $$",
+            cwd: dir.path(),
+            env: &env,
+            timeout: None,
+            call: Some(&call),
+        })
+        .await;
+        assert_eq!(end, RunEnd::Exited { code: 0 });
+        let group: i32 = out.trim().parse().unwrap();
+        let member = super::super::channel::Peer {
+            pid: group,
+            group: Some(group),
+            #[cfg(target_os = "macos")]
+            audit: super::super::channel::AuditToken([0; 8]),
+        };
+        assert!(matches!(
+            tokens.accept(&call.token, &member),
+            Ok(super::super::channel::Caller::Call { session: 1, .. })
+        ));
+        let outsider = super::super::channel::Peer {
+            group: Some(std::process::id() as i32),
+            ..member
+        };
+        assert!(tokens.accept(&call.token, &outsider).is_err());
+    }
+
+    /// A run's environment carries its own call token in place of pi's, and a host run none.
+    #[test]
+    fn a_run_never_carries_pi_s_token() {
+        let tokens = std::sync::Arc::new(super::super::Tokens::default());
+        let call = tokens.issue_call(1).unwrap();
+        let env: Env = [(super::super::TOKEN_ENV.to_string(), "pi's".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            call_env(&env, Some(&call)).get(super::super::TOKEN_ENV),
+            Some(&call.token)
+        );
+        assert_eq!(call_env(&env, None).get(super::super::TOKEN_ENV), None);
     }
 
     /// A host run gets the session's launch environment without what marks a sandboxed pi or reaches `agent.sock`.
@@ -580,6 +879,7 @@ mod tests {
             cwd: dir,
             env,
             timeout,
+            call: None,
         };
 
         let (_, end) = collect(spec(

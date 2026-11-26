@@ -741,7 +741,7 @@ mod tests {
             effect,
             access: access.to_vec(),
             target: Target::Subpath { path: path.into() },
-            source: Source::Piton { what: what.into() },
+            source: Source::BuiltIn { what: what.into() },
         }
     }
 
@@ -840,7 +840,9 @@ mod tests {
                     target: Target::Literal {
                         path: "/s/agent.sock".into(),
                     },
-                    source: Source::Piton { what: "agent".into() },
+                    source: Source::Piton {
+                        area: crate::launch::sandbox::PitonArea::AgentSocket,
+                    },
                 },
                 rule(Effect::Allow, &[Access::Read], "/s/logs", "logs"),
                 Rule {

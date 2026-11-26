@@ -19,7 +19,7 @@ import { BIN_ENV, clearSettingsCache } from "../extensions/__lib/settings.ts"
 delete process.env[RUNTIME_ENV]
 // A session under piton has its own channel to the daemon; tests that need one set up a fake.
 delete process.env.PITON_AGENT_SOCKET
-delete process.env.PITON_SESSION_TOKEN
+delete process.env.PITON_AGENT_TOKEN
 // The session's protected files name the runner's checkout; outside one, they're the workspace's own (the fixtures').
 delete process.env.PITON_PROTECTED
 // As in a session of a trusted repository: fixtures' committed grants apply (`piton config resolve` keeps what the

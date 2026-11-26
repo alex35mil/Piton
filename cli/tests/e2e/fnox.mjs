@@ -156,6 +156,18 @@ function attach(ctx) {
     return a;
 }
 
+/// One request on `socket` with `token`; resolves with the answer line.
+function agentLine(socket, token, request) {
+    return new Promise((resolve, reject) => {
+        const sock = net.connect(socket);
+        let buf = "";
+        sock.on("data", (chunk) => (buf += chunk));
+        sock.on("end", () => resolve(JSON.parse(buf)));
+        sock.on("error", reject);
+        sock.write(JSON.stringify({ token, request }) + "\n");
+    });
+}
+
 /// Runs the faux `env` tool in `session` and returns what pi's environment held.
 async function piEnv(c, session) {
     await c.req("session.send", { session, message_id: "env", text: "env" });
@@ -177,6 +189,11 @@ const tests = {
         assert.equal(env.fnoxProfile, "agent");
         const args = readFileSync(join(ctx.ws, "fake-fnox-args"), "utf8").split("\n");
         assert.deepEqual(args.slice(0, 2), ["--no-sandbox", "--"]);
+        // pi is fnox's child, not the process the daemon started: the helper reported pi's process before becoming pi,
+        // so pi's token works from pi (a request reaches its handler) and the launch token is spent.
+        const answer = await agentLine(env.relay, env.token, { type: "protected_write", path: join(ctx.ws, "x"), content: "" });
+        assert.equal(answer.type, "protected_write", JSON.stringify(answer));
+        assert.equal(answer.outcome, "refused", "not a protected file");
         assert.ok(!c.items(session.key).some((i) => i.type === "notice"), "no warning when every secret resolves");
         c.close();
     },

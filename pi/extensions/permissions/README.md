@@ -94,8 +94,9 @@ Setup's `configure_permissions` merges approved MCP `allow` and `ask` lists into
 ## Bash in a sandboxed session under Piton
 
 In a sandboxed session Piton's daemon launched (`PITON_RUNTIME=sandbox` with `PITON_AGENT_SOCKET` and
-`PITON_SESSION_TOKEN`), the extension registers pi's own `bash` tool definition with operations that send each call to
-the daemon, and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
+`PITON_AGENT_TOKEN`), the extension registers pi's own `bash` tool definition with operations that send each call to
+the daemon through the channel (`__lib/agent.ts`), without pi's token in the call's environment (the daemon gives each
+call a token of its own), and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
 sandbox, so the daemon runs each in its own, tagged with the call (`sandbox.ts`). pi's rendering, truncation,
 `shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `rerun`
 (`{ runtime: "sandbox" | "host" }`: after the sandbox blocked this exact command, run it again; the user is asked,
