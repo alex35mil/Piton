@@ -29,7 +29,7 @@ Both hold work that hasn't started. Adding work creates no `.piton` entity, arti
    - Use only its selected registered tools, under normal permissions. Let native mutations validate their own inputs; don't preflight labels, options, workspaces, or statuses.
    - Never load the source project's credentials or run its MCP settings.
 
-**Attribution:** submit the complete text and let publication code sign AI-assisted content ([attribution](./integrations/shared.md#attribution)). Use user-verbatim authorship only for complete, unchanged user-written messages. Never add a footer yourself. This applies to cross-project reports too.
+**Attribution:** publication code signs AI-assisted text, cross-project reports included ([attribution](./integrations/shared.md#attribution)).
 
 **Creating:**
 
