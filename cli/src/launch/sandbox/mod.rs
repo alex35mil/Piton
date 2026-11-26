@@ -21,13 +21,16 @@ pub use self::resolve::{ClaudeCode, ProfileChoice, SilenceSource, Silent};
 #[cfg(test)]
 pub use self::rules::{Apps, Effect, Listen, Rule, ServiceGrant, Services, Target};
 pub use self::{
-    apply::{Contained, Containment, POLICY_ENV, contained, containment, exec, report_launched},
+    apply::{Contained, Containment, POLICY_ENV, contained, containment, exec, inside, report_launched},
     policy::{Provenance, Source, WRITE_ROOTS, agent_dir_runtime, nono_version},
     resolve::{
         ClaudeCodeFolder, ClaudeCodeSockets, Facts, Resolution, Silenced, agent_dir, never_configuration, resolve,
         silenced,
     },
-    rules::{Access, Destination, Gate, Network, NetworkGrant, Policy, TAG_PREFIX, is_listen},
+    rules::{
+        Access, Destination, Gate, LIFT_LISTEN, LIFT_MACH, LIFT_READ, LIFT_WRITE, Lifts, Network, NetworkGrant, Policy,
+        TAG_PREFIX, is_listen,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]

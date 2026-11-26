@@ -8,6 +8,7 @@
 //! | Caller | Token | Accepted from |
 //! | --- | --- | --- |
 //! | pi's process | the session token, issued at launch | pi's process |
+//! | a process pi started | pi's session token | a descendant of pi's process (`facts` only) |
 //! | a bash call | a call token, issued when the daemon starts the call | the call's process group |
 //! | the launch helper | the one-time launch token | any process (spent once) |
 
@@ -30,6 +31,9 @@ pub const LAUNCH_TOKEN_ENV: &str = "PITON_LAUNCH_TOKEN";
 pub enum Caller {
     /// pi's own process for a session: its extensions, workflow tools, MCP servers' requests through them.
     Pi { session: SessionKey },
+    /// A process pi started (a `piton config` call, an MCP server, the reviewer pi, a host session's bash), with pi's
+    /// token: it may read facts, never act as pi.
+    PiChild { session: SessionKey },
     /// A bash call the daemon runs for a session.
     Call { session: SessionKey, call: CallId },
     /// The launch helper, before it becomes pi.
@@ -39,7 +43,10 @@ pub enum Caller {
 impl Caller {
     pub fn session(self) -> SessionKey {
         match self {
-            Caller::Pi { session } | Caller::Call { session, .. } | Caller::Launcher { session } => session,
+            Caller::Pi { session }
+            | Caller::PiChild { session }
+            | Caller::Call { session, .. }
+            | Caller::Launcher { session } => session,
         }
     }
 
@@ -47,6 +54,7 @@ impl Caller {
     pub fn kind(self) -> CallerKind {
         match self {
             Caller::Pi { .. } => CallerKind::Pi,
+            Caller::PiChild { .. } => CallerKind::PiChild,
             Caller::Call { .. } => CallerKind::Call,
             Caller::Launcher { .. } => CallerKind::Launcher,
         }
@@ -58,6 +66,7 @@ impl Caller {
 #[serde(rename_all = "snake_case")]
 pub enum CallerKind {
     Pi,
+    PiChild,
     Call,
     Launcher,
 }
@@ -243,6 +252,9 @@ impl Tokens {
         match credential {
             Credential::Session { session } => match lock(&self.pi).get(&session) {
                 Some(PiProcess::Known { pid }) if *pid == peer.pid => Ok(Caller::Pi { session }),
+                Some(PiProcess::Known { pid }) if super::facts::descends_from(peer.pid, *pid) => {
+                    Ok(Caller::PiChild { session })
+                }
                 Some(PiProcess::Known { .. }) | None => Err(Unaccepted::WrongProcess),
                 Some(PiProcess::Awaited) => Err(Unaccepted::NotYet),
             },
@@ -329,6 +341,9 @@ pub struct Envelope {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    /// The session's facts (`facts.rs`): asked by anyone in the session, never approval-gated. A struct variant, so an
+    /// unknown field is refused as for every other request.
+    Facts {},
     /// Write a protected file, after the user approves the diff (`write.rs`).
     ProtectedWrite { path: std::path::PathBuf, content: String },
     /// Run a bash call or a `!` command through the daemon (`run.rs`).
@@ -354,23 +369,36 @@ pub enum Request {
     WorkerList {},
     /// Delete one of the session's source's workers, as `[workers.permissions] delete_by_agent` says.
     WorkerDelete { path: std::path::PathBuf },
+    /// Widen pi's sandbox for one action, after the user approves (`lift.rs`): the tokens come back, pi consumes them,
+    /// acts, and releases them.
+    Lift {
+        targets: Vec<crate::launch::sandbox::grant::LiveLift>,
+        reason: String,
+    },
+    /// pi's stream of grants and revocations for blocks in its own process (`session/lifts.rs`), held open while the
+    /// session lives. A struct variant, so a stray field is refused (serde ignores them on a unit variant).
+    Lifts {},
 }
 
 impl Request {
     pub fn kind(&self) -> &'static str {
         match self {
+            Request::Facts {} => "facts",
             Request::ProtectedWrite { .. } => "protected_write",
             Request::RunCommand { .. } => "run_command",
             Request::Launched { .. } => "launched",
             Request::WorkerCreate { .. } => "worker_create",
             Request::WorkerList {} => "worker_list",
             Request::WorkerDelete { .. } => "worker_delete",
+            Request::Lift { .. } => "lift",
+            Request::Lifts {} => "lifts",
         }
     }
 
     /// Whether it asks the user, and the answers it offers, read from its answer type.
     pub fn asks(&self) -> Asks {
         match self {
+            Request::Facts {} => Asks::Never,
             // A write changes what later sessions may do: once (the diff as shown or the user's version), or deny.
             Request::ProtectedWrite { .. } => Asks::Always(super::write::WriteAnswer::OFFERED),
             // A plain call runs as the session's policy and saved entries say; a rerun asks.
@@ -381,6 +409,9 @@ impl Request {
                 Asks::When(super::workers::WorkerAnswer::OFFERED)
             }
             Request::WorkerList {} => Asks::Never,
+            // Not when a session approval already covers every target.
+            Request::Lift { .. } => Asks::When(super::lift::LiftAnswer::OFFERED),
+            Request::Lifts {} => Asks::Never,
         }
     }
 }
@@ -388,6 +419,9 @@ impl Request {
 /// A request its caller may send, with the session it acts for.
 #[derive(Debug)]
 pub enum Authorized {
+    Facts {
+        session: SessionKey,
+    },
     ProtectedWrite {
         session: SessionKey,
         request: super::write::WriteRequest,
@@ -404,16 +438,28 @@ pub enum Authorized {
         session: SessionKey,
         request: super::workers::WorkerRequest,
     },
+    Lift {
+        session: SessionKey,
+        request: super::lift::LiftRequest,
+    },
+    Lifts {
+        session: SessionKey,
+    },
 }
 
-/// Which callers may send each request: pi's process writes protected files, runs bash calls, and asks for worker
-/// operations; the launch helper reports pi's start; a bash call may send nothing yet (facts are its first, #405).
+/// Which callers may send each request: everyone in the session but the launch helper reads facts; only pi's process
+/// writes protected files, runs bash calls, widens its own sandbox (only its process can consume a token), and asks for
+/// worker operations; the launch helper reports pi's start.
 pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused> {
     let not_allowed = |request: &Request| Refused::NotAllowed {
         caller: caller.kind(),
         request: request.kind(),
     };
     match (request, caller) {
+        (Request::Facts {}, Caller::Pi { session } | Caller::PiChild { session } | Caller::Call { session, .. }) => {
+            Ok(Authorized::Facts { session })
+        }
+        (request @ Request::Facts {}, Caller::Launcher { .. }) => Err(not_allowed(&request)),
         (Request::ProtectedWrite { path, content }, Caller::Pi { session }) => Ok(Authorized::ProtectedWrite {
             session,
             request: super::write::WriteRequest { path, content },
@@ -434,15 +480,24 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
             session,
             request: super::workers::WorkerRequest::Delete { path },
         }),
+        (Request::Lift { targets, reason }, Caller::Pi { session }) => Ok(Authorized::Lift {
+            session,
+            request: super::lift::LiftRequest { targets, reason },
+        }),
+        (Request::Lifts {}, Caller::Pi { session }) => Ok(Authorized::Lifts { session }),
         (
             request @ (Request::ProtectedWrite { .. }
             | Request::RunCommand { .. }
+            | Request::Lift { .. }
+            | Request::Lifts {}
             | Request::WorkerCreate { .. }
             | Request::WorkerList {}
             | Request::WorkerDelete { .. }),
-            Caller::Call { .. } | Caller::Launcher { .. },
+            Caller::PiChild { .. } | Caller::Call { .. } | Caller::Launcher { .. },
         ) => Err(not_allowed(&request)),
-        (request @ Request::Launched { .. }, Caller::Pi { .. } | Caller::Call { .. }) => Err(not_allowed(&request)),
+        (request @ Request::Launched { .. }, Caller::Pi { .. } | Caller::PiChild { .. } | Caller::Call { .. }) => {
+            Err(not_allowed(&request))
+        }
     }
 }
 
@@ -475,6 +530,7 @@ impl std::fmt::Display for Refused {
                     CallerKind::Pi => "pi's process",
                     CallerKind::Call => "a bash call",
                     CallerKind::Launcher => "the launch helper",
+                    CallerKind::PiChild => "a process pi started",
                 };
                 write!(f, "{who} can't send {request}")
             }
@@ -506,6 +562,29 @@ mod tests {
             #[cfg(target_os = "macos")]
             audit: AuditToken([0, 0, 0, 0, 0, pid as u32, 0, 0]),
         }
+    }
+
+    /// A session token is pi's from pi's process, a process pi started's from a descendant of pi (a real one: this
+    /// test process plays pi), and nobody's from anywhere else.
+    #[test]
+    fn a_session_token_is_pi_s_or_its_children_s() {
+        let tokens = Tokens::default();
+        let issued = tokens.issue_session(4, false).unwrap();
+        let me = std::process::id() as i32;
+        tokens.pi_started(4, me);
+        let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let pid = child.id() as i32;
+        assert_eq!(
+            tokens.accept(&issued.session, &peer(pid, pid)),
+            Ok(Caller::PiChild { session: 4 })
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            tokens.accept(&issued.session, &peer(1, 1)),
+            Err(Unaccepted::WrongProcess),
+            "not pi's"
+        );
     }
 
     /// A session token works only from pi's process, once it's known; a guess never does.
@@ -573,15 +652,19 @@ mod tests {
     #[test]
     fn requests_name_their_callers() {
         let pi = Caller::Pi { session: 1 };
+        let child = Caller::PiChild { session: 1 };
         let call = Caller::Call {
             session: 1,
             call: CallId(0),
         };
         let launcher = Caller::Launcher { session: 1 };
         let lines = [
+            r#"{"token":"t","request":{"type":"facts"}}"#,
             r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":""}}"#,
             r#"{"token":"t","request":{"type":"run_command","call_id":"c","command":"ls","cwd":"/w"}}"#,
             r#"{"token":"t","request":{"type":"launched","upstream":"http://u"}}"#,
+            r#"{"token":"t","request":{"type":"lift","targets":[{"kind":"write","path":"/w/.git/config"},{"kind":"listen"}],"reason":"r"}}"#,
+            r#"{"token":"t","request":{"type":"lifts"}}"#,
             r#"{"token":"t","request":{"type":"worker_create","name":"x","item_id":"github:1"}}"#,
             r#"{"token":"t","request":{"type":"worker_list"}}"#,
             r#"{"token":"t","request":{"type":"worker_delete","path":"/p/r--x"}}"#,
@@ -590,22 +673,40 @@ mod tests {
             let request = serde_json::from_str::<Envelope>(line).unwrap().request;
             authorize(request, caller).is_ok()
         };
-        let table: Vec<[bool; 3]> = lines
+        let table: Vec<[bool; 4]> = lines
             .iter()
-            .map(|line| [allowed(line, pi), allowed(line, call), allowed(line, launcher)])
+            .map(|line| {
+                [
+                    allowed(line, pi),
+                    allowed(line, child),
+                    allowed(line, call),
+                    allowed(line, launcher),
+                ]
+            })
             .collect();
         assert_eq!(
             table,
             [
-                [true, false, false],
-                [true, false, false],
-                [false, false, true],
-                [true, false, false],
-                [true, false, false],
-                [true, false, false]
+                [true, true, true, false],
+                [true, false, false, false],
+                [true, false, false, false],
+                [false, false, false, true],
+                // Only pi's process can consume a token: neither a bash call nor a process pi started widens pi's
+                // sandbox.
+                [true, false, false, false],
+                [true, false, false, false],
+                // Only pi's process asks for worker operations.
+                [true, false, false, false],
+                [true, false, false, false],
+                [true, false, false, false],
             ]
         );
-        let request = serde_json::from_str::<Envelope>(lines[0]).unwrap().request;
+        let request = serde_json::from_str::<Envelope>(lines[1]).unwrap().request;
+        assert_eq!(
+            authorize(request, child).unwrap_err().to_string(),
+            "a process pi started can't send protected_write"
+        );
+        let request = serde_json::from_str::<Envelope>(lines[1]).unwrap().request;
         assert_eq!(
             authorize(request, call).unwrap_err(),
             Refused::NotAllowed {
@@ -645,6 +746,22 @@ mod tests {
             parse(r#"{"token":"t","request":{"type":"worker_list"}}"#).asks(),
             Asks::Never
         );
+        assert_eq!(parse(r#"{"token":"t","request":{"type":"facts"}}"#).asks(), Asks::Never);
+        // Once (one action) or for this session; nothing saved.
+        assert_eq!(
+            parse(r#"{"token":"t","request":{"type":"lift","targets":[],"reason":"r"}}"#).asks(),
+            Asks::When(offered(true, false))
+        );
+        assert_eq!(parse(r#"{"token":"t","request":{"type":"lifts"}}"#).asks(), Asks::Never);
+        // The process question: until the run settles, the session, always.
+        assert_eq!(
+            crate::agent::block::ProcessAnswer::OFFERED,
+            Offered {
+                narrowest: Narrowest::UntilSettled,
+                session: true,
+                always: true,
+            }
+        );
     }
 
     #[test]
@@ -654,6 +771,9 @@ mod tests {
             r#"{"token":"t","request":{"type":"answer","id":"x"}}"#,
             r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":"","x":1}}"#,
             r#"{"token":"t","request":{"type":"launched"},"x":1}"#,
+            r#"{"token":"t","request":{"type":"facts","x":1}}"#,
+            r#"{"token":"t","request":{"type":"lift","targets":[{"kind":"exec","path":"/x"}],"reason":"r"}}"#,
+            r#"{"token":"t","request":{"type":"lifts","x":1}}"#,
         ] {
             assert!(serde_json::from_str::<Envelope>(bad).is_err(), "{bad}");
         }

@@ -4,7 +4,7 @@
 //! One request per connection, one JSON line each way, except `run_command`, which streams the command's output as
 //! lines before its last one. The server is only a transport: it reads the connecting process ([`Peer`]), parses the
 //! [`Envelope`], accepts its token for that process, authorizes the request for its caller, and dispatches to the
-//! request's own handler (`write.rs`, `run.rs`, the daemon's launch). The contract is `channel.rs`.
+//! request's own handler (`facts.rs`, `write.rs`, `run.rs`, the daemon's launch). The contract is `channel.rs`.
 
 use std::{path::Path, sync::Arc};
 
@@ -73,13 +73,20 @@ type Lines = tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>;
 
 async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
     let peer = Peer::of(&stream);
-    let pid = peer.as_ref().ok().map(|p| p.pid);
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     let Ok(Some(line)) = lines.next_line().await else {
         return;
     };
-    let authorized = match identify(&daemon, peer, &line).await {
+    let peer = match peer {
+        Ok(peer) => peer,
+        Err(e) => {
+            crate::log!("agent.sock: {e}");
+            send(&mut write, &channel::refused_line(&Refused::Unidentified)).await;
+            return;
+        }
+    };
+    let authorized = match identify(&daemon, &peer, &line).await {
         Ok(authorized) => authorized,
         Err(refused) => {
             crate::log!("agent.sock: refused: {refused}");
@@ -88,6 +95,13 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     };
     match authorized {
+        Authorized::Facts { session } => {
+            let answer = match daemon.session(session) {
+                Some(handle) => super::facts::FactsAnswer::Facts(Box::new((*handle.facts).clone())),
+                None => super::facts::FactsAnswer::Ended,
+            };
+            send(&mut write, &answer).await;
+        }
         Authorized::ProtectedWrite { session, request } => {
             // The agent's tool call holds the connection while the user decides; when it's aborted, the connection
             // closes and the wait ends, which the session sees (its reply channel closes) and settles.
@@ -107,7 +121,7 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
             }
         }
         Authorized::Launched { session, upstream } => {
-            let response = launched(&daemon, session, pid, upstream);
+            let response = launched(&daemon, session, Some(peer.pid), upstream);
             send(&mut write, &response).await;
         }
         Authorized::Worker { session, request } => {
@@ -120,24 +134,141 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
                 _ = closed(&mut lines) => {}
             }
         }
+        Authorized::Lift { session, request } => {
+            // The tokens are bound to this connection's process: pi's, which the session token was accepted from.
+            tokio::select! {
+                response = super::lift::request(&daemon, session, &peer, request) => {
+                    send(&mut write, &response).await;
+                }
+                _ = closed(&mut lines) => {}
+            }
+        }
+        Authorized::Lifts { session } => lifts(&daemon, session, &peer, &mut write, &mut lines).await,
+    }
+}
+
+/// One line of the `lifts` stream, daemon to pi.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LiftsLine {
+    /// Consume this token now; `lift` is what it opens. `for_child`: a process pi started (an MCP server) was blocked,
+    /// so pi's MCP servers restart to inherit the grant.
+    Grant {
+        id: u64,
+        token: String,
+        lift: crate::launch::sandbox::grant::LiveLift,
+        for_child: bool,
+    },
+    /// Release grant `id`.
+    Revoke { id: u64 },
+    /// The session ended.
+    Ended,
+}
+
+/// One line of the `lifts` stream, pi to daemon.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum LiftsReply {
+    Consumed { id: u64 },
+    Failed { id: u64, message: String },
+}
+
+/// pi's `lifts` stream: the session's grants and revocations go out as tokens bound to `peer` (pi's process); pi's
+/// replies come back. Held while both sides are open; when it closes, the session ends every grant.
+async fn lifts(
+    daemon: &Daemon,
+    session: crate::session::SessionKey,
+    peer: &Peer,
+    write: &mut Writer,
+    lines: &mut Lines,
+) {
+    use crate::session::{LiftsEvent, LiftsOut};
+    let Some(handle) = daemon.session(session) else {
+        send(write, &LiftsLine::Ended).await;
+        return;
+    };
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stream_id_tx, stream_id) = tokio::sync::oneshot::channel();
+    if handle
+        .tx
+        .send(SessionCmd::Lifts(LiftsEvent::Opened {
+            out: out_tx,
+            id: stream_id_tx,
+            pi: peer.pid,
+        }))
+        .is_err()
+    {
+        send(write, &LiftsLine::Ended).await;
+        return;
+    }
+    let Ok(stream) = stream_id.await else {
+        send(write, &LiftsLine::Ended).await;
+        return;
+    };
+    let tx = handle.tx.clone();
+    let _closed = WakeOnDropWith(tx.clone(), SessionCmd::Lifts(LiftsEvent::Closed { stream }));
+    loop {
+        tokio::select! {
+            out = out_rx.recv() => match out {
+                Some(LiftsOut::Grant { id, lift, for_child }) => {
+                    let line = match super::lift::issue_for(&lift, peer) {
+                        Ok(token) => LiftsLine::Grant { id, token, lift, for_child },
+                        Err(e) => {
+                            let _ = tx.send(SessionCmd::Lifts(LiftsEvent::Failed { id, message: e.to_string() }));
+                            continue;
+                        }
+                    };
+                    if !send(write, &line).await {
+                        return;
+                    }
+                }
+                Some(LiftsOut::Revoke { id }) => {
+                    if !send(write, &LiftsLine::Revoke { id }).await {
+                        return;
+                    }
+                }
+                None => {
+                    send(write, &LiftsLine::Ended).await;
+                    return;
+                }
+            },
+            line = lines.next_line() => match line {
+                Ok(Some(text)) => match serde_json::from_str::<LiftsReply>(&text) {
+                    Ok(LiftsReply::Consumed { id }) => {
+                        let _ = tx.send(SessionCmd::Lifts(LiftsEvent::Consumed { id }));
+                    }
+                    Ok(LiftsReply::Failed { id, message }) => {
+                        let _ = tx.send(SessionCmd::Lifts(LiftsEvent::Failed { id, message }));
+                    }
+                    Err(e) => crate::log!("agent.sock: lifts: unreadable reply: {e}"),
+                },
+                Ok(None) | Err(_) => return,
+            },
+        }
+    }
+}
+
+/// Sends a command to the session when dropped.
+struct WakeOnDropWith(tokio::sync::mpsc::UnboundedSender<SessionCmd>, SessionCmd);
+
+impl Drop for WakeOnDropWith {
+    fn drop(&mut self) {
+        let command = std::mem::replace(&mut self.1, SessionCmd::SettleLift);
+        let _ = self.0.send(command);
     }
 }
 
 /// The authorized request `line` carries, from the connecting process `peer`.
-async fn identify(daemon: &Daemon, peer: Result<Peer, channel::PeerError>, line: &str) -> Result<Authorized, Refused> {
+async fn identify(daemon: &Daemon, peer: &Peer, line: &str) -> Result<Authorized, Refused> {
     let envelope: Envelope = serde_json::from_str(line).map_err(|e| Refused::Invalid { message: e.to_string() })?;
     crate::debug!(
         "agent.sock: {} ({})",
         envelope.request.kind(),
         asking(envelope.request.asks())
     );
-    let peer = peer.map_err(|e| {
-        crate::log!("agent.sock: {e}");
-        Refused::Unidentified
-    })?;
     let started = tokio::time::Instant::now();
     let caller = loop {
-        match daemon.agent_tokens().accept(&envelope.token, &peer) {
+        match daemon.agent_tokens().accept(&envelope.token, peer) {
             Ok(caller) => break caller,
             Err(Unaccepted::NotYet) if started.elapsed() < NOT_YET_WAIT => tokio::time::sleep(NOT_YET_POLL).await,
             Err(unaccepted @ (Unaccepted::NotYet | Unaccepted::UnknownToken | Unaccepted::WrongProcess)) => {

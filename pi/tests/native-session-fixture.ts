@@ -22,6 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent"
 
 import { clearSettingsCache } from "../extensions/__lib/settings.ts"
+import { TEST_HOST_FILE } from "./host-runtime.ts"
 
 const model: Model<"openai-completions"> = {
     id: "fixture",
@@ -84,7 +85,8 @@ type Reply = AssistantMessage | ((context: TranscriptContext) => AssistantMessag
 export async function nativeSessionFixture(options: {
     extensions: ExtensionFactory[]
     tools?: string[]
-    setup?: (root: string) => void
+    /** Prepares the fixture's folder before the session starts; `global` is the session's own global tier. */
+    setup?: (root: string, global: string) => void
     review?: (root: string, title: string, signal?: AbortSignal) => Promise<string | undefined>
     /** The folder pi runs in, relative to the fixture's folder, which `setup` creates; the fixture folder itself when omitted. */
     workspace?: string
@@ -94,14 +96,17 @@ export async function nativeSessionFixture(options: {
     const root = options.workspace ? path.join(fixture, options.workspace) : fixture
     const agentDir = path.join(fixture, "agent")
     const oldAgentDir = process.env.PI_CODING_AGENT_DIR
-    const oldConfigHome = process.env.PITON_CONFIG_HOME
+    const oldXdg = process.env.XDG_CONFIG_HOME
     process.env.PI_CODING_AGENT_DIR = agentDir
-    // The session's own global tier: `setup` writes global piton settings to `<fixture>/config`.
-    process.env.PITON_CONFIG_HOME = path.join(fixture, "config")
+    // The session's own global tier, `<fixture>/xdg/piton` (`setup` writes global piton settings there), keeping the
+    // test's state folder.
+    process.env.XDG_CONFIG_HOME = path.join(fixture, "xdg")
+    const global = path.join(fixture, "xdg", "piton")
     fs.mkdirSync(agentDir)
-    fs.mkdirSync(path.join(fixture, "config"))
+    fs.mkdirSync(global, { recursive: true })
+    fs.writeFileSync(path.join(global, "config.host.toml"), TEST_HOST_FILE)
     clearSettingsCache()
-    options.setup?.(fixture)
+    options.setup?.(fixture, global)
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } })
     settingsManager.setProjectTrusted(true)
     const manager = SessionManager.inMemory(root)
@@ -217,8 +222,8 @@ export async function nativeSessionFixture(options: {
                 session.dispose()
                 if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
                 else process.env.PI_CODING_AGENT_DIR = oldAgentDir
-                if (oldConfigHome === undefined) delete process.env.PITON_CONFIG_HOME
-                else process.env.PITON_CONFIG_HOME = oldConfigHome
+                if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME
+                else process.env.XDG_CONFIG_HOME = oldXdg
                 clearSettingsCache()
                 fs.rmSync(fixture, { recursive: true, force: true })
             }

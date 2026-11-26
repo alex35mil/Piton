@@ -151,9 +151,9 @@ pub enum RanBy {
     Session,
 }
 
-/// The variables a launch sets that mark a sandboxed pi and reach `agent.sock`: never given to a host run, which has
-/// no sandbox and nothing to ask the channel.
-const SESSION_ONLY: [&str; 3] = ["PITON_RUNTIME", super::TOKEN_ENV, super::SOCKET_ENV];
+/// The variables a launch sets that reach `agent.sock`: never given to a host run, which has no sandbox and nothing to
+/// ask the channel.
+const SESSION_ONLY: [&str; 2] = [super::TOKEN_ENV, super::SOCKET_ENV];
 
 /// What `run_command` answers, line by line: where it runs, its output, then how it ended.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -651,6 +651,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         }
     }
 
@@ -808,13 +809,12 @@ mod tests {
         assert_eq!(call_env(&env, None).get(super::super::TOKEN_ENV), None);
     }
 
-    /// A host run gets the session's launch environment without what marks a sandboxed pi or reaches `agent.sock`.
+    /// A host run gets the session's launch environment without what reaches `agent.sock`.
     #[test]
     fn a_host_run_drops_the_session_s_own_variables() {
         let launch: Env = [
             ("PATH", "/w/bin:/usr/bin"),
             ("RUST_LOG", "debug"),
-            ("PITON_RUNTIME", "sandbox"),
             (super::super::TOKEN_ENV, "t"),
             (super::super::SOCKET_ENV, "/s/agent.sock"),
         ]

@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import net from "node:net";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
@@ -36,11 +36,11 @@ function setup(options = {}) {
         },
         host: { default_attach_mode: "host", stop_empty_session_after: "60s", ...(options.roots === false ? {} : { roots: [root] }) },
     });
-    return { dir, root, ws, socket, config, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
+    return { dir, root, ws, socket, config, env: testEnv({ PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" }) };
 }
 
 async function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(piton, pitonArgs(ctx.dir, ["daemon"]), { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     for (let i = 0; i < 100 && !err.includes("listening"); i++) await sleep(50);
@@ -147,9 +147,22 @@ const tests = {
         await c.req("session.send", { session: key, message_id: "e", text: "env" });
         await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.model(key).items.some((i) => i.type === "tool" && i.status === "done"), 20000);
         const tool = c.model(key).items.find((i) => i.type === "tool");
-        const { token, socket, relay } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
+        const { token, socket, relay, childRelay, factVariables } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
         assert.equal(socket, join(ctx.dir, "agent.sock"));
         assert.match(token, /^[0-9a-f]{64}$/);
+        assert.deepEqual(factVariables, [], "facts are asked, not inherited");
+
+        // Facts: pi asks, and so does a process pi started, with pi's token; that process may ask nothing else.
+        const facts = await agentRequest(relay, token, { type: "facts" });
+        assert.equal(facts.type, "facts");
+        assert.equal(facts.runtime, "host");
+        assert.equal(facts.global, ctx.config);
+        assert.equal(facts.workspace.path, realpathSync(ctx.ws));
+        assert.deepEqual(facts.workspace.relation, { kind: "source" });
+        assert.deepEqual(await agentRequest(childRelay, token, { type: "facts" }), facts);
+        const childWrite = await agentRequest(childRelay, token, { type: "protected_write", path: join(ctx.ws, ".piton/config.toml"), content: "{}" });
+        assert.deepEqual([childWrite.type, childWrite.why, childWrite.caller], ["refused", "not_allowed", "pi_child"]);
+        assert.equal((await agentRequest(socket, token, { type: "facts" })).reason, "wrong_process", "not pi's, nor started by it");
         const write = (path, content, as = token) => agentRequest(relay, as, { type: "protected_write", path, content });
 
         const target = join(ctx.ws, ".piton", "config.toml");
@@ -333,7 +346,7 @@ const tests = {
 
     async "nvim and phone on one session: same conversation both ways"(ctx) {
         // pi.nvim through piton attach.
-        const nvim = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
+        const nvim = spawn(piton, pitonArgs(ctx.dir, ["attach"]), { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
         const nrecs = [];
         let nbuf = "";
         nvim.stdout.on("data", (d) => {

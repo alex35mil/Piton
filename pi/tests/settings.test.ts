@@ -1,4 +1,11 @@
-import { resetGlobalSettings, TEST_CONFIG_HOME, writeConfig, writeGlobalSetting } from "./host-runtime.ts"
+import "./host-runtime.ts"
+import {
+    resetGlobalSettings,
+    TEST_CONFIG_HOME,
+    withSessionFacts,
+    writeConfig,
+    writeGlobalSetting,
+} from "./host-runtime.ts"
 import { permissionsTable } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
@@ -8,7 +15,7 @@ import * as path from "node:path"
 import { describe, it } from "node:test"
 
 import { readMcpConfiguration } from "../extensions/__lib/mcp.ts"
-import { requireRuntime, resolveRuntime } from "../extensions/__lib/runtime.ts"
+import { currentRuntime } from "../extensions/__lib/runtime.ts"
 import { clearSettingsCache, resolveSettings, section } from "../extensions/__lib/settings.ts"
 import { inspectPersistentPermissions } from "../extensions/permissions/index.ts"
 import registerWebSearch from "../extensions/web-search/index.ts"
@@ -31,15 +38,28 @@ function fixture() {
 }
 
 describe("runtime selection", () => {
-    it("reads PITON_RUNTIME as host, sandbox, or invalid", () => {
-        assert.deepEqual(resolveRuntime({}), { runtime: "host" })
-        assert.deepEqual(resolveRuntime({ PITON_RUNTIME: "" }), { runtime: "host" })
-        assert.deepEqual(resolveRuntime({ PITON_RUNTIME: "sandbox" }), { runtime: "sandbox" })
-        const invalid = resolveRuntime({ PITON_RUNTIME: "sandboxed" })
-        assert.ok("error" in invalid)
-        assert.match(invalid.error.message, /PITON_RUNTIME "sandboxed"/)
-        assert.equal(requireRuntime({ PITON_RUNTIME: "sandbox" }), "sandbox")
-        assert.throws(() => requireRuntime({ PITON_RUNTIME: "Sandbox" }), /invalid PITON_RUNTIME/)
+    it("is the host outside a session and the session's inside one", async () => {
+        assert.equal(await currentRuntime({}), "host")
+        await withSessionFacts("sandbox", async () => assert.equal(await currentRuntime(), "sandbox"))
+        await assert.rejects(
+            currentRuntime({ PITON_AGENT_SOCKET: "/nowhere/agent.sock", PITON_AGENT_TOKEN: "t" }),
+            /can't reach piton's daemon/,
+        )
+    })
+
+    it("resolves configuration in the session's runtime when none is named", async () => {
+        const h = fixture()
+        try {
+            writeConfig(h.repositoryRoot, { "tools.permissions.sandbox.allow": ["bash(npm *)"] })
+            assert.equal(inspectPersistentPermissions(h.nested).runtime, "host")
+            await withSessionFacts("sandbox", () => {
+                const sandbox = inspectPersistentPermissions(h.nested)
+                assert.equal(sandbox.runtime, "sandbox")
+                assert.deepEqual(sandbox.settings.allow, ["bash(npm *)"])
+            })
+        } finally {
+            await h.cleanup()
+        }
     })
 
     it("runs every test file in the host runtime regardless of the launching runtime", () => {

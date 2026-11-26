@@ -83,6 +83,13 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
 - Clearing (`undefined`) sends the same record without `statusText` / `widgetLines`. Piton's replay keeps the latest
   per key and drops a key on a record without its value.
 
+## Extension factories may be async
+
+- pi awaits each extension's factory before the next loads (`await factory(api)`, pi 1.5.2's loader), so an
+  extension can ask the daemon for the session's facts while it loads: the permissions extension registers its
+  sandboxed bash only after it learns the runtime. Verified by `cli/tests/e2e/view.mjs` (the faux extension's
+  factory awaits its relay) and the pi tests that load the permissions extension through a real session.
+
 ## Compaction (`compaction`)
 
 - `compact` (and automatic compaction) emits `compaction_start {reason}` and then `compaction_end {reason, aborted,
@@ -210,6 +217,30 @@ there. Grant it with a `"write"` entry in `[sandbox.filesystem]`.
 A process in a Seatbelt sandbox can't apply another one (`sandbox_init` fails with "Operation not permitted"). The
 Piton daemon runs outside any sandbox (launchd), so this only affects running Piton's sandbox mode from a sandboxed
 agent session. Tests of sandbox mode run on the host.
+
+## Widening a running sandbox (#408)
+
+Verified on the host, macOS (Darwin 27), with probes kept in Epic #395's and Task #408's scratch folders and
+`cargo test` (`grant::the_lifting_policy_applies`, `agent::lift`), then end to end against real pi (`blocks.mjs`):
+
+- A token issued outside the sandbox with `sandbox_extension_issue_{file,mach,generic}_to_process` for a process's
+  audit token (`LOCAL_PEERTOKEN` of its `agent.sock` connection) can be consumed only by that process; another process
+  holding it is refused. Children forked after the consume inherit it; `sandbox_extension_release` revokes it at once.
+- A sandboxed process can't issue tokens (`file-issue-extension` is denied).
+- An `(allow <op> (require-all <filter> (extension "<class>")))` placed right after a deny reopens it for a token in
+  that class. A floor deny after it still wins; a deny *before* it over the same path is reopened (Seatbelt's last
+  match) unless the companion excludes it with `(require-not <its filter>)`, which keeps it closed.
+- Custom classes work for every kind (`com.piton.lift.read`, `.write`, `.mach`, `.listen`): file reads, writes (a
+  folder token covers create, rename, and delete inside), Unix-socket connects and binds (a write-class file token),
+  Mach lookups, and TCP listens (a generic token).
+- Seatbelt matches resolved paths (`/private/tmp`, not `/tmp`). A file token issues for a missing file whose folder
+  exists, and allows creating exactly that file; it's refused (ENOENT) when the folder doesn't exist.
+- A file opened while a token is held stays writable after release: the sandbox checks at `open`.
+- Node has no FFI: a Node-API addon loaded with `process.dlopen` consumes and releases tokens in pi's process. It's
+  built with `clang -bundle -undefined dynamic_lookup` and declares the few `napi_*` functions it calls, which Node
+  resolves at load, so it needs no Node headers.
+- pi 1.5.2: registering an MCP server again (`pi.unregisterMcpServer`, then `pi.registerMcpServer` with the same name)
+  closes and reconnects it at once; a stdio server started after a consume inherits the grant.
 
 ## The kernel's record of sandbox refusals
 

@@ -4,7 +4,8 @@
  * Controls tool execution via `[tools.permissions]` and `[tools.permissions.<runtime>]` of `config.toml` (and
  * `config.local.toml`) in piton's configuration chain (the global tier, parent folders, the repository's .piton/),
  * resolved by `piton config resolve`. Within a file: `[tools.permissions]`, then the runtime's table.
- * PITON_RUNTIME selects the runtime: unset = host, `sandbox` = sandboxed worker; other values are invalid.
+ * The runtime is the session's (`host`, or `sandbox` for a sandboxed session), which piton asks the daemon for; outside
+ * a session piton launched, the host.
  *
  * Schema:
  *   [tools.permissions]
@@ -45,7 +46,7 @@ import * as path from "node:path"
 import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
-import { requireRuntime, type Runtime } from "../__lib/runtime.js"
+import { currentRuntime, type Runtime } from "../__lib/runtime.js"
 import { isProtected, PROTECTED_HINT } from "../__lib/protected.js"
 import {
     camelKeys,
@@ -60,6 +61,8 @@ import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
 import { registerSandboxBash } from "./sandbox.js"
 import { WORKER_TOOLS } from "../workers/index.js"
+import type { LiftsStream } from "../__lib/agent.js"
+import { holdLifts, LIFT_GRANTED_EVENT } from "../__lib/lift.js"
 
 export const EXTENSION = "permissions"
 const BUILT_IN_ALLOW_RULES = ["bash(true)", "bash(false)"]
@@ -131,8 +134,9 @@ const STATUS_REJECTED = "[rejected]"
 const LOCAL_SKILL_SCOPES = new Set(["user", "project", "temporary"])
 let cachedDerivedSkillAllowState: DerivedSkillAllowState | undefined
 
-export default function (pi: ExtensionAPI) {
-    registerSandboxBash(pi)
+export default async function (pi: ExtensionAPI) {
+    const runtime = await currentRuntime()
+    await registerSandboxBash(pi)
     let mcpCatalog: McpToolCatalog = new Map()
     const disposeMcpCatalogListener = pi.events.on(MCP_TOOL_CATALOG_EVENT, (data) => {
         mcpCatalog = data instanceof Map ? new Map(data as McpToolCatalog) : new Map()
@@ -184,15 +188,22 @@ export default function (pi: ExtensionAPI) {
         updateEditStatus(result, ctx)
     }
 
+    // pi's stream of live lifts (#408): grants for blocks in pi's own process, consumed with piton's addon.
+    let lifts: LiftsStream | undefined
+
     pi.on("session_start", async (_event, ctx) => {
         const result = loadResolvedPermissionSettings(pi, ctx.cwd)
         updatePermissionSettingsErrorDisplay(result, ctx)
         updateEditStatus(result, ctx)
+        lifts?.close()
+        lifts = holdLifts((granted) => pi.events.emit(LIFT_GRANTED_EVENT, granted))
     })
 
     pi.on("session_shutdown", async () => {
         disposeMcpCatalogListener()
         mcpCatalog = new Map()
+        lifts?.close()
+        lifts = undefined
     })
 
     pi.registerCommand(`${EXTENSION}-toggle-auto-accept`, {
@@ -346,7 +357,7 @@ export default function (pi: ExtensionAPI) {
     })
     // The sandbox denies shell writes to protected files with a bare "Operation not permitted": say why, and what works.
     pi.on("tool_result", async (event, ctx) => {
-        if (event.toolName !== "bash" || process.env.PITON_RUNTIME !== "sandbox") return undefined
+        if (event.toolName !== "bash" || runtime !== "sandbox") return undefined
         const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
         if (!deniedProtectedWrite(text, (file) => isProtected(ctx.cwd, file))) return undefined
         return { content: [...event.content, { type: "text" as const, text: PROTECTED_HINT }] }
@@ -382,9 +393,13 @@ export interface PermissionSource {
     settings: PermissionSettings
 }
 
-/** The resolved permissions for `cwd` in `runtime`: the merged settings and each file that contributed. */
-export function inspectPersistentPermissions(cwd: string, runtime: Runtime = requireRuntime()) {
-    const resolved = section(resolveSettings(cwd, runtime).tools).permissions
+/**
+ * The resolved permissions for `cwd` in `runtime` (default: the current one, the session's): the merged settings, each
+ * file that contributed, and the runtime they're for.
+ */
+export function inspectPersistentPermissions(cwd: string, runtime?: Runtime) {
+    const settings = resolveSettings(cwd, runtime)
+    const resolved = section(settings.tools).permissions
     const sources: PermissionSource[] = resolved.sources.map((source) => ({
         level: source.level,
         scope: source.scope,
@@ -392,7 +407,11 @@ export function inspectPersistentPermissions(cwd: string, runtime: Runtime = req
         path: source.path,
         settings: validatePermissionSettings(camelKeys(source.settings) as PermissionSettings),
     }))
-    return { runtime, sources, settings: validatePermissionSettings(camelKeys(resolved.merged) as PermissionSettings) }
+    return {
+        runtime: settings.runtime,
+        sources,
+        settings: validatePermissionSettings(camelKeys(resolved.merged) as PermissionSettings),
+    }
 }
 
 function loadSettings(cwd: string): ResolvedPermissions {

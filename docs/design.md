@@ -102,7 +102,9 @@ Piton.app/Contents/
 
 The app registers both through `SMAppService` and offers a "Start at login" toggle. launchd restarts a crashed
 daemon. Quitting the app leaves the daemon and sessions running. `piton service install|uninstall` writes the same
-LaunchAgent for development without the app. The CLI is symlinked onto `PATH`.
+LaunchAgent for development without the app. The CLI is symlinked onto `PATH`. The Node-API addon pi widens its sandbox
+with is built into `piton` and written out by the daemon ("Lifts for pi's live sandbox"), so no install ships it
+separately.
 
 **Onboarding.** On first launch the Mac app asks what this Mac does: host (runs the daemon; the app connects to its
 socket) or client (connects to another host over the tailnet, like the phone). The choice is kept on the Mac and can
@@ -795,8 +797,8 @@ file or placement rules involved.
   folder itself is not a level. A level that exists but can't be read is an error. `.piton/.local/` is never
   configuration.
 - **Locating the global tier** can't depend on the workspace, whose `mise.toml` can set `HOME` or `XDG_CONFIG_HOME`.
-  The daemon resolves it once from its login-shell environment and sets `PITON_CONFIG_HOME` for every pi after the
-  mise environment; a pi started outside Piton falls back to `XDG_CONFIG_HOME`, then `~/.config`.
+  The daemon resolves it once from its login-shell environment (or `--config-home`), and `piton` inside a session asks
+  the daemon for it (`facts`); a pi started outside Piton uses `XDG_CONFIG_HOME`, then `~/.config`.
 - **Where a key may be set** is fixed by Piton, declared next to each table's type, and enforced by the reader (a
   file that breaks it fails that table, naming the key):
   - `[tracker]`, `[forge]`: a project or parent folder only, never the global tier, where they'd become every
@@ -834,8 +836,8 @@ file or placement rules involved.
     restart, a switch inside a session) never asks: it keeps what was decided. With #208, opening a project runs the
     same check before a draft exists.
   - pi follows the same decision: the daemon passes `--approve` or `--no-approve` on every launch, so pi's own
-    `trust.json` is never used or written. The launch's filter goes to pi in `PITON_TRUST` (set after the workspace's
-    environment), so `piton config resolve` inside the session keeps exactly what the launch kept.
+    `trust.json` is never used or written. The launch's filter is a fact of the session (`facts`), so `piton config
+    resolve` inside the session keeps exactly what the launch kept.
   - Worker Git and the source-update rule use the source's decision too.
 - **Merging,** farthest to nearest; within a level the shared file, then the `.local` one.
   - `[sandbox]`: one map per resource (`filesystem`, `network.connections`, `network.unix_socket_connections`,
@@ -1116,8 +1118,8 @@ grants the real path. A link outside the checkout made by a session elsewhere wh
 followed when this launch's grants don't cover it. A sandboxed launch is refused when the workspace path given goes
 through a symlink inside a git checkout that leads out of it; the user's own links outside any checkout work.
 
-`PITON_RUNTIME`, `PITON_CONFIG_HOME`, `PITON_AGENT_SOCKET`, and `PITON_AGENT_TOKEN` are set by the daemon after the mise
-environment.
+`PITON_AGENT_SOCKET`, `PITON_AGENT_TOKEN`, and `PITON_BIN` are set by the daemon after the mise environment; the rest
+of what a session needs to know it asks the daemon for (`facts`, "The channel to the daemon").
 
 **The network gate** (`launch/sandbox/network/`, `session/network.rs`, `pi/catalog.rs`). A session whose network is filtered gets a gate:
 an HTTP proxy on 127.0.0.1 in the daemon (`CONNECT` any port, plus absolute-form plain HTTP). `piton sandbox-exec`
@@ -1191,10 +1193,10 @@ or overlaps the state folder, a credential deny, or a filesystem `"deny"`, is le
 parent folder can edit that folder's `.agents/` (its own there), and a link it planted there to `~/.ssh` must not
 make keys proposable from a session below. `agent/protected.rs` (`Protected`) is the one definition: the daemon builds
 it at every launch, sandboxed or on the host, from the levels, the agent directories the launch resolved, and the
-fnox files, and gives pi a copy in `PITON_PROTECTED` (set after the workspace's environment), which `piton config
-protected` answers from. Outside a session it answers from the workspace (levels and `PI_CODING_AGENT_DIR` or
-`~/.pi/agent`, no fnox files). Changing that copy only changes where pi sends a write: the sandbox still denies the
-direct write, and the daemon checks the path against its own. The sandbox closes these files as rules 4 and 6 of
+fnox files, and keeps it as a fact of the session, which `piton config protected` inside the session asks for and
+answers from. Outside a session it answers from the workspace (levels and `PI_CODING_AGENT_DIR` or
+`~/.pi/agent`, no fnox files). The answer only decides where pi sends a write: the sandbox still denies the direct
+write, and the daemon checks the path itself. The sandbox closes these files as rules 4 and 6 of
 "Agent access" say; no sandboxed command approval ("Allow once" in the sandbox, `grant = "all"`) opens them. A command
 the user chose to run on the host has no sandbox, so they're open to it like any program the user runs.
 
@@ -1254,7 +1256,7 @@ state folder, with a typed answer (#395). The sandbox can connect to this one so
 - **One channel, one contract.** Requests, callers, answers, and liftability are sum types, matched exhaustively in
   the operation that needs the answer.
 - **The daemon decides, and only the user approves.** A request can't approve itself; answers come only from clients.
-- **Facts are asked, not inherited**: a session asks the daemon instead of reading launch snapshots (#405).
+- **Facts are asked, not inherited**: a session asks the daemon (`facts`) instead of reading launch snapshots.
 
 **Callers** (`agent/channel.rs`, `Caller`). Every request names its caller with a token, and the daemon also checks
 the process on the other end of the connection: on macOS its audit token (`LOCAL_PEERTOKEN`, whose pid is the
@@ -1263,6 +1265,7 @@ process's), elsewhere its credentials. A token presented by the wrong process is
 | Caller | Token | Accepted from |
 | --- | --- | --- |
 | pi's process | the session token, issued at launch, forgotten when the session ends | pi's process |
+| a process pi started | pi's session token | a descendant of pi's process, by its chain of parent processes |
 | a bash call | a call token, issued when the daemon starts a sandboxed call, forgotten when it ends | the call's process group |
 | the launch helper | the one-time launch token, behind fnox only | any process (spent once) |
 
@@ -1273,7 +1276,10 @@ process's), elsewhere its credentials. A token presented by the wrong process is
   fnox, pi is fnox's child: the helper (`sandbox-exec` or `launch-exec`) sends `launched` with the launch token
   (`PITON_LAUNCH_TOKEN`, its own variable) just before it becomes pi, and the daemon records that connection's
   process as pi's. Until then, the session token is refused.
-- A process pi starts (a `piton` subcommand, the reviewer subprocess) can't use pi's token.
+- A process pi starts (a `piton config` call, an MCP server, the reviewer pi, and in a host session the agent's bash)
+  inherits pi's token and is a caller of its own: the daemon follows the peer's parent processes (`proc_pidinfo` on
+  macOS, `/proc` elsewhere) and finds pi's. It may read facts and nothing else. A process that leaves pi's tree (a new
+  parent) is refused. A sandboxed bash call isn't pi's child: the daemon starts it, with a call token.
 
 **Requests.** One request per connection, `{"token": "…", "request": {"type": "…", …}}` on one line, every field
 strict. Each has its own answer, line by line; a request refused before it's handled gets one line,
@@ -1282,15 +1288,42 @@ adds `reason`: `unknown_token`, `wrong_process`, or `not_yet`; `not_allowed` add
 
 | Request | Callers | Asks the user | Narrowest answer |
 | --- | --- | --- | --- |
+| `facts` | pi, a process pi started, a bash call | no | — |
 | `protected_write` | pi | yes (diff) | once |
 | `run_command` | pi | for a rerun | once |
 | `launched` | launch helper | no | — |
+| `lift` | pi | unless a session approval covers it | once |
+| `lifts` | pi | no (a stream) | — |
 | `worker_create`, `worker_delete` | pi | as `[workers.permissions]` says | once |
 | `worker_list` | pi | no | — |
 
-A bash call may send none of these yet; `Fact` (#405) is its first. The socket server (`agent/socket.rs`) only
-reads the peer, parses, accepts the token, authorizes the request for its caller (`channel::authorize`, exhaustive), and
-dispatches to the request's handler (`write.rs`, `run.rs`, `workers.rs`, the launch). The pi package's one client is
+The socket server (`agent/socket.rs`) only reads the peer, parses, accepts the token, authorizes the request for its
+caller (`channel::authorize`, exhaustive), and dispatches to the request's handler (`facts.rs`, `write.rs`, `run.rs`,
+`lift.rs`, `workers.rs`, the launch). `lift` and `lifts` are described under "Lifts for pi's live sandbox" below.
+
+**Facts** (`agent/facts.rs`). `facts` answers the session's view in one line, `{"type": "facts", …}`, decided once at
+launch and kept on the session's handle:
+
+- `runtime`: `host` or `sandbox`, which permission tables apply;
+- `grants`: which of the repository's committed grants the session keeps (`{"kind": "all" | "only" | "none"}`), the
+  launch's by design, so a commit or a trust decision during the session doesn't widen it;
+- `protected`: the session's protected files, the definition the daemon checks a protected write against;
+- `global`: the global tier;
+- `workspace`: the folder pi runs in, its checkout, and the checkout's relation (`{"kind": "source"}` or
+  `{"kind": "worker", "source", "name"}`). The worker root and project slug join it with the data folder for workers
+  (#340).
+
+Every `piton` command that reads configuration asks for it when it runs in a session (`PITON_AGENT_SOCKET` and
+`PITON_AGENT_TOKEN` set), so the workspace's environment can't move what it reads: all of them take the session's
+global tier (unless `--config-home` names one); `piton config` also its runtime (unless `--runtime` does), its kept
+grants, and its protected files; `piton sandbox show` and `why` its kept grants. The daemon and the launch helpers
+(`sandbox-exec`, `launch-exec`, `gate-connect`) never ask. A refused or unreachable channel is an error, never a
+fallback to this process's own reads. Outside a session they read
+the configuration and the state database directly. The pi package asks for the runtime through its client
+(`pi/extensions/__lib/runtime.ts`), once per process; the rest comes from `piton config resolve`, which asks itself.
+`piton sandbox inside` answers a different question with no daemon: whether this process runs inside a sandbox, as
+the kernel says (`sandbox_check`), for mise tasks and host-only commands. The only variables a session's pi gets
+from Piton are the socket path, its token, and `PITON_BIN`. The pi package's one client is
 `pi/extensions/__lib/agent.ts` (outside a session, `{kind: "noSession"}`); the Rust one is `agent/client.rs`.
 
 **Answers** (`agent/answer.rs`). Every approval-gated request shares one shape; a kind fills in what each carries, and
@@ -1318,6 +1351,48 @@ and by block reports; the daemon checks it again before granting anything.
 
 Everything else is liftable once the user approves it: Git's control files, credentials while fnox is off, sockets,
 services, TCP listens, and paths outside every grant.
+
+**Lifts for pi's live sandbox** (#408, `agent/lift.rs`, `session/lifts.rs`, macOS only). pi's running sandbox is
+widened with Seatbelt extension tokens, so a block in pi's own process needs no restart.
+
+- **Profile.** pi's policy carries `lifts: Pi` (`rules::Lifts`); a bash call's never does, so a call never consumes a
+  token. Every liftable deny is followed by its companion, `(allow <op> (require-all <its filter> (require-not <each
+  floor deny's filter for that operation>)… (extension "com.piton.lift.<kind>")))`, in Piton's own classes: `read`
+  (credential reads while fnox is off), `write` (writes, and Unix-socket connects and binds), `mach`, and `listen`. Floor
+  denies get no companion; a floor deny after a companion wins by order, and one before it is excluded by
+  `require-not`, so a token reopens only what a liftable deny closed. The liftable denies are those
+  `grant::liftability` calls liftable, plus the base's: writes outside every grant, the socket base, the closed Mach
+  list, the keychain's services while fnox is off, and closed listening. The user's own service deny and `false` for
+  listening are floor.
+- **Tokens.** The daemon issues each with `sandbox_extension_issue_{file,mach,generic}_to_process` for the audit token
+  of pi's connection, so only pi's process can consume it; a resolved path (Seatbelt matches resolved paths; a missing
+  file's folder must exist). Before issuing it checks the target again (`grant::check_live`): refused when any deny that
+  covers the path is floor or the user's own, not only the deciding one, and for a folder when such a deny covers
+  anything below it; for a write token, connect and bind denies count too (its class reopens them).
+- **The addon.** `cli/native/lift.c`, a Node-API module (`consume(token)`, `release(handle)`), is compiled by
+  `cli/build.rs` with clang (the Node-API functions it calls are resolved by Node at load, so no Node headers) and
+  embedded in `piton`. The daemon writes it to `<state>/native/lift.node` at start, a folder every sandbox may read
+  (`PitonArea::Native`); the pi package loads it from next to `PITON_AGENT_SOCKET`. Every install carries the build
+  matching its daemon.
+- **`lift {targets, reason}`**: code in pi's process asks to widen its sandbox for one action (`__lib/lift.ts`,
+  `lift(targets, reason, action)`). The user answers once, for this session, or deny; the client consumes the tokens,
+  runs the action, and releases them in `finally`. A floor target, or another question holding the slot, is
+  `not_granted` without asking. Off macOS, `unsupported`; outside a session, the action runs directly.
+- **`lifts`**: the permissions extension holds this stream open from `session_start`. The daemon sends
+  `{type: "grant", id, token, lift, for_child}` and `{type: "revoke", id}`; pi answers each grant with `consumed` or
+  `failed`. `for_child` says the block was in a process pi started (a refusal whose pid isn't pi's), not pi's own.
+  When it closes, every grant ends. Without a stream (the addon didn't load), blocks offer no live answers.
+- **Lifecycle** (`session/lifts.rs`, one state machine): a grant is offered, then active once consumed; an "until the
+  run settles" grant is revoked at `agent_settled`, a session grant when the session ends, every grant when the
+  stream closes. A grant that ends forgets that its block was asked about, so the same block in a later run is asked
+  again.
+- **MCP servers.** A stdio server is pi's child and keeps the sandbox it started with. When a grant for a child's
+  block is consumed, the MCP extension registers each stdio server it owns again (pi connects it again at once), so
+  it inherits the grant; servers other extensions registered are named in a notice pointing to `/mcp reconnect`. A
+  grant for pi's own process restarts nothing.
+- **Limits.** While a path is open, every part of pi's process can use it, the agent's write and edit tools included
+  (the question says so); bash calls can't, since each runs in a sandbox of its own. A file opened during a lift stays
+  writable after release: the sandbox checks at `open`.
 
 ### Asking when the sandbox blocks
 
@@ -1363,8 +1438,8 @@ with no helper and no policy, and only a saved `runtime = "host"` entry or the u
   before `main`, so every sandboxed start (pi, environment tools, Git for workers, these commands) gives the helper only
   its own variables and carries the command's environment in `PITON_LAUNCH_ENV`, which it unpacks after applying the
   sandbox. On the host, the command gets the session's launch environment, the workspace's environment tools'
-  values included (as Claude Code passes its own environment to an unsandboxed command), without `PITON_RUNTIME`,
-  `PITON_AGENT_TOKEN`, and `PITON_AGENT_SOCKET`, so it isn't taken for the session's pi. A sandboxed call gets its own
+  values included (as Claude Code passes its own environment to an unsandboxed command), without `PITON_AGENT_TOKEN`
+  and `PITON_AGENT_SOCKET`, so it isn't taken for the session's pi. A sandboxed call gets its own
   call token instead of pi's ("The channel to the daemon"). At launch the daemon
   records which of those values came from a file the launch's sandbox can write (`launch/env.rs`,
   `SandboxEnv::agent_writable`; a tool that names no file counts as writable), and the block question shows them on its
@@ -1459,10 +1534,20 @@ The daemon runs one `log stream` (outside any sandbox; `log` refuses inside one)
 tagged reports and routes each to its session by tag (`daemon/refusals.rs`). A call's tag: kept for that call (shown
 when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fail. The session's tag, or a call
 forgotten since (its background job): a blocked process, every one brought to the user, in order, and each process,
-operation, and target once. The session asks one question at a time (protected writes, worker questions, block
-questions, process questions); a worker question waits for the slot like a network question (its timeout starts when
-it's shown); a process question waits for the slot, is shown as soon as it frees, and is asked again when its dialog
-leaves unanswered with the run it showed in. It's offered as the `[sandbox]` entry that lifts it
+operation, and target once (again after a live grant that answered it ends). The session asks one question at a time
+(protected writes, worker questions, block questions, process questions, lifts); a worker question waits for the slot
+like a network question (its timeout starts when it's shown); a process question waits for the slot, is shown as soon
+as it frees, and is asked again when its dialog leaves unanswered with the run it showed in. #416 replaces these
+per-kind rules with one question scheduler.
+
+The answers depend on whose block it is (`agent/block.rs`, `Live`). In pi's own sandbox (the session's tag), with its
+`lifts` stream open and the live check passing (`grant::live_lift`), it's lifted while pi runs ("Lifts for pi's live
+sandbox" above): **Allow until the end of this turn** (until `agent_settled`), **Allow for this session**, **Always** in this project or
+everywhere when a saved form exists (the entry is saved and lifted now, and the session's later bash calls get it too,
+no restart), or **Not now**. Git's control files and the keychain while fnox is off have no saved form, so only the
+live answers; the question says that while a path is open the agent's write and edit tools can change it too. A call's background
+job can't take pi's token, and without a stream nothing is lifted live: then only **Always** (for new sessions and
+commands) and **Not now**, with why. The saved form is the `[sandbox]` entry that lifts it
 (`grant::lift_for`), one key set in its table through the config writer's dotted keys (`KeyPath`, a path quoted):
 `"<path>" = "write"` in `filesystem` for a write (a file or a folder alike), `"allow"` in
 `network.unix_socket_connections` for a socket it connects to (one in a credential folder too, which that entry opens
@@ -1470,17 +1555,17 @@ for connecting) or in `network.unix_socket_bindings` for one it creates, `"<name
 `allow_tcp_listening = true` for a TCP listen (`network-inbound local:*:<port>`). An entry is offered only when the
 launch's configuration, resolved again with it as the nearest file's, allows the refused access. "Everywhere" saves the folder above the path's first component
 that names the source or checkout as pi and Claude Code name per-folder state (the path with `/` made `-`), unless that
-folder is `/`, home, directly in home, or holds a project. The question names each answer's exact entry: Allow in this
-project or everywhere (saved, then a session restart, stopped and resumed from its file), or Not now (a dismissal
-too). It saves no denial, as Codex's prompt doesn't: a block the user never wants is a `"deny"` they write, and a
+folder is `/`, home, directly in home, or holds a project. The question names each Always's exact entry; a dismissal
+is Not now. It saves no denial, as Codex's prompt doesn't: a block the user never wants is a `"deny"` they write, and a
 block an entry of theirs decides (`DeniedBy::UserDeny`: a `"deny"`, a `"read"` written to, a `false` switch, a
 service deny) is only logged, never asked or noticed. A path with the refusing process's pid as a whole
 number in a component is never offered as that path: the folder above it is, when it isn't under a temp folder, the
 home folder or directly in it, and lifts the block; otherwise `NoLift::PerProcess` makes it a notice. A process's
-credential read (nono's deny groups), keychain block (`DeniedBy::Keychain`: `Readable` with fnox off,
-`ClosedForFnox` with it on, matched exhaustively), and write to Git's control files are never asked about: the
-deciding deny (`grant::DeniedBy`) makes them a warning notice (`session/notice.rs`), once per process and path.
-Refusals by the floor, fnox's files, and operations no entry lifts are notices too. Every notice that can be quieted
+credential read (nono's deny groups) is never asked about: it's a probe programs recover from, so a warning notice
+(`session/notice.rs`), once per process and path. A keychain block (`DeniedBy::Keychain`: `Readable` with fnox off,
+`ClosedForFnox` with it on, matched exhaustively) and a write to Git's control files are asked about when pi's sandbox
+can be lifted live, and are notices otherwise. Refusals by the floor, fnox's files, and operations nothing lifts are
+notices too. Every notice that can be quieted
 ends with the entry that makes it the user's own (`session/notice.rs`, `Quiet`): a `"deny"` in the block's own table
 for a path or a host (the folder, unless that's too broad; it closes it to approved commands too, and the notice says
 so), `allow_git_control_files = false` for Git's files, and a `silence` entry for what has no path or host (a Mach

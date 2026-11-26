@@ -264,7 +264,7 @@ pub async fn prepare(
 ) -> Result<Prepared, LaunchError> {
     Ok(match mode {
         LaunchMode::Host => {
-            let mut env = host_env(config, tools, base, workspace).await?;
+            let mut env = host_env(tools, base, workspace).await?;
             let proxy = proxy_for(tools, base, workspace, &mut env).await?;
             Prepared::Host { env, proxy }
         }
@@ -291,14 +291,9 @@ async fn proxy_for(
 
 /// pi's environment for a host launch in `workspace`: the base environment and the environment tools' for that folder,
 /// run on the host (a host session trusts the project by choice), then Piton's own variables.
-async fn host_env(
-    config: &DaemonConfig,
-    tools: &crate::integrations::Integrations,
-    base: &Env,
-    workspace: &Path,
-) -> Result<Env, LaunchError> {
+async fn host_env(tools: &crate::integrations::Integrations, base: &Env, workspace: &Path) -> Result<Env, LaunchError> {
     let env = env::host(&env::enabled(tools)?, base, workspace).await?;
-    Ok(with_piton_vars(config, env, LaunchMode::Host))
+    Ok(with_piton_vars(env))
 }
 
 /// A sandboxed launch's environment and policy. The environment tools run inside the sandbox, under the launch's
@@ -355,7 +350,7 @@ pub async fn prepare_sandbox(
                 .map_err(|e| e.to_string())
         })
     };
-    let mut env = with_piton_vars(config, launch_env.clone().into_env(), LaunchMode::Sandbox);
+    let mut env = with_piton_vars(launch_env.clone().into_env());
     if let Some(proxy) = &proxy {
         fnox::strip_workspace_variables(&mut env, base);
         proxy.check_sandbox(&resolution.policy, &config.paths.home)?;
@@ -382,6 +377,10 @@ pub async fn prepare_sandbox(
     );
     let warnings = launch_warnings(&resolution, &env, proxy.as_ref());
     let sockets = with_claude_sockets(&mut env, &resolution);
+    // pi's own sandbox carries the companion rules a lift token reopens; the commands' policies above (bash calls) never
+    // do, since a call is never given a token.
+    let mut resolution = resolution;
+    resolution.policy.lifts = sandbox::Lifts::Pi { credentials };
     Ok(Sandboxed {
         env,
         resolution,
@@ -414,20 +413,9 @@ pub enum ClaudeSockets {
     None,
 }
 
-/// What Piton decides, set last so a repository's environment can't override it: the runtime (which permissions
-/// apply), the global tier, and this binary (the pi package resolves configuration through it).
-fn with_piton_vars(config: &DaemonConfig, mut env: Env, mode: LaunchMode) -> Env {
-    env.remove("PITON_RUNTIME");
-    match mode {
-        LaunchMode::Sandbox => {
-            env.insert("PITON_RUNTIME".into(), "sandbox".into());
-        }
-        LaunchMode::Host => {}
-    }
-    env.insert(
-        "PITON_CONFIG_HOME".into(),
-        config.paths.global.to_string_lossy().into_owned(),
-    );
+/// What Piton decides, set last so a repository's environment can't override it: this binary (the pi package resolves
+/// configuration through it). Everything else a session needs to know it asks the daemon for (`facts`).
+fn with_piton_vars(mut env: Env) -> Env {
     // Never a value from the workspace: unset when this binary can't be found.
     env.remove("PITON_BIN");
     if let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) {
@@ -609,23 +597,12 @@ mod tests {
         );
     }
 
-    /// piton's own variables are set after mise's, so a repository's `mise.toml` can't change them.
+    /// piton's own variable is set after mise's, so a repository's `mise.toml` can't change it.
     #[test]
     fn piton_variables_win_over_the_workspace_environment() {
-        let mut config = DaemonConfig::for_tests();
-        config.paths.global = PathBuf::from("/global/piton");
-        let base: Env = [
-            ("PITON_RUNTIME".to_string(), "sandbox".to_string()),
-            ("PITON_CONFIG_HOME".to_string(), "/repo/fake".to_string()),
-            ("PITON_BIN".to_string(), "/repo/fake-piton".to_string()),
-        ]
-        .into();
-        let host = with_piton_vars(&config, base, LaunchMode::Host);
-        assert_eq!(host.get("PITON_RUNTIME"), None, "host runtime is unset");
-        assert_eq!(host["PITON_CONFIG_HOME"], "/global/piton");
-        assert_ne!(host["PITON_BIN"], "/repo/fake-piton");
-        let sandbox = with_piton_vars(&config, Env::new(), LaunchMode::Sandbox);
-        assert_eq!(sandbox["PITON_RUNTIME"], "sandbox");
+        let base: Env = [("PITON_BIN".to_string(), "/repo/fake-piton".to_string())].into();
+        let env = with_piton_vars(base);
+        assert_ne!(env["PITON_BIN"], "/repo/fake-piton");
     }
 
     /// A sandboxed launch through a link inside a checkout that leads out of it is refused; the user's own links work.
@@ -674,6 +651,7 @@ mod tests {
                 },
                 listen: crate::launch::sandbox::Listen::Closed,
                 tag: String::new(),
+                lifts: Default::default(),
             },
             links: Vec::new(),
             agent_dirs: ["/h/.pi/agent".into(), "/h/.pi/agent".into()],

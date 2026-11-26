@@ -114,6 +114,61 @@ export function send<Line extends { type: string }, T>(
     })
 }
 
+/** Where a session's pi runs. */
+export type Runtime = "host" | "sandbox"
+
+/** A checkout's relation: a source checkout, or a worker cloned from one. */
+export type FactRelation = { kind: "source" } | { kind: "worker"; source: string; name: string }
+
+/**
+ * The session's view, as the daemon decided it at launch: its runtime, the repository grants it keeps (the launch's, by
+ * design), its protected files, the global configuration folder, and its workspace.
+ */
+export interface Facts {
+    runtime: Runtime
+    grants: { kind: "all" } | { kind: "none" } | { kind: "only"; grants: string[] }
+    protected: unknown
+    global: string
+    workspace: { path: string; checkout: string; relation: FactRelation }
+}
+
+type FactsLine = ({ type: "facts" } & Facts) | { type: "ended" }
+
+/** Asks the daemon for the session's facts. */
+export function facts(session: SessionChannel, signal?: AbortSignal): Promise<Facts> {
+    return send<FactsLine, Facts>(
+        session,
+        { type: "facts" },
+        (line) => {
+            switch (line.type) {
+                case "facts": {
+                    const { type: _, ...facts } = line
+                    return { done: facts }
+                }
+                case "ended":
+                    throw new Error("the session ended")
+            }
+        },
+        signal,
+    )
+}
+
+let cached: Promise<Facts> | undefined
+
+/** This session's facts, asked once per process: they don't change while the session runs. */
+export function sessionFacts(session: SessionChannel): Promise<Facts> {
+    cached ??= facts(session).catch((error: unknown) => {
+        cached = undefined
+        throw error
+    })
+    return cached
+}
+
+/** Forgets the cached facts, for tests. */
+export function clearFactsCache(): void {
+    cached = undefined
+}
+
 /** What the daemon did with a protected write. */
 export type ProtectedOutcome =
     | { outcome: "approved"; modified: boolean; content: string; notes: unknown[] }
@@ -147,6 +202,131 @@ export function protectedWrite(
         },
         signal,
     )
+}
+
+/**
+ * What a lift opens in pi's running sandbox (#408): a file or folder to write (also a socket to connect to or create
+ * there), a file to read, one Mach service, or TCP listening.
+ */
+export type LiftTarget =
+    | { kind: "write"; path: string }
+    | { kind: "read"; path: string }
+    | { kind: "service"; name: string }
+    | { kind: "listen" }
+
+/** What the daemon answers a lift with. */
+export type LiftLine =
+    | { type: "granted"; tokens: string[] }
+    | { type: "denied" }
+    /** Not asked or not issued: a floor target, another question waiting. (`refused` is the channel's own.) */
+    | { type: "not_granted"; reason: string }
+    | { type: "unsupported" }
+    | { type: "ended" }
+
+/** Asks the daemon to widen pi's sandbox for `targets` (the user answers); resolves with its answer. */
+export function requestLift(
+    session: SessionChannel,
+    targets: LiftTarget[],
+    reason: string,
+    signal?: AbortSignal,
+): Promise<Exclude<LiftLine, { type: "ended" }>> {
+    const resolved = targets.map((target) => {
+        switch (target.kind) {
+            case "write":
+            case "read":
+                return { ...target, path: path.resolve(target.path) }
+            case "service":
+            case "listen":
+                return target
+        }
+    })
+    return send<LiftLine, Exclude<LiftLine, { type: "ended" }>>(
+        session,
+        { type: "lift", targets: resolved, reason },
+        (line) => {
+            switch (line.type) {
+                case "ended":
+                    throw new Error("the session ended before the user answered")
+                case "granted":
+                case "denied":
+                case "not_granted":
+                case "unsupported":
+                    return { done: line }
+            }
+        },
+        signal,
+    )
+}
+
+/** One line of the `lifts` stream: consume a token, or release one. */
+export type LiftsLine =
+    /** `for_child`: a process pi started (an MCP server) was blocked; it inherits the grant only once started again. */
+    | { type: "grant"; id: number; token: string; lift: LiftTarget; for_child: boolean }
+    | { type: "revoke"; id: number }
+    | { type: "ended" }
+
+/** pi's reply about a grant. */
+export type LiftsReply = { type: "consumed"; id: number } | { type: "failed"; id: number; message: string }
+
+/** An open `lifts` stream. */
+export interface LiftsStream {
+    /** Tells the daemon what became of a grant. */
+    reply(reply: LiftsReply): void
+    /** Closes the stream: the daemon ends every grant. */
+    close(): void
+    /** Resolves when the stream closes, from either side. */
+    closed: Promise<void>
+}
+
+/**
+ * Opens pi's `lifts` stream: the daemon sends each grant (a token bound to this process) and each revocation as the
+ * user answers block questions and runs settle. Every line goes to `onLine`; the caller replies with `reply`.
+ */
+export function openLifts(
+    session: SessionChannel,
+    onLine: (line: Exclude<LiftsLine, { type: "ended" }>) => void,
+): LiftsStream {
+    const sock = net.connect(session.socket)
+    sock.setEncoding("utf-8")
+    let buf = ""
+    let done: () => void = () => {}
+    const closed = new Promise<void>((resolve) => (done = resolve))
+    sock.on("data", (chunk: string) => {
+        buf += chunk
+        let newline: number
+        while ((newline = buf.indexOf("\n")) >= 0) {
+            const text = buf.slice(0, newline)
+            buf = buf.slice(newline + 1)
+            if (!text) continue
+            let line: LiftsLine | RefusedLine
+            try {
+                line = JSON.parse(text) as LiftsLine | RefusedLine
+            } catch {
+                sock.destroy()
+                return
+            }
+            switch (line.type) {
+                case "grant":
+                case "revoke":
+                    onLine(line)
+                    break
+                case "ended":
+                case "refused":
+                    sock.destroy()
+                    return
+            }
+        }
+    })
+    sock.on("close", () => done())
+    sock.on("error", () => sock.destroy())
+    sock.write(`${JSON.stringify({ token: session.token, request: { type: "lifts" } })}\n`)
+    return {
+        reply: (reply) => {
+            if (!sock.destroyed) sock.write(`${JSON.stringify(reply)}\n`)
+        },
+        close: () => sock.destroy(),
+        closed,
+    }
 }
 
 /** Where a widened or host run ran: a widened sandbox, or the host with no sandbox. */

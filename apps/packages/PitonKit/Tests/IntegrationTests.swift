@@ -27,6 +27,8 @@ private final class Daemon: @unchecked Sendable {
     let workspace: URL
     let socket: String
     let log: URL
+    /// The test daemon's global configuration folder.
+    let config: URL
     private var process = Process()
     private var environment: [String: String] = [:]
 
@@ -54,7 +56,8 @@ private final class Daemon: @unchecked Sendable {
         // The global configuration folder's host file: how the daemon runs, and the host preferences. Keep-awake starts
         // off, so no caffeinate runs. fnox is off: unset, it's used when installed, and the user's own fnox config (with
         // secrets behind it) would then wrap every test session.
-        let config = dir.appendingPathComponent("config")
+        // Passed as `--config-home`; sessions get it from the daemon.
+        config = dir.appendingPathComponent("config")
         try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
         try """
         socket = "\(socket)"
@@ -93,7 +96,9 @@ private final class Daemon: @unchecked Sendable {
         try seed.run()
         seed.waitUntilExit()
         var env = ProcessInfo.processInfo.environment
-        env["PITON_CONFIG_HOME"] = config.path
+        // Never the runner's own session's channel: a `piton` inside a session asks it for the session's facts.
+        env.removeValue(forKey: "PITON_AGENT_SOCKET")
+        env.removeValue(forKey: "PITON_AGENT_TOKEN")
         env["PI_CODING_AGENT_DIR"] = agent.path
         env["PITON_FAUX_TPS"] = "40"
         env["PITON_FAKE_WHOIS"] = whois.path
@@ -104,7 +109,7 @@ private final class Daemon: @unchecked Sendable {
     private func launch() throws {
         process = Process()
         process.executableURL = URL(fileURLWithPath: pitonBin)
-        process.arguments = ["daemon"]
+        process.arguments = ["--config-home", config.path, "daemon"]
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

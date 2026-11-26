@@ -73,10 +73,6 @@ impl Offer for ForSession {
     const OFFERED: bool = true;
 }
 
-impl Offer for PersistScope {
-    const OFFERED: bool = true;
-}
-
 /// The user's answer to a worker operation: once (one operation the daemon bounds), for this session, always (saves
 /// `"allow"` in the chosen file's `[workers.permissions]`), or deny.
 pub type WorkerAnswer = super::answer::Answer<Once<()>, ForSession, PersistScope, ()>;

@@ -14,7 +14,16 @@ import type {
     ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
 
-import type { RefusedLine, RunLine } from "../extensions/__lib/agent.ts"
+import { clearFactsCache, type RefusedLine, type RunLine } from "../extensions/__lib/agent.ts"
+import {
+    addonPath,
+    holdLifts,
+    lift,
+    loadAddon,
+    resetAddon,
+    type Addon,
+    type LiftGranted,
+} from "../extensions/__lib/lift.ts"
 import { compile } from "../extensions/__lib/schema.ts"
 import {
     BLOCKED_SEPARATOR,
@@ -68,7 +77,8 @@ async function fakeDaemon(answer: (request: Record<string, unknown>) => (RunLine
     }
 }
 
-function register(socket: string) {
+/** Registers bash for a session whose facts say it's sandboxed. */
+async function register(socket: string) {
     const tools = new Map<string, ToolDefinition>()
     const handlers = new Map<string, (event: unknown) => unknown>()
     const pi = {
@@ -79,11 +89,11 @@ function register(socket: string) {
             handlers.set(name, handler)
         },
     } as unknown as ExtensionAPI
-    const registered = registerSandboxBash(pi, {
-        PITON_RUNTIME: "sandbox",
-        PITON_AGENT_SOCKET: socket,
-        PITON_AGENT_TOKEN: "token",
-    })
+    const registered = await registerSandboxBash(
+        pi,
+        { PITON_AGENT_SOCKET: socket, PITON_AGENT_TOKEN: "token" },
+        async () => "sandbox",
+    )
     return { registered, bash: tools.get("bash"), userBash: handlers.get("user_bash") }
 }
 
@@ -114,16 +124,39 @@ async function withPiSettings<T>(dir: string, settings: object, run: () => Promi
 }
 
 describe("bash in a sandboxed session under piton", () => {
-    it("is pi's own bash outside such a session", () => {
+    it("is pi's own bash outside such a session", async () => {
         const tools: string[] = []
         const pi = {
             registerTool: (tool: ToolDefinition) => tools.push(tool.name),
             on: () => tools.push("on"),
         } as unknown as ExtensionAPI
-        assert.equal(registerSandboxBash(pi, {}), false)
-        assert.equal(registerSandboxBash(pi, { PITON_AGENT_SOCKET: "/s", PITON_AGENT_TOKEN: "t" }), false)
-        assert.equal(registerSandboxBash(pi, { PITON_RUNTIME: "sandbox" }), false)
+        const channel = { PITON_AGENT_SOCKET: "/s", PITON_AGENT_TOKEN: "t" }
+        assert.equal(await registerSandboxBash(pi, {}, async () => "sandbox"), false, "no session")
+        assert.equal(await registerSandboxBash(pi, channel, async () => "host"), false, "a host session")
         assert.deepEqual(tools, [])
+    })
+
+    it("asks the daemon whether the session is sandboxed", async () => {
+        const daemon = await fakeDaemon((request) =>
+            request.type === "facts"
+                ? [{ type: "facts", runtime: "sandbox" } as unknown as RunLine]
+                : [{ type: "exit", code: 0 }],
+        )
+        try {
+            clearFactsCache()
+            const tools: string[] = []
+            const pi = {
+                registerTool: (tool: ToolDefinition) => tools.push(tool.name),
+                on: () => undefined,
+            } as unknown as ExtensionAPI
+            const env = { PITON_AGENT_SOCKET: daemon.socket, PITON_AGENT_TOKEN: "t" }
+            assert.equal(await registerSandboxBash(pi, env), true)
+            assert.deepEqual(tools, ["bash"])
+            assert.deepEqual(daemon.requests, [{ type: "facts", token: "t" }])
+        } finally {
+            clearFactsCache()
+            await daemon.close()
+        }
     })
 
     it("sends every call to the daemon with the agent's command and pi's shell environment", async () => {
@@ -132,7 +165,7 @@ describe("bash in a sandboxed session under piton", () => {
         process.env.PITON_AGENT_TOKEN = "pi's own"
         try {
             await withPiSettings(daemon.dir, { shellCommandPrefix: "PREFIXED=yes" }, async () => {
-                const { registered, bash } = register(daemon.socket)
+                const { registered, bash } = await register(daemon.socket)
                 assert.ok(registered && bash)
                 const updates: string[] = []
                 const result = await bash.execute(
@@ -172,7 +205,7 @@ describe("bash in a sandboxed session under piton", () => {
             { type: "refused", why: "token", message: "the token belongs to another process" },
         ])
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             await assert.rejects(
                 bash!.execute("c", { command: "ls" }, undefined, undefined, context(daemon.dir)),
                 /refused: the token belongs to another process/,
@@ -187,7 +220,7 @@ describe("bash in a sandboxed session under piton", () => {
             request.command === "wait" ? [] : [{ type: "not_run", reason: "the user denied it" }],
         )
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             await assert.rejects(
                 bash!.execute(
                     "c",
@@ -216,7 +249,7 @@ describe("bash in a sandboxed session under piton", () => {
                 : [{ type: "ran", runtime: "host", by: "approval" }, out("probed\n"), { type: "exit", code: 1 }],
         )
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             const host = await bash!.execute(
                 "c",
                 { command: "sh probe.sh", rerun: { runtime: "host" } },
@@ -263,7 +296,7 @@ describe("bash in a sandboxed session under piton", () => {
             }
         })
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             const reported = await bash!.execute(
                 "a",
                 { command: "reported" },
@@ -295,8 +328,8 @@ describe("bash in a sandboxed session under piton", () => {
         }
     })
 
-    it("adds the sandbox guideline to pi's own bash guidelines", () => {
-        const { bash } = register("/nowhere")
+    it("adds the sandbox guideline to pi's own bash guidelines", async () => {
+        const { bash } = await register("/nowhere")
         assert.ok(bash!.promptGuidelines?.includes(SANDBOX_GUIDELINE))
     })
 
@@ -308,8 +341,8 @@ describe("bash in a sandboxed session under piton", () => {
         assert.doesNotMatch(ranLine({ runtime: "sandbox", by: "grant" }), /everything/, "a saved grant may be narrowed")
     })
 
-    it("takes a rerun that hints only the runtime", () => {
-        const { bash } = register("/nowhere")
+    it("takes a rerun that hints only the runtime", async () => {
+        const { bash } = await register("/nowhere")
         const properties = (bash!.parameters as { properties: Record<string, unknown> }).properties
         assert.ok(properties.rerun && !("outside_sandbox" in properties))
         const validator = compile(RerunSchema)
@@ -321,7 +354,7 @@ describe("bash in a sandboxed session under piton", () => {
     it("maps the daemon's timeout to pi's timeout result", async () => {
         const daemon = await fakeDaemon(() => [out("partial\n"), { type: "timed_out" }])
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             await assert.rejects(
                 bash!.execute("c", { command: "sleep 9", timeout: 1 }, undefined, undefined, context(daemon.dir)),
                 /partial[\s\S]*timed out after 1 seconds/,
@@ -336,7 +369,7 @@ describe("bash in a sandboxed session under piton", () => {
         const daemon = await fakeDaemon(() => [out("listed\n"), { type: "exit", code: 0 }])
         try {
             await withPiSettings(daemon.dir, { shellCommandPrefix: "set -e" }, async () => {
-                const { userBash } = register(daemon.socket)
+                const { userBash } = await register(daemon.socket)
                 const handled = userBash!({
                     type: "user_bash",
                     command: "ls",
@@ -365,5 +398,195 @@ describe("bash in a sandboxed session under piton", () => {
         assert.equal(unprefixed("ls", "set -e"), "ls")
         assert.equal(unprefixed("set -ex\nls", "set -e"), "set -ex\nls")
         assert.equal(unprefixed("ls", undefined), "ls")
+    })
+})
+
+/** A fake addon: records what's consumed and released; `fail` is a token it refuses. */
+function fakeAddon(fail?: string) {
+    const consumed: string[] = []
+    const released: number[] = []
+    let next = 10
+    const addon: Addon = {
+        consume(token) {
+            if (fail === token) throw new Error("sandbox_extension_consume: Operation not permitted")
+            consumed.push(token)
+            return next++
+        },
+        release(handle) {
+            released.push(handle)
+        },
+    }
+    return { addon, consumed, released }
+}
+
+function withAddon(addon: Addon, socket: string) {
+    resetAddon()
+    const env = { PITON_AGENT_SOCKET: socket, PITON_AGENT_TOKEN: "token" }
+    loadAddon(env, () => addon)
+    return env
+}
+
+async function waitFor(ready: () => boolean) {
+    for (let i = 0; i < 200 && !ready(); i++) await new Promise((r) => setTimeout(r, 5))
+    assert.ok(ready(), "timed out")
+}
+
+describe("lifts for pi's live sandbox", { skip: process.platform !== "darwin" }, () => {
+    it("loads the addon next to the daemon's socket, or says why not", () => {
+        resetAddon()
+        assert.equal(addonPath({ PITON_AGENT_SOCKET: "/s/agent.sock" }), "/s/native/lift.node")
+        assert.equal(addonPath({}), undefined)
+        assert.equal(loadAddon({ PITON_AGENT_SOCKET: "/no/such/agent.sock" }).kind, "unavailable")
+        resetAddon()
+        assert.equal(loadAddon({}).kind, "unavailable")
+        resetAddon()
+    })
+
+    it("runs the action directly outside a session", async () => {
+        assert.deepEqual(await lift([{ kind: "listen" }], "r", async () => 7, { env: {} }), { kind: "done", value: 7 })
+    })
+
+    it("consumes the granted tokens, runs the action, and releases them, also when it throws", async () => {
+        const daemon = await fakeDaemon(() => [{ type: "granted", tokens: ["t1", "t2"] } as unknown as RunLine])
+        const { addon, consumed, released } = fakeAddon()
+        try {
+            const env = withAddon(addon, daemon.socket)
+            const targets = [
+                { kind: "write", path: "/w/.git/config" },
+                { kind: "service", name: "com.example" },
+            ] as const
+            const outcome = await lift(
+                [...targets],
+                "delete a merged branch",
+                async () => {
+                    assert.deepEqual(consumed, ["t1", "t2"], "open while the action runs")
+                    assert.deepEqual(released, [])
+                    return "ok"
+                },
+                { env },
+            )
+            assert.deepEqual(outcome, { kind: "done", value: "ok" })
+            assert.deepEqual(released, [10, 11])
+            assert.deepEqual(daemon.requests[0], {
+                type: "lift",
+                targets,
+                reason: "delete a merged branch",
+                token: "token",
+            })
+            const boom = lift(
+                [{ kind: "listen" }],
+                "r",
+                async () => {
+                    throw new Error("boom")
+                },
+                { env },
+            )
+            await assert.rejects(boom, /boom/)
+            assert.deepEqual(released, [10, 11, 12, 13], "released after a throw")
+        } finally {
+            resetAddon()
+            await daemon.close()
+        }
+    })
+
+    it("never runs the action when the user denies or the daemon refuses", async () => {
+        const cases = [
+            [{ type: "denied" }, { kind: "denied" }],
+            [
+                { type: "not_granted", reason: "floor" },
+                { kind: "refused", reason: "floor" },
+            ],
+            [{ type: "unsupported" }, { kind: "unsupported" }],
+        ] as const
+        for (const [line, expected] of cases) {
+            const daemon = await fakeDaemon(() => [line as unknown as RunLine])
+            const { addon, consumed } = fakeAddon()
+            try {
+                const env = withAddon(addon, daemon.socket)
+                let ran = false
+                const outcome = await lift(
+                    [{ kind: "listen" }],
+                    "r",
+                    async () => {
+                        ran = true
+                    },
+                    { env },
+                )
+                assert.deepEqual(outcome, expected)
+                assert.equal(ran, false)
+                assert.deepEqual(consumed, [])
+            } finally {
+                resetAddon()
+                await daemon.close()
+            }
+        }
+    })
+
+    it("holds the stream: consumes grants, replies, releases on revoke and when it ends", async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piton-lifts-"))
+        const socket = path.join(dir, "agent.sock")
+        const replies: unknown[] = []
+        let peer: net.Socket | undefined
+        let opened: () => void = () => {}
+        const open = new Promise<void>((resolve) => (opened = resolve))
+        const server = net.createServer((connection) => {
+            peer = connection
+            connection.setEncoding("utf-8")
+            let buf = ""
+            connection.on("data", (chunk: string) => {
+                buf += chunk
+                let newline: number
+                while ((newline = buf.indexOf("\n")) >= 0) {
+                    const line = JSON.parse(buf.slice(0, newline)) as Record<string, unknown>
+                    buf = buf.slice(newline + 1)
+                    if ("token" in line) {
+                        assert.deepEqual(line, { token: "token", request: { type: "lifts" } })
+                        opened()
+                    } else replies.push(line)
+                }
+            })
+        })
+        await new Promise<void>((resolve) => server.listen(socket, resolve))
+        const { addon, consumed, released } = fakeAddon("bad")
+        const granted: LiftGranted[] = []
+        try {
+            const env = withAddon(addon, socket)
+            const stream = holdLifts((g) => granted.push(g), env)
+            assert.ok(stream)
+            await open
+            const send = (line: object) => peer!.write(`${JSON.stringify(line)}\n`)
+            send({
+                type: "grant",
+                id: 1,
+                token: "good",
+                lift: { kind: "write", path: "/w/.git/config" },
+                for_child: false,
+            })
+            send({ type: "grant", id: 2, token: "bad", lift: { kind: "listen" }, for_child: false })
+            send({ type: "grant", id: 3, token: "other", lift: { kind: "listen" }, for_child: true })
+            await waitFor(() => replies.length === 3)
+            assert.deepEqual(
+                replies.map((r) => (r as { type: string }).type),
+                ["consumed", "failed", "consumed"],
+            )
+            assert.deepEqual(consumed, ["good", "other"])
+            assert.deepEqual(
+                granted.map((g) => [g.lift.kind, g.forChild]),
+                [
+                    ["write", false],
+                    ["listen", true],
+                ],
+            )
+            send({ type: "revoke", id: 1 })
+            await waitFor(() => released.length === 1)
+            assert.deepEqual(released, [10])
+            peer!.end()
+            await stream.closed
+            assert.deepEqual(released, [10, 11], "every open grant released when the stream ends")
+        } finally {
+            resetAddon()
+            await new Promise<void>((resolve) => server.close(() => resolve()))
+            fs.rmSync(dir, { recursive: true, force: true })
+        }
     })
 })

@@ -1,13 +1,14 @@
 import "./host-runtime.ts"
+import { factsLine } from "./host-runtime.ts"
 import { writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
 import * as fs from "node:fs"
 import { syncBuiltinESMExports } from "node:module"
-import * as net from "node:net"
 import * as os from "node:os"
 import * as path from "node:path"
 import { describe, it } from "node:test"
+import { Worker } from "node:worker_threads"
 
 import { Type } from "typebox"
 import type { JsonObject } from "@earendil-works/pi-ai"
@@ -16,6 +17,8 @@ import {
     createWriteToolDefinition,
     type ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
+import { clearFactsCache } from "../extensions/__lib/agent.ts"
+import { clearProtectedCache } from "../extensions/__lib/protected.ts"
 import registerPermission, { deniedProtectedWrite } from "../extensions/permissions/index.ts"
 import { decorateReviewCodemode, isFileReviewDetails } from "../extensions/permissions/review.ts"
 import registerRules from "../extensions/rules/index.ts"
@@ -36,7 +39,7 @@ const args = (kind: "edit" | "write"): JsonObject =>
 const textOf = (outcome: Awaited<ReturnType<ReturnType<typeof nativeMcpFixture>["run"]>>) =>
     outcome.result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
 
-function fixture(
+async function fixture(
     mode: "allow" | "ask" | "deny" = "ask",
     rules: { allow?: readonly string[]; ask?: readonly string[]; deny?: readonly string[] } = {},
 ) {
@@ -49,7 +52,7 @@ function fixture(
         allow: ["codemode", "later", ...(rules.allow ?? [])],
     })
     fs.writeFileSync(file, "before")
-    registerPermission(h.pi)
+    await registerPermission(h.pi)
     let choice: string | undefined = "Accept"
     let editorContent: string | undefined
     let prompts = 0
@@ -104,7 +107,7 @@ describe("native file permission execution", () => {
     for (const kind of ["edit", "write"] as const) {
         for (const mode of ["allow", "ask"] as const) {
             it(`${mode} ${kind} delegates to native execution once`, async () => {
-                const h = fixture(mode)
+                const h = await fixture(mode)
                 try {
                     const result = await h.run(kind, args(kind))
                     assert.equal(result.isError, false)
@@ -119,7 +122,7 @@ describe("native file permission execution", () => {
         }
         for (const result of ["Accepted", "AcceptModified"] as const) {
             it(`${kind} ${result} returns editor success without another write`, async () => {
-                const h = fixture()
+                const h = await fixture()
                 try {
                     const content = result === "Accepted" ? "after" : "the user's modified version"
                     h.choose(JSON.stringify({ result, content }), content)
@@ -139,7 +142,7 @@ describe("native file permission execution", () => {
         }
         for (const notes of [[], [note]]) {
             it(`${kind} rejection ${notes.length ? "with" : "without"} notes preserves its abort policy`, async () => {
-                const h = fixture()
+                const h = await fixture()
                 try {
                     h.choose(JSON.stringify({ result: "Rejected", notes }))
                     const outcome = await h.run(kind, args(kind))
@@ -156,7 +159,7 @@ describe("native file permission execution", () => {
         }
         it(`${kind} denial and no-UI ask block before review or mutation`, async () => {
             for (const mode of ["deny", "ask"] as const) {
-                const h = fixture(mode)
+                const h = await fixture(mode)
                 try {
                     if (mode === "ask") h.context.hasUI = false
                     const outcome = await h.run(kind, args(kind))
@@ -172,7 +175,7 @@ describe("native file permission execution", () => {
             }
         })
         it(`${kind} rule denial names the rule and keeps the turn`, async () => {
-            const h = fixture("allow", { deny: [`${kind}(target.txt)`] })
+            const h = await fixture("allow", { deny: [`${kind}(target.txt)`] })
             try {
                 const outcome = await h.run(kind, args(kind))
                 assert.equal(outcome.isError, true)
@@ -193,7 +196,7 @@ describe("native file permission execution", () => {
         type Rules = Parameters<typeof fixture>[1]
 
         // Session overrides are process-wide: track them so every test leaves none behind.
-        function toggler(h: ReturnType<typeof fixture>) {
+        function toggler(h: Awaited<ReturnType<typeof fixture>>) {
             let overridden = false
             return {
                 async toggle() {
@@ -211,7 +214,7 @@ describe("native file permission execution", () => {
         }
 
         // Runs one call against a fresh target and reports what happened to it.
-        async function attempt(h: ReturnType<typeof fixture>, kind: "edit" | "write"): Promise<Outcome> {
+        async function attempt(h: Awaited<ReturnType<typeof fixture>>, kind: "edit" | "write"): Promise<Outcome> {
             fs.writeFileSync(h.file, "before")
             const prompts = h.prompts()
             const outcome = await h.run(kind, args(kind))
@@ -335,7 +338,7 @@ describe("native file permission execution", () => {
         for (const kind of ["edit", "write"] as const) {
             for (const testCase of cases) {
                 it(`${kind}: ${testCase.name}`, async () => {
-                    const h = fixture(testCase.mode, testCase.rules(kind))
+                    const h = await fixture(testCase.mode, testCase.rules(kind))
                     const t = toggler(h)
                     try {
                         await h.start()
@@ -353,7 +356,7 @@ describe("native file permission execution", () => {
         }
 
         it("refreshes the status after /permissions-mode and shows none for a session deny", async () => {
-            const h = fixture("ask", { allow: ["edit", "write"] })
+            const h = await fixture("ask", { allow: ["edit", "write"] })
             const t = toggler(h)
             const selections = ["ask", "deny"]
             Object.assign(h.context.ui, {
@@ -380,7 +383,7 @@ describe("native file permission execution", () => {
     })
 
     it("preserves native schemas, preparation, prompt contributions, and rendering", async () => {
-        const h = fixture()
+        const h = await fixture()
         try {
             for (const native of [createEditToolDefinition(h.root), createWriteToolDefinition(h.root)]) {
                 const wrapped = h.tools.get(native.name)!
@@ -398,7 +401,7 @@ describe("native file permission execution", () => {
     })
 
     it("runs the rules gate before editor review even when permission registered first", async () => {
-        const h = fixture()
+        const h = await fixture()
         try {
             fs.mkdirSync(path.join(h.root, ".agents/rules"), { recursive: true })
             fs.writeFileSync(
@@ -418,7 +421,7 @@ describe("native file permission execution", () => {
     })
 
     it("blocks invalid permission settings without asking or writing", async () => {
-        const h = fixture()
+        const h = await fixture()
         try {
             fs.writeFileSync(path.join(h.root, ".piton/config.toml"), "[tools.permissions]\nallow = [7]\n")
             const outcome = await h.run("write", args("write"))
@@ -432,7 +435,7 @@ describe("native file permission execution", () => {
     })
 
     it("keeps checking tools when other tables of config.toml are broken", async () => {
-        const h = fixture("allow")
+        const h = await fixture("allow")
         try {
             const file = path.join(h.root, ".piton/config.toml")
             fs.writeFileSync(file, `tracker = 1\n${fs.readFileSync(file, "utf8")}[branches]\nunknown = 1\n`)
@@ -446,26 +449,16 @@ describe("native file permission execution", () => {
     })
 })
 
-/** A fake daemon on `agent.sock`: records each request and answers with the next outcome. */
-function fakeDaemon(outcomes: unknown[]) {
+/**
+ * A fake daemon on `agent.sock` for a host session in `workspace`: answers `facts` (also to the `piton config protected`
+ * pi runs synchronously, so it serves from a worker thread), records each protected write, and answers it with the next
+ * outcome.
+ */
+function fakeDaemon(workspace: string, outcomes: unknown[]) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piton-agent-"))
     const socket = path.join(dir, "agent.sock")
     const requests: { token: string; path: string; content: string }[] = []
-    const server = net.createServer((connection) => {
-        let buf = ""
-        connection.setEncoding("utf-8")
-        connection.on("data", (chunk: string) => {
-            buf += chunk
-            if (!buf.includes("\n")) return
-            const envelope = JSON.parse(buf) as {
-                token: string
-                request: { type: string; path: string; content: string }
-            }
-            assert.equal(envelope.request.type, "protected_write")
-            requests.push({ token: envelope.token, path: envelope.request.path, content: envelope.request.content })
-            connection.end(`${JSON.stringify({ type: "protected_write", ...(outcomes.shift() as object) })}\n`)
-        })
-    })
+    let worker: Worker | undefined
     const env = {
         PITON_AGENT_SOCKET: process.env.PITON_AGENT_SOCKET,
         PITON_AGENT_TOKEN: process.env.PITON_AGENT_TOKEN,
@@ -473,16 +466,51 @@ function fakeDaemon(outcomes: unknown[]) {
     return {
         requests,
         async start() {
-            await new Promise<void>((resolve) => server.listen(socket, resolve))
+            worker = new Worker(
+                `const net = require("node:net"); const { parentPort, workerData } = require("node:worker_threads");
+                const outcomes = [...workerData.outcomes];
+                net.createServer((c) => {
+                    let buf = "";
+                    c.setEncoding("utf-8");
+                    c.on("data", (chunk) => {
+                        buf += chunk;
+                        if (!buf.includes("\\n")) return;
+                        const envelope = JSON.parse(buf);
+                        if (envelope.request.type === "facts") return c.end(JSON.stringify(workerData.facts) + "\\n");
+                        parentPort.postMessage(envelope);
+                        c.end(JSON.stringify({ type: "protected_write", ...outcomes.shift() }) + "\\n");
+                    });
+                }).listen(workerData.socket, () => parentPort.postMessage("listening"));`,
+                { eval: true, workerData: { socket, outcomes, facts: factsLine("host", workspace) } },
+            )
+            await new Promise<void>((resolve) =>
+                worker!.on("message", (message: unknown) => {
+                    if (message === "listening") return resolve()
+                    const envelope = message as {
+                        token: string
+                        request: { type: string; path: string; content: string }
+                    }
+                    assert.equal(envelope.request.type, "protected_write")
+                    requests.push({
+                        token: envelope.token,
+                        path: envelope.request.path,
+                        content: envelope.request.content,
+                    })
+                }),
+            )
             process.env.PITON_AGENT_SOCKET = socket
             process.env.PITON_AGENT_TOKEN = "t0ken"
+            clearProtectedCache()
+            clearFactsCache()
         },
         async stop() {
             for (const [key, value] of Object.entries(env)) {
                 if (value === undefined) delete process.env[key]
                 else process.env[key] = value
             }
-            await new Promise<void>((resolve) => server.close(() => resolve()))
+            clearProtectedCache()
+            clearFactsCache()
+            await worker?.terminate()
             fs.rmSync(dir, { recursive: true, force: true })
         },
     }
@@ -496,8 +524,8 @@ describe("protected files", () => {
 
     for (const kind of ["edit", "write"] as const) {
         it(`${kind} goes through the daemon under piton, even when edits are allowed`, async () => {
-            const h = fixture("allow", { allow: ["edit", "write"] })
-            const daemon = fakeDaemon([{ outcome: "approved", modified: false, content: "x", notes: [] }])
+            const h = await fixture("allow", { allow: ["edit", "write"] })
+            const daemon = fakeDaemon(h.root, [{ outcome: "approved", modified: false, content: "x", notes: [] }])
             await daemon.start()
             try {
                 const before = fs.readFileSync(path.join(h.root, ".piton/config.toml"), "utf-8")
@@ -520,8 +548,8 @@ describe("protected files", () => {
     }
 
     it("returns the user's version, rejection, and refusals as the outcome", async () => {
-        const h = fixture("allow")
-        const daemon = fakeDaemon([
+        const h = await fixture("allow")
+        const daemon = fakeDaemon(h.root, [
             { outcome: "approved", modified: true, content: "mine", notes: [note] },
             { outcome: "rejected", notes: [] },
             { outcome: "refused", reason: "another protected write is waiting" },
@@ -584,7 +612,7 @@ describe("protected files", () => {
     })
 
     it("asks on the host even when edits are allowed, and leaves other files alone", async () => {
-        const h = fixture("allow", { allow: ["edit", "write"] })
+        const h = await fixture("allow", { allow: ["edit", "write"] })
         try {
             const plain = await h.run("write", args("write"))
             assert.equal(plain.isError, false)
@@ -602,7 +630,7 @@ describe("native codemode review handoff", () => {
     for (const result of ["Accepted", "AcceptModified", "Rejected"] as const) {
         for (const caught of [false, true]) {
             it(`${result} notes survive ${caught ? "caught errors" : "discarded results"} and stop later calls`, async () => {
-                const h = fixture()
+                const h = await fixture()
                 const outer = new AbortController()
                 try {
                     const longNote = { ...note, note: note.note + " Full review text.".repeat(600) }
@@ -640,7 +668,7 @@ describe("native codemode review handoff", () => {
 
     it("continues normally after acceptance without notes and preserves genuine script failures", async () => {
         for (const fail of [false, true]) {
-            const h = fixture()
+            const h = await fixture()
             try {
                 h.choose(JSON.stringify({ result: "Accepted" }), "after")
                 const code =
@@ -663,7 +691,7 @@ describe("native codemode review handoff", () => {
     })
 
     it("preserves external cancellation", async () => {
-        const h = fixture()
+        const h = await fixture()
         const outer = new AbortController()
         try {
             h.context.ui.select = async () => {
@@ -685,7 +713,7 @@ describe("native codemode review handoff", () => {
     })
 
     it("retains native parent usage and partial output during owned handoff", async () => {
-        const h = fixture()
+        const h = await fixture()
         try {
             h.choose(JSON.stringify({ result: "Accepted", notes: [note] }), "after")
             const usage = {
