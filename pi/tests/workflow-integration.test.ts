@@ -333,13 +333,8 @@ describe("workflow-source queue context", () => {
         assert.deepEqual(fileSnapshot(f.root), before)
     })
 
-    it("inspects and queues from a sandboxed worker without guarding artifact-free operations", (t) => {
+    it("inspects and queues from a worker without guarding artifact-free operations", (t) => {
         const f = workflowFixture(t)
-        const previous = process.env.PITON_RUNTIME
-        t.after(() => {
-            if (previous === undefined) delete process.env.PITON_RUNTIME
-            else process.env.PITON_RUNTIME = previous
-        })
         // The consuming project's source checkout owns a real .piton/.local; its worker links to it.
         prepareWorkflowProject(f.source)
         prepareArtifactPersistence(f.source)
@@ -352,7 +347,6 @@ describe("workflow-source queue context", () => {
         fs.mkdirSync(path.join(worker, ".piton"), { recursive: true })
         fs.symlinkSync(path.join(f.consumer, ".piton/.local"), path.join(worker, ".piton/.local"))
         clearSettingsCache()
-        process.env.PITON_RUNTIME = "sandbox"
         const ctx = { cwd: worker } as ExtensionContext
 
         const before = fileSnapshot(f.source)
@@ -367,7 +361,7 @@ describe("workflow-source queue context", () => {
         assert.deepEqual(fileSnapshot(f.source), before)
         assert.equal(buildIntegrationContext(ctx, { operation: "adopt", entity: "gig" }, mcpTools).state, "enabled")
 
-        // The sandboxed source checkout keeps its real folder and addresses entities.
+        // The source checkout keeps its real folder and addresses entities.
         assert.equal(buildIntegrationContext(f.ctx, { operation: "adopt", entity: "gig" }, mcpTools).state, "enabled")
 
         // An unlinked worker still inspects and queues, but can't address an entity.

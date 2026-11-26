@@ -10,7 +10,7 @@
 import type { AssistantMessageDiagnostic } from "@earendil-works/pi-ai"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 
-import { resolveRuntime } from "../__lib/runtime.ts"
+import { currentRuntime } from "../__lib/runtime.ts"
 
 export const RUNTIME_STATUS = "status:runtime"
 export const LIMITS_STATUS = "status:limits"
@@ -47,11 +47,11 @@ export default function (pi: ExtensionAPI) {
         publishLimits(ctx, ctx.model?.provider)
     }
 
-    pi.on("session_start", (_event, ctx) => {
-        const result = resolveRuntime()
-        // An invalid PITON_RUNTIME is reported by the permissions extension; here it only clears the entry.
-        ctx.ui.setStatus(RUNTIME_STATUS, "runtime" in result ? result.runtime : undefined)
+    pi.on("session_start", async (_event, ctx) => {
         publishLimits(ctx, ctx.model?.provider)
+        // The session's runtime, asked of the daemon; when it can't be asked, the entry stays clear.
+        const runtime = await currentRuntime().catch(() => undefined)
+        ctx.ui.setStatus(RUNTIME_STATUS, runtime)
     })
 
     pi.on("model_select", (event, ctx) => {

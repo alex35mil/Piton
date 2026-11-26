@@ -1,12 +1,11 @@
-import "./host-runtime.ts"
+import { withSessionFacts } from "./host-runtime.ts"
 
 import assert from "node:assert/strict"
-import { afterEach, describe, it } from "node:test"
+import { describe, it } from "node:test"
 
 import type { AssistantMessageDiagnostic } from "@earendil-works/pi-ai"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
-import { RUNTIME_ENV } from "../extensions/__lib/runtime.ts"
 import status, {
     claudeLimits,
     codexLimits,
@@ -146,29 +145,33 @@ describe("status limits parsing", () => {
 })
 
 describe("status extension", () => {
-    const original = process.env[RUNTIME_ENV]
-    afterEach(() => {
-        if (original === undefined) delete process.env[RUNTIME_ENV]
-        else process.env[RUNTIME_ENV] = original
-    })
-
-    it("publishes the runtime on session start and clears it when the runtime is invalid", () => {
+    it("publishes the session's runtime on session start, and clears it when the daemon can't be asked", async () => {
         const host = harness("claude-code")
-        host.start()
-        assert.equal(host.statuses.get(RUNTIME_STATUS), "host")
+        await host.start()
+        assert.equal(host.statuses.get(RUNTIME_STATUS), "host", "outside a session")
         assert.ok(host.statuses.has(LIMITS_STATUS))
         assert.equal(host.statuses.get(LIMITS_STATUS), undefined)
 
-        process.env[RUNTIME_ENV] = "sandbox"
-        const sandbox = harness("claude-code")
-        sandbox.start()
-        assert.equal(sandbox.statuses.get(RUNTIME_STATUS), "sandbox")
+        await withSessionFacts("sandbox", async () => {
+            const sandbox = harness("claude-code")
+            await sandbox.start()
+            assert.equal(sandbox.statuses.get(RUNTIME_STATUS), "sandbox")
+        })
 
-        process.env[RUNTIME_ENV] = "bogus"
-        const invalid = harness("claude-code")
-        invalid.start()
-        assert.ok(invalid.statuses.has(RUNTIME_STATUS))
-        assert.equal(invalid.statuses.get(RUNTIME_STATUS), undefined)
+        const previous = { socket: process.env.PITON_AGENT_SOCKET, token: process.env.PITON_AGENT_TOKEN }
+        process.env.PITON_AGENT_SOCKET = "/nowhere/agent.sock"
+        process.env.PITON_AGENT_TOKEN = "t"
+        try {
+            const unreachable = harness("claude-code")
+            await unreachable.start()
+            assert.ok(unreachable.statuses.has(RUNTIME_STATUS))
+            assert.equal(unreachable.statuses.get(RUNTIME_STATUS), undefined)
+        } finally {
+            delete process.env.PITON_AGENT_SOCKET
+            delete process.env.PITON_AGENT_TOKEN
+            if (previous.socket !== undefined) process.env.PITON_AGENT_SOCKET = previous.socket
+            if (previous.token !== undefined) process.env.PITON_AGENT_TOKEN = previous.token
+        }
     })
 
     it("publishes Claude limits with reset times from message_end", () => {

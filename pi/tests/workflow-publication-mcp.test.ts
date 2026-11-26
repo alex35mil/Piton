@@ -24,7 +24,7 @@ const model = { provider: "openrouter", id: "anthropic/claude-sonnet-4-5" } as E
 const githubFooter = "<sub>Sent via Pi. Model: openrouter/anthropic/claude-sonnet-4-5.</sub>"
 const linearFooter = "*Sent via Pi. Model: openrouter/anthropic/claude-sonnet-4-5.*"
 
-function runtimeHarness(
+async function runtimeHarness(
     provider: "github" | "linear",
     tool: string,
     field: string,
@@ -43,7 +43,7 @@ function runtimeHarness(
     })
     h.context.model = model
     writePermissions(h.root, { defaultMode: permissions === "absent" ? "ask" : permissions })
-    if (permissions !== "absent") registerPermission(h.pi)
+    if (permissions !== "absent") await registerPermission(h.pi)
     else createCodemodeExtension()(h.pi)
     if (order === "workflow-first") registerIntegrations(h.pi)
     const installed = h.install()
@@ -103,7 +103,7 @@ describe("workflow MCP publication binding", () => {
 
     for (const order of ["workflow-first", "mcp-first"] as const) {
         it(`signs without permission or project workflow configuration (${order})`, async () => {
-            const h = runtimeHarness("github", "issue_write", "body", "absent", order)
+            const h = await runtimeHarness("github", "issue_write", "body", "absent", order)
             try {
                 await h.start()
                 const toolName = h.toolName()
@@ -133,7 +133,7 @@ describe("workflow MCP publication binding", () => {
     }
 
     it("disposes registration and installs one wrapper after a fresh binding", async () => {
-        const h = runtimeHarness("github", "add_issue_comment", "body")
+        const h = await runtimeHarness("github", "add_issue_comment", "body")
         try {
             assert.equal(h.collectDecorators().length, 1)
             await h.start()
@@ -151,7 +151,7 @@ describe("workflow MCP publication binding", () => {
     })
 
     it("keeps user text exact and strips either local authorship value", async () => {
-        const h = runtimeHarness("linear", "save_comment", "body")
+        const h = await runtimeHarness("linear", "save_comment", "body")
         try {
             await h.start()
             h.context.model = undefined
@@ -166,7 +166,7 @@ describe("workflow MCP publication binding", () => {
     })
 
     it("preserves proposed arguments and the existing ask lane", async () => {
-        const h = runtimeHarness("github", "add_issue_comment", "body", "ask")
+        const h = await runtimeHarness("github", "add_issue_comment", "body", "ask")
         try {
             await h.start()
             const proposed = { body: "AI message." }
@@ -189,7 +189,7 @@ describe("workflow MCP publication binding", () => {
     })
 
     it("adds no prompt to allowed publications", async () => {
-        const h = runtimeHarness("github", "add_issue_comment", "body", "allow")
+        const h = await runtimeHarness("github", "add_issue_comment", "body", "allow")
         try {
             await h.start()
             const proposed = { body: "Allowed AI message." }
@@ -203,7 +203,7 @@ describe("workflow MCP publication binding", () => {
     })
 
     it("does not send denied publications", async () => {
-        const h = runtimeHarness("github", "add_issue_comment", "body", "deny")
+        const h = await runtimeHarness("github", "add_issue_comment", "body", "deny")
         try {
             await h.start()
             assert.equal((await h.send({ body: "Denied" })).isError, true)
@@ -216,7 +216,7 @@ describe("workflow MCP publication binding", () => {
 
     it("blocks partial edits before native execution, with or without permission", async () => {
         for (const permission of ["absent", "ask"] as const) {
-            const h = runtimeHarness("linear", "save_document", "content", permission)
+            const h = await runtimeHarness("linear", "save_document", "content", permission)
             try {
                 await h.start()
                 const outcome = await h.send({ patch: [{ op: "append", text: "Text" }] })

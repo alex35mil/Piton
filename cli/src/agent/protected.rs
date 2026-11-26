@@ -21,9 +21,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{LOCAL_DIR, PITON_DIR};
 
-/// The variable pi gets its session's [`Protected`] in (JSON), so `piton config protected` answers as the daemon checks.
-pub const PROTECTED_ENV: &str = "PITON_PROTECTED";
-
 /// Configuration outside the checkout's protected files. Paths are canonical.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

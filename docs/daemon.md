@@ -64,7 +64,7 @@ ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a sessio
 ## Configuration
 
 Optional, in the global configuration folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`; `--config-home`
-or `PITON_CONFIG_HOME` for tests). Every key has the default shown.
+for tests). Inside a session, `piton` uses the session's (it asks the daemon). Every key has the default shown.
 
 - **`config.host.toml`** (and `config.host.local.toml`, not committed): how the daemon runs on this host and this
   host's preferences. Only this file can stop the daemon from starting; a typo in it does.
@@ -152,8 +152,9 @@ device, the app's default applies. Unset, the fonts are the system font. Setting
 (Every device, Every Mac, iPhone and iPad, Every iPhone or iPad, or only this device, kept in the app); choosing a
 section there also removes the narrower sections that would hide it on that device.
 
-A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after the workspace's mise
-environment.
+A pi gets `PITON_AGENT_SOCKET`, `PITON_AGENT_TOKEN`, and `PITON_BIN` after the workspace's mise environment. What
+else a session needs to know (its runtime, kept grants, protected files, global tier, workspace) `piton` and the pi
+package ask the daemon for (`facts`, see "The channel to the daemon" in `docs/design.md`).
 
 For a sandboxed launch, `mise env` runs inside the launch's sandbox, so whatever a workspace's mise configuration runs
 (`exec()` templates, `_.source` scripts) is contained. A configuration that reads a secret manager while `mise env`

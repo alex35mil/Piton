@@ -12,14 +12,36 @@
 //   "picture"    call the `faux_picture` tool, which returns a 2 MB image (larger than a phone's WebSocket message)
 //   "status"     call the `faux_status` tool, which sets a status line and a widget, then clears them on "status clear"
 //   "env"        call the `faux_env` tool, which returns the daemon's variables for this pi (token, agent socket, and
-//                what the fake fnox set), and the relay: a socket that forwards each connection to the agent socket
-//                from pi's own process, so a test can send requests as pi (the daemon checks the connecting process)
+//                what the fake fnox set), which of the removed fact variables pi still has, and two relays: sockets
+//                that forward each connection to the agent socket from pi's own process (`relay`) and from a child
+//                process pi started (`childRelay`), so a test can send requests as either (the daemon checks the
+//                connecting process)
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { fauxProvider, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+/** Forwards each connection to `target` from a child process of this one: a process pi started. */
+async function childRelay(target: string): Promise<string> {
+    const { spawn } = await import("node:child_process");
+    const at = path.join(os.tmpdir(), `faux-child-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`);
+    const script = `const net = require("node:net");
+        net.createServer((d) => { const u = net.connect(${JSON.stringify(target)}); d.pipe(u); u.pipe(d);
+            d.on("close", () => u.destroy()); u.on("close", () => d.destroy()); d.on("error", () => u.destroy());
+            u.on("error", () => d.destroy()); })
+          .listen(${JSON.stringify(at)}, () => process.stdout.write("listening\\n"));
+        process.stdin.on("end", () => process.exit(0)); process.stdin.resume();`;
+    const child = spawn(process.execPath, ["-e", script], { stdio: ["pipe", "pipe", "ignore"] });
+    await new Promise<void>((resolve, reject) => {
+        child.stdout.once("data", () => resolve());
+        child.once("exit", () => reject(new Error("the child relay exited")));
+    });
+    child.unref();
+    process.on("exit", () => child.kill());
+    return at;
+}
 
 /** Forwards each connection to `target` from this process; either side closing closes the other. */
 async function relay(target: string): Promise<string> {
@@ -136,10 +158,13 @@ export default async function (pi: ExtensionAPI) {
         description: "Return the daemon's variables for this pi (test tool).",
         parameters: { type: "object", properties: {} },
         async execute() {
+            const removed = ["PITON_RUNTIME", "PITON_TRUST", "PITON_PROTECTED", "PITON_CONFIG_HOME"];
             const env = {
                 token: process.env.PITON_AGENT_TOKEN ?? null,
                 socket: process.env.PITON_AGENT_SOCKET ?? null,
                 relay: relayed,
+                childRelay: agentSocket ? await childRelay(agentSocket).catch(() => null) : null,
+                factVariables: removed.filter((name) => process.env[name] !== undefined),
                 fnox: process.env.FAKE_FNOX ?? null,
                 githubToken: process.env.GITHUB_TOKEN ?? null,
                 fnoxProfile: process.env.FNOX_PROFILE ?? null,

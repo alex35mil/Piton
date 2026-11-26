@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Builds Piton for iOS (Release) and installs and launches it on one device. Host only.
-# Usage: scripts/install-device.sh <device> <variable>
+# Usage: scripts/install-device.sh <device> <variable> <piton>
 #   device:   the device's name or identifier (xcrun devicectl list devices)
 #   variable: the mise.local.toml variable it comes from, for the error when it's unset
+#   piton:    this checkout's piton build, which says whether this runs inside a sandbox
 # Run from apps/.
 set -euo pipefail
 
 device=$1
 variable=$2
+piton=$3
 
-[ "${PITON_RUNTIME:-}" != sandbox ] || { echo "error: device installs are host-only" >&2; exit 1; }
+[ "$("$piton" sandbox inside)" != true ] || { echo "error: device installs are host-only" >&2; exit 1; }
 [ -n "$device" ] || { echo "error: set $variable in mise.local.toml (xcrun devicectl list devices)" >&2; exit 1; }
 
 # The device itself as the destination (not generic/platform=iOS): only then does Xcode register it with the team and

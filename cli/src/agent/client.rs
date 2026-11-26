@@ -1,5 +1,6 @@
-//! The Rust client of `agent.sock`, for `piton` running inside a session's sandbox: sends one request with this
-//! process's token and reads its answer. The launch helper reports pi's start with it; facts (#405) are asked with it.
+//! The Rust client of `agent.sock`, for `piton` running inside a session: sends one request with this process's token
+//! and reads its answer. The launch helper reports pi's start with it; `piton config` and `piton sandbox` ask for the
+//! session's facts with it.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -124,6 +125,17 @@ mod tests {
             sent,
             serde_json::json!({"token": "tok", "request": {"type": "launched", "upstream": "http://u"}})
         );
+    }
+
+    /// `facts` is sent bare and read back as the session's view.
+    #[test]
+    fn asks_for_facts() {
+        let (stream, server) = answering("{\"type\":\"ended\"}\n");
+        let answer: super::super::facts::FactsAnswer =
+            exchange(stream, "s", "tok", &super::super::facts::FactsRequest {}).unwrap();
+        assert_eq!(answer, super::super::facts::FactsAnswer::Ended);
+        let sent: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+        assert_eq!(sent, serde_json::json!({"token": "tok", "request": {"type": "facts"}}));
     }
 
     #[test]

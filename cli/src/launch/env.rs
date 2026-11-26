@@ -540,9 +540,14 @@ mod tests {
 
     #[test]
     fn containment_follows_this_process() {
-        let expected = match std::env::var("PITON_RUNTIME").as_deref() {
-            Ok("sandbox") => Containment::Inherited,
-            Ok(_) | Err(_) => Containment::Apply,
+        // Whether the test itself runs sandboxed, asked of the OS another way: nesting a sandbox is refused.
+        let nested = !std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|s| s.success());
+        let expected = match nested {
+            true => Containment::Inherited,
+            false => Containment::Apply,
         };
         assert_eq!(super::super::sandbox::containment(), expected);
     }

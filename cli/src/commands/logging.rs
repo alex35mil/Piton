@@ -65,9 +65,9 @@ pub async fn run(action: LoggingAction, config: &DaemonConfig) -> ExitCode {
 }
 
 fn host_only(what: &str) -> Result<(), String> {
-    match std::env::var("PITON_RUNTIME").as_deref() {
-        Ok("sandbox") => Err(format!("{what} is host-only")),
-        Ok(_) | Err(_) => Ok(()),
+    match crate::launch::sandbox::inside() {
+        true => Err(format!("{what} is host-only")),
+        false => Ok(()),
     }
 }
 

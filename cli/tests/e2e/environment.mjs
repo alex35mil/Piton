@@ -3,7 +3,7 @@
 // Usage (in cli/): cargo build && node tests/e2e/environment.mjs, or `mise run cli:test`.
 //
 // Checked through `piton sandbox show|why`, which prepare a launch exactly as the daemon does. Sandboxes don't nest:
-// in a sandboxed session (PITON_RUNTIME=sandbox) mise runs inside that session's sandbox instead of the launch's, so
+// inside a sandbox (`piton sandbox inside`) mise runs inside that session's sandbox instead of the launch's, so
 // the containment check runs only on the host.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, existsSync } from "node:fs";
@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { insideSandbox, pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
-const nested = process.env.PITON_RUNTIME === "sandbox";
+const nested = insideSandbox(piton);
 
 function setup() {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-env-")));
@@ -25,7 +25,7 @@ function setup() {
     const guarded = join(dir, "guarded");
     mkdirSync(guarded);
     mkdirSync(join(dir, "state"));
-    const config = writeConfig(dir, {
+    writeConfig(dir, {
         daemon: {
             socket: join(dir, "state/piton.sock"),
             env: { login_shell: false },
@@ -33,17 +33,12 @@ function setup() {
         },
         project: { sandbox: { filesystem: { [guarded]: "deny" } } },
     });
-    const env = {
-        ...process.env,
-        PITON_CONFIG_HOME: config,
-        PI_CODING_AGENT_DIR: join(dir, "agent"),
-        MISE_TRUSTED_CONFIG_PATHS: dir,
-    };
+    const env = testEnv({ PI_CODING_AGENT_DIR: join(dir, "agent"), MISE_TRUSTED_CONFIG_PATHS: dir });
     return { dir, repo, guarded, env };
 }
 
 function cli(ctx, args) {
-    const r = spawnSync(piton, args, { env: ctx.env, cwd: ctx.repo, encoding: "utf8" });
+    const r = spawnSync(piton, pitonArgs(ctx.dir, args), { env: ctx.env, cwd: ctx.repo, encoding: "utf8" });
     return { code: r.status, out: r.stdout, err: r.stderr };
 }
 

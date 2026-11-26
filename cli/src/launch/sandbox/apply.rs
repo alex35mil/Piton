@@ -81,14 +81,16 @@ pub fn contained(
 
 /// This process's [`Containment`].
 pub fn containment() -> Containment {
-    match current_process_sandboxed() {
+    match inside() {
         true => Containment::Inherited,
         false => Containment::Apply,
     }
 }
 
+/// Whether this process runs inside a sandbox, as the kernel says: what `piton sandbox inside` prints, and what
+/// host-only commands check.
 #[allow(unsafe_code)]
-fn current_process_sandboxed() -> bool {
+pub fn inside() -> bool {
     // libsystem_sandbox, part of libSystem: with no operation, nonzero when the process is sandboxed (-1 on error,
     // which then tries to apply the sandbox and fails visibly if it can't).
     unsafe extern "C" {

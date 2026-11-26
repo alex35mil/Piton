@@ -4,9 +4,11 @@
 rust = { version = "1.99.0", components = "clippy,rustfmt,rust-analyzer,rust-src" }
 xcodegen = "2.46.0"
 
-# In a sandboxed agent worker (PITON_RUNTIME=sandbox, set by the daemon), SwiftPM and the Swift compiler can't
-# start their own sandboxes (macOS doesn't nest them), so the Swift tasks turn those off: Piton's sandbox already
-# confines the process. On the host the flags are empty and the tools keep their sandboxes. See docs/development.md.
+# Whether a task runs inside a sandbox (a sandboxed agent session) is asked of the kernel by this checkout's own build,
+# `cli/target/debug/piton sandbox inside` (each such task depends on `cli:build`), never the installed piton. In a
+# sandbox, SwiftPM and the Swift compiler can't start their own (macOS doesn't nest them), so the Swift tasks turn
+# those off: Piton's sandbox already confines the process. On the host the tools keep their sandboxes, and only there
+# do host-only tasks run. See docs/development.md.
 
 # pi package (pi/)
 
@@ -110,9 +112,10 @@ fi
 [tasks."cli:install"]
 description = "Install the stable piton binary into ~/.cargo/bin and (re)load its launchd agent (host only; ends all sessions)"
 dir = "cli"
+depends = ["cli:build"]
 run = '''
 set -euo pipefail
-[ "${PITON_RUNTIME:-}" != sandbox ] || { echo "error: installing the daemon is host-only" >&2; exit 1; }
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || { echo "error: installing the daemon is host-only" >&2; exit 1; }
 cargo install --path . --locked
 # A stable code identity across rebuilds (the default ad-hoc signature changes every build), so firewall rules
 # (Little Snitch) that match on the signature keep applying. Same team as the apps.
@@ -130,13 +133,15 @@ run = "xcodegen generate --quiet"
 [tasks."apps:build"]
 description = "Build the iOS (simulator) and macOS apps (Debug) into apps/.build/xcode"
 dir = "apps"
-depends = ["apps:generate"]
+depends = ["apps:generate", "cli:build"]
 run = """
+set -eu
+flags=()
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || flags=('OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox')
 xcodebuild -project Piton.xcodeproj -scheme 'Piton iOS' -configuration Debug \
-  -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/xcode -quiet build\
-{% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} 'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox'{% endif %}
-xcodebuild -project Piton.xcodeproj -scheme 'Piton macOS' -configuration Debug -derivedDataPath .build/xcode -quiet build\
-{% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} 'OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox'{% endif %}
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/xcode -quiet build ${flags[@]+"${flags[@]}"}
+xcodebuild -project Piton.xcodeproj -scheme 'Piton macOS' -configuration Debug -derivedDataPath .build/xcode -quiet build \
+  ${flags[@]+"${flags[@]}"}
 """
 
 # The Swift package tests: unit tests (protocol fixtures and the like), and the integration tests (IntegrationTests),
@@ -151,20 +156,23 @@ set -eu
 logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-test-logs.XXXXXX")
 trap 'rm -rf "$logs"' EXIT
 export PITON_LOGS_DIR="$logs"
-swift test --quiet\
-{% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} --disable-sandbox{% endif %}
+flag=
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || flag=--disable-sandbox
+swift test --quiet $flag
 """
 
 [tasks."apps:test:unit"]
 description = "Run the Swift package unit tests (no daemon or pi)"
 dir = "apps"
+depends = ["cli:build"]
 run = """
 set -eu
 logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-test-logs.XXXXXX")
 trap 'rm -rf "$logs"' EXIT
 export PITON_LOGS_DIR="$logs"
-swift test --quiet --skip IntegrationTests\
-{% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} --disable-sandbox{% endif %}
+flag=
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || flag=--disable-sandbox
+swift test --quiet --skip IntegrationTests $flag
 """
 
 [tasks."apps:test:e2e"]
@@ -176,15 +184,17 @@ set -eu
 logs=$(mktemp -d "${TMPDIR:-/tmp}/piton-app-test-logs.XXXXXX")
 trap 'rm -rf "$logs"' EXIT
 export PITON_LOGS_DIR="$logs"
-swift test --quiet --filter IntegrationTests\
-{% if env.PITON_RUNTIME | default(value='') == 'sandbox' %} --disable-sandbox{% endif %}
+flag=
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || flag=--disable-sandbox
+swift test --quiet --filter IntegrationTests $flag
 """
 
 [tasks."logs:install"]
 description = "Install the independent paired-iPhone log collector (host only; does not stop sessions)"
+depends = ["cli:build"]
 run = '''
 set -eu
-[ "${PITON_RUNTIME:-}" != sandbox ] || { echo "error: collector installation is host-only" >&2; exit 1; }
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || { echo "error: collector installation is host-only" >&2; exit 1; }
 [ -n "${PITON_IPHONE:-}" ] || { echo "error: set PITON_IPHONE in mise.local.toml" >&2; exit 1; }
 piton logging install --device "$PITON_IPHONE"
 '''
@@ -199,21 +209,22 @@ piton logging install --device "$PITON_IPHONE"
 [tasks."apps:iphone"]
 description = "Build Piton (Release) and install it on $PITON_IPHONE (host only)"
 dir = "apps"
-depends = ["apps:generate"]
-run = 'bash scripts/install-device.sh "${PITON_IPHONE:-}" PITON_IPHONE'
+depends = ["apps:generate", "cli:build"]
+run = 'bash scripts/install-device.sh "${PITON_IPHONE:-}" PITON_IPHONE "{{config_root}}/cli/target/debug/piton"'
 
 [tasks."apps:ipad"]
 description = "Build Piton (Release) and install it on $PITON_IPAD (host only)"
 dir = "apps"
-depends = ["apps:generate"]
-run = 'bash scripts/install-device.sh "${PITON_IPAD:-}" PITON_IPAD'
+depends = ["apps:generate", "cli:build"]
+run = 'bash scripts/install-device.sh "${PITON_IPAD:-}" PITON_IPAD "{{config_root}}/cli/target/debug/piton"'
 
 [tasks."apps:crashes"]
 description = "Copy Piton's crash logs from $PITON_IPHONE into apps/.build/crashes (host only)"
 dir = "apps"
+depends = ["cli:build"]
 run = '''
 set -euo pipefail
-[ "${PITON_RUNTIME:-}" != sandbox ] || { echo "error: copying from the device is host-only" >&2; exit 1; }
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || { echo "error: copying from the device is host-only" >&2; exit 1; }
 [ -n "${PITON_IPHONE:-}" ] || { echo "error: set PITON_IPHONE in mise.local.toml (xcrun devicectl list devices)" >&2; exit 1; }
 mkdir -p .build/crashes
 # Piton-<date>.ips files, newest last; skips ones already copied.
@@ -230,10 +241,10 @@ ls -1 .build/crashes
 [tasks."apps:mac"]
 description = "Build Piton (Release) and install it in /Applications, replacing the running one (host only)"
 dir = "apps"
-depends = ["apps:generate"]
+depends = ["apps:generate", "cli:build"]
 run = '''
 set -euo pipefail
-[ "${PITON_RUNTIME:-}" != sandbox ] || { echo "error: installing the app is host-only" >&2; exit 1; }
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || { echo "error: installing the app is host-only" >&2; exit 1; }
 xcodebuild -project Piton.xcodeproj -scheme 'Piton macOS' -configuration Release -derivedDataPath .build/xcode \
   -allowProvisioningUpdates -quiet build
 # Quit the running app first, so the new one starts from the new files.
@@ -256,10 +267,10 @@ run = [
 [tasks."apps:testflight"]
 description = "Archive Piton (Release) and upload it to TestFlight; build number = commit count (host only)"
 dir = "apps"
-depends = ["apps:generate"]
+depends = ["apps:generate", "cli:build"]
 run = '''
 set -euo pipefail
-[ "${PITON_RUNTIME:-}" != sandbox ] || { echo "error: TestFlight uploads are host-only" >&2; exit 1; }
+[ "$("{{config_root}}/cli/target/debug/piton" sandbox inside)" != true ] || { echo "error: TestFlight uploads are host-only" >&2; exit 1; }
 for v in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH; do
   [ -n "${!v:-}" ] || { echo "error: set $v in mise.local.toml (see docs/development.md)" >&2; exit 1; }
 done

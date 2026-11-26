@@ -5,7 +5,7 @@
 // www.iana.org) over plain HTTP: a local server wouldn't do, since the gate refuses names that resolve to this Mac.
 //
 // Usage (in cli/): cargo build && node tests/e2e/network.mjs, or `mise run cli:test`. Sandboxes don't nest, so in a
-// sandboxed session (PITON_RUNTIME=sandbox) every test is skipped.
+// sandbox (`piton sandbox inside`) every test is skipped.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
