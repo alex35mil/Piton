@@ -1,5 +1,6 @@
 // Writes a test configuration folder in the layout the daemon reads (the global tier): `config.host.toml` with how the
-// daemon runs and this host's preferences. Returns the folder for PITON_CONFIG_HOME.
+// daemon runs and this host's preferences. Returns the folder; every `piton` a test runs gets it as `--config-home`
+// (`pitonArgs`). Sessions get it from the daemon (`facts`).
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -18,13 +19,36 @@ const toml = (value) =>
 /// Keep-awake is off unless `keepAwake`, so no `caffeinate` runs. fnox is off unless `daemon.integrations.fnox` says
 /// otherwise: the user's own fnox config (with secrets behind it) applies to any folder.
 export function writeConfig(dir, { daemon = {}, host = {}, project = {}, keepAwake = false } = {}) {
-    const home = join(dir, "config");
+    const home = configHome(dir);
     mkdirSync(home, { recursive: true });
     const integrations = { fnox: { enabled: false }, ...daemon.integrations };
     writeFileSync(join(home, "config.host.toml"), render({ keep_awake: keepAwake, ...daemon, integrations, ...host }));
     if (Object.keys(project).length > 0) writeFileSync(join(home, "config.toml"), render(project));
     if (daemon.socket) seedState(join(dirname(daemon.socket), "piton.db"));
     return home;
+}
+
+/// The global tier `writeConfig` writes for `dir`.
+export const configHome = (dir) => join(dir, "config");
+
+/// `args` for a `piton` the test runs, with the test's global tier.
+export const pitonArgs = (dir, args) => ["--config-home", configHome(dir), ...args];
+
+/// The environment a test's daemon and `piton` calls run with: this process's, with `extra` on top. Never the runner's
+/// own session's channel: a `piton` inside a session asks the session's daemon for its facts, which would replace the
+/// test's configuration.
+export function testEnv(extra = {}) {
+    const env = { ...process.env, ...extra };
+    delete env.PITON_AGENT_SOCKET;
+    delete env.PITON_AGENT_TOKEN;
+    // Variables an installed daemon that predates facts gives its sessions: not this test's.
+    for (const name of ["PITON_RUNTIME", "PITON_TRUST", "PITON_PROTECTED", "PITON_CONFIG_HOME"]) delete env[name];
+    return env;
+}
+
+/// Whether this process runs inside a sandbox (a sandboxed session), as this checkout's piton asks the kernel.
+export function insideSandbox(piton) {
+    return execFileSync(piton, ["sandbox", "inside"], { encoding: "utf8" }).trim() === "true";
 }
 
 /// A fixed host identity, so replies are comparable; the daemon opens the database at version 1 and migrates it. A

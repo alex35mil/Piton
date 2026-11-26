@@ -83,6 +83,13 @@ For one prompt, in order: the `prompt` response (`disposition: "started"`), `age
 - Clearing (`undefined`) sends the same record without `statusText` / `widgetLines`. Piton's replay keeps the latest
   per key and drops a key on a record without its value.
 
+## Extension factories may be async
+
+- pi awaits each extension's factory before the next loads (`await factory(api)`, pi 1.5.2's loader), so an
+  extension can ask the daemon for the session's facts while it loads: the permissions extension registers its
+  sandboxed bash only after it learns the runtime. Verified by `cli/tests/e2e/view.mjs` (the faux extension's
+  factory awaits its relay) and the pi tests that load the permissions extension through a real session.
+
 ## Compaction (`compaction`)
 
 - `compact` (and automatic compaction) emits `compaction_start {reason}` and then `compaction_end {reason, aborted,

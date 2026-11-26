@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
@@ -33,12 +33,12 @@ function setup() {
         },
         host: { default_attach_mode: "host", stop_empty_session_after: "1500ms" },
     });
-    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" };
+    const env = testEnv({ PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" });
     return { dir, ws, agent, socket, config, env };
 }
 
 async function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(piton, pitonArgs(ctx.dir, ["daemon"]), { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     for (let i = 0; i < 100; i++) {
@@ -52,7 +52,7 @@ async function startDaemon(ctx) {
 }
 
 function attach(ctx, name) {
-    const child = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(piton, pitonArgs(ctx.dir, ["attach"]), { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
     const c = { name, child, records: [], waiters: [], stderr: "", n: 0 };
     let buf = "";
     child.stdout.on("data", (chunk) => {
@@ -100,7 +100,7 @@ function attach(ctx, name) {
 }
 
 async function pitonCli(ctx, args) {
-    const p = spawn(piton, args, { env: ctx.env, stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(piton, pitonArgs(ctx.dir, args), { env: ctx.env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     p.stdout.on("data", (d) => (out += d));

@@ -538,8 +538,8 @@ impl Daemon {
             crate::agent::SOCKET_ENV.into(),
             config.agent_socket().to_string_lossy().into_owned(),
         );
-        // What this session's protected files are, the one definition the daemon checks a write against; pi asks
-        // `piton config protected`, which answers from it. Set after the workspace's environment too.
+        // What this session's protected files are, the one definition the daemon checks a write against; `piton config
+        // protected` inside the session answers from it (`facts`).
         let fnox_files: &[std::path::PathBuf] = proxy.as_ref().map_or(&[], |p| p.files.as_slice());
         let mut excluded = launch::sandbox::never_configuration(&launch_config, &config.paths.home, &self.base_env);
         excluded.push(config.state_dir());
@@ -553,19 +553,15 @@ impl Daemon {
             home: &config.paths.home,
             excluded: &excluded,
         });
-        match serde_json::to_string(&protected) {
-            Ok(json) => {
-                env.insert(crate::agent::PROTECTED_ENV.into(), json);
-            }
-            Err(e) => crate::log!("session {key}: can't describe its protected files to pi: {e}"),
-        }
-        // Which of the repository's grants this session keeps, for `piton config resolve` inside it: a commit made
-        // during the session can't widen them. Set after the workspace's environment too. A filter that can't be
-        // described keeps nothing.
-        env.insert(
-            crate::trust::FILTER_ENV.into(),
-            serde_json::to_string(&trust.filter()).unwrap_or_else(|_| "{\"kind\":\"none\"}".into()),
-        );
+        // The session's view, which `piton` inside it asks for (`facts`). The grants it keeps are the launch's: a commit
+        // or trust decision made during the session doesn't widen them.
+        let facts = crate::agent::facts::Facts {
+            runtime: crate::agent::facts::FactRuntime::of(mode),
+            grants: trust.filter(),
+            protected,
+            global: config.paths.global.clone(),
+            workspace: crate::agent::facts::FactWorkspace::of(&workspace),
+        };
         let weak = Arc::downgrade(self);
         let hooks = Hooks {
             ended: Box::new(move |key| {
@@ -637,7 +633,7 @@ impl Daemon {
             env,
             launch_token: tokens.launch,
             policy,
-            protected,
+            facts,
             proxy,
             commands,
             source: launch_config.source.clone(),

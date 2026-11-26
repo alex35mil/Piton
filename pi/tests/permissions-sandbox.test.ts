@@ -14,7 +14,7 @@ import type {
     ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
 
-import type { RefusedLine, RunLine } from "../extensions/__lib/agent.ts"
+import { clearFactsCache, type RefusedLine, type RunLine } from "../extensions/__lib/agent.ts"
 import {
     addonPath,
     holdLifts,
@@ -77,7 +77,8 @@ async function fakeDaemon(answer: (request: Record<string, unknown>) => (RunLine
     }
 }
 
-function register(socket: string) {
+/** Registers bash for a session whose facts say it's sandboxed. */
+async function register(socket: string) {
     const tools = new Map<string, ToolDefinition>()
     const handlers = new Map<string, (event: unknown) => unknown>()
     const pi = {
@@ -88,11 +89,11 @@ function register(socket: string) {
             handlers.set(name, handler)
         },
     } as unknown as ExtensionAPI
-    const registered = registerSandboxBash(pi, {
-        PITON_RUNTIME: "sandbox",
-        PITON_AGENT_SOCKET: socket,
-        PITON_AGENT_TOKEN: "token",
-    })
+    const registered = await registerSandboxBash(
+        pi,
+        { PITON_AGENT_SOCKET: socket, PITON_AGENT_TOKEN: "token" },
+        async () => "sandbox",
+    )
     return { registered, bash: tools.get("bash"), userBash: handlers.get("user_bash") }
 }
 
@@ -123,16 +124,39 @@ async function withPiSettings<T>(dir: string, settings: object, run: () => Promi
 }
 
 describe("bash in a sandboxed session under piton", () => {
-    it("is pi's own bash outside such a session", () => {
+    it("is pi's own bash outside such a session", async () => {
         const tools: string[] = []
         const pi = {
             registerTool: (tool: ToolDefinition) => tools.push(tool.name),
             on: () => tools.push("on"),
         } as unknown as ExtensionAPI
-        assert.equal(registerSandboxBash(pi, {}), false)
-        assert.equal(registerSandboxBash(pi, { PITON_AGENT_SOCKET: "/s", PITON_AGENT_TOKEN: "t" }), false)
-        assert.equal(registerSandboxBash(pi, { PITON_RUNTIME: "sandbox" }), false)
+        const channel = { PITON_AGENT_SOCKET: "/s", PITON_AGENT_TOKEN: "t" }
+        assert.equal(await registerSandboxBash(pi, {}, async () => "sandbox"), false, "no session")
+        assert.equal(await registerSandboxBash(pi, channel, async () => "host"), false, "a host session")
         assert.deepEqual(tools, [])
+    })
+
+    it("asks the daemon whether the session is sandboxed", async () => {
+        const daemon = await fakeDaemon((request) =>
+            request.type === "facts"
+                ? [{ type: "facts", runtime: "sandbox" } as unknown as RunLine]
+                : [{ type: "exit", code: 0 }],
+        )
+        try {
+            clearFactsCache()
+            const tools: string[] = []
+            const pi = {
+                registerTool: (tool: ToolDefinition) => tools.push(tool.name),
+                on: () => undefined,
+            } as unknown as ExtensionAPI
+            const env = { PITON_AGENT_SOCKET: daemon.socket, PITON_AGENT_TOKEN: "t" }
+            assert.equal(await registerSandboxBash(pi, env), true)
+            assert.deepEqual(tools, ["bash"])
+            assert.deepEqual(daemon.requests, [{ type: "facts", token: "t" }])
+        } finally {
+            clearFactsCache()
+            await daemon.close()
+        }
     })
 
     it("sends every call to the daemon with the agent's command and pi's shell environment", async () => {
@@ -141,7 +165,7 @@ describe("bash in a sandboxed session under piton", () => {
         process.env.PITON_AGENT_TOKEN = "pi's own"
         try {
             await withPiSettings(daemon.dir, { shellCommandPrefix: "PREFIXED=yes" }, async () => {
-                const { registered, bash } = register(daemon.socket)
+                const { registered, bash } = await register(daemon.socket)
                 assert.ok(registered && bash)
                 const updates: string[] = []
                 const result = await bash.execute(
@@ -181,7 +205,7 @@ describe("bash in a sandboxed session under piton", () => {
             { type: "refused", why: "token", message: "the token belongs to another process" },
         ])
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             await assert.rejects(
                 bash!.execute("c", { command: "ls" }, undefined, undefined, context(daemon.dir)),
                 /refused: the token belongs to another process/,
@@ -196,7 +220,7 @@ describe("bash in a sandboxed session under piton", () => {
             request.command === "wait" ? [] : [{ type: "not_run", reason: "the user denied it" }],
         )
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             await assert.rejects(
                 bash!.execute(
                     "c",
@@ -225,7 +249,7 @@ describe("bash in a sandboxed session under piton", () => {
                 : [{ type: "ran", runtime: "host", by: "approval" }, out("probed\n"), { type: "exit", code: 1 }],
         )
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             const host = await bash!.execute(
                 "c",
                 { command: "sh probe.sh", rerun: { runtime: "host" } },
@@ -272,7 +296,7 @@ describe("bash in a sandboxed session under piton", () => {
             }
         })
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             const reported = await bash!.execute(
                 "a",
                 { command: "reported" },
@@ -304,8 +328,8 @@ describe("bash in a sandboxed session under piton", () => {
         }
     })
 
-    it("adds the sandbox guideline to pi's own bash guidelines", () => {
-        const { bash } = register("/nowhere")
+    it("adds the sandbox guideline to pi's own bash guidelines", async () => {
+        const { bash } = await register("/nowhere")
         assert.ok(bash!.promptGuidelines?.includes(SANDBOX_GUIDELINE))
     })
 
@@ -317,8 +341,8 @@ describe("bash in a sandboxed session under piton", () => {
         assert.doesNotMatch(ranLine({ runtime: "sandbox", by: "grant" }), /everything/, "a saved grant may be narrowed")
     })
 
-    it("takes a rerun that hints only the runtime", () => {
-        const { bash } = register("/nowhere")
+    it("takes a rerun that hints only the runtime", async () => {
+        const { bash } = await register("/nowhere")
         const properties = (bash!.parameters as { properties: Record<string, unknown> }).properties
         assert.ok(properties.rerun && !("outside_sandbox" in properties))
         const validator = compile(RerunSchema)
@@ -330,7 +354,7 @@ describe("bash in a sandboxed session under piton", () => {
     it("maps the daemon's timeout to pi's timeout result", async () => {
         const daemon = await fakeDaemon(() => [out("partial\n"), { type: "timed_out" }])
         try {
-            const { bash } = register(daemon.socket)
+            const { bash } = await register(daemon.socket)
             await assert.rejects(
                 bash!.execute("c", { command: "sleep 9", timeout: 1 }, undefined, undefined, context(daemon.dir)),
                 /partial[\s\S]*timed out after 1 seconds/,
@@ -345,7 +369,7 @@ describe("bash in a sandboxed session under piton", () => {
         const daemon = await fakeDaemon(() => [out("listed\n"), { type: "exit", code: 0 }])
         try {
             await withPiSettings(daemon.dir, { shellCommandPrefix: "set -e" }, async () => {
-                const { userBash } = register(daemon.socket)
+                const { userBash } = await register(daemon.socket)
                 const handled = userBash!({
                     type: "user_bash",
                     command: "ls",

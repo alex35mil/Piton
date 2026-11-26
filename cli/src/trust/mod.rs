@@ -268,16 +268,12 @@ pub fn read_state(db: &Path, inputs: &TrustInputs) -> Result<TrustState, crate::
     Ok(TrustState::decide(inputs, record.as_ref()))
 }
 
-/// The environment variable a session's pi gets the launch's grant filter in, set after the workspace's environment
-/// (like `PITON_PROTECTED`), so `piton config resolve` inside the session keeps exactly what the launch kept.
-pub const FILTER_ENV: &str = "PITON_TRUST";
-
-/// The filter `piton config resolve` uses: the session's, when it runs in one; otherwise the decision in the state
-/// database (none: nothing is kept).
-pub fn current_filter(db: &Path, inputs: &TrustInputs) -> GrantFilter {
-    match std::env::var(FILTER_ENV) {
-        Ok(json) if !json.is_empty() => serde_json::from_str(&json).unwrap_or(GrantFilter::None),
-        Ok(_) | Err(_) => read_state(db, inputs)
+/// The filter `piton config resolve` and `piton sandbox` use: the session's (`facts`), when they run in one, so a
+/// session keeps exactly what its launch kept; otherwise the decision in the state database (none: nothing is kept).
+pub fn current_filter(view: &crate::agent::facts::View, db: &Path, inputs: &TrustInputs) -> GrantFilter {
+    match view.grants() {
+        Some(filter) => filter.clone(),
+        None => read_state(db, inputs)
             .map(|state| state.filter())
             .unwrap_or(GrantFilter::None),
     }

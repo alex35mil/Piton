@@ -114,6 +114,61 @@ export function send<Line extends { type: string }, T>(
     })
 }
 
+/** Where a session's pi runs. */
+export type Runtime = "host" | "sandbox"
+
+/** A checkout's relation: a source checkout, or a worker cloned from one. */
+export type FactRelation = { kind: "source" } | { kind: "worker"; source: string; name: string }
+
+/**
+ * The session's view, as the daemon decided it at launch: its runtime, the repository grants it keeps (the launch's, by
+ * design), its protected files, the global configuration folder, and its workspace.
+ */
+export interface Facts {
+    runtime: Runtime
+    grants: { kind: "all" } | { kind: "none" } | { kind: "only"; grants: string[] }
+    protected: unknown
+    global: string
+    workspace: { path: string; checkout: string; relation: FactRelation }
+}
+
+type FactsLine = ({ type: "facts" } & Facts) | { type: "ended" }
+
+/** Asks the daemon for the session's facts. */
+export function facts(session: SessionChannel, signal?: AbortSignal): Promise<Facts> {
+    return send<FactsLine, Facts>(
+        session,
+        { type: "facts" },
+        (line) => {
+            switch (line.type) {
+                case "facts": {
+                    const { type: _, ...facts } = line
+                    return { done: facts }
+                }
+                case "ended":
+                    throw new Error("the session ended")
+            }
+        },
+        signal,
+    )
+}
+
+let cached: Promise<Facts> | undefined
+
+/** This session's facts, asked once per process: they don't change while the session runs. */
+export function sessionFacts(session: SessionChannel): Promise<Facts> {
+    cached ??= facts(session).catch((error: unknown) => {
+        cached = undefined
+        throw error
+    })
+    return cached
+}
+
+/** Forgets the cached facts, for tests. */
+export function clearFactsCache(): void {
+    cached = undefined
+}
+
 /** What the daemon did with a protected write. */
 export type ProtectedOutcome =
     | { outcome: "approved"; modified: boolean; content: string; notes: unknown[] }

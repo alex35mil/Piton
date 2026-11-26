@@ -1,5 +1,7 @@
 //! `piton config resolve|get|set|check`: the resolved configuration for a workspace, for the pi package, the Neovim
-//! plugin, and the user, and changes to it. Reads and writes files only; the daemon needn't run.
+//! plugin, and the user, and changes to it. Reads and writes files; inside a session it also asks the daemon for the
+//! session's view (`facts`: its runtime, kept grants, protected files, and global tier). Outside one the daemon needn't
+//! run.
 
 use std::{
     path::{Path, PathBuf},
@@ -9,7 +11,10 @@ use std::{
 use serde::Serialize;
 
 use super::ConfigAction;
-use crate::config::{ConfigError, Paths, Resolved, Runtime};
+use crate::{
+    agent::facts::View,
+    config::{ConfigError, Paths, Resolved, Runtime},
+};
 
 /// Version of `piton config resolve --json`. Clients refuse a version they don't know.
 pub const RESOLVE_FORMAT: u32 = 1;
@@ -39,7 +44,21 @@ enum ErrorBody {
     Workspace { message: String },
 }
 
-pub fn run(action: &ConfigAction) -> ExitCode {
+pub fn run(action: &ConfigAction, config_home: Option<&Path>) -> ExitCode {
+    // `validate` reads nothing a session decides; the rest resolve (or, `set`, write the global tier) with the session's
+    // view.
+    let view = match action {
+        ConfigAction::Validate { .. } => View::NoSession,
+        ConfigAction::Set { .. }
+        | ConfigAction::Resolve { .. }
+        | ConfigAction::Get { .. }
+        | ConfigAction::Check { .. }
+        | ConfigAction::Protected { .. } => match View::current() {
+            Ok(view) => view,
+            Err(e) => return print_error(ErrorBody::Invalid { message: e.to_string() }),
+        },
+    };
+    let paths = view.paths(config_home);
     match action {
         ConfigAction::Resolve {
             workspace,
@@ -53,7 +72,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 #[serde(flatten)]
                 resolved: &'a crate::config::GlobalResolved,
             }
-            let resolved = crate::config::resolve_global(&Paths::current());
+            let resolved = crate::config::resolve_global(&paths);
             let output = GlobalOutput {
                 format: RESOLVE_FORMAT,
                 resolved: &resolved,
@@ -67,7 +86,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
             global: false,
         } => {
             let runtime = match runtime.as_deref() {
-                None => runtime_from_env(),
+                None => Ok(view.runtime()),
                 Some("host") => Ok(Runtime::Host),
                 Some("sandbox") => Ok(Runtime::Sandbox),
                 Some(other) => Err(format!("unknown runtime {other:?}: host or sandbox")),
@@ -76,7 +95,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 Ok(runtime) => runtime,
                 Err(message) => return print_error(ErrorBody::Invalid { message }),
             };
-            match resolve(workspace.as_deref(), runtime) {
+            match resolve(&view, &paths, workspace.as_deref(), runtime) {
                 Ok(resolved) => {
                     let output = Output {
                         format: RESOLVE_FORMAT,
@@ -88,7 +107,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 Err(body) => print_error(body),
             }
         }
-        ConfigAction::Get { part, workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
+        ConfigAction::Get { part, workspace } => match resolve(&view, &paths, workspace.as_deref(), view.runtime()) {
             Ok(resolved) => match get(&resolved, part) {
                 Some(Ok(value)) => {
                     println!("{}", serde_json::to_string(&value).unwrap_or_default());
@@ -112,21 +131,23 @@ pub fn run(action: &ConfigAction) -> ExitCode {
             local,
             unset,
             dry_run,
-        } => set(&SetRequest {
-            key,
-            value: value.as_deref(),
-            changes: *changes,
-            workspace: workspace.as_deref(),
-            global: *global,
-            scope: scope.as_deref(),
-            local: *local,
-            unset: *unset,
-            dry_run: *dry_run,
-        }),
-        ConfigAction::Check { workspace } => match resolve(workspace.as_deref(), runtime_or_host()) {
+        } => set(
+            &paths,
+            &SetRequest {
+                key,
+                value: value.as_deref(),
+                changes: *changes,
+                workspace: workspace.as_deref(),
+                global: *global,
+                scope: scope.as_deref(),
+                local: *local,
+                unset: *unset,
+                dry_run: *dry_run,
+            },
+        ),
+        ConfigAction::Check { workspace } => match resolve(&view, &paths, workspace.as_deref(), view.runtime()) {
             Ok(resolved) => {
                 // The workspace's chain, and the global tier's own files (host and client).
-                let paths = Paths::current();
                 let mut errors: Vec<(String, String)> = resolved
                     .errors()
                     .into_iter()
@@ -161,7 +182,7 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 if let Some(note) = ignored {
                     eprintln!("piton: warning: {note}");
                 }
-                print_trust(&resolved);
+                print_trust(&paths, &resolved);
                 if errors.is_empty() {
                     ExitCode::SUCCESS
                 } else {
@@ -190,13 +211,8 @@ pub fn run(action: &ConfigAction) -> ExitCode {
                 Ok(workspace) => workspace,
                 Err(e) => return print_error(ErrorBody::Workspace { message: e.to_string() }),
             };
-            let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-            let protected = match protected_of(
-                &workspace,
-                &Paths::current(),
-                env(crate::agent::PROTECTED_ENV).as_deref(),
-                env("PI_CODING_AGENT_DIR").as_deref(),
-            ) {
+            let agent_dir = std::env::var("PI_CODING_AGENT_DIR").ok().filter(|v| !v.is_empty());
+            let protected = match protected_of(&workspace, &paths, view.protected(), agent_dir.as_deref()) {
                 Ok(protected) => protected,
                 Err(message) => return print_error(ErrorBody::Invalid { message }),
             };
@@ -209,21 +225,16 @@ pub fn run(action: &ConfigAction) -> ExitCode {
     }
 }
 
-/// The protected files `piton config protected` answers from: the session's (`PITON_PROTECTED`, set by the daemon), or
-/// outside one, the workspace's.
+/// The protected files `piton config protected` answers from: the session's (`facts`, the definition the daemon checks
+/// a write against), or outside one, the workspace's.
 fn protected_of(
     workspace: &crate::project::Workspace,
     paths: &Paths,
-    session: Option<&str>,
+    session: Option<&crate::agent::Protected>,
     agent_dir: Option<&str>,
 ) -> Result<crate::agent::Protected, String> {
     match session {
-        Some(json) => serde_json::from_str(json).map_err(|e| {
-            format!(
-                "{} isn't a description of protected files: {e}",
-                crate::agent::PROTECTED_ENV
-            )
-        }),
+        Some(protected) => Ok(protected.clone()),
         None => workspace_protected(workspace, paths, agent_dir).map_err(|e| e.to_string()),
     }
 }
@@ -266,30 +277,15 @@ fn workspace_protected(
     }))
 }
 
-fn runtime_from_env() -> Result<Runtime, String> {
-    match std::env::var("PITON_RUNTIME").as_deref() {
-        Err(_) | Ok("") => Ok(Runtime::Host),
-        Ok("sandbox") => Ok(Runtime::Sandbox),
-        Ok(other) => Err(format!(
-            "invalid PITON_RUNTIME {other:?}: expected \"sandbox\", or unset for the host runtime"
-        )),
-    }
-}
-
-fn runtime_or_host() -> Runtime {
-    runtime_from_env().unwrap_or(Runtime::Host)
-}
-
 /// `piton config check`'s trust line: whether the repository's committed grants apply, and which are left out.
-fn print_trust(resolved: &Resolved) {
+fn print_trust(paths: &Paths, resolved: &Resolved) {
     let Ok(workspace) = crate::launch::resolve_workspace(&resolved.workspace) else {
         return;
     };
-    let paths = Paths::current();
-    let Ok(inputs) = crate::config::trust_inputs(&workspace, &paths) else {
+    let Ok(inputs) = crate::config::trust_inputs(&workspace, paths) else {
         return;
     };
-    let state = crate::trust::read_state(&state_db(&paths), &inputs);
+    let state = crate::trust::read_state(&state_db(paths), &inputs);
     let line = match &state {
         Ok(crate::trust::TrustState::NothingToTrust) => "nothing to trust".to_string(),
         Ok(crate::trust::TrustState::Trusted { .. }) => "trusted".to_string(),
@@ -312,19 +308,18 @@ fn state_db(paths: &Paths) -> PathBuf {
     crate::config::DaemonConfig::new(&host, paths.clone()).state_db()
 }
 
-fn resolve(workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, ErrorBody> {
+fn resolve(view: &View, paths: &Paths, workspace: Option<&Path>, runtime: Runtime) -> Result<Resolved, ErrorBody> {
     let path = workspace
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let workspace =
         crate::launch::resolve_workspace(&path).map_err(|e| ErrorBody::Workspace { message: e.to_string() })?;
-    let paths = Paths::current();
     // Inside a session: what its launch kept; outside: the user's recorded decision.
-    let filter = crate::config::trust_inputs(&workspace, &paths).map_or(crate::config::GrantFilter::None, |inputs| {
-        crate::trust::current_filter(&state_db(&paths), &inputs)
+    let filter = crate::config::trust_inputs(&workspace, paths).map_or(crate::config::GrantFilter::None, |inputs| {
+        crate::trust::current_filter(view, &state_db(paths), &inputs)
     });
-    crate::config::resolve(&workspace, &paths, runtime, &filter).map_err(|e| match e {
+    crate::config::resolve(&workspace, paths, runtime, &filter).map_err(|e| match e {
         ConfigError::Read { .. }
         | ConfigError::Invalid { .. }
         | ConfigError::NotInProjectConfig { .. }
@@ -381,10 +376,9 @@ struct Planned {
 
 /// `piton config set`: one key of a level's `config.toml` or `config.local.toml`, written with its comments and layout
 /// kept, and refused when the file would no longer be valid.
-fn set(request: &SetRequest) -> ExitCode {
+fn set(paths: &Paths, request: &SetRequest) -> ExitCode {
     use crate::config::{ConfigFile, KeyChange, KeyPath, Sharing, WriteLevel};
     let invalid = |message: String| print_error(ErrorBody::Invalid { message });
-    let paths = Paths::current();
     let level = match (request.scope, request.global) {
         (Some("host"), _) => WriteLevel::Host,
         (Some("client"), _) => WriteLevel::Client,
@@ -448,11 +442,11 @@ fn set(request: &SetRequest) -> ExitCode {
         }
     };
     if request.dry_run {
-        let content = match target.plan(&paths, &changes) {
+        let content = match target.plan(paths, &changes) {
             Ok(content) => content,
             Err(e) => return invalid(e.to_string()),
         };
-        let path = match target.path(&paths) {
+        let path = match target.path(paths) {
             Ok(path) => path,
             Err(e) => return invalid(e.to_string()),
         };
@@ -464,7 +458,7 @@ fn set(request: &SetRequest) -> ExitCode {
         println!("{}", serde_json::to_string(&planned).unwrap_or_default());
         return ExitCode::SUCCESS;
     }
-    match target.write(&paths, &changes) {
+    match target.write(paths, &changes) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => invalid(e.to_string()),
     }
@@ -565,7 +559,7 @@ mod tests {
             checkout: repo.clone(),
             relation: Relation::Source,
         };
-        let check = |session: Option<&str>, agent: Option<&str>, path: &Path| {
+        let check = |session: Option<&crate::agent::Protected>, agent: Option<&str>, path: &Path| {
             protected_of(&workspace, &paths, session, agent)
                 .unwrap()
                 .check(path)
@@ -591,9 +585,10 @@ mod tests {
             home: &home,
             excluded: &[],
         });
-        let json = serde_json::to_string(&session).unwrap();
-        assert!(check(Some(&json), None, &fnox));
-        assert!(!check(Some(&json), None, &global), "the session's description decides");
-        assert!(protected_of(&workspace, &paths, Some("{"), None).is_err());
+        assert!(check(Some(&session), None, &fnox));
+        assert!(
+            !check(Some(&session), None, &global),
+            "the session's description decides"
+        );
     }
 }

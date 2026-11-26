@@ -7,7 +7,7 @@
 // The test's `[tools.permissions] default_mode = "allow"` keeps the extension from asking before each call.
 //
 // Usage (in cli/): cargo build && node tests/e2e/blocks.mjs, or `mise run cli:test`. Sandboxes don't nest and `log`
-// refuses inside one, so in a sandboxed session (PITON_RUNTIME=sandbox) every test is skipped.
+// refuses inside one, so inside a sandbox (`piton sandbox inside`) every test is skipped.
 //
 // macOS may not report a process's first sandbox refusals for some seconds (docs/pi-findings.md), so the faux tool
 // that blocks pi's own process keeps trying for 10 s until the kernel's record reaches the daemon.

@@ -28,11 +28,13 @@ import { Type } from "typebox"
 import {
     channel,
     run,
+    sessionFacts,
     TOKEN_ENV,
     type RanBy,
     type RanRuntime,
     type Rerun,
     type RunRequest,
+    type Runtime,
     type SessionChannel,
 } from "../__lib/agent.js"
 
@@ -204,12 +206,17 @@ export function unprefixed(resolved: string, prefix: string | undefined): string
 }
 
 /**
- * Registers the bash tool and the `!` command handler for a sandboxed session under piton's daemon. Does nothing
- * elsewhere: pi's own bash stays.
+ * Registers the bash tool and the `!` command handler for a sandboxed session under piton's daemon (the session's
+ * `facts` say so). Does nothing elsewhere: pi's own bash stays.
  */
-export function registerSandboxBash(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env): boolean {
+export async function registerSandboxBash(
+    pi: ExtensionAPI,
+    env: NodeJS.ProcessEnv = process.env,
+    runtime: (session: SessionChannel) => Promise<Runtime> = async (session) => (await sessionFacts(session)).runtime,
+): Promise<boolean> {
     const session = channel(env)
-    if (session.kind === "noSession" || env.PITON_RUNTIME !== "sandbox") return false
+    if (session.kind === "noSession") return false
+    if ((await runtime(session)) !== "sandbox") return false
     const base = createBashToolDefinition(process.cwd())
     pi.registerTool({
         ...base,

@@ -1620,7 +1620,7 @@ mod tests {
     fn an_approved_rerun_runs_where_chosen() {
         let dir = tempfile::tempdir().unwrap();
         let mut c = commands(dir.path(), &[]);
-        c.env.insert("PITON_RUNTIME".into(), "sandbox".into());
+        c.env.insert(crate::agent::SOCKET_ENV.into(), "/s/agent.sock".into());
         let req = request(dir.path(), "1", "husky install", true);
         let sandboxed = c.approved_rerun(&req, "t-1", Target::Sandbox);
         match &sandboxed.runtime {
@@ -1631,11 +1631,11 @@ mod tests {
             }
             Runtime::Session(_) | Runtime::Host { .. } => panic!("not widened"),
         }
-        assert_eq!(sandboxed.env["PITON_RUNTIME"], "sandbox");
+        assert_eq!(sandboxed.env[crate::agent::SOCKET_ENV], "/s/agent.sock");
         let host = c.approved_rerun(&req, "t-1", Target::Host);
         assert_eq!(host.runtime, Runtime::Host { by: Why::Approval });
         assert_eq!(host.env["FROM"], "launch");
-        assert!(!host.env.contains_key("PITON_RUNTIME"));
+        assert!(!host.env.contains_key(crate::agent::SOCKET_ENV));
         assert_eq!(host.command, "set -e\nhusky install");
     }
 

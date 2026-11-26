@@ -82,22 +82,17 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// The global tier. Inside a pi the daemon launched, `PITON_CONFIG_HOME` names it (set after the mise environment, so
-/// a repository can't move it); otherwise `$XDG_CONFIG_HOME/piton`, else `~/.config/piton`. The daemon resolves it
-/// once at start, from its own (login-shell) environment.
+/// The global tier of this process: `$XDG_CONFIG_HOME/piton`, else `~/.config/piton`. `--config-home` replaces it, and
+/// inside a session, the session's (`facts`) does. The daemon resolves it once at start, from its own (login-shell)
+/// environment.
 pub fn global_tier() -> PathBuf {
-    global_tier_from(
-        std::env::var_os("PITON_CONFIG_HOME").map(PathBuf::from),
-        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-        &home(),
-    )
+    global_tier_from(std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from), &home())
 }
 
-fn global_tier_from(piton: Option<PathBuf>, xdg: Option<PathBuf>, home: &Path) -> PathBuf {
-    match (piton, xdg) {
-        (Some(piton), _) if piton.is_absolute() => piton,
-        (_, Some(xdg)) if xdg.is_absolute() => xdg.join("piton"),
-        (Some(_) | None, Some(_) | None) => home.join(".config/piton"),
+fn global_tier_from(xdg: Option<PathBuf>, home: &Path) -> PathBuf {
+    match xdg {
+        Some(xdg) if xdg.is_absolute() => xdg.join("piton"),
+        Some(_) | None => home.join(".config/piton"),
     }
 }
 
@@ -177,21 +172,11 @@ mod tests {
     #[test]
     fn the_global_tier_follows_xdg() {
         let home = Path::new("/Users/a");
+        assert_eq!(global_tier_from(Some("/x".into()), home), PathBuf::from("/x/piton"));
+        assert_eq!(global_tier_from(None, home), PathBuf::from("/Users/a/.config/piton"));
+        // A relative value is ignored, as the XDG spec says.
         assert_eq!(
-            global_tier_from(Some("/x/p".into()), Some("/x".into()), home),
-            PathBuf::from("/x/p")
-        );
-        assert_eq!(
-            global_tier_from(None, Some("/x".into()), home),
-            PathBuf::from("/x/piton")
-        );
-        assert_eq!(
-            global_tier_from(None, None, home),
-            PathBuf::from("/Users/a/.config/piton")
-        );
-        // Relative values are ignored, as the XDG spec says.
-        assert_eq!(
-            global_tier_from(Some("rel".into()), Some("rel".into()), home),
+            global_tier_from(Some("rel".into()), home),
             PathBuf::from("/Users/a/.config/piton")
         );
     }
