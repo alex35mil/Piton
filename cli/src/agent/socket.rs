@@ -1,149 +1,50 @@
-//! `agent.sock`: the socket sandboxed pis reach the daemon on, next to the control socket but separate from it. A
+//! `agent.sock`: the socket sandboxed processes reach the daemon on, next to the control socket but separate from it. A
 //! sandbox may connect to this one socket (a built-in allow in every launch's policy) and never to the control socket.
 //!
 //! One request per connection, one JSON line each way, except `run_command`, which streams the command's output as
-//! lines before its last one. A request names its session by the token the daemon gave that pi
-//! (`PITON_SESSION_TOKEN`): a request can act only for the session it came from, and only in the ways listed here: a
-//! protected write (see `write.rs`), and a bash call run through the daemon (see `run.rs`, `block.rs`), each answered
-//! only by the user through a client or by the user's own grants.
+//! lines before its last one. The server is only a transport: it reads the connecting process ([`Peer`]), parses the
+//! [`Envelope`], accepts its token for that process, authorizes the request for its caller, and dispatches to the
+//! request's own handler (`write.rs`, `run.rs`, the daemon's launch). The contract is `channel.rs`.
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
+use std::{path::Path, sync::Arc};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
 };
 
-use crate::{
-    daemon::Daemon,
-    session::{SessionCmd, SessionKey, lock},
+use super::{
+    answer::Asks,
+    channel::{self, Authorized, Envelope, Peer, Refused, Unaccepted},
 };
+
+/// How a request's declaration reads in the daemon log.
+fn asking(asks: Asks) -> &'static str {
+    match asks {
+        Asks::Always(_) => "asks the user",
+        Asks::When(_) => "may ask the user",
+        Asks::Never => "asks no one",
+    }
+}
+use crate::{daemon::Daemon, session::SessionCmd};
 
 /// The socket file, in the daemon's state folder.
 pub const FILE: &str = "agent.sock";
-/// The variable a pi reads its token from.
-pub const TOKEN_ENV: &str = "PITON_SESSION_TOKEN";
-/// The variable a pi reads the socket path from.
-pub const SOCKET_ENV: &str = "PITON_AGENT_SOCKET";
 
-/// Session tokens: random, one per launched pi, forgotten when the session ends.
-#[derive(Debug, Default)]
-pub struct Tokens {
-    by_token: Mutex<HashMap<String, SessionKey>>,
-    /// One-time tokens for reporting a session's upstream proxy (fnox's).
-    gate: Mutex<HashMap<String, SessionKey>>,
-}
-
-impl Tokens {
-    /// A new token for `key`.
-    pub fn issue(&self, key: SessionKey) -> std::io::Result<String> {
-        let token = random_bytes_hex(32)?;
-        lock(&self.by_token).insert(token.clone(), key);
-        Ok(token)
-    }
-
-    pub fn session(&self, token: &str) -> Option<SessionKey> {
-        lock(&self.by_token).get(token).copied()
-    }
-
-    pub fn forget(&self, key: SessionKey) {
-        lock(&self.by_token).retain(|_, k| *k != key);
-        lock(&self.gate).retain(|_, k| *k != key);
-    }
-
-    /// A one-time token for reporting `key`'s upstream proxy.
-    pub fn issue_gate(&self, key: SessionKey) -> std::io::Result<String> {
-        let token = random_bytes_hex(32)?;
-        lock(&self.gate).insert(token.clone(), key);
-        Ok(token)
-    }
-
-    /// The session a gate token was issued for; the token is spent.
-    pub fn spend_gate(&self, token: &str) -> Option<SessionKey> {
-        lock(&self.gate).remove(token)
-    }
-}
-
-fn random_bytes_hex(n: usize) -> std::io::Result<String> {
-    use std::io::Read;
-    let mut bytes = vec![0u8; n];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
+/// How long a token whose process isn't known yet (pi before the daemon recorded its start, a call before it started)
+/// is asked about again before it's refused.
+const NOT_YET_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const NOT_YET_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// `n` random bytes as hex; the clock's nanoseconds if the system's randomness can't be read (a tag, not a secret).
 pub fn random_hex(n: usize) -> String {
-    random_bytes_hex(n).unwrap_or_else(|_| {
+    channel::random_bytes_hex(n).unwrap_or_else(|_| {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         format!("{nanos:x}")
     })
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum Request {
-    ProtectedWrite {
-        token: String,
-        path: PathBuf,
-        content: String,
-    },
-    RunCommand {
-        token: String,
-        #[serde(flatten)]
-        request: super::RunRequest,
-    },
-    /// fnox's proxy URL, reported once by the helper that starts pi behind fnox, before it applies the sandbox: the
-    /// session's gate forwards through it. The token is the launch's one-time [`GATE_TOKEN_ENV`].
-    GateUpstream { token: String, url: String },
-}
-
-/// The variable that carries a launch's one-time gate token to the helper (removed before pi starts).
-pub const GATE_TOKEN_ENV: &str = "PITON_GATE_TOKEN";
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum Response {
-    ProtectedWrite(super::write::WriteOutcome),
-    /// Where a widened or host run runs, before its output: the agent's result says so.
-    Ran(super::Ran),
-    /// A chunk of the running command's output, base64.
-    Output {
-        data: String,
-    },
-    /// The daemon's run ended: the exit code, or 128 + the signal.
-    Exit {
-        code: i32,
-    },
-    /// The blocks the daemon recorded for a failed run (`operation target`, with why one isn't asked about), and a note.
-    Blocks {
-        blocks: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        note: Option<String>,
-    },
-    /// The run failed on a block and the user is asked to run it again: what follows is the rerun's, or `not_rerun`.
-    Blocked,
-    /// The user didn't approve running it again: the first run's exit follows.
-    NotRerun {
-        reason: String,
-    },
-    TimedOut,
-    /// Not run, with why: the user denied it, didn't answer, or the request doesn't match a running call.
-    NotRun {
-        reason: String,
-    },
-    Error {
-        message: String,
-    },
-    /// A gate upstream was taken.
-    Reported,
 }
 
 /// Binds the socket, owner-only and replacing a stale one.
@@ -167,331 +68,136 @@ pub async fn serve(daemon: Arc<Daemon>, listener: UnixListener) {
     }
 }
 
+pub type Writer = tokio::net::unix::OwnedWriteHalf;
+type Lines = tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>;
+
 async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
+    let peer = Peer::of(&stream);
+    let pid = peer.as_ref().ok().map(|p| p.pid);
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     let Ok(Some(line)) = lines.next_line().await else {
         return;
     };
-    let response = match serde_json::from_str::<Request>(&line) {
-        Ok(Request::RunCommand { token, request }) => {
+    let authorized = match identify(&daemon, peer, &line).await {
+        Ok(authorized) => authorized,
+        Err(refused) => {
+            crate::log!("agent.sock: refused: {refused}");
+            send(&mut write, &channel::refused_line(&refused)).await;
+            return;
+        }
+    };
+    match authorized {
+        Authorized::ProtectedWrite { session, request } => {
+            // The agent's tool call holds the connection while the user decides; when it's aborted, the connection
+            // closes and the wait ends, which the session sees (its reply channel closes) and settles.
+            tokio::select! {
+                response = super::write::protected_write(&daemon, session, request) => {
+                    send(&mut write, &response).await;
+                }
+                _ = closed(&mut lines) => {}
+            }
+        }
+        Authorized::RunCommand { session, request } => {
             // Streams: the output lines, then the end. Closing the connection (the agent's stop or timeout) drops the
             // run, which kills the command's process group.
             tokio::select! {
-                () = run_command(&daemon, token, request, &mut write) => {}
+                () = super::run::serve(&daemon, session, request, &mut write) => {}
                 _ = closed(&mut lines) => {}
             }
-            return;
         }
-        // The agent's tool call holds the connection while the user decides; when it's aborted, the connection closes
-        // and the wait ends, which the session sees (its reply channel closes) and settles.
-        Ok(request) => tokio::select! {
-            response = respond(&daemon, request) => response,
-            _ = closed(&mut lines) => return,
-        },
-        Err(e) => Response::Error {
-            message: format!("invalid request: {e}"),
-        },
-    };
-    send(&mut write, &response).await;
+        Authorized::Launched { session, upstream } => {
+            let response = launched(&daemon, session, pid, upstream);
+            send(&mut write, &response).await;
+        }
+    }
 }
 
-async fn send(write: &mut tokio::net::unix::OwnedWriteHalf, response: &Response) -> bool {
+/// The authorized request `line` carries, from the connecting process `peer`.
+async fn identify(daemon: &Daemon, peer: Result<Peer, channel::PeerError>, line: &str) -> Result<Authorized, Refused> {
+    let envelope: Envelope = serde_json::from_str(line).map_err(|e| Refused::Invalid { message: e.to_string() })?;
+    crate::debug!(
+        "agent.sock: {} ({})",
+        envelope.request.kind(),
+        asking(envelope.request.asks())
+    );
+    let peer = peer.map_err(|e| {
+        crate::log!("agent.sock: {e}");
+        Refused::Unidentified
+    })?;
+    let started = tokio::time::Instant::now();
+    let caller = loop {
+        match daemon.agent_tokens().accept(&envelope.token, &peer) {
+            Ok(caller) => break caller,
+            Err(Unaccepted::NotYet) if started.elapsed() < NOT_YET_WAIT => tokio::time::sleep(NOT_YET_POLL).await,
+            Err(unaccepted @ (Unaccepted::NotYet | Unaccepted::UnknownToken | Unaccepted::WrongProcess)) => {
+                return Err(Refused::Token(unaccepted));
+            }
+        }
+    };
+    // A session's tokens exist from just before it starts; it's registered once it started (the launch helper can ask
+    // in between).
+    while daemon.session(caller.session()).is_none() {
+        if started.elapsed() >= NOT_YET_WAIT || !daemon.agent_tokens().live(caller.session()) {
+            return Err(Refused::Ended);
+        }
+        tokio::time::sleep(NOT_YET_POLL).await;
+    }
+    channel::authorize(envelope.request, caller)
+}
+
+/// What `launched` answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LaunchedResponse {
+    /// pi's process is recorded, and the gate's route when one was given.
+    Recorded,
+    /// The session ended.
+    Ended,
+}
+
+/// The helper is about to become pi: its process is pi's from now on. Behind fnox with a filtered network, the gate
+/// forwards through fnox's proxy.
+fn launched(
+    daemon: &Daemon,
+    session: crate::session::SessionKey,
+    pid: Option<i32>,
+    upstream: Option<String>,
+) -> LaunchedResponse {
+    let Some(handle) = daemon.session(session) else {
+        return LaunchedResponse::Ended;
+    };
+    if let Some(pid) = pid {
+        daemon.agent_tokens().pi_started(session, pid);
+    }
+    if let Some(url) = upstream
+        && handle.tx.send(SessionCmd::GateUpstream { url }).is_err()
+    {
+        return LaunchedResponse::Ended;
+    }
+    LaunchedResponse::Recorded
+}
+
+/// Sends one line; false when the client stopped listening.
+pub async fn send(write: &mut Writer, response: &impl Serialize) -> bool {
     let mut out = serde_json::to_string(response).unwrap_or_default();
     out.push('\n');
     write.write_all(out.as_bytes()).await.is_ok()
 }
 
-/// How long a failed call waits for the kernel's record of its blocks: it usually comes within ~5 ms
-/// (docs/pi-findings.md), and the wait ends at the first look that finds one.
-const BLOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
-/// How often a failed call looks for its blocks while it waits.
-const BLOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
-
-/// Decides a bash call with its session (a grant, the user's answer), runs it when approved, and streams it back. A
-/// call that fails in the session's own sandbox on a block an approved rerun lifts is asked about, and the rerun's
-/// result is the call's.
-async fn run_command(
-    daemon: &Daemon,
-    token: String,
-    request: super::RunRequest,
-    write: &mut tokio::net::unix::OwnedWriteHalf,
-) {
-    use super::{Failed, RunDecision};
-    let Some(handle) = daemon
-        .agent_tokens()
-        .session(&token)
-        .and_then(|key| daemon.session(key))
-    else {
-        send(
-            write,
-            &Response::Error {
-                message: "unknown or ended session".into(),
-            },
-        )
-        .await;
-        return;
-    };
-    let (reply, decision) = tokio::sync::oneshot::channel();
-    let asked_for = request.clone();
-    if handle.tx.send(SessionCmd::RunCommand { request, reply }).is_err() {
-        send(
-            write,
-            &Response::Error {
-                message: "unknown or ended session".into(),
-            },
-        )
-        .await;
-        return;
-    }
-    // Wakes the session when the agent stops waiting, so it closes the question at once.
-    let _wake = WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleQuestion);
-    let approved = match decision.await {
-        Ok(RunDecision::Run(approved)) => approved,
-        Ok(RunDecision::NotRun { reason }) => {
-            send(write, &Response::NotRun { reason }).await;
-            return;
-        }
-        Err(_) => {
-            send(
-                write,
-                &Response::Error {
-                    message: "the session ended before the user answered".into(),
-                },
-            )
-            .await;
-            return;
-        }
-    };
-    let session = handle.key;
-    let Some(end) = execute(&approved, session, write).await else {
-        return;
-    };
-    let code = match (&approved.runtime, end) {
-        (super::Runtime::Session(_), Response::Exit { code }) if code != 0 => code,
-        (_, last) => {
-            send(write, &last).await;
-            return;
-        }
-    };
-    // Failed in the session's own sandbox: the session decides whether to ask, after the kernel's record had its time.
-    let started = tokio::time::Instant::now();
-    let failed = loop {
-        let last = started.elapsed() >= BLOCK_WAIT;
-        let (reply, answer) = tokio::sync::oneshot::channel();
-        let asked = SessionCmd::RunFailed {
-            request: asked_for.clone(),
-            last,
-            reply,
-        };
-        if handle.tx.send(asked).is_err() {
-            break Failed::Report {
-                blocks: Vec::new(),
-                note: None,
-            };
-        }
-        match answer.await {
-            Ok(Failed::Wait) => tokio::time::sleep(BLOCK_POLL).await,
-            Ok(failed) => break failed,
-            Err(_) => {
-                break Failed::Report {
-                    blocks: Vec::new(),
-                    note: None,
-                };
-            }
-        }
-    };
-    let first_exit = Response::Exit { code };
-    match failed {
-        Failed::Wait => unreachable!("waited above"),
-        Failed::Report { blocks, note } => {
-            if (!blocks.is_empty() || note.is_some()) && !send(write, &Response::Blocks { blocks, note }).await {
-                return;
-            }
-            send(write, &first_exit).await;
-        }
-        Failed::Asked { blocks, decision } => {
-            if !send(write, &Response::Blocks { blocks, note: None }).await || !send(write, &Response::Blocked).await {
-                return;
-            }
-            match decision.await {
-                Ok(RunDecision::Run(rerun)) => {
-                    if let Some(last) = execute(&rerun, session, write).await {
-                        send(write, &last).await;
-                    }
-                }
-                Ok(RunDecision::NotRun { reason }) => {
-                    if send(write, &Response::NotRerun { reason }).await {
-                        send(write, &first_exit).await;
-                    }
-                }
-                Err(_) => {
-                    let reason = "the session ended before the user answered".to_string();
-                    if send(write, &Response::NotRerun { reason }).await {
-                        send(write, &first_exit).await;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Runs `approved` and streams its output: the `ran` line first when it isn't the session's own sandbox. Returns the
-/// line that ends it (not sent yet); `None` when the agent stopped listening.
-async fn execute(
-    approved: &super::Approved,
-    session: crate::session::SessionKey,
-    write: &mut tokio::net::unix::OwnedWriteHalf,
-) -> Option<Response> {
-    use super::{RunEnd, RunEvent};
-    let helper = match crate::launch::helper() {
-        Ok(helper) => helper,
-        Err(e) => return Some(Response::Error { message: e.to_string() }),
-    };
-    if let Some(ran) = approved.runtime.ran()
-        && !send(write, &Response::Ran(ran)).await
-    {
-        return None;
-    }
-    let (events, mut output) = tokio::sync::mpsc::unbounded_channel();
-    let spec = super::RunSpec {
-        helper: &helper,
-        runtime: &approved.runtime,
-        shell: &approved.shell,
-        command: &approved.command,
-        cwd: &approved.cwd,
-        env: &approved.env,
-        timeout: approved.timeout,
-    };
-    let run = super::run(spec, events);
-    tokio::pin!(run);
-    let end = loop {
-        tokio::select! {
-            end = &mut run => break end,
-            Some(RunEvent::Output(chunk)) = output.recv() => {
-                if !send(write, &Response::Output { data: STANDARD.encode(&chunk) }).await {
-                    return None;
-                }
-            }
-        }
-    };
-    // What the command printed before it ended.
-    while let Ok(RunEvent::Output(chunk)) = output.try_recv() {
-        if !send(
-            write,
-            &Response::Output {
-                data: STANDARD.encode(&chunk),
-            },
-        )
-        .await
-        {
-            return None;
-        }
-    }
-    let last = match end {
-        RunEnd::Exited { code } => {
-            crate::log!("session {session}: command run by the daemon exited with {code}");
-            Response::Exit { code }
-        }
-        RunEnd::TimedOut => {
-            crate::log!("session {session}: command run by the daemon timed out");
-            Response::TimedOut
-        }
-        RunEnd::Failed { reason } => {
-            crate::log!("session {session}: command run by the daemon failed: {reason}");
-            Response::Error { message: reason }
-        }
-    };
-    Some(last)
-}
-
 /// Resolves when the client closes its side (or sends more, which this protocol doesn't allow).
-async fn closed(lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>) {
+async fn closed(lines: &mut Lines) {
     let _ = lines.next_line().await;
 }
 
-async fn respond(daemon: &Daemon, request: Request) -> Response {
-    let unknown = || Response::Error {
-        message: "unknown or ended session".into(),
-    };
-    match request {
-        Request::ProtectedWrite { token, path, content } => {
-            let Some(handle) = daemon
-                .agent_tokens()
-                .session(&token)
-                .and_then(|key| daemon.session(key))
-            else {
-                return unknown();
-            };
-            let (reply, outcome) = tokio::sync::oneshot::channel();
-            let request = super::write::WriteRequest { path, content };
-            if handle.tx.send(SessionCmd::ProtectedWrite { request, reply }).is_err() {
-                return unknown();
-            }
-            // Wakes the session when the agent stops waiting, so it closes the dialog at once.
-            let _wake = WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleProtectedWrite);
-            // Waits for the user, as long as it takes; the agent's tool call waits with it.
-            match outcome.await {
-                Ok(outcome) => Response::ProtectedWrite(outcome),
-                Err(_) => Response::Error {
-                    message: "the session ended before the user answered".into(),
-                },
-            }
-        }
-        Request::RunCommand { .. } => unreachable!("handled with its stream"),
-        Request::GateUpstream { token, url } => {
-            let Some(handle) = daemon
-                .agent_tokens()
-                .spend_gate(&token)
-                .and_then(|key| daemon.session(key))
-            else {
-                return unknown();
-            };
-            match handle.tx.send(SessionCmd::GateUpstream { url }) {
-                Ok(()) => Response::Reported,
-                Err(_) => unknown(),
-            }
-        }
-    }
-}
-
 /// Asks the session to look at its pending question when dropped: the agent stopped waiting.
-struct WakeOnDrop(tokio::sync::mpsc::UnboundedSender<SessionCmd>, fn() -> SessionCmd);
+pub struct WakeOnDrop(
+    pub tokio::sync::mpsc::UnboundedSender<SessionCmd>,
+    pub fn() -> SessionCmd,
+);
 
 impl Drop for WakeOnDrop {
     fn drop(&mut self) {
         let _ = self.0.send((self.1)());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tokens_name_one_session_until_forgotten() {
-        let tokens = Tokens::default();
-        let a = tokens.issue(1).unwrap();
-        let b = tokens.issue(2).unwrap();
-        assert_ne!(a, b);
-        assert_eq!(a.len(), 64);
-        assert_eq!(tokens.session(&a), Some(1));
-        tokens.forget(1);
-        assert_eq!(tokens.session(&a), None);
-        assert_eq!(tokens.session(&b), Some(2));
-        assert_eq!(tokens.session("guess"), None);
-    }
-
-    #[test]
-    fn requests_are_strict() {
-        assert!(
-            serde_json::from_str::<Request>(r#"{"type":"protected_write","token":"t","path":"/p","content":""}"#)
-                .is_ok()
-        );
-        assert!(serde_json::from_str::<Request>(r#"{"type":"answer","id":"x"}"#).is_err());
-        assert!(
-            serde_json::from_str::<Request>(r#"{"type":"protected_write","token":"t","path":"/p","content":"","x":1}"#)
-                .is_err()
-        );
     }
 }

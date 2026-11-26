@@ -63,8 +63,8 @@ pub struct Daemon {
     state: Mutex<crate::state::State>,
     /// Fires when host logging changes, so the expiry task re-arms.
     logging_changed: Arc<Notify>,
-    /// Session tokens for `agent.sock`.
-    agent_tokens: crate::agent::Tokens,
+    /// Every live token for `agent.sock`: sessions', calls', and launch helpers'.
+    agent_tokens: Arc<crate::agent::Tokens>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,7 +181,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         host_id,
         state: Mutex::new(state),
         logging_changed: Arc::new(Notify::new()),
-        agent_tokens: crate::agent::Tokens::default(),
+        agent_tokens: Arc::new(crate::agent::Tokens::default()),
     });
     tokio::spawn(crate::daemon::awake::run(daemon.clone()));
     tokio::spawn(logging_expiry(daemon.clone()));
@@ -340,8 +340,8 @@ impl Daemon {
         &self.list_changed
     }
 
-    /// Who may ask over `agent.sock`: one token per live session.
-    pub fn agent_tokens(&self) -> &crate::agent::Tokens {
+    /// Who may ask over `agent.sock`: every live caller's token.
+    pub fn agent_tokens(&self) -> &Arc<crate::agent::Tokens> {
         &self.agent_tokens
     }
 
@@ -517,13 +517,17 @@ impl Daemon {
         if let Some(commands) = &mut commands {
             commands.set_tag(&tag);
         }
-        // How this pi reaches the daemon for protected writes; set after the workspace's environment, so a
-        // repository can't change it.
-        let token = self.agent_tokens.issue(key).map_err(|source| LaunchError::Spawn {
-            program: "session token".into(),
-            source,
-        })?;
-        env.insert(crate::agent::TOKEN_ENV.into(), token);
+        // How this pi reaches the daemon (`agent.sock`); set after the workspace's environment, so a repository can't
+        // change it. Behind fnox, pi is fnox's child: the helper that becomes pi reports its process with a one-time
+        // launch token (and fnox's proxy, for a filtered network's gate).
+        let tokens = self
+            .agent_tokens
+            .issue_session(key, proxy.is_some())
+            .map_err(|source| LaunchError::Spawn {
+                program: "session token".into(),
+                source,
+            })?;
+        env.insert(crate::agent::TOKEN_ENV.into(), tokens.session);
         env.insert(
             crate::agent::SOCKET_ENV.into(),
             config.agent_socket().to_string_lossy().into_owned(),
@@ -612,22 +616,15 @@ impl Daemon {
                 if ssh.is_none() {
                     crate::log!("session {key}: can't make the ssh wrapper: SSH won't go through the gate");
                 }
-                // Behind fnox, the helper reports fnox's proxy with a one-time token; the gate waits for it.
-                let (route, upstream_token) = match &proxy {
-                    Some(_) => {
-                        let token = self.agent_tokens.issue_gate(key).map_err(|source| LaunchError::Spawn {
-                            program: "gate token".into(),
-                            source,
-                        })?;
-                        (None, Some(token))
-                    }
-                    None => (Some(crate::launch::sandbox::network::Route::Direct), None),
+                // Behind fnox, the helper reports fnox's proxy with its launch token; the gate waits for it.
+                let route = match &proxy {
+                    Some(_) => None,
+                    None => Some(crate::launch::sandbox::network::Route::Direct),
                 };
                 Some(session::NetworkSpec {
                     ssh,
                     catalog: crate::pi::catalog::Catalog::new(builtin, files),
                     route,
-                    upstream_token,
                 })
             }
             Some(launch::sandbox::Network::Open { .. } | launch::sandbox::Network::Direct { .. }) | None => None,
@@ -638,6 +635,7 @@ impl Daemon {
             mode,
             session,
             env,
+            launch_token: tokens.launch,
             policy,
             protected,
             proxy,
@@ -655,13 +653,19 @@ impl Daemon {
             SessionArg::Resume(file) => format!("resume {}", file.display()),
         };
         let workspace_text = format!("{}{relation}", spec.workspace.path.display());
+        let reported = spec.launch_token.is_some();
         let handle = match session::spawn(self.config(), spec, hooks) {
             Ok(handle) => handle,
             Err(e) => {
+                self.agent_tokens.forget(key);
                 crate::log!("launch failed in {workspace_text} ({mode:?}, {resume}): {e}");
                 return Err(e);
             }
         };
+        // pi's process is the one started, unless the helper reports it (behind fnox, pi is fnox's child).
+        if let (false, Some(pid)) = (reported, handle.snapshot().pid) {
+            self.agent_tokens.pi_started(key, pid as i32);
+        }
         crate::log!(
             "session {key}: launched pid {} in {workspace_text} ({mode:?}, {resume})",
             handle.snapshot().pid.map_or_else(|| "?".into(), |p| p.to_string())

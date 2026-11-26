@@ -11,6 +11,66 @@ use serde::Deserialize;
 
 use crate::config::{ClaudeLogin, NetworkTarget, Preset, Profile, ServiceKey};
 
+/// What a rule of Piton's own covers. Its liftability, for a deny, is [`crate::launch::sandbox::grant::liftability`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PitonArea {
+    /// A configuration level outside the source's `.piton/`, or what a link in one points to.
+    ConfigLevel,
+    /// pi's agent directory, or what a link in it points to.
+    AgentDir,
+    /// A folder on the way to configuration, fixed in place.
+    FixedFolder,
+    /// A socket an entry allows, or a folder on its way, fixed in place.
+    SocketPath,
+    /// A protected file: `.piton/` and `.pi/` in the checkout.
+    ProtectedFile,
+    /// Git's hooks and configuration.
+    GitControl,
+    /// The daemon's state folder.
+    StateFolder,
+    /// Piton's logs, readable (an allow).
+    Logs,
+    /// The ssh wrapper the network gate tunnels SSH through, readable (an allow).
+    SshWrapper,
+    /// `agent.sock`, which a sandbox may connect to (an allow).
+    AgentSocket,
+    /// The daemon's control socket.
+    ControlSocket,
+}
+
+impl PitonArea {
+    /// What it is, and how it changes: what `piton sandbox why` prints.
+    pub fn describe(self) -> &'static str {
+        match self {
+            PitonArea::ConfigLevel => {
+                "a configuration level: changed only through a write the user approves (the edit or write tool)"
+            }
+            PitonArea::AgentDir => {
+                "pi's agent directory: extensions, settings, and packages pi loads; changed only through a write the \
+                 user approves (the edit or write tool)"
+            }
+            PitonArea::FixedFolder => {
+                "a folder on the way to configuration: renaming or replacing it would move what the user approves \
+                 (what's in it follows the other rules)"
+            }
+            PitonArea::SocketPath => {
+                "a socket an entry allows, or a folder on its way: kept in place so no other socket can be moved there"
+            }
+            PitonArea::ProtectedFile => "a protected file (.piton/ or .pi/): changed only with the user's approval",
+            PitonArea::GitControl => {
+                "Git's hooks and configuration: Git on the host runs what they name; `allow_git_control_files = true` \
+                 opens them (global config.toml or a config.local.toml)"
+            }
+            PitonArea::StateFolder => "the daemon's state folder",
+            PitonArea::Logs => "Piton's logs",
+            PitonArea::SshWrapper => "the ssh wrapper that tunnels SSH through the network gate",
+            PitonArea::AgentSocket => "the agent socket (the channel to the daemon)",
+            PitonArea::ControlSocket => "the daemon's control socket (clients only)",
+        }
+    }
+}
+
 /// Where a deny or a grant comes from: what `piton sandbox why` reports.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -21,8 +81,8 @@ pub enum Source {
     BuiltIn { what: String },
     /// One of nono's vendored deny groups.
     NonoGroup { group: String },
-    /// Piton's own deny: the daemon's state folder or control socket.
-    Piton { what: String },
+    /// Piton's own rule: configuration, the daemon's state, and what a sandbox may reach of it.
+    Piton { area: PitonArea },
     /// A file fnox loads for this launch (`fnox config-files`), or a folder on its path: which secrets go where. Never
     /// writable, and never lifted.
     FnoxConfig,

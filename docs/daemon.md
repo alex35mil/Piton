@@ -347,7 +347,9 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
   `.git` file or symlink in a subfolder pointing at a repository it built elsewhere, whose settings Git uses when run
   in that folder; check a folder an agent created before running Git there. Hooks still run in the sandbox; only
   writing these files is closed. `allow_git_control_files = true` (below) lifts it.
-- **Unix sockets:** closed, except DNS (`mDNSResponder`) and `agent.sock`: no process may connect to a socket (a
+- **Unix sockets:** closed, except DNS (`mDNSResponder`) and `agent.sock`, the channel to the daemon (each process
+  there has a token of its own, which the daemon accepts only from that process: a bash call can't send pi's
+  requests): no process may connect to a socket (a
   running Neovim, Docker, the SSH and gpg agents) or create one, unless a `[sandbox.network.unix_socket_connections]`
   or `[sandbox.network.unix_socket_bindings]` entry (below) opens it.
 - **Network:** filtered. A process reaches only DNS, the port entries, and Piton's gate (below), which decides named
@@ -712,9 +714,10 @@ again, then answer:
   files it runs and into the files that set its environment (`mise.toml` can set `PATH` or `BASH_ENV`). The question
   lists those variables, by file (folded in the apps).
 
-Then: **Allow once** (or **Run once on the host**), **Deny** (it stays failed), or **always** for this command or an
-edited pattern, in this project or everywhere, which saves a per-command entry for that runtime and runs it. The
-whole command runs again, so its side effects repeat. The agent's result says where it ran. When Piton asked, the
+Then: **Allow once** (or **Run once on the host**); **for this session**, which runs it and then runs exactly this
+command there without failing or asking until the session ends, saving nothing; **Deny** (it stays failed); or
+**always** for this command or an edited pattern, in this project or everywhere, which saves a per-command entry for
+that runtime and runs it. The whole command runs again, so its side effects repeat. The agent's result says where it ran. When Piton asked, the
 rerun's output and exit are the agent's result; after a denial, it gets the failed run's.
 
 The apps show a switch (left and right arrows with a keyboard) and the pattern inline. pi.nvim shows pi's dialog: its

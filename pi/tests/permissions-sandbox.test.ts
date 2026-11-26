@@ -14,6 +14,7 @@ import type {
     ToolDefinition,
 } from "@earendil-works/pi-coding-agent"
 
+import type { RefusedLine, RunLine } from "../extensions/__lib/agent.ts"
 import { compile } from "../extensions/__lib/schema.ts"
 import {
     BLOCKED_SEPARATOR,
@@ -22,11 +23,13 @@ import {
     RerunSchema,
     SANDBOX_GUIDELINE,
     unprefixed,
-    type RunLine,
 } from "../extensions/permissions/sandbox.ts"
 
-/** A fake daemon on a Unix socket: records each request and answers with the lines `answer` gives. */
-async function fakeDaemon(answer: (request: Record<string, unknown>) => RunLine[]) {
+/**
+ * A fake daemon on a Unix socket: records each request (and the token it came with) and answers with the lines `answer`
+ * gives.
+ */
+async function fakeDaemon(answer: (request: Record<string, unknown>) => (RunLine | RefusedLine)[]) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piton-sandbox-"))
     const socket = path.join(dir, "agent.sock")
     const requests: Record<string, unknown>[] = []
@@ -40,7 +43,9 @@ async function fakeDaemon(answer: (request: Record<string, unknown>) => RunLine[
             const newline = buf.indexOf("\n")
             if (newline < 0 || answered) return
             answered = true
-            const request = JSON.parse(buf.slice(0, newline)) as Record<string, unknown>
+            const envelope = JSON.parse(buf.slice(0, newline)) as { token: string; request: Record<string, unknown> }
+            assert.deepEqual(Object.keys(envelope).sort(), ["request", "token"])
+            const request = { ...envelope.request, token: envelope.token }
             requests.push(request)
             const lines = answer(request)
             if (lines.length === 0) return
@@ -77,7 +82,7 @@ function register(socket: string) {
     const registered = registerSandboxBash(pi, {
         PITON_RUNTIME: "sandbox",
         PITON_AGENT_SOCKET: socket,
-        PITON_SESSION_TOKEN: "token",
+        PITON_AGENT_TOKEN: "token",
     })
     return { registered, bash: tools.get("bash"), userBash: handlers.get("user_bash") }
 }
@@ -116,13 +121,15 @@ describe("bash in a sandboxed session under piton", () => {
             on: () => tools.push("on"),
         } as unknown as ExtensionAPI
         assert.equal(registerSandboxBash(pi, {}), false)
-        assert.equal(registerSandboxBash(pi, { PITON_AGENT_SOCKET: "/s", PITON_SESSION_TOKEN: "t" }), false)
+        assert.equal(registerSandboxBash(pi, { PITON_AGENT_SOCKET: "/s", PITON_AGENT_TOKEN: "t" }), false)
         assert.equal(registerSandboxBash(pi, { PITON_RUNTIME: "sandbox" }), false)
         assert.deepEqual(tools, [])
     })
 
     it("sends every call to the daemon with the agent's command and pi's shell environment", async () => {
         const daemon = await fakeDaemon(() => [out("installed\n"), out("hooks\n"), { type: "exit", code: 2 }])
+        const previous = process.env.PITON_AGENT_TOKEN
+        process.env.PITON_AGENT_TOKEN = "pi's own"
         try {
             await withPiSettings(daemon.dir, { shellCommandPrefix: "PREFIXED=yes" }, async () => {
                 const { registered, bash } = register(daemon.socket)
@@ -151,7 +158,25 @@ describe("bash in a sandboxed session under piton", () => {
                 const env = request!.env as Record<string, string>
                 assert.equal(env.PI_SESSION_ID, "s", "pi's session variables")
                 assert.ok(env.PATH!.startsWith(path.join(daemon.dir, "agent", "bin")), "pi's bin folder first")
+                assert.ok(!("PITON_AGENT_TOKEN" in env), "pi's token never reaches a call")
             })
+        } finally {
+            if (previous === undefined) delete process.env.PITON_AGENT_TOKEN
+            else process.env.PITON_AGENT_TOKEN = previous
+            await daemon.close()
+        }
+    })
+
+    it("fails with the daemon's reason when it refuses the request", async () => {
+        const daemon = await fakeDaemon(() => [
+            { type: "refused", why: "token", message: "the token belongs to another process" },
+        ])
+        try {
+            const { bash } = register(daemon.socket)
+            await assert.rejects(
+                bash!.execute("c", { command: "ls" }, undefined, undefined, context(daemon.dir)),
+                /refused: the token belongs to another process/,
+            )
         } finally {
             await daemon.close()
         }
@@ -279,6 +304,7 @@ describe("bash in a sandboxed session under piton", () => {
         assert.match(ranLine({ runtime: "host", by: "grant" }), /host[\s\S]*saved/)
         assert.match(ranLine({ runtime: "sandbox", by: "approval" }), /everything open[\s\S]*user/)
         assert.match(ranLine({ runtime: "sandbox", by: "grant" }), /widened[\s\S]*saved/)
+        assert.match(ranLine({ runtime: "host", by: "session" }), /host[\s\S]*this session/)
         assert.doesNotMatch(ranLine({ runtime: "sandbox", by: "grant" }), /everything/, "a saved grant may be narrowed")
     })
 

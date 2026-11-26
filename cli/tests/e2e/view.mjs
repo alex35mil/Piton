@@ -119,8 +119,8 @@ function viewClient(ctx, name, device = "mac") {
     return c;
 }
 
-/// One request on the daemon's agent socket, as a pi in the session would send it.
-function agentRequest(socket, request) {
+/// One request on the daemon's agent socket (or the faux extension's relay to it, which sends from pi's process).
+function agentRequest(socket, token, request) {
     return new Promise((resolve, reject) => {
         const sock = net.connect(socket);
         let buf = "";
@@ -133,7 +133,7 @@ function agentRequest(socket, request) {
             }
         });
         sock.on("error", reject);
-        sock.write(JSON.stringify(request) + "\n");
+        sock.write(JSON.stringify({ token, request }) + "\n");
     });
 }
 
@@ -147,18 +147,27 @@ const tests = {
         await c.req("session.send", { session: key, message_id: "e", text: "env" });
         await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.model(key).items.some((i) => i.type === "tool" && i.status === "done"), 20000);
         const tool = c.model(key).items.find((i) => i.type === "tool");
-        const { token, socket } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
+        const { token, socket, relay } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
         assert.equal(socket, join(ctx.dir, "agent.sock"));
         assert.match(token, /^[0-9a-f]{64}$/);
+        const write = (path, content, as = token) => agentRequest(relay, as, { type: "protected_write", path, content });
 
         const target = join(ctx.ws, ".piton", "config.toml");
-        // Not this session's, or not protected, or not a session at all: refused without asking.
-        assert.equal((await agentRequest(socket, { type: "protected_write", token: "guess", path: target, content: "{}" })).type, "error");
-        const plain = await agentRequest(socket, { type: "protected_write", token, path: join(ctx.ws, "src.rs"), content: "x" });
+        // pi's token from another process (this test's): refused, whatever it asks.
+        const stolen = await agentRequest(socket, token, { type: "protected_write", path: target, content: "{}" });
+        assert.deepEqual([stolen.type, stolen.why, stolen.reason], ["refused", "token", "wrong_process"]);
+        // A request only the launch helper may send: refused for pi.
+        const launched = await agentRequest(relay, token, { type: "launched" });
+        assert.deepEqual([launched.type, launched.why, launched.caller], ["refused", "not_allowed", "pi"]);
+        // Not this session's, or not protected, or not a request at all: refused without asking.
+        const guessed = await write(target, "{}", "guess");
+        assert.deepEqual([guessed.type, guessed.reason], ["refused", "unknown_token"]);
+        assert.equal((await agentRequest(relay, token, { type: "protected_write", path: target })).why, "invalid");
+        const plain = await write(join(ctx.ws, "src.rs"), "x");
         assert.equal(plain.outcome, "refused");
 
         // A protected write waits for the user: a dialog in the shape pi.nvim's diff view opens.
-        const pending = agentRequest(socket, { type: "protected_write", token, path: target, content: '{"allow":["read"]}\n' });
+        const pending = write(target, '{"allow":["read"]}\n');
         const st = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         assert.equal(st.change.state.status, "needs_input");
         const dialog = st.change.state.dialogs[0];
@@ -169,7 +178,7 @@ const tests = {
         // The current content, so a client that can't read the file shows a diff (null: the file is new).
         assert.equal(title.current, null);
         // One at a time.
-        const second = await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" });
+        const second = await write(target, "{}");
         assert.equal(second.outcome, "refused");
         // The user approves with their own version and a note; the daemon writes it, and never tells pi. The dialog
         // closes in every client (waited for from before the answer, so the change can't slip past).
@@ -185,7 +194,7 @@ const tests = {
         assert.equal((await closed).change.state.status, "idle");
 
         // Rejected: nothing written.
-        const rejected = agentRequest(socket, { type: "protected_write", token, path: target, content: "bad" });
+        const rejected = write(target, "bad");
         const again = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         await c.req("session.answer", { session: key, request_id: again.change.state.dialogs[0].id, answer: { value: "Reject" } });
         assert.equal((await rejected).outcome, "rejected");
@@ -193,19 +202,19 @@ const tests = {
 
         // A skill isn't protected: the agent writes it itself, and a request for it is refused without asking.
         const skill = join(ctx.ws, ".agents", "skills", "s", "SKILL.md");
-        const skillWrite = await agentRequest(socket, { type: "protected_write", token, path: skill, content: "x" });
+        const skillWrite = await write(skill, "x");
         assert.equal(skillWrite.outcome, "refused");
         assert.match(skillWrite.reason, /isn't a protected file/);
 
         // The agent stops waiting (its tool call was aborted): the dialog closes, and the next request is asked again
         // instead of being refused as "another is waiting".
-        const abandoned = net.connect(socket);
-        abandoned.write(JSON.stringify({ type: "protected_write", token, path: target, content: "left" }) + "\n");
+        const abandoned = net.connect(relay);
+        abandoned.write(JSON.stringify({ token, request: { type: "protected_write", path: target, content: "left" } }) + "\n");
         await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         const closing = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
         abandoned.destroy();
         await closing;
-        const next = agentRequest(socket, { type: "protected_write", token, path: target, content: "again" });
+        const next = write(target, "again");
         const reasked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         await c.req("session.answer", { session: key, request_id: reasked.change.state.dialogs[0].id, answer: { value: "Reject" } });
         assert.equal((await next).outcome, "rejected");
@@ -214,7 +223,8 @@ const tests = {
         // The session ends: its token stops working.
         await c.req("session.stop", { session: key });
         await sleep(300);
-        assert.equal((await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" })).type, "error");
+        const ended = await agentRequest(socket, token, { type: "protected_write", path: target, content: "{}" });
+        assert.deepEqual([ended.type, ended.reason], ["refused", "unknown_token"]);
         c.close();
     },
 

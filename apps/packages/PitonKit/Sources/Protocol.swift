@@ -385,6 +385,8 @@ public enum PersistScope: String, Codable, Sendable, Hashable, CaseIterable {
 /// A typed answer to a Piton question (`session.decide`).
 public enum Decision: Sendable, Hashable {
     case once(CommandRuntime)
+    /// Run this exact command there without asking until the session ends; nothing saved.
+    case session(CommandRuntime)
     case deny
     /// Run it and save a `[[sandbox.commands]]` entry for `pattern`.
     case always(CommandRuntime, scope: PersistScope, pattern: String)
@@ -392,6 +394,7 @@ public enum Decision: Sendable, Hashable {
     var json: JSON {
         switch self {
         case .once(let runtime): .object(["once": .string(runtime.rawValue)])
+        case .session(let runtime): .object(["session": .string(runtime.rawValue)])
         case .deny: .string("deny")
         case .always(let runtime, let scope, let pattern):
             .object([

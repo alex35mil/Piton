@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    policy::{self, Source},
+    policy::{self, PitonArea, Source},
     rules::{Access, Apps, Effect, Listen, Network, Policy, Rule, ServiceGrant, Services, Target, is_listen},
 };
 use crate::config::{
@@ -267,28 +267,80 @@ fn root_entries() -> Vec<PathBuf> {
 fn kept(rule: &Rule, credentials: Credentials) -> bool {
     match rule.effect {
         Effect::Allow => true,
-        Effect::Deny => floor(rule, credentials),
+        Effect::Deny => match liftability(rule, credentials) {
+            Liftability::Floor(_) => true,
+            Liftability::Liftable(_) => false,
+        },
     }
 }
 
-/// Whether a deny is part of the floor.
-pub fn floor(rule: &Rule, credentials: Credentials) -> bool {
+/// Whether the user's approval can lift a deny: the one classification every widening and every block report reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liftability {
+    /// No approval lifts it; only the user's own edit, or for some items a host run, gets past it.
+    Floor(FloorItem),
+    /// An approval lifts it.
+    Liftable(LiftableDeny),
+}
+
+/// The floor: what no approval lifts from a sandbox, each for its reason (docs/design.md, "The floor").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorItem {
+    /// The daemon's control socket: a sandbox that reached it could approve its own requests and start host sessions.
+    ControlSocket,
+    /// The daemon's state folder: it holds trust decisions and the agent socket.
+    StateFolder,
+    /// Configuration levels, pi's agent directories, protected files, and the folders on their way: they decide what
+    /// later sessions may do.
+    Configuration,
+    /// A file fnox loads, or a folder on its path: one edit could send secrets anywhere.
+    FnoxFiles,
+    /// A socket an entry allows, or a folder on its way: kept in place so no other socket is moved there.
+    AllowedSocket,
+    /// The user's own `"deny"`, `"read"`, or `false`.
+    UserSwitch,
+    /// A credential while fnox is on: the sandbox could run `fnox get`.
+    Credential,
+    /// A deny no classification covers yet: kept closed until it's classified here.
+    Unclassified,
+}
+
+/// A deny an approval lifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiftableDeny {
+    /// Git's hooks and configuration.
+    GitControl,
+    /// A credential while fnox is off.
+    Credential,
+}
+
+/// The liftability of a deny `rule`, under the launch's `credentials`.
+pub fn liftability(rule: &Rule, credentials: Credentials) -> Liftability {
+    use Liftability::{Floor, Liftable};
     match &rule.target {
-        Target::Protected { .. } => true,
-        Target::GitControl { .. } => false,
+        Target::Protected { .. } => Floor(FloorItem::Configuration),
+        Target::GitControl { .. } => Liftable(LiftableDeny::GitControl),
         Target::Subpath { .. } | Target::Literal { .. } | Target::Prefix { .. } => match &rule.source {
             Source::NonoGroup { .. } => match credentials {
-                Credentials::Liftable => false,
-                Credentials::Floor => true,
+                Credentials::Liftable => Liftable(LiftableDeny::Credential),
+                Credentials::Floor => Floor(FloorItem::Credential),
             },
-            // Configuration levels, pi's agent directories, the daemon's state and control socket.
-            Source::Piton { .. } => true,
-            // What fnox loads: one edit could send secrets anywhere.
-            Source::FnoxConfig => true,
-            // The user's own `"deny"`.
-            Source::Config { .. } => true,
-            // No such deny exists; kept, so a new one is closed until it's classified here.
-            Source::Workspace | Source::BuiltIn { .. } | Source::AgentDir | Source::Preset { .. } => true,
+            Source::Piton { area } => match area {
+                PitonArea::ConfigLevel | PitonArea::AgentDir | PitonArea::FixedFolder | PitonArea::ProtectedFile => {
+                    Floor(FloorItem::Configuration)
+                }
+                PitonArea::SocketPath => Floor(FloorItem::AllowedSocket),
+                PitonArea::GitControl => Liftable(LiftableDeny::GitControl),
+                PitonArea::StateFolder => Floor(FloorItem::StateFolder),
+                PitonArea::ControlSocket => Floor(FloorItem::ControlSocket),
+                // Allows only; a deny of them would be new.
+                PitonArea::Logs | PitonArea::SshWrapper | PitonArea::AgentSocket => Floor(FloorItem::Unclassified),
+            },
+            Source::FnoxConfig => Floor(FloorItem::FnoxFiles),
+            Source::Config { .. } => Floor(FloorItem::UserSwitch),
+            Source::Workspace | Source::BuiltIn { .. } | Source::AgentDir | Source::Preset { .. } => {
+                Floor(FloorItem::Unclassified)
+            }
         },
     }
 }
@@ -488,19 +540,22 @@ fn denied_by(policy: &Policy, path: &Path, access: Access) -> Option<DeniedBy> {
         .find(|r| r.access.contains(&access) && r.target.covers(path))?;
     match rule.effect {
         Effect::Allow => None,
-        Effect::Deny => Some(match &rule.target {
-            Target::GitControl { .. } => DeniedBy::GitControl,
-            Target::Protected { .. } => DeniedBy::Floor,
-            Target::Subpath { .. } | Target::Literal { .. } | Target::Prefix { .. } => match &rule.source {
-                Source::NonoGroup { .. } => DeniedBy::Credential(access),
-                Source::Config { .. } => DeniedBy::UserDeny,
-                Source::FnoxConfig => DeniedBy::FnoxConfig,
-                Source::Piton { .. }
-                | Source::Workspace
-                | Source::BuiltIn { .. }
-                | Source::AgentDir
-                | Source::Preset { .. } => DeniedBy::Floor,
-            },
+        // Credentials are reported alike whether fnox is on or not: the keychain, the one that differs, is decided
+        // before this.
+        Effect::Deny => Some(match liftability(rule, Credentials::Liftable) {
+            Liftability::Liftable(LiftableDeny::GitControl) => DeniedBy::GitControl,
+            Liftability::Liftable(LiftableDeny::Credential) | Liftability::Floor(FloorItem::Credential) => {
+                DeniedBy::Credential(access)
+            }
+            Liftability::Floor(FloorItem::UserSwitch) => DeniedBy::UserDeny,
+            Liftability::Floor(FloorItem::FnoxFiles) => DeniedBy::FnoxConfig,
+            Liftability::Floor(
+                FloorItem::ControlSocket
+                | FloorItem::StateFolder
+                | FloorItem::Configuration
+                | FloorItem::AllowedSocket
+                | FloorItem::Unclassified,
+            ) => DeniedBy::Floor,
         }),
     }
 }
@@ -824,8 +879,8 @@ mod tests {
         }
     }
 
-    fn piton(what: &str) -> Source {
-        Source::Piton { what: what.into() }
+    fn piton(area: PitonArea) -> Source {
+        Source::Piton { area }
     }
 
     /// A launch policy with one rule of each kind the floor decides about.
@@ -847,7 +902,7 @@ mod tests {
                         group: "keychain".into(),
                     },
                 ),
-                deny(&[Access::Write], "/h/.pi/agent", piton("pi's agent directory")),
+                deny(&[Access::Write], "/h/.pi/agent", piton(PitonArea::AgentDir)),
                 deny(
                     &all,
                     "/h/secret",
@@ -858,7 +913,7 @@ mod tests {
                         },
                     },
                 ),
-                deny(&[Access::Write], "/h/.config/piton", piton("a configuration level")),
+                deny(&[Access::Write], "/h/.config/piton", piton(PitonArea::ConfigLevel)),
                 Rule {
                     effect: Effect::Deny,
                     access: vec![Access::Write],
@@ -866,7 +921,7 @@ mod tests {
                         source: "/w".into(),
                         checkout: "/w".into(),
                     },
-                    source: piton("a protected file"),
+                    source: piton(PitonArea::ProtectedFile),
                 },
                 Rule {
                     effect: Effect::Deny,
@@ -874,16 +929,16 @@ mod tests {
                     target: Target::GitControl {
                         control: GitControl::of(&[Path::new("/w")]),
                     },
-                    source: piton("Git's hooks and configuration"),
+                    source: piton(PitonArea::GitControl),
                 },
-                deny(&all, "/h/.local/state/piton", piton("the daemon's state folder")),
+                deny(&all, "/h/.local/state/piton", piton(PitonArea::StateFolder)),
                 Rule {
                     effect: Effect::Allow,
                     access: vec![Access::Connect],
                     target: Target::Literal {
                         path: "/h/.local/state/piton/agent.sock".into(),
                     },
-                    source: piton("the agent socket"),
+                    source: piton(PitonArea::AgentSocket),
                 },
             ],
             keychain: false,
@@ -895,6 +950,41 @@ mod tests {
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
         }
+    }
+
+    /// Each deny of the launch classifies as the floor table says; credentials follow fnox.
+    #[test]
+    fn every_deny_classifies() {
+        use FloorItem as F;
+        use Liftability::{Floor, Liftable};
+        let denies: Vec<Rule> = launch()
+            .rules
+            .into_iter()
+            .filter(|r| r.effect == Effect::Deny)
+            .collect();
+        let classes =
+            |credentials| -> Vec<Liftability> { denies.iter().map(|r| liftability(r, credentials)).collect() };
+        let credential = |item| {
+            [
+                item,
+                item,
+                Floor(F::Configuration),
+                Floor(F::UserSwitch),
+                Floor(F::Configuration),
+                Floor(F::Configuration),
+                Liftable(LiftableDeny::GitControl),
+                Floor(F::StateFolder),
+            ]
+        };
+        assert_eq!(
+            classes(Credentials::Liftable),
+            credential(Liftable(LiftableDeny::Credential))
+        );
+        assert_eq!(classes(Credentials::Floor), credential(Floor(F::Credential)));
+        let control = deny(&[Access::Connect], "/s/piton.sock", piton(PitonArea::ControlSocket));
+        assert_eq!(liftability(&control, Credentials::Liftable), Floor(F::ControlSocket));
+        let fnox = deny(&[Access::Write], "/h/.config/fnox", Source::FnoxConfig);
+        assert_eq!(liftability(&fnox, Credentials::Liftable), Floor(F::FnoxFiles));
     }
 
     /// `all` opens everything the launch closes except the floor, which still decides wherever it applies.

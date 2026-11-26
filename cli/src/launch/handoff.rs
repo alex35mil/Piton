@@ -80,8 +80,12 @@ fn merge(mut env: Env, base: &Env, current: &Env) -> Env {
 /// environment from the handoff. Returns only on failure.
 pub fn exec(command: &[std::ffi::OsString]) -> HandoffError {
     let run = || -> Result<std::convert::Infallible, HandoffError> {
-        let env = from_process()?.ok_or(HandoffError::Missing)?;
+        let mut env = from_process()?.ok_or(HandoffError::Missing)?;
         let (program, args) = command.split_first().ok_or(HandoffError::NoCommand)?;
+        // pi is fnox's child, not the process the daemon started: this process becomes pi, so it says so. A host
+        // launch has no gate.
+        super::sandbox::report_launched("launch-exec", Some(&env), false);
+        env.remove(crate::agent::LAUNCH_TOKEN_ENV);
         use std::os::unix::process::CommandExt;
         // With the environment replaced, the program is found through pi's PATH.
         let source = std::process::Command::new(program)

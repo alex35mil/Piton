@@ -11,7 +11,10 @@
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::block::{CHOOSE_BELOW, PersistScope};
+use super::{
+    answer::Once,
+    block::{CHOOSE_BELOW, PersistScope},
+};
 use crate::{config::CommandPattern, launch::env::WritableVars};
 
 /// Where an approved rerun runs.
@@ -83,17 +86,25 @@ impl Asker {
     }
 }
 
-/// The user's answer, from either rendering.
+/// The user's answer, from either rendering: run it once where chosen (a rerun is one run the daemon bounds), run this
+/// exact command there without asking for the rest of the session, save a `[[sandbox.commands]]` entry and run it, or
+/// deny.
+pub type Answer = super::answer::Answer<Once<Target>, Target, Always, ()>;
+
+impl super::answer::Offer for Target {
+    const OFFERED: bool = true;
+}
+
+impl super::answer::Offer for Always {
+    const OFFERED: bool = true;
+}
+
+/// An "always" answer: run it, and save a `[[sandbox.commands]]` entry for `pattern` in `scope`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    Once(Target),
-    Deny,
-    /// Run it, and save a `[[sandbox.commands]]` entry for `pattern`.
-    Always {
-        target: Target,
-        scope: PersistScope,
-        pattern: CommandPattern,
-    },
+pub struct Always {
+    pub target: Target,
+    pub scope: PersistScope,
+    pub pattern: CommandPattern,
 }
 
 impl Question {
@@ -114,32 +125,34 @@ impl Question {
     }
 }
 
-/// A `session.decide` answer: `{"once": "sandbox" | "host"}`, `"deny"`, or
+/// A `session.decide` answer: `{"once": "sandbox" | "host"}`, `{"session": "sandbox" | "host"}`, `"deny"`, or
 /// `{"always": {"runtime", "scope": "project" | "global", "pattern"}}`.
 pub fn parse_decision(value: &Value) -> Result<Answer, String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "snake_case", deny_unknown_fields)]
     enum Wire {
         Once(Target),
+        Session(Target),
         Deny,
-        Always(Always),
+        Always(WireAlways),
     }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Always {
+    struct WireAlways {
         runtime: Target,
         scope: PersistScope,
         pattern: String,
     }
     let wire: Wire = serde_json::from_value(value.clone()).map_err(|e| format!("invalid answer: {e}"))?;
     Ok(match wire {
-        Wire::Once(target) => Answer::Once(target),
-        Wire::Deny => Answer::Deny,
-        Wire::Always(always) => Answer::Always {
+        Wire::Once(target) => Answer::Narrowest(Once(target)),
+        Wire::Session(target) => Answer::Session(target),
+        Wire::Deny => Answer::Deny(()),
+        Wire::Always(always) => Answer::Always(Always {
             target: always.runtime,
             scope: always.scope,
             pattern: CommandPattern::new(&always.pattern).map_err(|why| format!("pattern: {why}"))?,
-        },
+        }),
     })
 }
 
@@ -151,6 +164,8 @@ pub enum RpcChoice {
     /// Show the question again in the other runtime.
     Switch,
     Once,
+    /// Run this exact command there without asking for the rest of the session.
+    Session,
     Deny,
     /// Save the exact command.
     Command(PersistScope),
@@ -158,7 +173,7 @@ pub enum RpcChoice {
     Pattern(PersistScope),
 }
 
-fn rpc_options(target: Target) -> [(String, RpcChoice); 8] {
+fn rpc_options(target: Target) -> [(String, RpcChoice); 9] {
     use PersistScope::{Global, Project};
     let (once, prefix, switch) = match target {
         Target::Sandbox => (
@@ -175,6 +190,10 @@ fn rpc_options(target: Target) -> [(String, RpcChoice); 8] {
     [
         (CHOOSE_BELOW.to_string(), RpcChoice::AskAgain),
         (once.to_string(), RpcChoice::Once),
+        (
+            format!("{prefix}Allow this command for this session"),
+            RpcChoice::Session,
+        ),
         ("Deny".to_string(), RpcChoice::Deny),
         (
             format!("{prefix}Allow this command {}", Project.label()),
@@ -373,6 +392,7 @@ mod tests {
                 [
                     RpcChoice::AskAgain,
                     RpcChoice::Once,
+                    RpcChoice::Session,
                     RpcChoice::Deny,
                     RpcChoice::Command(Project),
                     RpcChoice::Command(Global),
@@ -460,22 +480,30 @@ mod tests {
 
     #[test]
     fn decisions_parse_strictly() {
-        assert_eq!(parse_decision(&json!({"once": "host"})), Ok(Answer::Once(Target::Host)));
+        assert_eq!(
+            parse_decision(&json!({"once": "host"})),
+            Ok(Answer::Narrowest(Once(Target::Host)))
+        );
         assert_eq!(
             parse_decision(&json!({"once": "sandbox"})),
-            Ok(Answer::Once(Target::Sandbox))
+            Ok(Answer::Narrowest(Once(Target::Sandbox)))
         );
-        assert_eq!(parse_decision(&json!("deny")), Ok(Answer::Deny));
+        assert_eq!(
+            parse_decision(&json!({"session": "sandbox"})),
+            Ok(Answer::Session(Target::Sandbox))
+        );
+        assert_eq!(parse_decision(&json!("deny")), Ok(Answer::Deny(())));
         assert_eq!(
             parse_decision(&json!({"always": {"runtime": "host", "scope": "project", "pattern": "log show *"}})),
-            Ok(Answer::Always {
+            Ok(Answer::Always(Always {
                 target: Target::Host,
                 scope: PersistScope::Project,
                 pattern: CommandPattern::new("log show *").unwrap(),
-            })
+            }))
         );
         for bad in [
             json!({"once": "vm"}),
+            json!({"session": "galaxy"}),
             json!("allow"),
             json!({"always": {"runtime": "host", "scope": "project", "pattern": "  "}}),
             json!({"always": {"runtime": "host", "scope": "galaxy", "pattern": "x"}}),

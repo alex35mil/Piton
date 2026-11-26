@@ -25,7 +25,7 @@ use std::{
 
 use super::{
     SandboxError,
-    policy::{self, AgentDirWrite, Provenance, Source},
+    policy::{self, AgentDirWrite, PitonArea, Provenance, Source},
     rules::{Access, Apps, Effect, Gate, Listen, Network, NetworkGrant, Policy, Rule, ServiceGrant, Services, Target},
 };
 use crate::{
@@ -67,25 +67,10 @@ pub struct Facts<'a> {
     pub claude_sockets: Option<&'a Path>,
 }
 
-/// Why a configuration level is closed, and how it's changed: what `piton sandbox why` prints.
-const CONFIG_LEVEL_DENY: &str = "a configuration level: changed only through a write the user approves (the edit or \
-                                 write tool)";
-
-/// Why pi's agent directory is closed, and how it's changed.
-const AGENT_DIR_DENY: &str = "pi's agent directory: extensions, settings, and packages pi loads; changed only through \
-                              a write the user approves (the edit or write tool)";
-
-/// Why a folder on the way to a configuration level, an agent directory, or a link target can't be renamed or replaced.
-const FIXED_FOLDER_DENY: &str = "a folder on the way to configuration: renaming or replacing it would move what the \
-                                 user approves (what's in it follows the other rules)";
-
-/// Why Git's hooks and configuration are closed, and how to open them: what `piton sandbox why` prints.
-const GIT_CONTROL_DENY: &str = "Git's hooks and configuration: Git on the host runs what they name; \
-                                `allow_git_control_files = true` opens them (global config.toml or a config.local.toml)";
-
-/// Why a socket a `[sandbox.network.unix_socket_connections]` entry names, or a folder on its way, can't be written.
-const SOCKET_PATH_DENY: &str = "a socket an entry allows, or a folder on its way: kept in place so no other socket can \
-                                be moved there";
+/// Piton's own rule source for `area`.
+fn piton(area: PitonArea) -> Source {
+    Source::Piton { area }
+}
 
 /// The socket macOS resolves names through.
 const DNS_SOCKET: &str = "/var/run/mDNSResponder";
@@ -720,9 +705,7 @@ fn build(
         Effect::Deny,
         &[Access::Write],
         subpath(&host_agent),
-        Source::Piton {
-            what: AGENT_DIR_DENY.into(),
-        },
+        piton(PitonArea::AgentDir),
     );
     if canonical_target(&agent) != canonical_target(&host_agent) {
         // A per-folder agent directory (even one inside the workspace) is loaded by host sessions in that folder too.
@@ -730,9 +713,7 @@ fn build(
             Effect::Deny,
             &[Access::Write],
             subpath(&agent),
-            Source::Piton {
-                what: AGENT_DIR_DENY.into(),
-            },
+            piton(PitonArea::AgentDir),
         );
     }
     for write in policy::AGENT_DIR_WRITES {
@@ -768,17 +749,13 @@ fn build(
             Effect::Deny,
             &[Access::Write],
             literal(&entry),
-            Source::Piton {
-                what: SOCKET_PATH_DENY.into(),
-            },
+            piton(PitonArea::SocketPath),
         );
     }
 
     // 5. Configuration and protected files: what the user edits by hand, changed only through a write they approve
     // (`agent/protected.rs`, the same definition).
-    let config_level = Source::Piton {
-        what: CONFIG_LEVEL_DENY.into(),
-    };
+    let config_level = piton(PitonArea::ConfigLevel);
     let own_piton = config.source.join(crate::config::PITON_DIR);
     let own_agents = config.checkout.join(crate::config::AGENTS_DIR);
     let mut areas: Vec<(PathBuf, Source)> = Vec::new();
@@ -791,11 +768,11 @@ fn build(
     }
     let agent_dirs = [host_agent.clone(), agent.clone()];
     for (link, target) in crate::agent::link_entries(&config.levels, &agent_dirs, &config.source, &config.checkout) {
-        let what = match agent_dirs.iter().any(|d| link.starts_with(d)) {
-            true => AGENT_DIR_DENY,
-            false => CONFIG_LEVEL_DENY,
+        let area = match agent_dirs.iter().any(|d| link.starts_with(d)) {
+            true => PitonArea::AgentDir,
+            false => PitonArea::ConfigLevel,
         };
-        areas.push((target, Source::Piton { what: what.into() }));
+        areas.push((target, piton(area)));
     }
     // Every folder on the way to each of them (and to the agent directories), fixed in place, as for what fnox loads: a
     // folder moved aside and replaced would let what's inside be changed under the same name. The areas' own denies
@@ -810,9 +787,7 @@ fn build(
             Effect::Deny,
             &[Access::Write],
             literal(&entry),
-            Source::Piton {
-                what: FIXED_FOLDER_DENY.into(),
-            },
+            piton(PitonArea::FixedFolder),
         );
     }
     for (path, source) in areas {
@@ -826,9 +801,7 @@ fn build(
             source: canonical(&config.source),
             checkout: canonical(&config.checkout),
         },
-        Source::Piton {
-            what: "a protected file (.piton/ or .pi/): changed only with the user's approval".into(),
-        },
+        piton(PitonArea::ProtectedFile),
     );
     // `allow_git_control_files = true` (the user's own choice, or yolo's) leaves this rule out.
     if grants.git_control.is_none() {
@@ -838,9 +811,7 @@ fn build(
             Target::GitControl {
                 control: GitControl::of(&[&canonical(&config.checkout), &canonical(&config.source)]),
             },
-            Source::Piton {
-                what: GIT_CONTROL_DENY.into(),
-            },
+            piton(PitonArea::GitControl),
         );
     }
 
@@ -849,41 +820,31 @@ fn build(
         Effect::Deny,
         &all,
         subpath(facts.state_dir),
-        Source::Piton {
-            what: "the daemon's state folder".into(),
-        },
+        piton(PitonArea::StateFolder),
     );
     rules.push(
         Effect::Allow,
         &[Access::Read],
         subpath(facts.logs),
-        Source::Piton {
-            what: "Piton's logs".into(),
-        },
+        piton(PitonArea::Logs),
     );
     rules.push(
         Effect::Allow,
         &[Access::Read],
         subpath(&crate::launch::sandbox::network::ssh::folder(facts.state_dir)),
-        Source::Piton {
-            what: "the ssh wrapper that tunnels SSH through the network gate".into(),
-        },
+        piton(PitonArea::SshWrapper),
     );
     rules.push(
         Effect::Allow,
         &[Access::Connect],
         literal(facts.agent_socket),
-        Source::Piton {
-            what: "the agent socket (protected writes, commands the daemon runs)".into(),
-        },
+        piton(PitonArea::AgentSocket),
     );
     rules.push(
         Effect::Deny,
         &[Access::Connect],
         literal(facts.control_socket),
-        Source::Piton {
-            what: "the daemon's control socket (clients only)".into(),
-        },
+        piton(PitonArea::ControlSocket),
     );
 
     let keychains = facts.home.join("Library/Keychains");
@@ -2645,7 +2606,7 @@ mod tests {
         assert_eq!(
             denied(&pi).source,
             Source::Piton {
-                what: FIXED_FOLDER_DENY.into()
+                area: PitonArea::FixedFolder
             }
         );
         assert!(denied(&pi.join("keybindings.json")).allowed, "a sibling");
@@ -2804,10 +2765,8 @@ mod tests {
         }
         // `piton sandbox why` names the opt-in.
         let source = p.decide(&f.repo.join(".git/config"), Access::Write).source;
-        assert!(
-            matches!(&source, Source::Piton { what } if what.contains("allow_git_control_files")),
-            "{source:?}"
-        );
+        assert_eq!(source, piton(PitonArea::GitControl), "{source:?}");
+        assert!(PitonArea::GitControl.describe().contains("allow_git_control_files"));
         for open in [
             ".git/index",
             ".git/refs/heads/x",

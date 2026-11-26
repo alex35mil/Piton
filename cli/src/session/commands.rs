@@ -19,9 +19,10 @@ use tokio::sync::oneshot;
 use crate::{
     agent::{
         Approved, Matched, PiShell, RunDecision, RunRequest, Runtime, Why,
+        answer::Once,
         block::PersistScope,
         grant_for,
-        question::{self, Answer, Question, RpcChoice, Target},
+        question::{self, Always, Answer, Question, RpcChoice, Target},
     },
     config::{AllGrant, CommandGrant, CommandPattern, CommandRuntime, ConfigFile, Grant, Paths, Sharing, WriteLevel},
     launch::{
@@ -121,6 +122,8 @@ pub struct Commands {
     pub grants: Vec<crate::config::Listed<CommandGrant>>,
     /// The configuration levels the launch read (its `.piton/` and `.agents/` folders, the global tier included).
     pub levels: Vec<PathBuf>,
+    /// Commands the user approved for this session, exactly as the agent sends them, with where they run.
+    pub session_grants: HashMap<String, Target>,
 }
 
 /// The question the user is being asked, and where the decision goes.
@@ -568,9 +571,11 @@ impl Commands {
                         )),
                     }
                 }
-                Ok(Matched::None | Matched::Redirect) | Err(_) => {
-                    self.run(request, Runtime::Session(tagged(&self.policies.launch, &tag)))
-                }
+                // Not a saved entry's: the user's approval for this session, for exactly this command.
+                Ok(Matched::None | Matched::Redirect) | Err(_) => match self.session_grants.get(&request.command) {
+                    Some(target) => self.run(request, self.approved_runtime(&tag, *target, Why::Session)),
+                    None => self.run(request, Runtime::Session(tagged(&self.policies.launch, &tag))),
+                },
             },
         }
     }
@@ -680,14 +685,22 @@ impl Commands {
 
     /// A rerun the user approved, where they chose: at `all` in the sandbox, or on the host.
     pub fn approved_rerun(&self, request: &RunRequest, tag: &str, target: Target) -> Approved {
-        let runtime = match target {
+        self.approved(request, self.approved_runtime(tag, target, Why::Approval))
+    }
+
+    /// Runs `command` where `target` says, without asking, until the session ends.
+    pub fn allow_for_session(&mut self, command: &str, target: Target) {
+        self.session_grants.insert(command.to_string(), target);
+    }
+
+    fn approved_runtime(&self, tag: &str, target: Target, by: Why) -> Runtime {
+        match target {
             Target::Sandbox => Runtime::Widened {
                 policy: tagged(&self.policies.all, tag),
-                by: Why::Approval,
+                by,
             },
-            Target::Host => Runtime::Host { by: Why::Approval },
-        };
-        self.approved(request, runtime)
+            Target::Host => Runtime::Host { by },
+        }
     }
 
     /// The command as the daemon runs it: where `runtime` says, the shell and prefix from pi's settings, and the
@@ -736,8 +749,10 @@ impl Commands {
         }
     }
 
-    /// Saves a per-command entry for `pattern`: `runtime = "sandbox"` with `grant = "all"`, or `runtime = "host"`.
-    pub fn persist(&self, scope: PersistScope, pattern: CommandPattern, target: Target) -> Result<PathBuf, String> {
+    /// Saves a per-command entry for `always`'s pattern: `runtime = "sandbox"` with `grant = "all"`, or
+    /// `runtime = "host"`.
+    pub fn persist(&self, always: Always) -> Result<PathBuf, String> {
+        let Always { target, scope, pattern } = always;
         let file = self.file(scope);
         let grant = CommandGrant {
             pattern,
@@ -786,18 +801,19 @@ pub fn rpc_answer(stage: Stage, question: &Question, answer: &Map<String, Value>
         Stage::Choice => match question::read_rpc_choice(target, answer) {
             RpcChoice::AskAgain => Next::AskAgain,
             RpcChoice::Switch => Next::Switch,
-            RpcChoice::Once => Next::Decided(Answer::Once(target)),
-            RpcChoice::Deny => Next::Decided(Answer::Deny),
+            RpcChoice::Once => Next::Decided(Answer::Narrowest(Once(target))),
+            RpcChoice::Session => Next::Decided(Answer::Session(target)),
+            RpcChoice::Deny => Next::Decided(Answer::Deny(())),
             RpcChoice::Command(scope) => match CommandPattern::new(&question.command) {
-                Ok(pattern) => Next::Decided(Answer::Always { target, scope, pattern }),
+                Ok(pattern) => Next::Decided(Answer::Always(Always { target, scope, pattern })),
                 // A multi-line command can't be a pattern: run it once.
-                Err(_) => Next::Decided(Answer::Once(target)),
+                Err(_) => Next::Decided(Answer::Narrowest(Once(target))),
             },
             RpcChoice::Pattern(scope) => Next::AskPattern(target, scope),
         },
         Stage::Pattern(target, scope) => match question::read_pattern(answer) {
-            Some(pattern) => Next::Decided(Answer::Always { target, scope, pattern }),
-            None => Next::Decided(Answer::Deny),
+            Some(pattern) => Next::Decided(Answer::Always(Always { target, scope, pattern })),
+            None => Next::Decided(Answer::Deny(())),
         },
     }
 }
@@ -875,6 +891,7 @@ mod tests {
             },
             grants,
             levels: vec![dir.join("g"), dir.join(".piton")],
+            session_grants: HashMap::new(),
         }
     }
 
@@ -1024,7 +1041,7 @@ mod tests {
             crate::launch::sandbox::Access::Write,
             home.join(".pi"),
             crate::launch::sandbox::Source::Piton {
-                what: "agent dir".into(),
+                area: crate::launch::sandbox::PitonArea::AgentDir,
             },
         );
         let ssh = deny(
@@ -1500,39 +1517,49 @@ mod tests {
         };
         let (s, h) = (labels(&sandbox), labels(&host));
         assert!(matches!(a(&sandbox, Stage::Choice, &s[0]), Next::AskAgain));
-        assert!(matches!(a(&sandbox, Stage::Choice, &s[7]), Next::Switch));
+        assert!(matches!(a(&sandbox, Stage::Choice, &s[8]), Next::Switch));
         assert_eq!(
             decided(a(&sandbox, Stage::Choice, &s[1])),
-            Answer::Once(Target::Sandbox)
+            Answer::Narrowest(Once(Target::Sandbox))
         );
-        assert_eq!(decided(a(&host, Stage::Choice, &h[1])), Answer::Once(Target::Host));
-        assert_eq!(decided(a(&host, Stage::Choice, &h[2])), Answer::Deny);
         assert_eq!(
-            decided(a(&host, Stage::Choice, &h[3])),
-            Answer::Always {
+            decided(a(&host, Stage::Choice, &h[1])),
+            Answer::Narrowest(Once(Target::Host))
+        );
+        assert_eq!(s[2], "Allow this command for this session");
+        assert_eq!(h[2], "On the host: Allow this command for this session");
+        assert_eq!(
+            decided(a(&sandbox, Stage::Choice, &s[2])),
+            Answer::Session(Target::Sandbox)
+        );
+        assert_eq!(decided(a(&host, Stage::Choice, &h[2])), Answer::Session(Target::Host));
+        assert_eq!(decided(a(&host, Stage::Choice, &h[3])), Answer::Deny(()));
+        assert_eq!(
+            decided(a(&host, Stage::Choice, &h[4])),
+            Answer::Always(Always {
                 target: Target::Host,
                 scope: PersistScope::Project,
                 pattern: CommandPattern::new("husky install").unwrap(),
-            }
+            })
         );
         assert!(matches!(
-            a(&host, Stage::Choice, &h[6]),
+            a(&host, Stage::Choice, &h[7]),
             Next::AskPattern(Target::Host, PersistScope::Global)
         ));
         assert_eq!(
             decided(a(&host, Stage::Pattern(Target::Host, PersistScope::Global), "husky *")),
-            Answer::Always {
+            Answer::Always(Always {
                 target: Target::Host,
                 scope: PersistScope::Global,
                 pattern: CommandPattern::new("husky *").unwrap(),
-            }
+            })
         );
         assert_eq!(
             decided(a(&host, Stage::Pattern(Target::Host, PersistScope::Global), "")),
-            Answer::Deny
+            Answer::Deny(())
         );
         // The sandbox dialog's labels don't approve a host run, nor the other way round.
-        assert_eq!(decided(a(&sandbox, Stage::Choice, &h[1])), Answer::Deny);
+        assert_eq!(decided(a(&sandbox, Stage::Choice, &h[1])), Answer::Deny(()));
     }
 
     /// An approved rerun runs where the user chose: at `all` with the launch environment, or on the host without the
@@ -1558,6 +1585,43 @@ mod tests {
         assert_eq!(host.env["FROM"], "launch");
         assert!(!host.env.contains_key("PITON_RUNTIME"));
         assert_eq!(host.command, "set -e\nhusky install");
+    }
+
+    /// A command approved for this session runs where approved without asking, for exactly that command; a saved entry
+    /// that matches still decides first, and another command runs in the session's sandbox.
+    #[test]
+    fn a_command_approved_for_the_session_runs_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &["cargo build *"]);
+        c.allow_for_session("npm install", Target::Sandbox);
+        c.allow_for_session("cargo build", Target::Host);
+        let mut calls = Calls::new("7-ab");
+        start(&mut calls, "1", "npm install", false);
+        let ran = run(c.decide(&mut calls, &request(&dir, "1", "npm install", false)));
+        match &ran.runtime {
+            Runtime::Widened { policy, by } => {
+                assert!(policy.keychain, "at `all`");
+                assert_eq!(*by, Why::Session);
+            }
+            Runtime::Session(_) | Runtime::Host { .. } => panic!("not widened"),
+        }
+        assert_eq!(
+            ran.runtime.ran(),
+            Some(crate::agent::Ran {
+                runtime: crate::agent::RanRuntime::Sandbox,
+                by: crate::agent::RanBy::Session,
+            })
+        );
+        start(&mut calls, "2", "npm install left-pad", false);
+        let other = run(c.decide(&mut calls, &request(&dir, "2", "npm install left-pad", false)));
+        assert!(matches!(other.runtime, Runtime::Session(_)), "only the exact command");
+        start(&mut calls, "3", "cargo build", false);
+        let saved = run(c.decide(&mut calls, &request(&dir, "3", "cargo build", false)));
+        assert!(
+            matches!(saved.runtime, Runtime::Widened { by: Why::Grant(_), .. }),
+            "the saved entry decides first"
+        );
     }
 
     /// A saved host entry runs its matching command on the host, without asking; a sandbox entry runs widened.
@@ -1596,11 +1660,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = commands(dir.path(), &[]);
         let global = c
-            .persist(
-                PersistScope::Global,
-                CommandPattern::new("husky install").unwrap(),
-                Target::Sandbox,
-            )
+            .persist(Always {
+                scope: PersistScope::Global,
+                pattern: CommandPattern::new("husky install").unwrap(),
+                target: Target::Sandbox,
+            })
             .unwrap();
         assert_eq!(global, dir.path().join("g/config.toml"));
         let text = std::fs::read_to_string(&global).unwrap();
@@ -1609,11 +1673,11 @@ mod tests {
             "{text}"
         );
         let project = c
-            .persist(
-                PersistScope::Project,
-                CommandPattern::new("git push *").unwrap(),
-                Target::Host,
-            )
+            .persist(Always {
+                scope: PersistScope::Project,
+                pattern: CommandPattern::new("git push *").unwrap(),
+                target: Target::Host,
+            })
             .unwrap();
         assert_eq!(project, dir.path().join(".piton/config.local.toml"));
         let text = std::fs::read_to_string(project).unwrap();
