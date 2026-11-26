@@ -218,7 +218,7 @@ export type LiftTarget =
 export type LiftLine =
     | { type: "granted"; tokens: string[] }
     | { type: "denied" }
-    /** Not asked or not issued: a floor target, another question waiting. (`refused` is the channel's own.) */
+    /** Not granted: a floor target, no answer in time, the run ended, a token not issued. (`refused` is the channel's own.) */
     | { type: "not_granted"; reason: string }
     | { type: "unsupported" }
     | { type: "ended" }

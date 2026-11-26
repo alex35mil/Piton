@@ -216,7 +216,7 @@ pub async fn serve(daemon: &Daemon, session: SessionKey, request: RunRequest, wr
         return;
     }
     // Wakes the session when the agent stops waiting, so it closes the question at once.
-    let _wake = WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleQuestion);
+    let _wake = WakeOnDrop(handle.tx.clone());
     let unanswered = || RunLine::Error {
         message: "the session ended before the user answered".into(),
     };

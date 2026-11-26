@@ -288,8 +288,8 @@ with `.piton/.local` linked to the source's.
   - Follow-up questions come after the first answer and before anything changes: a protected-files update (as the
     CLI's `protected_files_update`, answered in the question), and, on delete, uncommitted or unpushed work, which
     offers "Delete anyway" every time, whatever the settings say.
-  - The questions share the session's one question slot. One that arrives while another question is open waits for
-    it and is shown when it frees, oldest first; its `approval_timeout` starts when it's shown.
+  - The questions wait their turn in the session's questions ("Questions" under "The channel to the daemon"); an
+    operation the user allowed for this session while its question waited is answered without showing it.
   - Only the wait for the first answer is tied to the agent's connection: closing it withdraws the question. Once
     approved, the operation runs as its own task to the end, so a session may delete the worker it runs in (the
     question says so); its pi stops, and the worker is still deleted.
@@ -1140,7 +1140,8 @@ writable from the sandbox, which runs the real `ssh` with `ProxyCommand=piton ga
   most specific matching entry when it names a host (`Policy::network_entry`), pi's trusted hosts
   (`pi::catalog::Catalog`), the hosts allowed for the session, and a generic entry (`*`, `*:PORT`, `localhost…`), so
   `"*" = "deny"` refuses without asking but never cuts pi off from its providers; otherwise the connection waits on a
-  question, one at a time in the session's slot, connections to the same destination joining it. Answers: allow for
+  question in the session's questions ("Questions" under "The channel to the daemon"), connections to the same
+  destination joining it. Answers: allow for
   the session; allow and save (`"host:port" = "allow"`, `grant::Lift::Network`), which also joins every live
   sandbox's policy so it applies at once (Seatbelt doesn't change, so no restart); not now. No answer saves a denial,
   as in Codex. No answer in `approval_timeout`, or no client, refuses it with `403`.
@@ -1217,8 +1218,9 @@ Changes are gated where they're written:
    the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
    as a `protected_write` request ("The channel to the daemon"); the daemon checks the path, shows the confirmation with the diff in the apps
    and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
-   approve: answers come only from clients. One pending request per session; it ends when the agent stops waiting or
-   its run ends. Every protected write asks. The dialog carries the file's current content, so the
+   approve: answers come only from clients. A request waits its turn in the session's questions ("Questions" under
+   "The channel to the daemon"); it ends when the agent stops waiting, its run ends, or `approval_timeout` passes.
+   Every protected write asks, and its diff is against the file as it is when the question shows. The dialog carries the file's current content, so the
    apps show a diff without reading the file. Its `prompt` says what the file controls, since the diff is the user's
    only check: "can loosen the sandbox" (the global `config.toml`, any `config.local.toml`), "runs code in every
    session" (an agent directory's `extensions/`, `npm/`, `git/`, `bin/`, `settings.json`, `trust.json`, `mcp.json`; a
@@ -1336,6 +1338,28 @@ one it doesn't offer can't be built.
 - **Always:** saved where the kind says, only for kinds that have a saved form.
 - **Deny.**
 
+**Questions** (`session/questions.rs`, #416). Every question a session asks the user is one value of one sum type:
+a protected write, a block question (the agent's rerun or Piton's own), a process question, a network question, a
+worker question, or a lift. The session holds one showing and the rest in one queue, in arrival order across kinds,
+with one path to show, answer, show again, settle, and expire; nothing is refused because another question is open.
+
+- **Per kind**, a question supplies only its dialog, how its answer is read, its timeout, what it does when it ends
+  unanswered, and whether its asker stopped waiting (its connection closed). Approvals (writes, block questions,
+  network questions, worker questions, lifts) end after `approval_timeout`, counted from when they're first shown and
+  kept when they show again (a next stage, "Choose an answer below"); the action doesn't happen and the asker is told.
+  Process questions are notices: nothing waits on them, so they never time out.
+- **pi's dialogs take the slot too.** A question waits while a dialog of pi's own is pending (a file review, an
+  extension's prompt), and shows once it's answered or expires. The replay records whose each pending dialog is, pi's
+  or the session's (`replay::Owner`). A dialog pi opens while a question shows still appears; pi can't be held back.
+- **Ending unanswered.** A waiting question whose asker stops waiting is dropped without showing; the showing one ends
+  and its dialog closes in every client (`SessionCmd::Settle`, sent when the asker's wait ends). When its dialog
+  leaves with the run (pi's `agent_settled`), an approval is refused and the agent told; a process or network question
+  goes back to the front, to show again.
+- **Network questions** gather every held connection to the same destination, showing or waiting; one answer settles
+  them all. A connection the gate let go is dropped from its question.
+- Typed answers from `view` clients (`session.decide`) take the showing block question by its typed id; answering
+  either rendering closes both.
+
 **The floor** (`launch/sandbox/grant.rs`, `Liftability`): what no approval lifts from a sandbox, each with its reason.
 Liftability is one typed classification of each deny, read both by the widened sandbox (`all` keeps exactly the floor)
 and by block reports; the daemon checks it again before granting anything.
@@ -1376,8 +1400,9 @@ widened with Seatbelt extension tokens, so a block in pi's own process needs no 
   matching its daemon.
 - **`lift {targets, reason}`**: code in pi's process asks to widen its sandbox for one action (`__lib/lift.ts`,
   `lift(targets, reason, action)`). The user answers once, for this session, or deny; the client consumes the tokens,
-  runs the action, and releases them in `finally`. A floor target, or another question holding the slot, is
-  `not_granted` without asking. Off macOS, `unsupported`; outside a session, the action runs directly.
+  runs the action, and releases them in `finally`. A floor target is `not_granted` without asking; otherwise the
+  question waits its turn ("Questions" above), and no answer in `approval_timeout`, or the run ending, is
+  `not_granted` too. Off macOS, `unsupported`; outside a session, the action runs directly.
 - **`lifts`**: the permissions extension holds this stream open from `session_start`. The daemon sends
   `{type: "grant", id, token, lift, for_child}` and `{type: "revoke", id}`; pi answers each grant with `consumed` or
   `failed`. `for_child` says the block was in a process pi started (a refusal whose pid isn't pi's), not pi's own.
@@ -1469,7 +1494,7 @@ socket asks the session (`SessionCmd::RunFailed`, decided by `Commands::after_fa
 recorded block an approved rerun lifts (`grant::command_block` against `all`). The kernel's record usually arrives
 within ~5 ms, so the socket looks every 10 ms for at most 50 ms, and stops at the first look that finds a block. A
 success never waits. Credential reads (ssh's key probe on every SSH Git command), blocks the floor decides, and
-silenced blocks are reported, not asked; so is a block while another question holds the slot. Every operation's
+silenced blocks are reported, not asked; the question for any other waits its turn ("Questions" above). Every operation's
 refusal reaches its call, since the default deny is tagged (below): a preferences write (`user-preference-write`, which
 `all` lifts), a blocked `open` (`lsopen`, which `all` lifts), `osascript` scripting another app
 (`file-issue-extension`, refused even with apps open), a signal to another process or a `sysctl` write (floor: only a
@@ -1513,8 +1538,7 @@ question per connection, by the protocol its hello chose, so the view protocol i
 - Both map to the same typed answer, and answering either closes both. This is the first Piton question; protected
   writes and process questions are still pi dialogs (#338 generalizes it).
 
-Only a client answers. One
-question at a time per session, shared with protected writes and worker questions; no answer within `approval_timeout` (host
+Only a client answers. It waits its turn in the session's questions ("Questions" above); no answer within `approval_timeout` (host
 configuration, 10 minutes by default, or `"never"`), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
 (`agent/open/`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
 scheme names the app Launch Services hands it to (`LSCopyDefaultApplicationURLForURL`, asked by the daemon) and is
@@ -1534,11 +1558,9 @@ The daemon runs one `log stream` (outside any sandbox; `log` refuses inside one)
 tagged reports and routes each to its session by tag (`daemon/refusals.rs`). A call's tag: kept for that call (shown
 when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fail. The session's tag, or a call
 forgotten since (its background job): a blocked process, every one brought to the user, in order, and each process,
-operation, and target once (again after a live grant that answered it ends). The session asks one question at a time
-(protected writes, worker questions, block questions, process questions, lifts); a worker question waits for the slot
-like a network question (its timeout starts when it's shown); a process question waits for the slot, is shown as soon
-as it frees, and is asked again when its dialog leaves unanswered with the run it showed in. #416 replaces these
-per-kind rules with one question scheduler.
+operation, and target once (again after a live grant that answered it ends). Its question waits its turn in the
+session's questions ("Questions" above), never times out, and is asked again when its dialog leaves unanswered with the
+run it showed in.
 
 The answers depend on whose block it is (`agent/block.rs`, `Live`). In pi's own sandbox (the session's tag), with its
 `lifts` stream open and the live check passing (`grant::live_lift`), it's lifted while pi runs ("Lifts for pi's live

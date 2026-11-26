@@ -490,12 +490,12 @@ async fn ask<T>(
     let Some(handle) = daemon.session(session) else {
         return Err(WorkerResponse::Ended);
     };
-    // Waits for the session's one question slot when another question holds it.
+    // Waits its turn in the session's questions.
     if handle.tx.send(SessionCmd::WorkerQuestion { asked }).is_err() {
         return Err(WorkerResponse::Ended);
     }
-    // Wakes the session when the asker stops waiting, so it closes the dialog at once.
-    let _wake = super::socket::WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleWorkerQuestion);
+    // Wakes the session when the asker stops waiting, so it drops the question or closes its dialog at once.
+    let _wake = super::socket::WakeOnDrop(handle.tx.clone());
     answer
         .await
         .map_err(|_| not_done("the user didn't answer (dismissed, timed out, or the run ended)"))

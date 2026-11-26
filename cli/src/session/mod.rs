@@ -7,6 +7,7 @@ mod lifts;
 mod network;
 mod notice;
 mod prompts;
+mod questions;
 mod replay;
 mod view;
 
@@ -36,6 +37,7 @@ pub use self::{
 };
 use self::{
     prompts::PromptQueue,
+    questions::{Ended, PendingLift, PendingWrite, Question, Questions, Showing, Unanswered},
     replay::Replay,
     view::{Change, StateInput, View},
 };
@@ -188,15 +190,12 @@ pub enum SessionCmd {
         request: crate::agent::WriteRequest,
         reply: oneshot::Sender<crate::agent::WriteOutcome>,
     },
-    /// The agent stopped waiting for a protected write (or got its answer): settle it if it's still pending.
-    SettleProtectedWrite,
-    /// A worker operation's question (agent.sock): asked in the session's one question slot, waiting for it when
-    /// another question holds it.
+    /// A worker operation's question (agent.sock): it waits its turn in the session's questions.
     WorkerQuestion {
         asked: crate::agent::workers::Asked,
     },
-    /// The agent stopped waiting for a worker question: settle it if it's still pending.
-    SettleWorkerQuestion,
+    /// Someone who asked a question stopped waiting (or got its answer): the session's questions drop or end it.
+    Settle,
     /// A bash call the agent asks the daemon to run (agent.sock): with a per-command grant, or after the user approves.
     RunCommand {
         request: crate::agent::RunRequest,
@@ -209,8 +208,6 @@ pub enum SessionCmd {
         last: bool,
         reply: oneshot::Sender<crate::agent::Failed>,
     },
-    /// The agent stopped waiting for a run request: settle its question if it's still pending.
-    SettleQuestion,
     /// A refusal the kernel recorded for this session's sandbox.
     Refusal(crate::daemon::Refusal),
     /// A connection the gate holds: decided by the session, asking the user when nothing else does.
@@ -236,8 +233,6 @@ pub enum SessionCmd {
         request: crate::agent::lift::LiftRequest,
         reply: oneshot::Sender<crate::agent::lift::LiftDecision>,
     },
-    /// The caller stopped waiting for a lift: settle its question if it's still pending.
-    SettleLift,
     /// pi's `lifts` stream.
     Lifts(LiftsEvent),
 }
@@ -587,13 +582,10 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
     let task = SessionTask {
         config,
         protected: spec.facts.protected,
-        protected_write: None,
-        worker_question: None,
-        worker_queue: VecDeque::new(),
+        questions: Questions::default(),
         workers_allowed: std::collections::HashSet::new(),
         commands,
         calls: commands::Calls::new(&session_tag),
-        question: None,
         process: commands::ProcessBlocks::default(),
         shared,
         hooks,
@@ -623,7 +615,6 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         lifts_out: None,
         pi_pid: None,
         next_stream: 1,
-        lift: None,
     };
     tokio::spawn(task.run(
         child,
@@ -665,24 +656,6 @@ enum Sent {
     Accepted(Value),
 }
 
-/// A protected write the user is being asked about: the dialog's id, and where the outcome goes.
-struct PendingWrite {
-    id: String,
-    /// The folder the write starts from (the checkout, a configuration level, pi's agent directory, a linked file's
-    /// folder): it walks from here without following symlinks.
-    root: PathBuf,
-    path: PathBuf,
-    content: String,
-    reply: oneshot::Sender<crate::agent::WriteOutcome>,
-}
-
-/// A worker question the user is being asked about: the dialog's id, and the question with where its answer goes.
-struct PendingWorkerQuestion {
-    id: String,
-    asked: crate::agent::workers::Asked,
-    deadline: Option<Instant>,
-}
-
 /// How many message ids a session remembers for repeats.
 const SENT_KEPT: usize = 256;
 
@@ -697,21 +670,15 @@ enum StopPhase {
 struct SessionTask {
     config: Arc<DaemonConfig>,
     protected: crate::agent::Protected,
-    /// The protected write waiting for the user: one per session.
-    protected_write: Option<PendingWrite>,
-    /// The worker question waiting for the user, sharing the slot.
-    worker_question: Option<PendingWorkerQuestion>,
-    /// Worker questions waiting for the slot, oldest first: each is shown when it frees, and its timeout starts then.
-    worker_queue: VecDeque<crate::agent::workers::Asked>,
+    /// Every question for the user: one showing, the rest waiting their turn (`questions.rs`).
+    questions: Questions,
     /// Worker operations the user allowed for the rest of this session.
     workers_allowed: std::collections::HashSet<crate::agent::workers::WorkerOp>,
     /// What approved commands run with: sandboxed sessions only.
     commands: Option<commands::Commands>,
     /// The bash calls pi is running, and whose sandbox each tag is.
     calls: commands::Calls,
-    /// The block question waiting for the user: one per session, sharing the slot with protected writes.
-    question: Option<commands::PendingQuestion>,
-    /// A blocked process's question (an MCP server, an extension), and the refusals offered already.
+    /// The blocked processes' refusals offered already (an MCP server, an extension).
     process: commands::ProcessBlocks,
     shared: Arc<Mutex<Shared>>,
     hooks: Hooks,
@@ -744,15 +711,6 @@ struct SessionTask {
     /// pi's pid, from its stream: a refusal of another pid is a process pi started (an MCP server).
     pi_pid: Option<i32>,
     next_stream: u64,
-    /// An explicit lift waiting for the user: one at a time, sharing the slot with every other question.
-    lift: Option<PendingLift>,
-}
-
-/// An explicit lift the user is being asked about.
-struct PendingLift {
-    id: String,
-    targets: Vec<crate::launch::sandbox::grant::LiveLift>,
-    reply: oneshot::Sender<crate::agent::lift::LiftDecision>,
 }
 
 struct Watcher {
@@ -855,13 +813,12 @@ impl SessionTask {
         let mut end_reason = EndReason::PiExited;
         loop {
             let stop_deadline = self.stopping.as_ref().map(|(_, at)| *at);
-            let question_deadline = self.question.as_ref().and_then(|q| q.deadline);
-            let worker_deadline = self.worker_question.as_ref().and_then(|q| q.deadline);
-            let network_deadline = self
-                .network
-                .as_ref()
-                .and_then(|n| n.asking.as_ref())
-                .and_then(|a| a.deadline);
+            let question_deadline = self.questions.deadline();
+            // A question waiting behind a dialog of pi's with a timeout shows when that dialog expires.
+            let pi_dialog_expiry = match self.questions.is_waiting() {
+                true => self.replay.pi_dialog_expiry(),
+                false => None,
+            };
             tokio::select! {
                 line = stdout.next_line(), if stdout_open => match line {
                     Ok(Some(line)) => self.on_pi_line(line),
@@ -895,13 +852,13 @@ impl SessionTask {
                     self.advance_stop();
                 }
                 _ = sleep_until(question_deadline.unwrap_or_else(Instant::now)), if question_deadline.is_some() => {
-                    self.expire_question();
+                    let ended = self.questions.expire(Instant::now());
+                    self.after_ended(ended);
                 }
-                _ = sleep_until(worker_deadline.unwrap_or_else(Instant::now)), if worker_deadline.is_some() => {
-                    self.end_worker_question("timed out");
-                }
-                _ = sleep_until(network_deadline.unwrap_or_else(Instant::now)), if network_deadline.is_some() => {
-                    self.expire_network_question();
+                _ = sleep_until(pi_dialog_expiry.unwrap_or_else(Instant::now)), if pi_dialog_expiry.is_some() => {
+                    self.ask_next();
+                    self.sync_shared();
+                    self.publish_view_state();
                 }
                 _ = sleep_until(self.empty_deadline.unwrap_or_else(Instant::now)), if self.empty_deadline.is_some() => {
                     self.empty_deadline = None;
@@ -1028,35 +985,16 @@ impl SessionTask {
                 reply,
             } => self.view_command(watcher, command, reply),
             SessionCmd::ProtectedWrite { request, reply } => self.protected_write(request, reply),
-            SessionCmd::SettleProtectedWrite => {
-                self.settle_protected_write();
-                self.ask_next_process();
-                self.publish_view_state();
-            }
             SessionCmd::WorkerQuestion { asked } => self.worker_question(asked),
-            SessionCmd::SettleWorkerQuestion => {
-                self.settle_worker_question();
-                self.ask_next_process();
-                self.publish_view_state();
-            }
+            SessionCmd::Settle => self.settle(),
             SessionCmd::RunCommand { request, reply } => self.run_command(request, reply),
             SessionCmd::RunFailed { request, last, reply } => self.run_failed(request, last, reply),
-            SessionCmd::SettleQuestion => {
-                self.settle_question();
-                self.ask_next_process();
-                self.publish_view_state();
-            }
             SessionCmd::Refusal(refusal) => self.on_refusal(refusal),
             SessionCmd::NetworkAsk { user, to, reply } => self.network_ask(user, to, reply),
             SessionCmd::GateRefused(refused) => self.gate_refused(refused),
             SessionCmd::GateUpstream { url } => self.gate_upstream(&url),
             SessionCmd::NetworkEntrySaved { target, file } => self.network_entry_saved(target, file),
             SessionCmd::Lift { request, reply } => self.lift(request, reply),
-            SessionCmd::SettleLift => {
-                self.settle_lift();
-                self.ask_next_process();
-                self.publish_view_state();
-            }
             SessionCmd::Lifts(event) => self.lifts_event(event),
             SessionCmd::Stop { .. } => unreachable!("handled in run"),
         }
@@ -1069,46 +1007,30 @@ impl SessionTask {
         request: crate::agent::WriteRequest,
         reply: oneshot::Sender<crate::agent::WriteOutcome>,
     ) {
-        use crate::agent::{WriteOutcome, write_dialog};
-        let refuse = |reason: String| WriteOutcome::Refused { reason };
+        use crate::agent::WriteOutcome;
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
         let path = crate::agent::canonical_target(&request.path);
         let Some(file) = self.protected.check(&path) else {
-            let _ = reply.send(refuse(format!(
-                "{} isn't a protected file of this session; write it with the write or edit tool",
-                request.path.display()
-            )));
+            let _ = reply.send(WriteOutcome::Refused {
+                reason: format!(
+                    "{} isn't a protected file of this session; write it with the write or edit tool",
+                    request.path.display()
+                ),
+            });
             return;
         };
-        if self.asking() {
-            let _ = reply.send(refuse(
-                "another question is waiting for the user; try again after it's answered".into(),
-            ));
-            return;
-        }
-        let before = std::fs::read_to_string(&path).ok();
-        let key = lock(&self.shared).key;
-        self.next_internal += 1;
-        let id = format!("piton:write:{}", self.next_internal);
-        crate::log!("session {key}: asking about a protected write to {}", path.display());
-        let record = write_dialog(&id, &path, file.controls, before.as_deref(), &request.content);
-        self.protected_write = Some(PendingWrite {
-            id,
+        self.enqueue(Question::ProtectedWrite(PendingWrite {
             root: file.root,
             path,
+            controls: file.controls,
             content: request.content,
             reply,
-        });
-        // To every client like a dialog of pi's, and kept for replay until it's answered.
-        self.on_pi_line(record.to_string());
+        }));
     }
 
-    /// A client's answer to the pending protected write's dialog: write or not, and tell the agent.
-    fn answer_protected_write(&mut self, answer: &Map<String, Value>) {
+    /// A client's answer to a protected write's dialog: write or not, and tell the agent.
+    fn answer_protected_write(&mut self, pending: PendingWrite, answer: &Map<String, Value>) {
         use crate::agent::{WriteAnswer, WriteApproval, WriteOutcome, answer::Once, read_write_answer, write_approved};
-        let Some(pending) = self.protected_write.take() else {
-            return;
-        };
         let key = lock(&self.shared).key;
         let outcome = match read_write_answer(answer) {
             WriteAnswer::Narrowest(Once(WriteApproval { content, notes })) => {
@@ -1135,7 +1057,6 @@ impl SessionTask {
             WriteAnswer::Session(never) | WriteAnswer::Always(never) => match never {},
         };
         let _ = pending.reply.send(outcome);
-        self.ask_next_process();
     }
 
     fn watch(&mut self, watcher: ClientId, tx: WatchTx, from: WatchFrom) {
@@ -1205,14 +1126,15 @@ impl SessionTask {
 
     fn publish_view_state(&mut self) {
         // The block question goes to `view` clients typed; its `rpc` rendering is for `piton attach` only.
-        let rpc_only = self.question.as_ref().map(|q| q.dialog_id.as_str());
+        let block = self.questions.showing_block();
+        let rpc_only = block.map(|(_, dialog)| dialog);
         let dialogs: Vec<Value> = self
             .replay
             .pending_dialogs()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|d| d.get("id").and_then(Value::as_str) != rpc_only || rpc_only.is_none())
             .collect();
-        let questions: Vec<Value> = self.question.iter().map(|q| q.question.view()).collect();
+        let questions: Vec<Value> = block.iter().map(|(q, _)| q.question.view()).collect();
         let input = {
             let shared = lock(&self.shared);
             StateInput {
@@ -1339,52 +1261,21 @@ impl SessionTask {
                     // Already answered by another client, expired, or unknown: pi would ignore it.
                     return;
                 }
-                // The daemon's own dialogs: answered here, never sent to pi (which didn't ask).
-                if self.protected_write.as_ref().is_some_and(|w| w.id == id) {
-                    self.answer_protected_write(&command);
+                // The session's own questions: answered here, never sent to pi (which didn't ask).
+                if let Some(showing) = self.questions.take_answered(&id) {
+                    self.answer(showing, &command);
+                    self.ask_next();
                     // The status first, then the state with it: the dialog closes in every client.
                     self.sync_shared();
                     self.publish_view_state();
                     return;
                 }
-                if self.worker_question.as_ref().is_some_and(|q| q.id == id) {
-                    self.answer_worker_question(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
-                if self.question.as_ref().is_some_and(|q| q.dialog_id == id) {
-                    self.answer_question(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
-                if self.process.asking(&id) {
-                    self.answer_process(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
-                if self.lift.as_ref().is_some_and(|l| l.id == id) {
-                    self.answer_lift(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
-                if self
-                    .network
-                    .as_ref()
-                    .and_then(|n| n.asking.as_ref())
-                    .is_some_and(|a| a.dialog_id == id)
-                {
-                    self.answer_network(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
                 self.writer = Some(client);
-                self.sync_shared();
                 self.send_to_pi(&Value::Object(command));
+                // pi's dialog closed: a question waiting for it may show now.
+                self.ask_next();
+                self.sync_shared();
+                self.publish_view_state();
                 return;
             }
             "prompt" | "steer" | "follow_up" | "abort" | "bash" => self.writer = Some(client),
@@ -1516,9 +1407,147 @@ impl SessionTask {
             // The conversation was rewritten: rebuild the view from entries.
             self.internal(Internal::GetEntries);
         }
-        // A question whose dialog left with the run frees the slot; a waiting process question is shown then. (The
-        // dialog it adds comes back through here, and finds the slot taken.)
-        self.ask_next_process();
+        // A question whose dialog left with the run, or a dialog of pi's that closed, frees the slot.
+        self.settle();
+    }
+
+    /// One of the session's questions as a dialog: to every client like a dialog of pi's, and kept for replay until
+    /// it's answered, as the session's own (it never holds the slot against itself).
+    fn show_dialog(&mut self, record: Value) {
+        let Value::Object(map) = record else { return };
+        let line: Arc<str> = Value::Object(map.clone()).to_string().into();
+        self.replay
+            .track_as("extension_ui_request", &map, &line, replay::Owner::Piton);
+        for tx in self.clients.values() {
+            let _ = tx.send(Frame::Record(line.clone()));
+        }
+    }
+
+    /// A question waits its turn, and shows at once when the slot is free.
+    fn enqueue(&mut self, question: Question) {
+        crate::log!(
+            "session {}: asking a {} question",
+            lock(&self.shared).key,
+            question.kind()
+        );
+        self.questions.enqueue(question);
+        self.ask_next();
+        self.sync_shared();
+        self.publish_view_state();
+    }
+
+    /// Shows the next question when the slot is free: nothing showing, and no dialog of pi's pending. Called after
+    /// everything that can free it.
+    fn ask_next(&mut self) {
+        let pi_dialog = self.replay.pi_dialog_pending();
+        while let Some((question, deadline)) =
+            self.questions
+                .next(pi_dialog, Instant::now(), self.config.approval_timeout)
+        {
+            let question = match question {
+                // The user allowed this operation for the session while it waited: answered without asking.
+                Question::Worker(asked) => match asked.operation() {
+                    Some(op) if self.workers_allowed.contains(&op) => {
+                        asked.approve_for_session();
+                        continue;
+                    }
+                    Some(_) | None => Question::Worker(asked),
+                },
+                // The stream may have opened or closed since it was queued: decide liftability now.
+                Question::Process(process) => Question::Process(self.refresh_live(process)),
+                question @ (Question::ProtectedWrite(_)
+                | Question::Block(_)
+                | Question::Network(_)
+                | Question::Lift(_)) => question,
+            };
+            self.show(question, deadline);
+            return;
+        }
+    }
+
+    /// Shows `question` under a fresh dialog: from the queue, or again after an answer that decided nothing yet (its
+    /// next stage, "Choose an answer below"), keeping the deadline it had.
+    fn show(&mut self, question: Question, deadline: Option<Instant>) {
+        self.next_internal += 1;
+        let id = format!("piton:{}:{}", question.kind(), self.next_internal);
+        let record = match &question {
+            Question::ProtectedWrite(write) => {
+                // The file as it is now, so the diff is against what the write replaces.
+                let before = std::fs::read_to_string(&write.path).ok();
+                crate::agent::write_dialog(&id, &write.path, write.controls, before.as_deref(), &write.content)
+            }
+            Question::Block(block) => match block.stage {
+                commands::Stage::Choice => crate::agent::question::rpc_dialog(&id, &block.question),
+                commands::Stage::Pattern(target, scope) => {
+                    crate::agent::question::rpc_pattern_dialog(&id, &block.request.command, target, scope)
+                }
+            },
+            Question::Process(process) => crate::agent::block::process_dialog(
+                &id,
+                &process.process,
+                &process.refusal,
+                &process.live,
+                process.offer.as_ref(),
+            ),
+            Question::Network(network) => {
+                let who = match network.waiting.first() {
+                    Some(first) => self.who(&first.user),
+                    None => "A connection".to_string(),
+                };
+                crate::agent::block::network_dialog(&id, &who, &network.to.to_string())
+            }
+            Question::Worker(asked) => asked.dialog(&id),
+            Question::Lift(lift) => crate::agent::lift::dialog(
+                &id,
+                &crate::agent::lift::LiftRequest {
+                    targets: lift.targets.clone(),
+                    reason: lift.reason.clone(),
+                },
+            ),
+        };
+        self.questions.show(question, id, deadline);
+        self.show_dialog(record);
+    }
+
+    /// A client answered the showing question's dialog: its kind reads the answer.
+    fn answer(&mut self, showing: Showing, answer: &Map<String, Value>) {
+        let Showing { question, deadline, .. } = showing;
+        match question {
+            Question::ProtectedWrite(write) => self.answer_protected_write(write, answer),
+            Question::Block(block) => self.answer_question(block, deadline, answer),
+            Question::Process(process) => self.answer_process(process, answer),
+            Question::Network(network) => self.answer_network(network, deadline, answer),
+            Question::Worker(asked) => self.answer_worker_question(asked, deadline, answer),
+            Question::Lift(lift) => self.answer_lift(lift, deadline, answer),
+        }
+    }
+
+    /// Drops questions whose asker stopped waiting, and ends the showing one when it can't be answered any more; then
+    /// the next shows.
+    fn settle(&mut self) {
+        let replay = &self.replay;
+        let ended = self.questions.settle(|dialog| replay.has_dialog(dialog));
+        self.after_ended(ended);
+    }
+
+    /// A question ended unanswered (its kind told its asker): its dialog closes in every client, and the next shows.
+    fn after_ended(&mut self, ended: Option<Ended>) {
+        if let Some(Ended { dialog, kind, why }) = ended {
+            let key = lock(&self.shared).key;
+            match why {
+                Unanswered::RunEnded => crate::log!("session {key}: a {kind} question ended with the run"),
+                Unanswered::TimedOut => {
+                    crate::log!("session {key}: a {kind} question timed out");
+                    self.replay.answer_dialog(&dialog);
+                }
+                Unanswered::AskerLeft => {
+                    crate::log!("session {key}: a {kind} question was withdrawn");
+                    self.replay.answer_dialog(&dialog);
+                }
+            }
+        }
+        self.ask_next();
+        self.sync_shared();
         self.publish_view_state();
     }
 
@@ -1555,27 +1584,22 @@ impl SessionTask {
                 let asker = crate::agent::question::Asker::Agent {
                     reason: request.reason.clone(),
                 };
+                self.next_internal += 1;
                 let question = commands.question(
-                    format!("piton:question:{}", self.next_internal + 1),
+                    format!("piton:question:{}", self.next_internal),
                     &request,
                     asker,
                     refusals,
                     note,
                 );
-                if self.asking() {
-                    let _ = reply.send(RunDecision::NotRun {
-                        reason: "another question is waiting for the user; try again after it's answered".into(),
-                    });
-                    return;
-                }
                 crate::log!("session {key}: asking to run a command outside the sandbox");
                 self.ask_question(question, request, tag, reply);
             }
         }
     }
 
-    /// Shows the block question: to `rpc` clients as pi's dialog, kept for replay until answered; `view` clients get the
-    /// typed question in the state instead.
+    /// The block question waits its turn: `rpc` clients get it as pi's dialog, kept for replay until answered; `view`
+    /// clients get the typed question in the state instead.
     fn ask_question(
         &mut self,
         question: crate::agent::question::Question,
@@ -1583,20 +1607,13 @@ impl SessionTask {
         tag: String,
         reply: oneshot::Sender<crate::agent::RunDecision>,
     ) {
-        self.next_internal += 1;
-        let dialog_id = self.next_dialog_id();
-        let record = crate::agent::question::rpc_dialog(&dialog_id, &question);
-        self.question = Some(commands::PendingQuestion {
+        self.enqueue(Question::Block(commands::PendingQuestion {
             question,
-            dialog_id,
             stage: commands::Stage::Choice,
             request,
             tag,
             reply,
-            deadline: self.config.approval_timeout.deadline(Instant::now()),
-        });
-        self.on_pi_line(record.to_string());
-        self.publish_view_state();
+        }));
     }
 
     /// A call that failed in the session's own sandbox: asked about when a block recorded for it is one an approved
@@ -1609,7 +1626,6 @@ impl SessionTask {
     ) {
         use crate::agent::Failed;
         let key = lock(&self.shared).key;
-        let slot_taken = self.asking();
         let Some(commands) = &self.commands else {
             let _ = reply.send(Failed::Report {
                 blocks: Vec::new(),
@@ -1617,7 +1633,7 @@ impl SessionTask {
             });
             return;
         };
-        match commands.after_failure(&mut self.calls, &request, last, slot_taken) {
+        match commands.after_failure(&mut self.calls, &request, last) {
             commands::AfterFailure::Wait => {
                 let _ = reply.send(Failed::Wait);
             }
@@ -1636,8 +1652,9 @@ impl SessionTask {
                 tag,
                 note,
             } => {
+                self.next_internal += 1;
                 let question = commands.question(
-                    format!("piton:question:{}", self.next_internal + 1),
+                    format!("piton:question:{}", self.next_internal),
                     &request,
                     crate::agent::question::Asker::Piton,
                     refusals,
@@ -1654,65 +1671,47 @@ impl SessionTask {
         }
     }
 
-    /// A fresh id for the block question's `rpc` dialog.
-    fn next_dialog_id(&mut self) -> String {
-        self.next_internal += 1;
-        format!("piton:block:{}", self.next_internal)
-    }
-
     /// An `rpc` client's answer to the block question's dialog: show it again, switch the runtime, ask for the
     /// pattern, or decide.
-    fn answer_question(&mut self, answer: &Map<String, Value>) {
-        let Some(pending) = self.question.take() else { return };
+    fn answer_question(
+        &mut self,
+        pending: commands::PendingQuestion,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
         let next = commands::rpc_answer(pending.stage, &pending.question, answer);
-        let (question, stage, record) = match next {
+        let pending = match next {
             commands::Next::Decided(answer) => return self.decide_question(pending, answer),
-            commands::Next::AskAgain => {
-                let id = self.next_dialog_id();
-                let record = crate::agent::question::rpc_dialog(&id, &pending.question);
-                (pending.question.clone(), commands::Stage::Choice, (id, record))
-            }
-            commands::Next::Switch => {
-                let question = pending.question.switched();
-                let id = self.next_dialog_id();
-                let record = crate::agent::question::rpc_dialog(&id, &question);
-                (question, commands::Stage::Choice, (id, record))
-            }
-            commands::Next::AskPattern(target, scope) => {
-                let id = self.next_dialog_id();
-                let record = crate::agent::question::rpc_pattern_dialog(&id, &pending.request.command, target, scope);
-                (
-                    pending.question.clone(),
-                    commands::Stage::Pattern(target, scope),
-                    (id, record),
-                )
-            }
+            commands::Next::AskAgain => commands::PendingQuestion {
+                stage: commands::Stage::Choice,
+                ..pending
+            },
+            commands::Next::Switch => commands::PendingQuestion {
+                question: pending.question.switched(),
+                stage: commands::Stage::Choice,
+                ..pending
+            },
+            commands::Next::AskPattern(target, scope) => commands::PendingQuestion {
+                stage: commands::Stage::Pattern(target, scope),
+                ..pending
+            },
         };
-        let (dialog_id, record) = record;
-        self.question = Some(commands::PendingQuestion {
-            question,
-            dialog_id,
-            stage,
-            ..pending
-        });
-        self.on_pi_line(record.to_string());
+        self.show(Question::Block(pending), deadline);
     }
 
     /// A `view` client's typed answer to the block question (`session.decide`).
     fn decide(&mut self, question: &str, answer: &Value) -> Result<(), String> {
-        let Some(pending) = &self.question else {
-            return Err("that question was already answered or expired".into());
-        };
-        if pending.question.id != question {
-            return Err("that question was already answered or expired".into());
+        let gone = || "that question was already answered or expired".to_string();
+        match self.questions.showing_block() {
+            Some((block, _)) if block.question.id == question => {}
+            Some(_) | None => return Err(gone()),
         }
         let answer = crate::agent::question::parse_decision(answer)?;
-        let Some(pending) = self.question.take() else {
-            return Ok(());
-        };
+        let (pending, dialog) = self.questions.take_decided(question).ok_or_else(gone)?;
         // The `rpc` rendering's dialog closes in every attached client.
-        self.replay.answer_dialog(&pending.dialog_id);
+        self.replay.answer_dialog(&dialog);
         self.decide_question(pending, answer);
+        self.ask_next();
         Ok(())
     }
 
@@ -1785,7 +1784,6 @@ impl SessionTask {
         };
         let decision = self.with_gate_user(decision);
         let _ = pending.reply.send(decision);
-        self.ask_next_process();
     }
 
     /// A command run in a sandbox with a filtered network gets the gate as its own proxy user, named by its tag, so the
@@ -1810,36 +1808,9 @@ impl SessionTask {
         }
     }
 
-    /// Ends the block question when it can't be answered any more: its dialog left (the run ended) or the agent
-    /// stopped waiting.
-    fn settle_question(&mut self) {
-        let Some(pending) = &self.question else { return };
-        let gone = !self.replay.has_dialog(&pending.dialog_id);
-        if !gone && !pending.reply.is_closed() {
-            return;
-        }
-        let Some(pending) = self.question.take() else { return };
-        crate::log!(
-            "session {}: a command question ended unanswered",
-            lock(&self.shared).key
-        );
-        match gone {
-            true => {
-                let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
-                    reason: "the run ended before the user answered".into(),
-                });
-            }
-            false => {
-                self.replay.answer_dialog(&pending.dialog_id);
-                self.sync_shared();
-            }
-        }
-        self.publish_view_state();
-    }
-
     /// A connection the gate holds: allowed or refused at once when the sandbox's entries, pi's hosts, or the session's
-    /// answers decide it; otherwise it waits for the user, joining the question about the same
-    /// destination when one is showing.
+    /// answers decide it; otherwise it waits for the user, joining the question about the same destination when one is
+    /// showing or waiting.
     fn network_ask(
         &mut self,
         user: crate::launch::sandbox::network::User,
@@ -1853,13 +1824,7 @@ impl SessionTask {
         let Some(waiting) = network.decide(user, to, reply) else {
             return;
         };
-        match &mut network.asking {
-            Some(asking) if asking.to == waiting.to => asking.waiting.push(waiting),
-            Some(_) | None => {
-                network.queued.push_back(waiting);
-                self.ask_next_network();
-            }
-        }
+        self.enqueue(Question::Network(network::NetworkQuestion::new(waiting)));
     }
 
     /// Who a proxy user is, as the network question names it: pi, or the call's command.
@@ -1876,61 +1841,24 @@ impl SessionTask {
         }
     }
 
-    /// Shows the next network question when the session's question slot is free.
-    fn ask_next_network(&mut self) {
-        if self.asking() {
-            return;
-        }
-        let Some(network) = &mut self.network else { return };
-        if network.asking.is_some() {
-            return;
-        }
-        let Some(first) = network.queued.pop_front() else {
-            return;
-        };
-        // Every connection waiting on the same destination joins this question.
-        let (same, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut network.queued)
-            .into_iter()
-            .partition(|w| w.to == first.to);
-        network.queued = rest.into();
-        let to = first.to.clone();
-        let who = self.who(&first.user);
-        let mut waiting = vec![first];
-        waiting.extend(same);
-        self.next_internal += 1;
-        let dialog_id = format!("piton:network:{}", self.next_internal);
-        let deadline = self.config.approval_timeout.deadline(Instant::now());
-        let record = crate::agent::block::network_dialog(&dialog_id, &who, &to.to_string());
-        if let Some(network) = &mut self.network {
-            network.asking = Some(network::Asking {
-                dialog_id,
-                to,
-                waiting,
-                deadline,
-            });
-        }
-        self.on_pi_line(record.to_string());
-    }
-
     /// The user's answer to a network question.
-    fn answer_network(&mut self, answer: &Map<String, Value>) {
+    fn answer_network(
+        &mut self,
+        question: network::NetworkQuestion,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
         use crate::agent::block::NetworkAnswer;
         let key = lock(&self.shared).key;
-        let Some(network) = &mut self.network else { return };
-        let Some(to) = network.asking.as_ref().map(|a| a.to.clone()) else {
+        let to = question.to.clone();
+        let Some(network) = &mut self.network else {
+            question.settle(&network::refused(&to, "this session has no gate"));
             return;
         };
         let verdict = match crate::agent::block::read_network_answer(answer) {
             NetworkAnswer::AskAgain => {
                 // Shown again: the connections keep waiting under a new dialog.
-                if let Some(asking) = network.asking.take() {
-                    let mut waiting = asking.waiting.into_iter();
-                    if let Some(first) = waiting.next() {
-                        network.queued.push_front(first);
-                    }
-                    network.queued.extend(waiting);
-                }
-                self.ask_next_network();
+                self.show(Question::Network(question), deadline);
                 return;
             }
             NetworkAnswer::Session => {
@@ -1973,23 +1901,7 @@ impl SessionTask {
             }
             NetworkAnswer::NotNow => network::refused(&to, "the user didn't allow it"),
         };
-        if let Some(network) = &mut self.network {
-            network.settle(&verdict);
-        }
-        self.ask_next_process();
-    }
-
-    /// No answer in time: the connections are refused, and the dialog closes everywhere.
-    fn expire_network_question(&mut self) {
-        let Some(network) = &mut self.network else { return };
-        let Some(asking) = &network.asking else { return };
-        let (id, to) = (asking.dialog_id.clone(), asking.to.clone());
-        network.settle(&network::refused(&to, "the user didn't answer in time"));
-        self.replay.answer_dialog(&id);
-        crate::log!("session {}: a network question timed out", lock(&self.shared).key);
-        self.ask_next_process();
-        self.sync_shared();
-        self.publish_view_state();
+        question.settle(&verdict);
     }
 
     /// A connection the gate refused: recorded for the call that made it (its block list shows it), else logged.
@@ -2120,7 +2032,6 @@ impl SessionTask {
         };
         let process = &refusal.process;
         let question = |offer: Option<grant::Offer>, live: Live| commands::ProcessQuestion {
-            id: String::new(),
             process: process.clone(),
             operation: refusal.operation.clone(),
             target: refusal.target.clone(),
@@ -2154,15 +2065,15 @@ impl SessionTask {
             ),
             (Ok(offer), live) => {
                 crate::log!("session {key}: {process} was blocked: {summary}");
-                self.process.queue(question(Some(offer), live));
-                self.ask_next_process();
+                let question = question(Some(offer), live);
+                self.enqueue(Question::Process(question));
                 return;
             }
             // No saved form (Git's control files, the keychain with fnox off), but pi's sandbox can be widened now.
             (Err(_), live @ Live::Lift(_)) => {
                 crate::log!("session {key}: {process} was blocked: {summary} (liftable while it runs)");
-                self.process.queue(question(None, live));
-                self.ask_next_process();
+                let question = question(None, live);
+                self.enqueue(Question::Process(question));
                 return;
             }
             (Err(why), Live::No(_)) => notice::notice(
@@ -2202,74 +2113,6 @@ impl SessionTask {
         }
     }
 
-    /// Whether the session's one question slot is taken: a protected write, a block question, or a process question.
-    /// Settles the ones that can't be answered any more first.
-    fn asking(&mut self) -> bool {
-        self.settle_protected_write();
-        self.settle_worker_question();
-        self.settle_question();
-        self.settle_process();
-        self.settle_network();
-        self.settle_lift();
-        self.protected_write.is_some()
-            || self.worker_question.is_some()
-            || self.question.is_some()
-            || self.process.asking.is_some()
-            || self.network.as_ref().is_some_and(|n| n.asking.is_some())
-            || self.lift.is_some()
-    }
-
-    /// A network question whose dialog left unanswered (the run it showed in ended) is asked again under a new dialog;
-    /// its connections keep waiting.
-    fn settle_network(&mut self) {
-        let Some(network) = &mut self.network else { return };
-        let Some(asking) = &network.asking else { return };
-        if self.replay.has_dialog(&asking.dialog_id) {
-            return;
-        }
-        if let Some(asking) = network.asking.take() {
-            for waiting in asking.waiting.into_iter().rev() {
-                network.queued.push_front(waiting);
-            }
-        }
-    }
-
-    /// A process question whose dialog left unanswered (the run it showed in ended) is asked again.
-    fn settle_process(&mut self) {
-        let Some(question) = &self.process.asking else { return };
-        if self.replay.has_dialog(&question.id) {
-            return;
-        }
-        self.process.requeue_unanswered();
-    }
-
-    /// Shows the next process question when nothing else is being asked. Called whenever the slot may have freed.
-    fn ask_next_process(&mut self) {
-        // A held connection is waiting for an answer: its question goes first, then an agent's waiting worker call.
-        self.ask_next_network();
-        self.ask_next_worker();
-        if self.asking() {
-            return;
-        }
-        let Some(next) = self.process.next().cloned() else {
-            return;
-        };
-        // A fresh id, so a re-asked question is a new dialog every client shows.
-        self.next_internal += 1;
-        let id = format!("piton:process:{}", self.next_internal);
-        if let Some(asking) = &mut self.process.asking {
-            asking.id = id.clone();
-        }
-        // The stream may have opened or closed since it was queued: decide liftability now.
-        let next = self.refresh_live(next);
-        if let Some(asking) = &mut self.process.asking {
-            asking.live = next.live.clone();
-        }
-        let record =
-            crate::agent::block::process_dialog(&id, &next.process, &next.refusal, &next.live, next.offer.as_ref());
-        self.on_pi_line(record.to_string());
-    }
-
     /// A queued question's live answer, as of now: a question queued without a stream gets one once pi's opened, and
     /// loses it when it closed.
     fn refresh_live(&self, mut question: commands::ProcessQuestion) -> commands::ProcessQuestion {
@@ -2306,13 +2149,10 @@ impl SessionTask {
 
     /// The user's answer to a process question: lift it in pi's running sandbox until the run settles or for the
     /// session, save the entry (and lift it now), or leave it.
-    fn answer_process(&mut self, answer: &Map<String, Value>) {
+    fn answer_process(&mut self, question: commands::ProcessQuestion, answer: &Map<String, Value>) {
         use crate::agent::{
             answer::{Answer, UntilSettled},
             block::Live,
-        };
-        let Some(question) = self.process.asking.take() else {
-            return;
         };
         let key = lock(&self.shared).key;
         // pi's own process takes the grant at once; another (an MCP server pi started) once it's started again.
@@ -2332,28 +2172,22 @@ impl SessionTask {
             Live::No(_) => None,
         };
         match answer {
-            None => {
-                self.process.asking = Some(question);
-                self.process.requeue_unanswered();
-                self.ask_next_process();
-            }
+            // Shown again, under a new dialog.
+            None => self.show(Question::Process(question), None),
             Some(Answer::Deny(())) => {
                 crate::log!("session {key}: the user left {} blocked for now", question.process);
-                self.ask_next_process();
             }
             Some(Answer::Narrowest(UntilSettled(()))) => {
                 if let Some(lift) = live {
                     crate::log!("session {key}: {} lifted until the run settles", lift.describe());
                     self.grant_live(lift, lifts::Scope::UntilSettled, Some(block()));
                 }
-                self.ask_next_process();
             }
             Some(Answer::Session(())) => {
                 if let Some(lift) = live {
                     crate::log!("session {key}: {} lifted for the session", lift.describe());
                     self.grant_live(lift, lifts::Scope::Session, Some(block()));
                 }
-                self.ask_next_process();
             }
             Some(Answer::Always(scope)) => {
                 let Some(offer) = &question.offer else { return };
@@ -2378,7 +2212,6 @@ impl SessionTask {
                         self.show_notice(format!("Couldn't save the sandbox entry: {e}"));
                     }
                 }
-                self.ask_next_process();
             }
         }
     }
@@ -2459,7 +2292,7 @@ impl SessionTask {
     }
 
     /// An explicit lift from code in pi's process: answered from a session approval when one covers every target,
-    /// refused when a target is floor or another question holds the slot, otherwise asked.
+    /// refused when a target is floor, otherwise asked in its turn.
     fn lift(
         &mut self,
         request: crate::agent::lift::LiftRequest,
@@ -2499,49 +2332,24 @@ impl SessionTask {
             let _ = reply.send(LiftDecision::Granted(targets));
             return;
         }
-        if self.asking() {
-            let _ = reply.send(LiftDecision::Refused {
-                reason: "another question is waiting for the user; try again after it's answered".into(),
-            });
-            return;
-        }
-        self.next_internal += 1;
-        let id = format!("piton:lift:{}", self.next_internal);
         crate::log!("session {key}: asking about a lift: {}", request.reason);
-        let record = crate::agent::lift::dialog(
-            &id,
-            &crate::agent::lift::LiftRequest {
-                targets: targets.clone(),
-                reason: request.reason,
-            },
-        );
-        self.lift = Some(PendingLift { id, targets, reply });
-        self.on_pi_line(record.to_string());
+        self.enqueue(Question::Lift(PendingLift {
+            targets,
+            reason: request.reason,
+            reply,
+        }));
     }
 
     /// The user's answer to an explicit lift.
-    fn answer_lift(&mut self, answer: &Map<String, Value>) {
+    fn answer_lift(&mut self, pending: PendingLift, deadline: Option<Instant>, answer: &Map<String, Value>) {
         use crate::agent::{
             answer::{Answer, Once},
             lift::LiftDecision,
         };
-        let Some(pending) = self.lift.take() else { return };
         let key = lock(&self.shared).key;
         match crate::agent::lift::read_answer(answer) {
-            None => {
-                // Asks again, under a new dialog.
-                self.next_internal += 1;
-                let id = format!("piton:lift:{}", self.next_internal);
-                let record = crate::agent::lift::dialog(
-                    &id,
-                    &crate::agent::lift::LiftRequest {
-                        targets: pending.targets.clone(),
-                        reason: "(asked again)".into(),
-                    },
-                );
-                self.lift = Some(PendingLift { id, ..pending });
-                self.on_pi_line(record.to_string());
-            }
+            // Asks again, under a new dialog.
+            None => self.show(Question::Lift(pending), deadline),
             Some(Answer::Narrowest(Once(()))) => {
                 crate::log!("session {key}: lift approved once");
                 let _ = pending.reply.send(LiftDecision::Granted(pending.targets));
@@ -2560,162 +2368,33 @@ impl SessionTask {
                 let _ = pending.reply.send(LiftDecision::Denied);
             }
         }
-        // The slot may have freed: a waiting question goes next.
-        self.ask_next_process();
-    }
-
-    /// Ends a pending lift that can no longer be answered: its dialog left with the run, or the caller stopped waiting.
-    fn settle_lift(&mut self) {
-        let Some(pending) = &self.lift else { return };
-        let gone = !self.replay.has_dialog(&pending.id);
-        if !gone && !pending.reply.is_closed() {
-            return;
-        }
-        let Some(pending) = self.lift.take() else { return };
-        match gone {
-            true => {
-                let _ = pending.reply.send(crate::agent::lift::LiftDecision::Refused {
-                    reason: "the run ended before the user answered; ask again if it's still needed".into(),
-                });
-            }
-            false => {
-                self.replay.answer_dialog(&pending.id);
-                self.sync_shared();
-            }
-        }
-    }
-
-    /// No answer in time: the command doesn't run, and the dialog closes everywhere.
-    fn expire_question(&mut self) {
-        let Some(pending) = self.question.take() else { return };
-        crate::log!("session {}: a command question timed out", lock(&self.shared).key);
-        self.replay.answer_dialog(&pending.dialog_id);
-        let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
-            reason: "the user didn't answer in time; it didn't run".into(),
-        });
-        self.ask_next_process();
-        self.sync_shared();
-        self.publish_view_state();
     }
 
     /// A worker operation's question: answered "for this session" at once when the user allowed the operation earlier
-    /// in this session; otherwise queued for the slot and asked, with a dialog every client shows, when it's free.
+    /// in this session; otherwise asked in its turn, with a dialog every client shows.
     fn worker_question(&mut self, asked: crate::agent::workers::Asked) {
         if asked.operation().is_some_and(|op| self.workers_allowed.contains(&op)) {
             asked.approve_for_session();
             return;
         }
-        self.worker_queue.push_back(asked);
-        self.ask_next_process();
-        self.publish_view_state();
+        self.enqueue(Question::Worker(asked));
     }
 
-    /// Shows the oldest waiting worker question when the slot is free, dropping ones whose asker left meanwhile; one
-    /// for an operation the user allowed for this session while it waited is answered at once.
-    fn ask_next_worker(&mut self) {
-        while !self.asking() {
-            let Some(asked) = self.worker_queue.pop_front() else {
-                return;
-            };
-            if asked.abandoned() {
-                continue;
-            }
-            if asked.operation().is_some_and(|op| self.workers_allowed.contains(&op)) {
-                asked.approve_for_session();
-                continue;
-            }
-            self.show_worker_question(asked);
-        }
-    }
-
-    fn show_worker_question(&mut self, asked: crate::agent::workers::Asked) {
-        self.next_internal += 1;
-        let id = format!("piton:worker:{}", self.next_internal);
-        crate::log!("session {}: asking about a worker operation", lock(&self.shared).key);
-        let record = asked.dialog(&id);
-        self.worker_question = Some(PendingWorkerQuestion {
-            id,
-            asked,
-            deadline: self.config.approval_timeout.deadline(Instant::now()),
-        });
-        // To every client like a dialog of pi's, and kept for replay until it's answered.
-        self.on_pi_line(record.to_string());
-    }
-
-    /// A client's answer to the worker question: answered, or shown again.
-    fn answer_worker_question(&mut self, answer: &Map<String, Value>) {
+    /// A client's answer to a worker question: answered, or shown again.
+    fn answer_worker_question(
+        &mut self,
+        asked: crate::agent::workers::Asked,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
         use crate::agent::workers::Answered;
-        let Some(pending) = self.worker_question.take() else {
-            return;
-        };
-        match pending.asked.answer(answer) {
-            Answered::AskAgain(asked) => self.show_worker_question(asked),
+        match asked.answer(answer) {
+            Answered::AskAgain(asked) => self.show(Question::Worker(asked), deadline),
             Answered::Done { for_session } => {
                 if let Some(op) = for_session {
                     self.workers_allowed.insert(op);
                 }
-                self.ask_next_process();
             }
-        }
-    }
-
-    /// Ends the worker question unanswered (`why`): the asker hears no, and the dialog closes everywhere.
-    fn end_worker_question(&mut self, why: &str) {
-        let Some(pending) = self.worker_question.take() else {
-            return;
-        };
-        crate::log!("session {}: a worker question {why}", lock(&self.shared).key);
-        self.replay.answer_dialog(&pending.id);
-        // Dropping the question closes its reply: the operation doesn't happen.
-        drop(pending);
-        self.ask_next_process();
-        self.sync_shared();
-        self.publish_view_state();
-    }
-
-    /// Ends a worker question that can no longer be answered: its dialog left (the run ended) or the asker stopped
-    /// waiting.
-    fn settle_worker_question(&mut self) {
-        let Some(pending) = &self.worker_question else { return };
-        let gone = !self.replay.has_dialog(&pending.id);
-        if !gone && !pending.asked.abandoned() {
-            return;
-        }
-        let Some(pending) = self.worker_question.take() else {
-            return;
-        };
-        crate::log!("session {}: a worker question ended unanswered", lock(&self.shared).key);
-        if !gone {
-            self.replay.answer_dialog(&pending.id);
-            self.sync_shared();
-        }
-    }
-
-    /// Ends a pending protected write that can no longer be answered: its dialog left (the run it belonged to ended,
-    /// so pi.nvim and the apps no longer show it) or the agent stopped waiting. The agent, if still there, hears that it
-    /// wasn't written; the next request isn't refused as "another is waiting".
-    fn settle_protected_write(&mut self) {
-        let Some(pending) = &self.protected_write else { return };
-        let gone = !self.replay.has_dialog(&pending.id);
-        if !gone && !pending.reply.is_closed() {
-            return;
-        }
-        let Some(pending) = self.protected_write.take() else {
-            return;
-        };
-        let key = lock(&self.shared).key;
-        crate::log!(
-            "session {key}: protected write to {} ended unanswered",
-            pending.path.display()
-        );
-        if gone {
-            let _ = pending.reply.send(crate::agent::WriteOutcome::Refused {
-                reason: "the run ended before the user answered; ask again if it's still needed".into(),
-            });
-        } else {
-            // The agent left (its tool call was aborted): close the dialog in every client.
-            self.replay.answer_dialog(&pending.id);
-            self.sync_shared();
         }
     }
 

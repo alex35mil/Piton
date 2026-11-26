@@ -66,7 +66,7 @@ export type LiftOutcome<T> =
     | { kind: "done"; value: T }
     /** The user said no: the action didn't run. */
     | { kind: "denied" }
-    /** The daemon refused without asking (a floor path, another question waiting): the action didn't run. */
+    /** The daemon refused (a floor path, no answer in time, the run ended): the action didn't run. */
     | { kind: "refused"; reason: string }
     /** Not macOS: use the daemon's run or write requests instead. */
     | { kind: "unsupported" }

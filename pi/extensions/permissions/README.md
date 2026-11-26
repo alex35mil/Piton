@@ -127,7 +127,7 @@ the addon, nothing is held and those blocks offer only "always" (for new session
 
 Other extensions and workflow tools widen pi's sandbox for one action with `lift(targets, reason, action)`: the user
 is asked, the tokens are consumed, the action runs, and they're released whatever happens. It returns `done`,
-`denied`, `refused` (a floor path, another question waiting), `unsupported` (not macOS), or `unavailable` (no addon);
+`denied`, `refused` (a floor path, no answer in time, or the run ended), `unsupported` (not macOS), or `unavailable` (no addon);
 outside a session, the action just runs. See "Lifts for pi's live sandbox" in `docs/design.md`.
 
 ## Safety Features

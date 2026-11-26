@@ -126,35 +126,30 @@ pub struct Commands {
     pub session_grants: HashMap<String, Target>,
 }
 
-/// The question the user is being asked, and where the decision goes.
+/// A block question for the user, and where the decision goes. The session's questions (`questions.rs`) hold it, with
+/// the dialog its `rpc` rendering shows.
 pub struct PendingQuestion {
     /// The typed question: its id is what `session.decide` names; its runtime is the one the `rpc` dialog shows.
     pub question: Question,
-    /// The `rpc` rendering's dialog showing now, and which one it is.
-    pub dialog_id: String,
+    /// Which `rpc` dialog shows it.
     pub stage: Stage,
     /// The request, as the agent sent it.
     pub request: RunRequest,
     /// The tag the call's sandbox gets.
     pub tag: String,
     pub reply: oneshot::Sender<RunDecision>,
-    /// When it's refused unanswered; none when `approval_timeout` is `"never"`.
-    pub deadline: Option<tokio::time::Instant>,
 }
 
-/// Blocked processes that aren't bash calls: the question showing, the refusals already offered (once per process,
-/// operation, and target), and what's waiting to be asked.
+/// Blocked processes that aren't bash calls: the refusals already offered (once per process, operation, and target).
+/// Their questions wait in the session's questions.
 #[derive(Default)]
 pub struct ProcessBlocks {
-    pub asking: Option<ProcessQuestion>,
     offered: std::collections::HashSet<(String, String, String)>,
-    waiting: std::collections::VecDeque<ProcessQuestion>,
 }
 
 /// One process question: the block, what it can lift in pi's live sandbox, and what it can save.
 #[derive(Debug, Clone)]
 pub struct ProcessQuestion {
-    pub id: String,
     pub process: String,
     pub operation: String,
     pub target: String,
@@ -167,10 +162,6 @@ pub struct ProcessQuestion {
 }
 
 impl ProcessBlocks {
-    pub fn asking(&self, id: &str) -> bool {
-        self.asking.as_ref().is_some_and(|q| q.id == id)
-    }
-
     /// Whether this refusal is new: each (process, operation, target) is offered once per session, until a live grant
     /// that answered it ends ([`Self::forget`]).
     pub fn first(&mut self, process: &str, operation: &str, target: &str) -> bool {
@@ -182,27 +173,6 @@ impl ProcessBlocks {
     pub fn forget(&mut self, process: &str, operation: &str, target: &str) {
         self.offered
             .remove(&(process.to_string(), operation.to_string(), target.to_string()));
-    }
-
-    /// Every blocked process is asked about, in order: none is dropped.
-    pub fn queue(&mut self, question: ProcessQuestion) {
-        self.waiting.push_back(question);
-    }
-
-    /// The question showing is shown again, first: its dialog left unanswered (the run it showed in ended), or the user
-    /// chose the option that decides nothing.
-    pub fn requeue_unanswered(&mut self) {
-        if let Some(question) = self.asking.take() {
-            self.waiting.push_front(question);
-        }
-    }
-
-    /// The next question to show, when none is showing.
-    pub fn next(&mut self) -> Option<&ProcessQuestion> {
-        if self.asking.is_none() {
-            self.asking = self.waiting.pop_front();
-        }
-        self.asking.as_ref()
     }
 }
 
@@ -624,8 +594,8 @@ impl Commands {
 
     /// What a call that failed in the session's own sandbox gets before the agent hears of it: Piton asks the user when
     /// a block it recorded for the call is one an approved rerun lifts; otherwise the blocks are reported. `last` is the
-    /// last look (the kernel's record had its time). `slot_taken`: another question is showing.
-    pub fn after_failure(&self, calls: &mut Calls, request: &RunRequest, last: bool, slot_taken: bool) -> AfterFailure {
+    /// last look (the kernel's record had its time). The question waits its turn in the session's questions.
+    pub fn after_failure(&self, calls: &mut Calls, request: &RunRequest, last: bool) -> AfterFailure {
         use crate::{
             agent::open::{self, OpenCheck},
             launch::sandbox::grant::{CommandBlock, command_block},
@@ -687,12 +657,6 @@ impl Commands {
             .collect();
         if !treated.iter().any(|(_, t)| *t == Treated::Asked) {
             return report(blocks, None);
-        }
-        if slot_taken {
-            return report(
-                blocks,
-                Some("Piton didn't ask about it: another question was waiting for the user".into()),
-            );
         }
         let note = match refusals.iter().any(launch_ops) {
             true => match open::check(
@@ -1016,7 +980,7 @@ mod tests {
     }
 
     fn after(c: &Commands, calls: &mut Calls, req: &RunRequest, last: bool) -> AfterFailure {
-        c.after_failure(calls, req, last, false)
+        c.after_failure(calls, req, last)
     }
 
     /// A `[sandbox.network.connections]` entry saved from a network question reaches calls that start afterwards, at
@@ -1167,11 +1131,10 @@ mod tests {
         let (blocks, _) = reported(after(&c, &mut calls, &req, true));
         assert!(blocks[0].ends_with("(silenced)"), "{blocks:?}");
 
-        // Another question showing: reported, saying why.
+        // A liftable block always asks, whatever else is being asked: the question waits its turn.
         let req = begin(&c, &mut calls, &dir, "5", "touch ~/y");
         calls.note("5", refusal("file-write-create", &home.join("y").display().to_string()));
-        let (_, note) = reported(c.after_failure(&mut calls, &req, false, true));
-        assert!(note.is_some_and(|n| n.contains("another question")));
+        assert_eq!(kind(&after(&c, &mut calls, &req, false)), "ask");
 
         // A typed command is never asked about.
         let typed = request(&dir, "user:1", "touch ~/z", false);
@@ -1497,43 +1460,6 @@ mod tests {
         // A grant that answered a block ended: it's asked about again.
         blocks.forget("node", "file-write-create", "/h/x");
         assert!(blocks.first("node", "file-write-create", "/h/x"));
-        let question = |id: &str| ProcessQuestion {
-            id: id.into(),
-            process: "node".into(),
-            operation: "file-write-create".into(),
-            target: "/h/x".into(),
-            pid: 1,
-            refusal: "file-write-create /h/x".into(),
-            live: crate::agent::block::Live::Lift(crate::launch::sandbox::grant::LiveLift::Write {
-                path: "/h/x".into(),
-            }),
-            offer: Some(crate::launch::sandbox::grant::Offer {
-                project: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
-                everywhere: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
-            }),
-        };
-        blocks.queue(question("a"));
-        blocks.queue(question("b"));
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()));
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()), "one at a time");
-        assert!(blocks.asking("a"));
-        // A question that lost its dialog unanswered (the run ended) is asked again, before the ones behind it.
-        blocks.requeue_unanswered();
-        assert!(blocks.asking.is_none());
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()));
-        blocks.asking = None;
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("b".into()));
-        // Nothing is dropped, however many wait.
-        blocks.asking = None;
-        for i in 0..20 {
-            blocks.queue(question(&i.to_string()));
-        }
-        let mut shown = 0;
-        while blocks.next().is_some() {
-            shown += 1;
-            blocks.asking = None;
-        }
-        assert_eq!(shown, 20);
     }
 
     /// Each `rpc` option leads to the same typed answer a `view` client sends, in the runtime the dialog showed.
