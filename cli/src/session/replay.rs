@@ -35,6 +35,16 @@ struct Dialog {
     expires: Option<Instant>,
     /// Asked during the current run, so it can't outlive the run.
     in_run: bool,
+    owner: Owner,
+}
+
+/// Whose dialog it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// pi's own (an extension's `select`, `confirm`, `input`, `editor`): answered by pi.
+    Pi,
+    /// One of the session's questions: answered by the daemon, never sent to pi.
+    Piton,
 }
 
 impl Dialog {
@@ -46,6 +56,11 @@ impl Dialog {
 impl Replay {
     /// Follows one pi record (`kind` is its `type`; `line` the record as pi wrote it).
     pub fn track(&mut self, kind: &str, record: &Map<String, Value>, line: &Arc<str>) {
+        self.track_as(kind, record, line, Owner::Pi);
+    }
+
+    /// Follows one record, a dialog in it owned by `owner`: pi's records, and the dialogs the session's questions show.
+    pub fn track_as(&mut self, kind: &str, record: &Map<String, Value>, line: &Arc<str>, owner: Owner) {
         match kind {
             "agent_start" => self.run_active = true,
             "agent_settled" => {
@@ -85,12 +100,12 @@ impl Replay {
                 }
             }
             "queue_update" => self.queue = Some(line.clone()),
-            "extension_ui_request" => self.track_ui(record, line),
+            "extension_ui_request" => self.track_ui(record, line, owner),
             _ => {}
         }
     }
 
-    fn track_ui(&mut self, record: &Map<String, Value>, line: &Arc<str>) {
+    fn track_ui(&mut self, record: &Map<String, Value>, line: &Arc<str>, owner: Owner) {
         let method = record.get("method").and_then(Value::as_str).unwrap_or_default();
         match method {
             "select" | "confirm" | "input" | "editor" => {
@@ -104,6 +119,7 @@ impl Replay {
                     line: line.clone(),
                     expires,
                     in_run: self.run_active,
+                    owner,
                 });
             }
             "setStatus" => {
@@ -167,6 +183,22 @@ impl Replay {
     pub fn pending_dialogs(&self) -> impl Iterator<Item = &Arc<str>> {
         let now = Instant::now();
         self.dialogs.iter().filter(move |d| d.pending(now)).map(|d| &d.line)
+    }
+
+    /// Whether a dialog of pi's own is pending: the session's questions wait until it closes.
+    pub fn pi_dialog_pending(&self) -> bool {
+        let now = Instant::now();
+        self.dialogs.iter().any(|d| d.owner == Owner::Pi && d.pending(now))
+    }
+
+    /// When the next of pi's pending dialogs expires (pi's `timeout` option): a question waiting behind it shows then.
+    pub fn pi_dialog_expiry(&self) -> Option<Instant> {
+        let now = Instant::now();
+        self.dialogs
+            .iter()
+            .filter(|d| d.owner == Owner::Pi && d.pending(now))
+            .filter_map(|d| d.expires)
+            .min()
     }
 
     pub fn has_dialog(&self, id: &str) -> bool {
@@ -274,5 +306,34 @@ mod tests {
         assert!(replay.answer_dialog("d1"));
         assert!(!replay.answer_dialog("d1"));
         assert!(!replay.needs_input());
+    }
+
+    /// Only pi's own pending dialogs hold the session's questions back: not the session's own, nor an expired one.
+    #[tokio::test]
+    async fn only_pi_dialogs_hold_the_slot() {
+        let mut replay = Replay::default();
+        let piton = json!({"type":"extension_ui_request","id":"piton:write:1","method":"select","options":["a"]});
+        let line: Arc<str> = piton.to_string().into();
+        replay.track_as("extension_ui_request", piton.as_object().unwrap(), &line, Owner::Piton);
+        assert!(replay.needs_input() && !replay.pi_dialog_pending());
+        feed(
+            &mut replay,
+            &[json!({"type":"extension_ui_request","id":"d1","method":"select","options":["a"],"timeout":50})],
+        );
+        assert!(replay.pi_dialog_pending());
+        assert!(
+            replay
+                .pi_dialog_expiry()
+                .is_some_and(|e| e <= Instant::now() + Duration::from_millis(50))
+        );
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!replay.pi_dialog_pending(), "expired");
+        feed(
+            &mut replay,
+            &[json!({"type":"extension_ui_request","id":"d2","method":"confirm"})],
+        );
+        assert!(replay.pi_dialog_pending() && replay.pi_dialog_expiry().is_none());
+        replay.answer_dialog("d2");
+        assert!(!replay.pi_dialog_pending());
     }
 }

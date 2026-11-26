@@ -122,9 +122,9 @@ roots = []                # where the apps may browse and start sessions; none u
 favorites = []
 default_attach_mode = "sandbox"   # mode for `piton attach` when none is given
 stop_empty_session_after = "10s"  # stop a pi with no messages this long after its last client leaves
-approval_timeout = "10m"  # an approval (a blocked command, a held connection) waits this long for your answer;
-                          # then the action doesn't happen. "never" waits until it's answered, dismissed, or the
-                          # run ends, holding the session's one question slot meanwhile
+approval_timeout = "10m"  # an approval (a blocked command, a held connection, a protected write, a lift, a worker
+                          # operation) waits this long for your answer, counted from when it's shown; then the
+                          # action doesn't happen. "never" waits until it's answered, dismissed, or the run ends
 keep_awake = true         # hold the Mac awake while sessions are live; toggled from the apps
                           # (put it in config.host.local.toml to keep toggles out of a dotfiles diff)
 
@@ -723,6 +723,11 @@ at most 50 ms after the failure for the kernel's record. A block it didn't see i
 the agent, which can ask to run the command again, hinting where (the sandbox or the host). Either way the agent's
 result lists the blocks Piton recorded.
 
+A session shows one question at a time. The others wait their turn, oldest first, whatever they're about (a command,
+a connection, a protected file, a worker, a blocked process), and none is refused because another is showing. A
+question also waits while one of pi's own dialogs is open (a file review, an extension's prompt), and shows once you've
+answered it.
+
 Some blocks aren't asked about, only listed for the agent: credential reads (ssh opens your private keys on every SSH
 Git command and recovers), what the floor protects (signals to other processes and `sysctl` writes included: only a
 host run passes them), and silenced paths. A few refusals programs always hit and recover from (`open`'s CPU-type
@@ -788,7 +793,7 @@ of a compound command must match the same entry; a command that writes a file wi
 `[tools.permissions]` rules still decide first whether it runs at all.
 
 When something other than a command is blocked (an MCP server, an extension, pi), you're asked once per process and
-path, one question at a time. On macOS, pi's running sandbox is widened on your answer, with no restart: the daemon
+path, in its turn. These questions never time out: nothing waits on your answer. On macOS, pi's running sandbox is widened on your answer, with no restart: the daemon
 writes a small addon for this to `<state>/native/lift.node` when it starts, and pi loads it from there.
 
 - **Allow until the end of this turn:** open now, closed when the agent hands the turn back to you (pi's

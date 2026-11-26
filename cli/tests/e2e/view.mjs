@@ -190,12 +190,13 @@ const tests = {
         assert.equal(title.toolInput.path, realpathSync(ctx.ws) + "/.piton/config.toml");
         // The current content, so a client that can't read the file shows a diff (null: the file is new).
         assert.equal(title.current, null);
-        // One at a time.
-        const second = await write(target, "{}");
-        assert.equal(second.outcome, "refused");
-        // The user approves with their own version and a note; the daemon writes it, and never tells pi. The dialog
-        // closes in every client (waited for from before the answer, so the change can't slip past).
-        const closed = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        // One at a time: a second write waits its turn instead of being refused, and shows once the first is answered.
+        const second = write(target, "{}");
+        await sleep(300);
+        assert.deepEqual(c.model(key).state.dialogs.map((d) => d.id), [dialog.id], "the second waits");
+        // The user approves with their own version and a note; the daemon writes it, and never tells pi. The second
+        // write's dialog follows (waited for from before the answer, so the change can't slip past).
+        const shown = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1 && m.change.state.dialogs[0].id !== dialog.id);
         await c.req("session.answer", {
             session: key,
             request_id: dialog.id,
@@ -204,7 +205,29 @@ const tests = {
         const outcome = await pending;
         assert.deepEqual(outcome, { type: "protected_write", outcome: "approved", modified: true, content: '{"allow":[]}\n', notes: [{ note: "n" }] });
         assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
+        const secondDialog = (await shown).change.state.dialogs[0];
+        assert.match(secondDialog.id, /^piton:write:/);
+        // Its diff is against the file as it is when it's shown: the first write's content.
+        assert.equal(JSON.parse(secondDialog.title).current, '{"allow":[]}\n');
+        const closed = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        await c.req("session.answer", { session: key, request_id: secondDialog.id, answer: { value: "Reject" } });
+        assert.equal((await second).outcome, "rejected");
         assert.equal((await closed).change.state.status, "idle");
+
+        // A dialog of pi's own holds the slot: a write asked while it's open shows only once it's answered.
+        await c.req("session.send", { session: key, message_id: "a", text: "ask" });
+        const asked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        const piDialog = asked.change.state.dialogs[0];
+        assert.doesNotMatch(piDialog.id, /^piton:/);
+        const behind = write(target, "behind");
+        await sleep(300);
+        assert.deepEqual(c.model(key).state.dialogs.map((d) => d.id), [piDialog.id], "the write waits for pi's dialog");
+        const after = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.some((d) => d.id.startsWith("piton:write:")));
+        await c.req("session.answer", { session: key, request_id: piDialog.id, answer: { value: "alpha" } });
+        const writeDialog = (await after).change.state.dialogs.find((d) => d.id.startsWith("piton:write:"));
+        await c.req("session.answer", { session: key, request_id: writeDialog.id, answer: { value: "Reject" } });
+        assert.equal((await behind).outcome, "rejected");
+        await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && m.change.state.dialogs.length === 0, 20000);
 
         // Rejected: nothing written.
         const rejected = write(target, "bad");

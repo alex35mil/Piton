@@ -253,7 +253,7 @@ struct WakeOnDropWith(tokio::sync::mpsc::UnboundedSender<SessionCmd>, SessionCmd
 
 impl Drop for WakeOnDropWith {
     fn drop(&mut self) {
-        let command = std::mem::replace(&mut self.1, SessionCmd::SettleLift);
+        let command = std::mem::replace(&mut self.1, SessionCmd::Settle);
         let _ = self.0.send(command);
     }
 }
@@ -331,14 +331,12 @@ async fn closed(lines: &mut Lines) {
     let _ = lines.next_line().await;
 }
 
-/// Asks the session to look at its pending question when dropped: the agent stopped waiting.
-pub struct WakeOnDrop(
-    pub tokio::sync::mpsc::UnboundedSender<SessionCmd>,
-    pub fn() -> SessionCmd,
-);
+/// Asks the session to settle its questions when dropped: whoever asked stopped waiting (or got its answer), so the
+/// question is dropped from the queue, or ends and closes its dialog, at once.
+pub struct WakeOnDrop(pub tokio::sync::mpsc::UnboundedSender<SessionCmd>);
 
 impl Drop for WakeOnDrop {
     fn drop(&mut self) {
-        let _ = self.0.send((self.1)());
+        let _ = self.0.send(SessionCmd::Settle);
     }
 }

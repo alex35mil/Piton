@@ -69,7 +69,7 @@ pub async fn protected_write(
         return WriteResponse::Ended;
     }
     // Wakes the session when the agent stops waiting, so it closes the dialog at once.
-    let _wake = super::socket::WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleProtectedWrite);
+    let _wake = super::socket::WakeOnDrop(handle.tx.clone());
     match outcome.await {
         Ok(outcome) => WriteResponse::ProtectedWrite(outcome),
         Err(_) => WriteResponse::Ended,

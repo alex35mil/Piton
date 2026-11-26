@@ -37,7 +37,7 @@ pub enum LiftDecision {
     /// Approved (or covered by a session approval): issue for these, resolved.
     Granted(Vec<LiveLift>),
     Denied,
-    /// Not asked: a target is floor, unsupported, or another question holds the slot.
+    /// Not asked: a target is floor or unsupported, or the question ended unanswered.
     Refused {
         reason: String,
     },
@@ -52,7 +52,7 @@ pub enum LiftResponse {
         tokens: Vec<String>,
     },
     Denied,
-    /// Not asked or not issued: a target is floor, another question holds the slot, the kernel refused a token. Not
+    /// Not asked or not issued: a target is floor, no answer came (timed out, the run ended), the kernel refused a token. Not
     /// `refused`, which is the channel's own refusal of a request it didn't handle.
     NotGranted {
         reason: String,
@@ -80,7 +80,7 @@ pub async fn request(
     if handle.tx.send(SessionCmd::Lift { request, reply }).is_err() {
         return LiftResponse::Ended;
     }
-    let _wake = super::socket::WakeOnDrop(handle.tx.clone(), || SessionCmd::SettleLift);
+    let _wake = super::socket::WakeOnDrop(handle.tx.clone());
     match decision.await {
         Ok(LiftDecision::Granted(targets)) => {
             let mut tokens = Vec::with_capacity(targets.len());
