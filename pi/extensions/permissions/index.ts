@@ -59,6 +59,8 @@ import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
 import { registerSandboxBash } from "./sandbox.js"
+import type { LiftsStream } from "../__lib/agent.js"
+import { holdLifts, LIFT_GRANTED_EVENT } from "../__lib/lift.js"
 
 export const EXTENSION = "permissions"
 const BUILT_IN_ALLOW_RULES = ["bash(true)", "bash(false)"]
@@ -178,15 +180,22 @@ export default function (pi: ExtensionAPI) {
         updateEditStatus(result, ctx)
     }
 
+    // pi's stream of live lifts (#408): grants for blocks in pi's own process, consumed with piton's addon.
+    let lifts: LiftsStream | undefined
+
     pi.on("session_start", async (_event, ctx) => {
         const result = loadResolvedPermissionSettings(pi, ctx.cwd)
         updatePermissionSettingsErrorDisplay(result, ctx)
         updateEditStatus(result, ctx)
+        lifts?.close()
+        lifts = holdLifts((granted) => pi.events.emit(LIFT_GRANTED_EVENT, granted))
     })
 
     pi.on("session_shutdown", async () => {
         disposeMcpCatalogListener()
         mcpCatalog = new Map()
+        lifts?.close()
+        lifts = undefined
     })
 
     pi.registerCommand(`${EXTENSION}-toggle-auto-accept`, {

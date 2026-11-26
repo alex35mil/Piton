@@ -33,6 +33,8 @@ pub enum PitonArea {
     Logs,
     /// The ssh wrapper the network gate tunnels SSH through, readable (an allow).
     SshWrapper,
+    /// The addon pi consumes lift tokens with, readable (an allow).
+    Native,
     /// `agent.sock`, which a sandbox may connect to (an allow).
     AgentSocket,
     /// The daemon's control socket.
@@ -65,6 +67,7 @@ impl PitonArea {
             PitonArea::StateFolder => "the daemon's state folder",
             PitonArea::Logs => "Piton's logs",
             PitonArea::SshWrapper => "the ssh wrapper that tunnels SSH through the network gate",
+            PitonArea::Native => "the addon pi widens its sandbox with, after the user approves",
             PitonArea::AgentSocket => "the agent socket (the channel to the daemon)",
             PitonArea::ControlSocket => "the daemon's control socket (clients only)",
         }

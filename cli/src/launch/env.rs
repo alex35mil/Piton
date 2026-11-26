@@ -394,6 +394,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         };
         let base: Env = [("PATH".to_string(), "/nonexistent".to_string())].into();
         let workspace = Path::new("/w");

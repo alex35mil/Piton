@@ -651,6 +651,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         }
     }
 

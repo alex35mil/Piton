@@ -66,7 +66,13 @@ export function setup(prefix, { settings = {}, files = {} } = {}) {
         host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s" },
         project: { tools: { permissions: { default_mode: "allow" } } },
     });
-    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
+    // The faux `lift` tool imports Piton's pi package's lift library from this checkout.
+    const env = {
+        ...process.env,
+        PITON_CONFIG_HOME: config,
+        PI_CODING_AGENT_DIR: agent,
+        PITON_FAUX_LIFT_LIB: join(pkg, "extensions/__lib/lift.ts"),
+    };
     return { dir, ws, agent, config, env };
 }
 

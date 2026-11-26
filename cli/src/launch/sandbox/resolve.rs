@@ -836,6 +836,12 @@ fn build(
     );
     rules.push(
         Effect::Allow,
+        &[Access::Read],
+        subpath(&crate::agent::lift::folder(facts.state_dir)),
+        piton(PitonArea::Native),
+    );
+    rules.push(
+        Effect::Allow,
         &[Access::Connect],
         literal(facts.agent_socket),
         piton(PitonArea::AgentSocket),
@@ -863,6 +869,8 @@ fn build(
         network: grants.network(),
         listen: grants.listen.clone(),
         tag: String::new(),
+        // pi's sandbox turns them on at launch (`launch/mod.rs`), with fnox's setting.
+        lifts: super::rules::Lifts::Off,
     };
     Ok(Built {
         policy,

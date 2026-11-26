@@ -761,22 +761,35 @@ of a compound command must match the same entry; a command that writes a file wi
 `[tools.permissions]` rules still decide first whether it runs at all.
 
 When something other than a command is blocked (an MCP server, an extension, pi), you're asked once per process and
-path, one question at a time. The question names the exact entry each answer saves:
+path, one question at a time. On macOS, pi's running sandbox is widened on your answer, with no restart: the daemon
+writes a small addon for this to `<state>/native/lift.node` when it starts, and pi loads it from there.
 
-- **Allow in this project / everywhere, and restart:** adds the entry that lifts it: `"<path>" = "write"` in
+- **Allow until the end of this turn:** open now, closed when the agent hands the turn back to you (pi's
+  `agent_settled`: retries and queued follow-ups stay inside the turn). The same block
+  in a later run is asked about again.
+- **Allow for this session:** open until the session ends; nothing saved.
+
+While a path is open, the agent's write and edit tools can change it too; the question says so. Bash commands can't:
+each runs in a sandbox of its own.
+These two answers are offered only for pi's own process: a background job a bash call left running can't be widened
+while it runs.
+
+- **Always in this project / everywhere:** saves the entry that lifts it and opens it now; the session's later bash
+  calls get it too, and new sessions read it. The entry: `"<path>" = "write"` in
   `[sandbox.filesystem]` for a file or folder it writes (what it writes inside isn't blocked again),
   `"<path>" = "allow"` in `[sandbox.network.unix_socket_connections]` for a socket it connects to (in a credential
   folder too, for that socket only) or in `[sandbox.network.unix_socket_bindings]` for one it creates,
   `allow_tcp_listening = true` for a TCP listen (pi's OAuth sign-in callback, an MCP server's). "Everywhere" saves
   the folder above a path's per-project part (Claude Code's `~/Library/Caches/claude-cli-nodejs/<project>` saves
-  `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block.
+  `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block. Git's
+  control files and the keychain have no entry to save, so they get only the first two answers.
 
 A path named after the blocked process itself (its pid is a whole number in a component: Claude Code's
 `cc-socks/64421.sock`, Neovim's `nvim.64421.0`) is never offered as that path, since the entry would never match
 again. The question offers the folder above it when that folder isn't temp (`/tmp`, `$TMPDIR`, and what's below them,
 where other processes keep their sockets), the home folder or a folder directly in it, and listing it lifts the block;
 otherwise it's a notice naming that folder.
-- **Not now** (or dismissing it): it stays blocked; a new session asks again.
+- **Not now** (or dismissing it): it stays blocked; it's asked again later.
 
 There's no Deny: like Codex's prompt, a question never saves a denial. A block you never want is an entry you write,
 and a block decided by your own entry (a `"deny"`, a `"read"` path something writes to, a `false` switch) is only
@@ -794,13 +807,14 @@ a time:
   key to read its public half before signing through your SSH agent, so every SSH Git command shows one. To keep ssh
   from opening private keys at all, point `IdentityFile` at the `.pub` file in `~/.ssh/config`, with
   `IdentitiesOnly yes`; ssh then signs through the agent (which must hold the key: `ssh-add -l`).
-- **The keychain** (its services, and `~/Library/Keychains`). With fnox off, the warning names
-  `"~/Library/Keychains" = "read"`. With fnox on it says the keychain stays closed: the credentials of fnox's secret
-  sources live there, and a sandbox that can read it isn't started. For `claude`, it names the `pi-claude-code`
-  preset with a setup token.
-- **Git's hooks and configuration** (`.git/hooks/`, `.git/config`): what Git skipped (`git push -u` sets an
-  upstream; `git branch -D` drops a branch's section; a hook isn't installed). Git carries on.
-- What the floor blocks, and what no entry can lift.
+- **The keychain** (its services, and `~/Library/Keychains`), when pi's sandbox can't be widened while it runs. With
+  fnox off, the warning names `"~/Library/Keychains" = "read"`; in pi's own process its services are asked about
+  instead. With fnox on it says the keychain stays closed: the credentials of fnox's secret sources live there, and a
+  sandbox that can read it isn't started. For `claude`, it names the `pi-claude-code` preset with a setup token.
+- **Git's hooks and configuration** (`.git/hooks/`, `.git/config`), when pi's sandbox can't be widened while it runs
+  (otherwise pi's own write is asked about): what Git skipped (`git push -u` sets an upstream; `git branch -D` drops a
+  branch's section; a hook isn't installed). Git carries on.
+- What the floor blocks, and what nothing can lift.
 
 A command the agent runs keeps the rerun question for every block, credentials and Git's files included.
 

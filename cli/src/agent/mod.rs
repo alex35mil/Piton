@@ -11,6 +11,7 @@
 //! - [`client`]: the Rust client of the channel, for `piton` running inside a sandbox.
 //! - [`answer`]: the answers every approval-gated request shares.
 //! - [`write`]: a protected write an agent asks for: the user's dialog, and the daemon's write once approved.
+//! - [`lift`]: tokens that widen pi's live sandbox, and the addon pi consumes them with.
 
 pub mod answer;
 pub mod block;
@@ -18,6 +19,7 @@ mod channel;
 pub mod client;
 mod command;
 mod git;
+pub mod lift;
 pub mod open;
 mod protected;
 pub mod question;

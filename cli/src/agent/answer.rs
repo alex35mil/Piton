@@ -19,8 +19,7 @@ pub type Never = std::convert::Infallible;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Once<T>(pub T);
 
-/// Approved until the current run settles: the daemon can't bound the operation. Its first user is lifts (#408).
-#[allow(dead_code)]
+/// Approved until the current run settles: the daemon can't bound the operation (a block in pi's own process).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UntilSettled<T>(pub T);
 
@@ -40,7 +39,6 @@ pub enum Answer<N, S, A, D> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Narrowest {
     Once,
-    #[allow(dead_code)]
     UntilSettled,
 }
 
@@ -72,6 +70,11 @@ pub trait Offer {
 
 impl Offer for Never {
     const OFFERED: bool = false;
+}
+
+/// An answer that carries nothing beyond being given.
+impl Offer for () {
+    const OFFERED: bool = true;
 }
 
 impl<N: NarrowestKind, S: Offer, A: Offer, D> Answer<N, S, A, D> {
