@@ -4,7 +4,7 @@
 //! One request per connection, one JSON line each way, except `run_command`, which streams the command's output as
 //! lines before its last one. The server is only a transport: it reads the connecting process ([`Peer`]), parses the
 //! [`Envelope`], accepts its token for that process, authorizes the request for its caller, and dispatches to the
-//! request's own handler (`write.rs`, `run.rs`, the daemon's launch). The contract is `channel.rs`.
+//! request's own handler (`facts.rs`, `write.rs`, `run.rs`, the daemon's launch). The contract is `channel.rs`.
 
 use std::{path::Path, sync::Arc};
 
@@ -88,6 +88,13 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     };
     match authorized {
+        Authorized::Facts { session } => {
+            let answer = match daemon.session(session) {
+                Some(handle) => super::facts::FactsAnswer::Facts(Box::new((*handle.facts).clone())),
+                None => super::facts::FactsAnswer::Ended,
+            };
+            send(&mut write, &answer).await;
+        }
         Authorized::ProtectedWrite { session, request } => {
             // The agent's tool call holds the connection while the user decides; when it's aborted, the connection
             // closes and the wait ends, which the session sees (its reply channel closes) and settles.

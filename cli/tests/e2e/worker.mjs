@@ -1,7 +1,7 @@
 // End-to-end tests of `piton worker` and worker-aware sandbox launches, through the daemon.
 // Usage (in cli/): cargo build && node tests/e2e/worker.mjs, or `mise run cli:test`.
 //
-// Sandboxes don't nest: in a sandboxed session (PITON_RUNTIME=sandbox) the sandboxed launch is checked through
+// Sandboxes don't nest: inside a sandbox (`piton sandbox inside`) the sandboxed launch is checked through
 // `piton sandbox show`, the daemon's own resolver, and the launch itself only on the host.
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, readFileSync, existsSync, lstatSync } from "node:fs";
@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { insideSandbox, pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
@@ -47,7 +47,7 @@ function setup() {
     mkdirSync(join(dir, "state"));
     const socket = join(dir, "state/piton.sock");
     const log = join(dir, "piton.log");
-    const config = writeConfig(dir, {
+    writeConfig(dir, {
         daemon: {
             socket,
             log,
@@ -59,12 +59,12 @@ function setup() {
         host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s" },
         project: { sandbox: { presets: ["rust"], filesystem: { "/global-grant": "write" } } },
     });
-    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
+    const env = testEnv({ PI_CODING_AGENT_DIR: agent });
     return { dir, source, log, env };
 }
 
 async function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(piton, pitonArgs(ctx.dir, ["daemon"]), { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     for (let i = 0; i < 100 && !err.includes("listening"); i++) await sleep(50);
@@ -75,7 +75,7 @@ async function startDaemon(ctx) {
 
 function cli(ctx, args, cwd) {
     return new Promise((res) => {
-        const p = spawn(piton, args, { env: ctx.env, cwd: cwd ?? ctx.source, stdio: ["ignore", "pipe", "pipe"] });
+        const p = spawn(piton, pitonArgs(ctx.dir, args), { env: ctx.env, cwd: cwd ?? ctx.source, stdio: ["ignore", "pipe", "pipe"] });
         let out = "";
         let err = "";
         p.stdout.on("data", (d) => (out += d));
@@ -136,7 +136,7 @@ const tests = {
         await sleep(1500);
         const log = readFileSync(ctx.log, "utf8");
         assert.ok(log.includes(`worker of ${ctx.source}`), "launch logs the relation");
-        const nested = process.env.PITON_RUNTIME === "sandbox";
+        const nested = insideSandbox(piton);
 
         const listed = await cli(ctx, ["worker", "ls", "--json"]);
         assert.equal(listed.json.workers.length, 1);
@@ -243,7 +243,7 @@ const tests = {
         assert.equal(approved.code, 0, approved.err);
         assert.equal(head(), target);
         assert.equal(readFileSync(join(ctx.source, ".piton/config.toml"), "utf8"), '[workers]\nskip = ["apps/.build/index-build"]\n');
-        if (process.env.PITON_RUNTIME !== "sandbox") {
+        if (!insideSandbox(piton)) {
             assert.ok(!existsSync(local), "the hook couldn't write a protected file");
         }
         const skipped = await cli(ctx, ["worker", "delete", worker, "--skip-source-update", "--json"]);

@@ -1,30 +1,21 @@
 /**
- * Where this Pi runs: directly on the host, or inside a sandbox such as a nono worker.
+ * Where this pi runs: directly on the host, or inside the sandbox of a session piton's daemon launched.
  *
- * Selected by PITON_RUNTIME: unset or empty means host, `sandbox` means sandboxed.
- * Any other value is invalid, so a typo never silently falls back to host policy.
+ * A fact of the session, asked of the daemon over the channel (`facts`); outside a session the daemon launched, the
+ * host.
  */
 
-export const RUNTIME_ENV = "PITON_RUNTIME"
+import { channel, sessionFacts, type Runtime } from "./agent.js"
 
-export type Runtime = "host" | "sandbox"
+export type { Runtime } from "./agent.js"
 
-export type RuntimeResult = { runtime: Runtime } | { error: Error }
-
-export function resolveRuntime(env: NodeJS.ProcessEnv = process.env): RuntimeResult {
-    const value = env[RUNTIME_ENV]
-    if (value === undefined || value === "") return { runtime: "host" }
-    if (value === "sandbox") return { runtime: "sandbox" }
-    return {
-        error: new Error(
-            `invalid ${RUNTIME_ENV} ${JSON.stringify(value)}: expected "sandbox", or unset for the host runtime`,
-        ),
+/** The current runtime: the session's, or the host outside one. Rejects when the daemon can't be asked. */
+export async function currentRuntime(env: NodeJS.ProcessEnv = process.env): Promise<Runtime> {
+    const current = channel(env)
+    switch (current.kind) {
+        case "noSession":
+            return "host"
+        case "session":
+            return (await sessionFacts(current)).runtime
     }
-}
-
-/** The current runtime, throwing the invalid-runtime error for callers that report settings errors. */
-export function requireRuntime(env: NodeJS.ProcessEnv = process.env): Runtime {
-    const result = resolveRuntime(env)
-    if ("error" in result) throw result.error
-    return result.runtime
 }

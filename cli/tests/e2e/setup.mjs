@@ -7,23 +7,25 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
+import { configHome, pitonArgs, testEnv } from "./config.mjs";
+
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
 
 function home() {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-setup-")));
-    const config = join(dir, "config");
+    const config = configHome(dir);
     return {
         dir,
         config,
         args: ["--socket", join(dir, "state", "piton.sock")],
         link: join(dir, "bin", "piton"),
-        env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: join(dir, "agent") },
+        env: testEnv({ PI_CODING_AGENT_DIR: join(dir, "agent") }),
     };
 }
 
 function run(h, ...args) {
-    const out = spawnSync(piton, [...h.args, "setup", ...args, "--json", "--link", h.link], { env: h.env });
+    const out = spawnSync(piton, [...pitonArgs(h.dir, h.args), "setup", ...args, "--json", "--link", h.link], { env: h.env });
     return { status: out.status, json: JSON.parse(out.stdout.toString() || "null"), stderr: out.stderr.toString() };
 }
 

@@ -277,6 +277,8 @@ pub struct SessionHandle {
     pub shared: Arc<Mutex<Shared>>,
     /// The sandbox's tag, for a sandboxed session: the kernel's refusals carry it.
     pub tag: Option<String>,
+    /// The session's view, decided at launch: what `facts` answers.
+    pub facts: Arc<crate::agent::facts::Facts>,
 }
 
 impl SessionHandle {
@@ -341,8 +343,9 @@ pub struct LaunchSpec {
     /// The sandbox, for sandboxed launches: `piton sandbox-exec` reads it from the environment and removes it before
     /// pi starts.
     pub policy: Option<launch::sandbox::Policy>,
-    /// What this session's protected files are: the checkout's and the configuration the user edits by hand.
-    pub protected: crate::agent::Protected,
+    /// The session's view (runtime, kept grants, protected files, global tier, workspace): what `facts` answers and
+    /// what a protected write is checked against.
+    pub facts: crate::agent::facts::Facts,
     /// The credential proxy pi starts behind, when fnox is used for this workspace.
     pub proxy: Option<launch::fnox::Proxy>,
     /// What commands the user approves run with, for sandboxed launches.
@@ -505,6 +508,7 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         tx,
         shared: shared.clone(),
         tag: spec.policy.as_ref().map(|p| p.tag.clone()).filter(|t| !t.is_empty()),
+        facts: Arc::new(spec.facts.clone()),
     };
 
     let stdin = child.stdin.take().expect("piped stdin");
@@ -536,7 +540,7 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
     });
     let task = SessionTask {
         config,
-        protected: spec.protected,
+        protected: spec.facts.protected,
         protected_write: None,
         commands,
         calls: commands::Calls::new(&session_tag),

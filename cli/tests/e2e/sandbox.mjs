@@ -13,7 +13,7 @@
 // listeners this test starts in its scratch folder, never the user's.
 //
 // Usage (in cli/): cargo build && node tests/e2e/sandbox.mjs, or `mise run cli:test`. Sandboxes don't nest, so in a
-// sandboxed session (PITON_RUNTIME=sandbox) every test is skipped. TCP probes reach 1.1.1.1:80.
+// sandbox (`piton sandbox inside`) every test is skipped. TCP probes reach 1.1.1.1:80.
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";

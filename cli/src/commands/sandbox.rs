@@ -12,13 +12,17 @@ use crate::{
     },
 };
 
-pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
+pub async fn run(action: SandboxAction, config: &DaemonConfig, view: &crate::agent::facts::View) -> ExitCode {
     let workspace = match &action {
         SandboxAction::Show { workspace }
         | SandboxAction::Why { workspace, .. }
         | SandboxAction::Gate { workspace } => workspace.clone(),
+        SandboxAction::Inside => {
+            println!("{}", launch::sandbox::inside());
+            return ExitCode::SUCCESS;
+        }
     };
-    let (policy, profile, silence, ignored, catalog, untrusted) = match policy(config, workspace).await {
+    let (policy, profile, silence, ignored, catalog, untrusted) = match policy(config, view, workspace).await {
         Ok((resolution, warnings, catalog, untrusted)) => {
             for link in &resolution.links {
                 eprintln!("piton: warning: {link}");
@@ -47,6 +51,7 @@ pub async fn run(action: SandboxAction, config: &DaemonConfig) -> ExitCode {
         }
     };
     match action {
+        SandboxAction::Inside => ExitCode::SUCCESS,
         SandboxAction::Gate { .. } => serve_gate(policy, catalog, config).await,
         SandboxAction::Show { .. } => {
             let output = serde_json::json!({
@@ -218,7 +223,11 @@ type Described = (
     Vec<crate::config::GrantEntry>,
 );
 
-async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Described, String> {
+async fn policy(
+    config: &DaemonConfig,
+    view: &crate::agent::facts::View,
+    workspace: Option<PathBuf>,
+) -> Result<Described, String> {
     let dir = workspace
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -227,7 +236,7 @@ async fn policy(config: &DaemonConfig, workspace: Option<PathBuf>) -> Result<Des
     // What a launch keeps: the session's filter inside one, the user's decision outside.
     let filter = crate::config::trust_inputs(&workspace, &config.paths)
         .map_or(crate::config::GrantFilter::None, |inputs| {
-            crate::trust::current_filter(&config.state_db(), &inputs)
+            crate::trust::current_filter(view, &config.state_db(), &inputs)
         });
     let resolved = launch::resolve_config(config, &workspace, &filter).map_err(|e| e.to_string())?;
     let untrusted = resolved.untrusted.clone();

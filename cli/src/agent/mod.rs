@@ -8,7 +8,9 @@
 //! - [`git`]: Git's hooks and configuration, which a sandboxed agent may not write.
 //! - [`channel`]: the channel's contract: callers, their tokens and processes, requests, and who may send which.
 //! - [`socket`]: `agent.sock`, the transport: identifies a request's caller and dispatches it.
-//! - [`client`]: the Rust client of the channel, for `piton` running inside a sandbox.
+//! - [`client`]: the Rust client of the channel, for `piton` running inside a session.
+//! - [`facts`]: the session's view (runtime, kept grants, protected files, global tier, workspace), asked over the
+//!   channel.
 //! - [`answer`]: the answers every approval-gated request shares.
 //! - [`write`]: a protected write an agent asks for: the user's dialog, and the daemon's write once approved.
 
@@ -17,6 +19,7 @@ pub mod block;
 mod channel;
 pub mod client;
 mod command;
+pub mod facts;
 mod git;
 pub mod open;
 mod protected;
@@ -32,8 +35,7 @@ pub use self::{
     command::{Matched, analyze, grant_for},
     git::{GitControl, GitControlEntry},
     protected::{
-        Controls, PROTECTED_ENV, Protected, ProtectedFacts, ProtectedRoots, canonical_target, fixed_entries, lexical,
-        link_entries,
+        Controls, Protected, ProtectedFacts, ProtectedRoots, canonical_target, fixed_entries, lexical, link_entries,
     },
     run::{Approved, Failed, PiShell, Rerun, RunDecision, RunRequest, Runtime, Why, host_env},
     socket::{FILE, bind, random_hex, serve},

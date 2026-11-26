@@ -3,8 +3,8 @@
  * approval. In the checkout: the source's `.piton/` except `.local/`, and `.pi/` and fnox's config files at any depth.
  * Outside it: Piton's configuration levels (the global tier, `.piton/` and `.agents/` in parent folders), pi's agent
  * directory (except the runtime state pi writes itself), the files fnox loads, and what their symlinks point to.
- * piton's binary is the one definition (`piton config protected`, which answers from the session's `PITON_PROTECTED`),
- * shared with the sandbox rules and the daemon's check.
+ * piton's binary is the one definition (`piton config protected`, which in a session answers from the session's facts,
+ * asked of the daemon), shared with the sandbox rules and the daemon's check.
  *
  * Every pi the daemon launches, sandboxed or on the host, writes them through the daemon (the channel, `agent.ts`),
  * which asks the user in every client and writes on approval; in a sandbox the OS also denies every direct write. Only
