@@ -216,9 +216,10 @@ with `.piton/.local` linked to the source's.
   settings come from the checkout's source, and deleting a worker stops the sessions in its subfolders too.
 - **`[workers] skip`** in `.piton/config.toml` lists paths not copied into new workers, such as editor indexes that
   break tooling in a clone (`apps/.build/index-build` here). It only removes things from the copy.
-- **`piton worker create <name> [--from <checkout>] [--label] [--issue] [--approve-source-update <sha>]`:** the
+- **`piton worker create <name> [--source <checkout>] [--label] [--item-id <id>] [--approve-source-update <sha>]`:** the
   source must be clean on its default branch; Piton fast-forwards it (see "Updating the source" below), clones
-  everything except the skip list and `.piton/.local` (one `clonefile(2)` per entry), links `.piton/.local`, and sets `agent.source`, `agent.label`, `agent.issue`. When mise trusts the
+  everything except the skip list and `.piton/.local` (one `clonefile(2)` per entry), links `.piton/.local`, and sets `agent.source`, `agent.label`, `agent.itemId` (the stable ID of the work item the
+  worker is for: a tracker issue or Project, an incoming pull request). When mise trusts the
   source's own config, Piton trusts the worker's too (`mise trust <worker>`): its config files are the source's,
   cloned, so this grants nothing the user hasn't. An untrusted source gives an untrusted worker, and a launch there
   reports it (see "Launching pi"). It writes no pi.nvim
@@ -240,7 +241,7 @@ with `.piton/.local` linked to the source's.
   reports, never a remote-tracking ref an agent could have rewritten. Read-only Git commands run on the host with
   hooks and fsmonitor off.
   - An update that changes protected files (`.piton/`, `.pi/`) needs the user, since the sandbox can't write them. The
-    daemon refuses with `protected_update` (the checkout, `upstream`, the `target` commit, and the `files`) before
+    daemon refuses with `protected_files_update` (the checkout, `upstream`, the `target` commit, and the `files`) before
     changing anything. The client asks and retries with `--approve-source-update <target>`; deletion can instead
     `--skip-source-update`. An approval of a commit the remote has since moved past asks again.
   - Approved, the daemon writes exactly the approved files itself: each path's blob from the target commit (by hash,
@@ -248,11 +249,11 @@ with `.piton/.local` linked to the source's.
     Then the merge runs in the sandbox with every rule in place, finding those paths done. Nothing is lifted, so a
     hook can't write any other protected file (`.piton/config.local.toml`, which no diff shows). A symlink or
     submodule among them refuses (change it by hand); a merge that fails puts the paths back from `HEAD`.
-  - The user's permission rules can answer before anyone is asked: `piton(git-pull)` in the source checkout's
-    `[tools.permissions]` (the host's rules: `[tools.permissions]` and `[tools.permissions.host]`). `allow` applies the update's
-    protected files without asking, through the same approval path; `deny` refuses creation (`update_denied`) and, on
-    deletion, deletes the worker and leaves the source as it is, with a warning; `ask` or no rule asks. A deny or ask
-    rule wins over an allow, and `*` counts.
+  - The user's settings can answer before anyone is asked: `protected_files_update` in `[workers.permissions]` of the
+    source checkout's chain. `"allow"` applies the update's protected files without asking, through the same approval
+    path; `"deny"` refuses creation (`update_denied`) and, on deletion, deletes the worker and leaves the source as it
+    is, with a warning; `"ask"` or no setting asks. The nearest level that sets it wins; a repository's committed
+    `"allow"` counts only once the user trusts the repository.
   - An incoming-PR review that the pi package's `/pr` tools left untouched isn't an uncommitted change. Piton reads
     `.piton/.local/pull-requests/<number>/checkout.json`, which pi writes, and checks four fields: `phase`,
     `location.root`, and `workspace.{headSha, indexTree, diskCommit}`.
@@ -270,8 +271,29 @@ with `.piton/.local` linked to the source's.
   trusted revision on disk.
 - **`--json`:** every `piton worker` command prints the daemon's response; refusals are typed (`kind`: `exists`,
   `source_dirty`, `source_off_default`, `unknown_default`, `invalid_name`, `not_a_repository`, `not_a_worker`,
-  `leftovers`, `invalid_configuration`, `source_fetch`, `protected_update`, `failed`) with what a caller needs to
-  explain or answer them, and exit 4.
+  `leftovers`, `outside_project`, `invalid_configuration`, `source_fetch`, `protected_files_update`, `update_denied`,
+  `integration_unavailable`, `failed`) with what a caller needs to explain or answer them, and exit 4.
+- **One at a time per source.** A create or delete holds its source checkout's lock (`daemon/workers.rs`) from its
+  first check to its last change, whoever asked (the CLI, nvim, a session), so two operations never race on one
+  source. Listing doesn't take it. The control socket and a session's channel call the same operations.
+- **From a session.** An agent asks through the pi package's `create_worker`, `list_workers`, and `delete_worker`
+  tools, one per operation, which send `worker_create`, `worker_list`, and `worker_delete` on the channel ("The channel
+  to the daemon"). The daemon decides, never pi: `[workers.permissions] create_by_agent` and `delete_by_agent`
+  (`"ask"`, `"allow"`, or `"deny"`; unset asks; a repository's committed `"allow"` only once trusted) answer first,
+  and on `"ask"` the session asks the user (`agent/workers.rs`): once, for this session, always in this project
+  (`.piton/config.local.toml`) or everywhere (the global `config.toml`), which saves `"allow"`, or deny. The
+  permissions extension leaves these tools to the daemon, so nothing is configured in two places or asked twice.
+  - The source is the session's own (its workspace's source); a delete of a checkout that isn't one of that
+    source's workers is refused (`not_a_worker`, `outside_project`).
+  - Follow-up questions come after the first answer and before anything changes: a protected-files update (as the
+    CLI's `protected_files_update`, answered in the question), and, on delete, uncommitted or unpushed work, which
+    offers "Delete anyway" every time, whatever the settings say.
+  - The questions share the session's one question slot. One that arrives while another question is open waits for
+    it and is shown when it frees, oldest first; its `approval_timeout` starts when it's shown.
+  - Only the wait for the first answer is tied to the agent's connection: closing it withdraws the question. Once
+    approved, the operation runs as its own task to the end, so a session may delete the worker it runs in (the
+    question says so); its pi stops, and the worker is still deleted.
+  - #208's session creation will build on these operations; creating a worker keeps one interface for every caller.
 
 The editor keeps its UI (tabs, picker, tracker queue, dialogs) and calls `piton worker` for the rest.
 
@@ -1272,10 +1294,12 @@ adds `reason`: `unknown_token`, `wrong_process`, or `not_yet`; `not_allowed` add
 | `launched` | launch helper | no | — |
 | `lift` | pi | unless a session approval covers it | once |
 | `lifts` | pi | no (a stream) | — |
+| `worker_create`, `worker_delete` | pi | as `[workers.permissions]` says | once |
+| `worker_list` | pi | no | — |
 
 The socket server (`agent/socket.rs`) only reads the peer, parses, accepts the token, authorizes the request for its
 caller (`channel::authorize`, exhaustive), and dispatches to the request's handler (`facts.rs`, `write.rs`, `run.rs`,
-`lift.rs`, the launch). `lift` and `lifts` are described under "Lifts for pi's live sandbox" below.
+`lift.rs`, `workers.rs`, the launch). `lift` and `lifts` are described under "Lifts for pi's live sandbox" below.
 
 **Facts** (`agent/facts.rs`). `facts` answers the session's view in one line, `{"type": "facts", …}`, decided once at
 launch and kept on the session's handle:
@@ -1490,7 +1514,7 @@ question per connection, by the protocol its hello chose, so the view protocol i
   writes and process questions are still pi dialogs (#338 generalizes it).
 
 Only a client answers. One
-question at a time per session, shared with protected writes; no answer within `approval_timeout` (host
+question at a time per session, shared with protected writes and worker questions; no answer within `approval_timeout` (host
 configuration, 10 minutes by default, or `"never"`), a dismissal, or the run ending means it doesn't run, and the agent is told which. `open` and `osascript` are decided by their target first
 (`agent/open/`): `osascript` is refused; `open` of an `https://` link says it opens in the browser; another URL
 scheme names the app Launch Services hands it to (`LSCopyDefaultApplicationURLForURL`, asked by the daemon) and is
@@ -1511,8 +1535,10 @@ tagged reports and routes each to its session by tag (`daemon/refusals.rs`). A c
 when it's rerun); a typed command's (`<session>-<random>-u`): the user saw it fail. The session's tag, or a call
 forgotten since (its background job): a blocked process, every one brought to the user, in order, and each process,
 operation, and target once (again after a live grant that answered it ends). The session asks one question at a time
-(protected writes, block questions, process questions, lifts); a process question waits for the slot, is shown as soon
-as it frees, and is asked again when its dialog leaves unanswered with the run it showed in.
+(protected writes, worker questions, block questions, process questions, lifts); a worker question waits for the slot
+like a network question (its timeout starts when it's shown); a process question waits for the slot, is shown as soon
+as it frees, and is asked again when its dialog leaves unanswered with the run it showed in. #416 replaces these
+per-kind rules with one question scheduler.
 
 The answers depend on whose block it is (`agent/block.rs`, `Live`). In pi's own sandbox (the session's tag), with its
 `lifts` stream open and the live check passing (`grant::live_lift`), it's lifted while pi runs ("Lifts for pi's live

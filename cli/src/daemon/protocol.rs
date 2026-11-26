@@ -79,7 +79,7 @@ pub enum ControlRequest {
     WorkerCreate(crate::project::CreateRequest),
     WorkerList {
         /// The source checkout or any of its workers.
-        from: PathBuf,
+        source: PathBuf,
     },
     WorkerDelete {
         path: PathBuf,

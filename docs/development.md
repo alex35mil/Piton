@@ -55,6 +55,9 @@ docs/              confirmed documentation
 - Protocol fixtures (`apps/packages/PitonKit/Tests/Fixtures`) are written by the daemon test `fixtures`
   (`cli/src/session/view.rs`), which fails when they're stale. After a protocol change, run
   `PITON_WRITE_FIXTURES=1 cargo test fixtures` in `cli/`, then fix PitonKit until `mise run apps:test` passes.
+- Every tool the pi package registers works with every model: one tool per operation, a plain object root, string
+  enums (`.agents/rules/tool-schemas.md`, #81). `pi/tests/tool-schemas.test.ts` checks every registered tool, including
+  against Claude Code's schema normalization.
 - The app integration tests always run this checkout's debug build (`cli/target/debug/piton`), never the installed
   `piton` the daemon names in a session's `PITON_BIN`: `apps:test` and `apps:test:e2e` build it first, and a bare
   `swift test` fails them when it's missing.

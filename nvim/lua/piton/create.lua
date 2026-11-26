@@ -22,7 +22,7 @@ M.PROTECTED_UPDATE_NOTE =
 ---@class AgentPlan
 ---@field name string Directory suffix; piton normalizes it.
 ---@field label string
----@field issue string?
+---@field item_id string?
 ---@field draft string? Kickoff command pre-filled in the Pi prompt.
 
 ---@param request AgentRequest
@@ -35,7 +35,7 @@ function M.plan(request)
         return {
             name = queue.agent_name(item),
             label = queue.agent_label(item),
-            issue = item.id,
+            item_id = item.id,
             draft = queue.command(item),
         }
     end
@@ -55,10 +55,10 @@ function M.create(request)
         ---@cast source string
 
         log.info("Updating " .. source .. " and creating agent…")
-        local request = { from = source, name = plan.name, label = plan.label, issue = plan.issue }
+        local request = { source = source, name = plan.name, label = plan.label, item_id = plan.item_id }
         local result = cli.create(request)
-        if result.kind == "refused" and result.refusal.kind == "protected_update" then
-            local refusal = result.refusal --[[@as { kind: "protected_update", target: string }]]
+        if result.kind == "refused" and result.refusal.kind == "protected_files_update" then
+            local refusal = result.refusal --[[@as { kind: "protected_files_update", target: string }]]
             local question = cli.describe(refusal)
                 .. "\n\n"
                 .. M.PROTECTED_UPDATE_NOTE
@@ -98,7 +98,7 @@ function M.refusal_message(refusal)
         or kind == "source_off_default"
         or kind == "unknown_default"
         or kind == "source_fetch"
-        or kind == "protected_update"
+        or kind == "protected_files_update"
         or kind == "update_denied"
     then
         return "Can't create an agent: " .. cli.describe(refusal)

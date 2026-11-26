@@ -24,14 +24,38 @@ tail -f ~/.local/state/piton/logs/daemon/current.log  # bounded daemon log
 Copy-on-write clones for agents; see "Workers" in [design.md](design.md).
 
 ```sh
-piton worker create "Fix login" --issue KID-5   # from the current checkout: ../<repo>--fix-login
-piton worker ls
+piton worker create "Fix login" --item-id KID-5   # from the current checkout: ../<repo>--fix-login
+piton worker create "Fix login" --source ~/p/app  # from another checkout (or any of its workers)
+piton worker ls [--source <checkout>]
 piton worker delete ../<repo>--fix-login [--force]
 ```
 
+`--item-id` records the stable ID of the work item (a tracker issue or Project, an incoming pull request) the worker is
+for, as `agent.itemId` in the worker's Git config.
+
+An agent in a session can create, list, and delete its own project's workers too, through the `create_worker`,
+`list_workers`, and `delete_worker` tools (the pi package's `workers` extension). Piton asks you in the session first,
+unless `[workers.permissions]` answers (below); listing never asks. Deleting a worker with uncommitted or unpushed
+work asks again every time, showing that work. A session may delete the worker it runs in; it ends with it.
+
 Per-project settings live in `.piton/config.toml` in the source checkout (read only from there, never from a worker):
-`[workers] skip` lists paths not copied into new workers, `[sandbox]` adds grants for sandboxed pis (see "Sandbox"
-below).
+`[workers] skip` lists paths not copied into new workers, `[workers.permissions]` decides what Piton does without
+asking, and `[sandbox]` adds grants for sandboxed pis (see "Sandbox" below).
+
+```toml
+[workers]
+skip = ["apps/.build/index-build"]
+
+[workers.permissions]
+# "ask" | "allow" | "deny"; every key defaults to "ask".
+create_by_agent = "ask"          # a session's create_worker; "Always" in the question saves "allow" here
+delete_by_agent = "ask"          # a session's delete_worker
+protected_files_update = "ask"   # a source update that changes .piton/ or .pi/, whoever asked
+```
+
+`create_by_agent` and `delete_by_agent` apply only to an agent's requests: `piton worker` and the Neovim plugin are
+you. Each key can go in any level's `config.toml` or `config.local.toml`; the nearest that sets it wins. A repository's
+committed `"allow"` counts only once you trust the repository.
 
 Creating or deleting a worker fast-forwards its source checkout. The fetch and the fast-forward run in the sandbox a
 session in the source gets, with your hooks on; nothing of it runs outside the sandbox. The fetch authenticates the way
@@ -43,10 +67,12 @@ An update that changes protected files (`.piton/`, `.pi/`) needs your approval, 
 Piton asks before changing anything, naming the files. Approved, Piton writes exactly those files from the upstream
 commit itself, and the rest of the update, with your hooks, still runs in the sandbox, so a hook can't change any
 other protected file. Declined, nothing changes (when deleting, you can delete without updating the source). The
-Neovim plugin asks; `piton worker` refuses and prints the flag that answers it (`--approve-source-update <sha>`, or
-`--skip-source-update` when deleting). To answer once for all updates, add `piton(git-pull)` to the source's
-`[tools.permissions]`: in `allow`, the files are applied without asking; in `deny`, creating a worker is refused and deleting
-one leaves the source as it is.
+Neovim plugin and a session's question ask; `piton worker` refuses (`protected_files_update`) and prints the flag that
+answers it (`--approve-source-update <sha>`, or `--skip-source-update` when deleting). To answer once for all updates,
+set `protected_files_update` in `[workers.permissions]`: `"allow"` applies the files without asking; `"deny"` refuses
+creating a worker and leaves the source as it is when deleting one.
+
+Operations on one source run one at a time, whoever asks: a second create or delete there waits for the first.
 
 ## pi.nvim
 

@@ -231,8 +231,8 @@ function M.pick()
             -- Items an agent was already created for are left out.
             local started = {} ---@type table<string, true>
             for _, entry in ipairs(lookup.list(source)) do
-                if entry.agent.issue then
-                    started[entry.agent.issue] = true
+                if entry.agent.item_id then
+                    started[entry.agent.item_id] = true
                 end
             end
             return { started = started, items = queue.load(source) }

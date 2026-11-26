@@ -13,6 +13,7 @@ mod refusals;
 mod rpc;
 mod socket;
 mod watch;
+mod workers;
 
 use std::{
     collections::BTreeMap,
@@ -30,9 +31,11 @@ use tokio::{
 
 pub use self::{
     protocol::{
-        AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello, PROTOCOL_VERSION,
+        AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello,
+        PROTOCOL_VERSION, WorkerEntry,
     },
     refusals::Refusal,
+    workers::Deleted,
 };
 use crate::{
     config::DaemonConfig,
@@ -65,6 +68,8 @@ pub struct Daemon {
     logging_changed: Arc<Notify>,
     /// Every live token for `agent.sock`: sessions', calls', and launch helpers'.
     agent_tokens: Arc<crate::agent::Tokens>,
+    /// One lock per source checkout: worker operations there run one at a time, whoever asks.
+    worker_locks: workers::SourceLocks,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +193,7 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         state: Mutex::new(state),
         logging_changed: Arc::new(Notify::new()),
         agent_tokens: Arc::new(crate::agent::Tokens::default()),
+        worker_locks: workers::SourceLocks::default(),
     });
     tokio::spawn(crate::daemon::awake::run(daemon.clone()));
     tokio::spawn(logging_expiry(daemon.clone()));

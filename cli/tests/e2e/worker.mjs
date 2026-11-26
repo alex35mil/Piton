@@ -7,6 +7,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, readFileSync, existsSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import net from "node:net";
 import assert from "node:assert/strict";
 
 import { insideSandbox, pitonArgs, testEnv, writeConfig } from "./config.mjs";
@@ -56,7 +57,8 @@ function setup() {
             integrations: { mise: { enabled: false }, tailscale: { enabled: false } },
             stop: { terminate_after: "3s", kill_after: "1s" },
         },
-        host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s" },
+        // The apps' `session.start` (used to watch a session's dialogs) takes checkouts under a root.
+        host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s", roots: [dir] },
         project: { sandbox: { presets: ["rust"], filesystem: { "/global-grant": "write" } } },
     });
     const env = testEnv({ PI_CODING_AGENT_DIR: agent });
@@ -84,6 +86,89 @@ function cli(ctx, args, cwd) {
     });
 }
 
+/// A `view` client that watches one session and answers its dialogs.
+function viewClient(socketPath) {
+    const sock = net.connect(socketPath);
+    const c = { lines: [], waiters: [], n: 0 };
+    let buf = "";
+    sock.on("data", (chunk) => {
+        buf += chunk;
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (!line.trim()) continue;
+            const msg = JSON.parse(line);
+            c.lines.push(msg);
+            for (const w of [...c.waiters]) if (w.pred(msg)) { c.waiters.splice(c.waiters.indexOf(w), 1); w.resolve(msg); }
+        }
+    });
+    sock.write(JSON.stringify({ protocol: "view", version: 1, client: "test", device: "mac" }) + "\n");
+    c.wait = (pred, ms = 20000) => {
+        const hit = c.lines.find(pred);
+        if (hit) return Promise.resolve(hit);
+        return new Promise((res, rej) => {
+            c.waiters.push({ pred, resolve: res });
+            setTimeout(() => rej(new Error(`timeout; last ${JSON.stringify(c.lines.slice(-3)).slice(0, 600)}`)), ms);
+        });
+    };
+    c.waitNew = (pred, ms) => {
+        const from = c.lines.length;
+        return c.wait((m) => c.lines.indexOf(m) >= from && pred(m), ms);
+    };
+    c.req = async (type, args = {}) => {
+        const id = `t-${++c.n}`;
+        sock.write(JSON.stringify({ id, type, ...args }) + "\n");
+        const reply = await c.wait((m) => m.type === "reply" && m.id === id);
+        if (!reply.ok) throw new Error(`${type}: ${reply.error}`);
+        return reply.data;
+    };
+    /// The next worker dialog shown: its id and options.
+    c.dialog = async () => {
+        const st = await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.some((d) => d.id.startsWith("piton:worker:") && !c.answered?.has(d.id)));
+        return st.change.state.dialogs.find((d) => d.id.startsWith("piton:worker:") && !c.answered?.has(d.id));
+    };
+    c.answered = new Set();
+    c.answer = async (session, dialog, value) => {
+        c.answered.add(dialog.id);
+        await c.req("session.answer", { session, request_id: dialog.id, answer: { value } });
+    };
+    c.close = () => sock.end();
+    return c;
+}
+
+/// One request on the agent socket; `onSent` gets the open socket (to close it early).
+function agentRequest(socket, token, request, onSent) {
+    return new Promise((resolve, reject) => {
+        const sock = net.connect(socket);
+        let buf = "";
+        sock.on("data", (chunk) => (buf += chunk));
+        sock.on("close", () => {
+            try {
+                resolve(buf.trim() ? JSON.parse(buf) : null);
+            } catch (e) {
+                reject(e);
+            }
+        });
+        sock.on("error", reject);
+        sock.write(JSON.stringify({ token, request }) + "\n");
+        onSent?.(sock);
+    });
+}
+
+/// Starts a host session in `workspace` and returns its key, pi's token, and the relay that sends as pi.
+async function piSession(c, workspace) {
+    const { session } = await c.req("session.start", { workspace, mode: "host" });
+    const key = session.key;
+    await c.req("session.watch", { session: key });
+    await c.req("session.send", { session: key, message_id: "e", text: "env" });
+    const done = await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.lines.some((l) => l.session === key && l.change?.item?.type === "tool" && l.change.item.status === "done"));
+    assert.ok(done);
+    const tool = c.lines.find((l) => l.session === key && l.change?.item?.type === "tool" && l.change.item.status === "done").change.item;
+    const { token, relay } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
+    return { key, token, relay };
+}
+
 const tests = {
     async "create, launch in the sandbox with the source's settings, delete"(ctx) {
         // The source's committed grant applies only once the user trusts the source; its workers share the decision.
@@ -101,12 +186,12 @@ const tests = {
         const allowed = await cli(ctx, ["trust", "allow", "--grants", JSON.stringify(status.json.trust.grants)]);
         assert.equal(allowed.code, 0, allowed.err);
         assert.match(allowed.out, /trusted/);
-        const created = await cli(ctx, ["worker", "create", "Fix X", "--issue", "KID-5", "--json"]);
+        const created = await cli(ctx, ["worker", "create", "Fix X", "--item-id", "KID-5", "--json"]);
         assert.equal(created.code, 0, created.err);
         assert.equal(created.json.type, "worker");
         const worker = created.json.worker.path;
         assert.equal(worker, join(ctx.dir, "repo--fix-x"));
-        assert.equal(created.json.worker.issue, "KID-5");
+        assert.equal(created.json.worker.item_id, "KID-5");
         assert.ok(lstatSync(join(worker, ".piton/.local")).isSymbolicLink());
         assert.ok(!existsSync(join(worker, "apps/.build/index-build")), "skip list honored");
         // An agent edits its worker's grants to widen its sandbox: ignored.
@@ -214,7 +299,7 @@ const tests = {
         const target = push(".piton/config.toml", '[workers]\nskip = ["apps/.build/index-build"]\n');
         const refused = await cli(ctx, ["worker", "create", "two", "--json"]);
         assert.equal(refused.code, 4, refused.err);
-        assert.equal(refused.json.refusal.kind, "protected_update");
+        assert.equal(refused.json.refusal.kind, "protected_files_update");
         assert.equal(refused.json.refusal.target, target);
         assert.deepEqual(refused.json.refusal.files, [".piton/config.toml"]);
         assert.equal(head(), before, "the source is unchanged");
@@ -227,7 +312,7 @@ const tests = {
         // Deleting asks too, before deleting.
         const worker = one.json.worker.path;
         const asked = await cli(ctx, ["worker", "delete", worker, "--json"]);
-        assert.equal(asked.json.refusal.kind, "protected_update");
+        assert.equal(asked.json.refusal.kind, "protected_files_update");
         assert.ok(existsSync(worker), "nothing deleted before the answer");
 
         // The user's post-merge hook tries to write a protected file the user never saw: the daemon wrote the approved
@@ -249,6 +334,99 @@ const tests = {
         const skipped = await cli(ctx, ["worker", "delete", worker, "--skip-source-update", "--json"]);
         assert.equal(skipped.code, 0, skipped.err);
         assert.ok(!existsSync(worker));
+    },
+
+    // A session's agent asks the daemon over its channel; the daemon decides from `[workers.permissions]` and asks the
+    // user, and only a client answers.
+    async "a session creates, lists, and deletes workers after the user approves"(ctx) {
+        const trusted = await cli(ctx, ["trust", "status", "--json"]);
+        await cli(ctx, ["trust", "allow", "--grants", JSON.stringify(trusted.json.trust.grants)]);
+        const c = viewClient(join(ctx.dir, "state/piton.sock"));
+        const { key, token, relay } = await piSession(c, ctx.source);
+        const ask = (request, onSent) => agentRequest(relay, token, request, onSent);
+
+        // Listing never asks.
+        assert.deepEqual(await ask({ type: "worker_list" }), { type: "workers", workers: [] });
+
+        // Asked: denied, then allowed once. A second request while the first question is open waits for it, and is
+        // asked once it's answered.
+        const denied = ask({ type: "worker_create", name: "one" });
+        const first = await c.dialog();
+        const waiting = ask({ type: "worker_create", name: "waited" });
+        await sleep(300);
+        const shown = c.lines.filter((m) => m.type === "change" && m.change.op === "state").at(-1).change.state.dialogs;
+        assert.deepEqual(shown.map((d) => d.id), [first.id], "one question at a time");
+        await c.answer(key, first, "Deny");
+        assert.equal((await denied).type, "not_done");
+        const second = await c.dialog();
+        assert.notEqual(second.id, first.id);
+        await c.answer(key, second, "Deny");
+        assert.equal((await waiting).type, "not_done");
+        assert.ok(!existsSync(join(ctx.dir, "repo--one")));
+        const once = ask({ type: "worker_create", name: "one", item_id: "github:7" });
+        const dialog = await c.dialog();
+        assert.match(dialog.title, /create a worker/);
+        assert.match(dialog.title, /Item: github:7/);
+        await c.answer(key, dialog, "Allow once");
+        const created = await once;
+        assert.equal(created.type, "worker_created", JSON.stringify(created));
+        assert.equal(created.worker.item_id, "github:7");
+        assert.equal(git(created.worker.path, "config", "--local", "agent.itemId"), "github:7");
+
+        // A call that stops waiting after the user approved still gets its worker.
+        const abandoned = ask({ type: "worker_create", name: "two" }, (sock) => (c.abandon = sock));
+        await c.answer(key, await c.dialog(), "Allow for this session");
+        c.abandon.destroy();
+        await abandoned;
+        for (let i = 0; i < 100 && !existsSync(join(ctx.dir, "repo--two", ".git")); i++) await sleep(100);
+        await sleep(500);
+        assert.ok(existsSync(join(ctx.dir, "repo--two")), "created after the call left");
+        // For this session: no more questions for creating.
+        const third = await ask({ type: "worker_create", name: "three" });
+        assert.equal(third.type, "worker_created");
+
+        // Outside the project: refused without asking.
+        const outside = await ask({ type: "worker_delete", path: ctx.source });
+        assert.equal(outside.type, "worker_refused");
+        assert.equal(outside.refusal.kind, "not_a_worker");
+
+        // Leftovers: "Delete anyway" after the delete question.
+        writeFileSync(join(ctx.dir, "repo--three", "wip"), "x");
+        const deleting = ask({ type: "worker_delete", path: join(ctx.dir, "repo--three") });
+        await c.answer(key, await c.dialog(), "Allow once");
+        const leftovers = await c.dialog();
+        assert.match(leftovers.title, /isn't pushed/);
+        await c.answer(key, leftovers, "Delete anyway (this work is lost)");
+        assert.equal((await deleting).type, "worker_deleted");
+        assert.ok(!existsSync(join(ctx.dir, "repo--three")));
+
+        // A setting decides first: deny refuses, allow runs without asking.
+        writeFileSync(join(ctx.source, ".git/info/exclude"), "/.piton/*.local.*\n");
+        writeFileSync(join(ctx.source, ".piton/config.local.toml"), '[workers.permissions]\ndelete_by_agent = "deny"\n');
+        const off = await ask({ type: "worker_delete", path: join(ctx.dir, "repo--two") });
+        assert.equal(off.type, "not_done");
+        assert.match(off.reason, /delete_by_agent/);
+        writeFileSync(join(ctx.source, ".piton/config.local.toml"), '[workers.permissions]\ndelete_by_agent = "allow"\n');
+        assert.equal((await ask({ type: "worker_delete", path: join(ctx.dir, "repo--two") })).type, "worker_deleted");
+        c.close();
+    },
+
+    async "a session deletes the worker it runs in"(ctx) {
+        const created = await cli(ctx, ["worker", "create", "self", "--json"]);
+        const worker = created.json.worker.path;
+        const trusted = await cli(ctx, ["trust", "status", "--json"]);
+        await cli(ctx, ["trust", "allow", "--grants", JSON.stringify(trusted.json.trust.grants)]);
+        const c = viewClient(join(ctx.dir, "state/piton.sock"));
+        const { key, token, relay } = await piSession(c, worker);
+        const deleting = agentRequest(relay, token, { type: "worker_delete", path: worker });
+        const dialog = await c.dialog();
+        assert.match(dialog.title, /This session runs in it/);
+        await c.answer(key, dialog, "Allow once");
+        // pi stops, so the agent may hear nothing; the worker goes anyway.
+        await deleting.catch(() => null);
+        for (let i = 0; i < 100 && existsSync(worker); i++) await sleep(100);
+        assert.ok(!existsSync(worker), "deleted though the requester ended");
+        c.close();
     },
 };
 

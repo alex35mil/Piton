@@ -217,7 +217,19 @@ pub static CATALOG: &[Entry] = &[
     project("sandbox.macos.services", ValueType::Map { values: EFFECTS }, empty_map),
     // Not `sandbox.silence`: its entries are tables (`{ target, process }`), edited in the file; a notice names each.
     project("workers.skip", TextList, empty),
+    project("workers.permissions.create_by_agent", WORKER_PERMISSION, ask),
+    project("workers.permissions.delete_by_agent", WORKER_PERMISSION, ask),
+    project("workers.permissions.protected_files_update", WORKER_PERMISSION, ask),
 ];
+
+/// A `[workers.permissions]` key: unset asks.
+const WORKER_PERMISSION: ValueType = ValueType::Choice {
+    options: &["ask", "allow", "deny"],
+};
+
+fn ask(_: &DaemonConfig) -> Value {
+    json!("ask")
+}
 
 /// The entry for `key` in `scope`.
 pub fn entry(scope: Scope, key: &str) -> Option<&'static Entry> {

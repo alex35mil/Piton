@@ -4,7 +4,7 @@
 ---@field path string Agent checkout (its git root).
 ---@field source string Checkout the agent was cloned from.
 ---@field label string Name the agent was created with.
----@field issue string? Identity of the tracker item the agent was created for.
+---@field item_id string? The stable ID of the work item the agent was created for.
 
 ---@class AgentEntry
 ---@field agent Agent
@@ -42,12 +42,12 @@ function M.get(path)
         return nil
     end
     local label = util.git(root, { "config", "--local", "--get", "agent.label" })
-    local issue = util.git(root, { "config", "--local", "--get", "agent.issue" })
+    local item_id = util.git(root, { "config", "--local", "--get", "agent.itemId" })
     return {
         path = root,
         source = vim.trim(source.stdout),
         label = label.code == 0 and vim.trim(label.stdout) or vim.fs.basename(root),
-        issue = issue.code == 0 and vim.trim(issue.stdout) or nil,
+        item_id = item_id.code == 0 and vim.trim(item_id.stdout) or nil,
     }
 end
 

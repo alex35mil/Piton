@@ -60,6 +60,7 @@ import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
 import { registerReviewCodemode } from "./review.js"
 import { registerSandboxBash } from "./sandbox.js"
+import { WORKER_TOOLS } from "../workers/index.js"
 import type { LiftsStream } from "../__lib/agent.js"
 import { holdLifts, LIFT_GRANTED_EVENT } from "../__lib/lift.js"
 
@@ -119,6 +120,11 @@ interface DerivedSkillAllowState {
     cacheKey: string
     rules: string[]
     sources: SkillAllowSource[]
+}
+
+/** Tools whose calls piton's daemon decides itself: the workers extension's. */
+export function daemonDecides(toolName: string): boolean {
+    return (WORKER_TOOLS as readonly string[]).includes(toolName)
 }
 
 // Runtime mode overrides (toggled by user during session, not persisted)
@@ -282,6 +288,9 @@ export default async function (pi: ExtensionAPI) {
     })
 
     pi.on("tool_call", async (event, ctx) => {
+        // piton's daemon decides worker operations from `[workers.permissions]` and asks the user itself: no rule here
+        // applies, and the user is never asked twice.
+        if (daemonDecides(event.toolName)) return undefined
         const settingsResult = loadResolvedPermissionSettings(pi, ctx.cwd)
         updatePermissionSettingsErrorDisplay(settingsResult, ctx)
         if ("error" in settingsResult) {

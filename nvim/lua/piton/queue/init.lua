@@ -30,7 +30,7 @@
 ---| "pull_requests"
 
 ---@class QueueItem
----@field id string Stable identity, stored as the agent's `agent.issue`.
+---@field id string Stable identity, stored as the agent's `agent.itemId`.
 ---@field section QueueSection
 ---@field mention string How a workflow command names the item.
 ---@field marker string? Short reference, when the tracker has one (`#12`, `ENG-42`).

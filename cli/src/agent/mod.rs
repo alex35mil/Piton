@@ -14,6 +14,7 @@
 //! - [`answer`]: the answers every approval-gated request shares.
 //! - [`write`]: a protected write an agent asks for: the user's dialog, and the daemon's write once approved.
 //! - [`lift`]: tokens that widen pi's live sandbox, and the addon pi consumes them with.
+//! - [`workers`]: worker operations an agent asks for: `[workers.permissions]`, the user's questions, and the operation.
 
 pub mod answer;
 pub mod block;
@@ -28,6 +29,7 @@ mod protected;
 pub mod question;
 mod run;
 mod socket;
+pub mod workers;
 mod write;
 
 #[cfg(test)]

@@ -357,6 +357,18 @@ pub enum Request {
         #[serde(default)]
         upstream: Option<String>,
     },
+    /// Create a worker of the session's source (`workers.rs`), as `[workers.permissions] create_by_agent` says.
+    WorkerCreate {
+        name: String,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        item_id: Option<String>,
+    },
+    /// The session's source's workers.
+    WorkerList {},
+    /// Delete one of the session's source's workers, as `[workers.permissions] delete_by_agent` says.
+    WorkerDelete { path: std::path::PathBuf },
     /// Widen pi's sandbox for one action, after the user approves (`lift.rs`): the tokens come back, pi consumes them,
     /// acts, and releases them.
     Lift {
@@ -375,6 +387,9 @@ impl Request {
             Request::ProtectedWrite { .. } => "protected_write",
             Request::RunCommand { .. } => "run_command",
             Request::Launched { .. } => "launched",
+            Request::WorkerCreate { .. } => "worker_create",
+            Request::WorkerList {} => "worker_list",
+            Request::WorkerDelete { .. } => "worker_delete",
             Request::Lift { .. } => "lift",
             Request::Lifts {} => "lifts",
         }
@@ -389,6 +404,11 @@ impl Request {
             // A plain call runs as the session's policy and saved entries say; a rerun asks.
             Request::RunCommand { .. } => Asks::When(super::question::Answer::OFFERED),
             Request::Launched { .. } => Asks::Never,
+            // Asks as `[workers.permissions]` says; listing never asks.
+            Request::WorkerCreate { .. } | Request::WorkerDelete { .. } => {
+                Asks::When(super::workers::WorkerAnswer::OFFERED)
+            }
+            Request::WorkerList {} => Asks::Never,
             // Not when a session approval already covers every target.
             Request::Lift { .. } => Asks::When(super::lift::LiftAnswer::OFFERED),
             Request::Lifts {} => Asks::Never,
@@ -414,6 +434,10 @@ pub enum Authorized {
         session: SessionKey,
         upstream: Option<String>,
     },
+    Worker {
+        session: SessionKey,
+        request: super::workers::WorkerRequest,
+    },
     Lift {
         session: SessionKey,
         request: super::lift::LiftRequest,
@@ -424,8 +448,8 @@ pub enum Authorized {
 }
 
 /// Which callers may send each request: everyone in the session but the launch helper reads facts; only pi's process
-/// writes protected files, runs bash calls, and widens its own sandbox (only its process can consume a token); the
-/// launch helper reports pi's start.
+/// writes protected files, runs bash calls, widens its own sandbox (only its process can consume a token), and asks for
+/// worker operations; the launch helper reports pi's start.
 pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused> {
     let not_allowed = |request: &Request| Refused::NotAllowed {
         caller: caller.kind(),
@@ -444,6 +468,18 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
         (Request::Launched { upstream }, Caller::Launcher { session }) => {
             Ok(Authorized::Launched { session, upstream })
         }
+        (Request::WorkerCreate { name, label, item_id }, Caller::Pi { session }) => Ok(Authorized::Worker {
+            session,
+            request: super::workers::WorkerRequest::Create { name, label, item_id },
+        }),
+        (Request::WorkerList {}, Caller::Pi { session }) => Ok(Authorized::Worker {
+            session,
+            request: super::workers::WorkerRequest::List,
+        }),
+        (Request::WorkerDelete { path }, Caller::Pi { session }) => Ok(Authorized::Worker {
+            session,
+            request: super::workers::WorkerRequest::Delete { path },
+        }),
         (Request::Lift { targets, reason }, Caller::Pi { session }) => Ok(Authorized::Lift {
             session,
             request: super::lift::LiftRequest { targets, reason },
@@ -453,7 +489,10 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
             request @ (Request::ProtectedWrite { .. }
             | Request::RunCommand { .. }
             | Request::Lift { .. }
-            | Request::Lifts {}),
+            | Request::Lifts {}
+            | Request::WorkerCreate { .. }
+            | Request::WorkerList {}
+            | Request::WorkerDelete { .. }),
             Caller::PiChild { .. } | Caller::Call { .. } | Caller::Launcher { .. },
         ) => Err(not_allowed(&request)),
         (request @ Request::Launched { .. }, Caller::Pi { .. } | Caller::PiChild { .. } | Caller::Call { .. }) => {
@@ -626,6 +665,9 @@ mod tests {
             r#"{"token":"t","request":{"type":"launched","upstream":"http://u"}}"#,
             r#"{"token":"t","request":{"type":"lift","targets":[{"kind":"write","path":"/w/.git/config"},{"kind":"listen"}],"reason":"r"}}"#,
             r#"{"token":"t","request":{"type":"lifts"}}"#,
+            r#"{"token":"t","request":{"type":"worker_create","name":"x","item_id":"github:1"}}"#,
+            r#"{"token":"t","request":{"type":"worker_list"}}"#,
+            r#"{"token":"t","request":{"type":"worker_delete","path":"/p/r--x"}}"#,
         ];
         let allowed = |line: &str, caller| {
             let request = serde_json::from_str::<Envelope>(line).unwrap().request;
@@ -651,6 +693,10 @@ mod tests {
                 [false, false, false, true],
                 // Only pi's process can consume a token: neither a bash call nor a process pi started widens pi's
                 // sandbox.
+                [true, false, false, false],
+                [true, false, false, false],
+                // Only pi's process asks for worker operations.
+                [true, false, false, false],
                 [true, false, false, false],
                 [true, false, false, false],
             ]
@@ -690,6 +736,14 @@ mod tests {
         );
         assert_eq!(
             parse(r#"{"token":"t","request":{"type":"launched"}}"#).asks(),
+            Asks::Never
+        );
+        assert_eq!(
+            parse(r#"{"token":"t","request":{"type":"worker_create","name":"x"}}"#).asks(),
+            Asks::When(offered(true, true))
+        );
+        assert_eq!(
+            parse(r#"{"token":"t","request":{"type":"worker_list"}}"#).asks(),
             Asks::Never
         );
         assert_eq!(parse(r#"{"token":"t","request":{"type":"facts"}}"#).asks(), Asks::Never);

@@ -367,6 +367,113 @@ export interface RunRequest {
     rerun?: Rerun
 }
 
+/** A worker, as the daemon reports it. */
+export interface WorkerInfo {
+    path: string
+    source: string
+    label: string
+    /** The stable ID of the work item the worker is for. */
+    item_id: string | null
+}
+
+/** A worker and its live sessions. */
+export interface WorkerEntry extends WorkerInfo {
+    sessions: Array<{ key: number; workspace: string }>
+}
+
+/** Why the daemon refused a worker operation (`WorkerRefusal`): its `kind`, and what it carries. */
+export type WorkerRefusal = { kind: string } & Record<string, unknown>
+
+/** What the daemon answered a worker request with. */
+export type WorkerOutcome<T> =
+    | { kind: "done"; value: T }
+    | { kind: "refused"; refusal: WorkerRefusal }
+    /** Not done: the user denied it or didn't answer, or `[workers.permissions]` turns it off. */
+    | { kind: "notDone"; reason: string }
+
+type WorkerLine =
+    | { type: "worker_created"; worker: WorkerInfo }
+    | { type: "workers"; workers: WorkerEntry[] }
+    | { type: "worker_deleted"; stopped: number; warning: string | null }
+    | { type: "worker_refused"; refusal: WorkerRefusal }
+    | { type: "not_done"; reason: string }
+    | { type: "ended" }
+
+function workerRequest<T>(
+    session: SessionChannel,
+    request: { type: string } & Record<string, unknown>,
+    done: (line: WorkerLine) => T | undefined,
+    signal?: AbortSignal,
+): Promise<WorkerOutcome<T>> {
+    return send<WorkerLine, WorkerOutcome<T>>(
+        session,
+        request,
+        (line) => {
+            switch (line.type) {
+                case "worker_refused":
+                    return { done: { kind: "refused", refusal: line.refusal } }
+                case "not_done":
+                    return { done: { kind: "notDone", reason: line.reason } }
+                case "ended":
+                    throw new Error("the session ended before the daemon answered")
+                case "worker_created":
+                case "workers":
+                case "worker_deleted": {
+                    const value = done(line)
+                    if (value === undefined)
+                        throw new Error(`piton's daemon answered ${request.type} with ${line.type}`)
+                    return { done: { kind: "done", value } }
+                }
+            }
+        },
+        signal,
+    )
+}
+
+/**
+ * Asks the daemon to create a worker of this session's source. The daemon decides from `[workers.permissions]
+ * create_by_agent` and asks the user when it says so; waits as long as the user takes.
+ */
+export function createWorker(
+    session: SessionChannel,
+    request: { name: string; label?: string; item_id?: string },
+    signal?: AbortSignal,
+): Promise<WorkerOutcome<WorkerInfo>> {
+    return workerRequest(
+        session,
+        { type: "worker_create", ...request },
+        (line) => (line.type === "worker_created" ? line.worker : undefined),
+        signal,
+    )
+}
+
+/** This session's source's workers, with their live sessions. Never asks. */
+export function listWorkers(session: SessionChannel, signal?: AbortSignal): Promise<WorkerOutcome<WorkerEntry[]>> {
+    return workerRequest(
+        session,
+        { type: "worker_list" },
+        (line) => (line.type === "workers" ? line.workers : undefined),
+        signal,
+    )
+}
+
+/**
+ * Asks the daemon to delete one of this session's source's workers, as `[workers.permissions] delete_by_agent` says.
+ * Its sessions stop; when this session runs in it, this session ends.
+ */
+export function deleteWorker(
+    session: SessionChannel,
+    worker: string,
+    signal?: AbortSignal,
+): Promise<WorkerOutcome<{ stopped: number; warning: string | null }>> {
+    return workerRequest(
+        session,
+        { type: "worker_delete", path: path.resolve(worker) },
+        (line) => (line.type === "worker_deleted" ? { stopped: line.stopped, warning: line.warning } : undefined),
+        signal,
+    )
+}
+
 /** How a run ended, for the caller. */
 export type RunEnd = { kind: "exited"; code: number } | { kind: "timedOut" } | { kind: "notRun"; reason: string }
 
