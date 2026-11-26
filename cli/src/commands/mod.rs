@@ -338,24 +338,26 @@ pub enum WhyAccess {
 
 #[derive(Subcommands)]
 enum WorkerAction {
-    /// Clone the source of FROM into `<parent>/<repo>--<name>`.
+    /// Clone SOURCE into `<parent>/<repo>--<name>`.
     Create {
         name: String,
         /// The source checkout or any of its workers (default: current directory).
         #[usage(long)]
-        from: Option<PathBuf>,
+        source: Option<PathBuf>,
         #[usage(long)]
         label: Option<String>,
+        /// The stable ID of the work item (a tracker issue or Project, an incoming pull request) the worker is for.
         #[usage(long)]
-        issue: Option<String>,
+        item_id: Option<String>,
         /// Approve this commit's changes to protected files: Piton writes them, the rest of the update runs in the sandbox.
         #[usage(long, value_name = "SHA")]
         approve_source_update: Option<String>,
     },
-    /// List the workers of FROM's source, with their live sessions.
+    /// List the workers of SOURCE, with their live sessions.
     Ls {
+        /// The source checkout or any of its workers (default: current directory).
         #[usage(long)]
-        from: Option<PathBuf>,
+        source: Option<PathBuf>,
     },
     /// Stop the worker's sessions and delete it.
     Delete {

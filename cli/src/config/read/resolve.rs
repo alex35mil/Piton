@@ -370,6 +370,9 @@ impl<'a> Docs<'a> {
             if let Ok(Some(table)) = doc.part::<ToolsTable>(Table::Tools) {
                 grants.extend(TableValue::grants(&table));
             }
+            if let Ok(Some(table)) = doc.part::<WorkersTable>(Table::Workers) {
+                grants.extend(TableValue::grants(&table));
+            }
         }
         grants
     }

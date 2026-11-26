@@ -189,6 +189,13 @@ pub enum SessionCmd {
     },
     /// The agent stopped waiting for a protected write (or got its answer): settle it if it's still pending.
     SettleProtectedWrite,
+    /// A worker operation's question (agent.sock): asked in the session's one question slot, waiting for it when
+    /// another question holds it.
+    WorkerQuestion {
+        asked: crate::agent::workers::Asked,
+    },
+    /// The agent stopped waiting for a worker question: settle it if it's still pending.
+    SettleWorkerQuestion,
     /// A bash call the agent asks the daemon to run (agent.sock): with a per-command grant, or after the user approves.
     RunCommand {
         request: crate::agent::RunRequest,
@@ -538,6 +545,9 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         config,
         protected: spec.protected,
         protected_write: None,
+        worker_question: None,
+        worker_queue: VecDeque::new(),
+        workers_allowed: std::collections::HashSet::new(),
         commands,
         calls: commands::Calls::new(&session_tag),
         question: None,
@@ -618,6 +628,13 @@ struct PendingWrite {
     reply: oneshot::Sender<crate::agent::WriteOutcome>,
 }
 
+/// A worker question the user is being asked about: the dialog's id, and the question with where its answer goes.
+struct PendingWorkerQuestion {
+    id: String,
+    asked: crate::agent::workers::Asked,
+    deadline: Option<Instant>,
+}
+
 /// How many message ids a session remembers for repeats.
 const SENT_KEPT: usize = 256;
 
@@ -634,6 +651,12 @@ struct SessionTask {
     protected: crate::agent::Protected,
     /// The protected write waiting for the user: one per session.
     protected_write: Option<PendingWrite>,
+    /// The worker question waiting for the user, sharing the slot.
+    worker_question: Option<PendingWorkerQuestion>,
+    /// Worker questions waiting for the slot, oldest first: each is shown when it frees, and its timeout starts then.
+    worker_queue: VecDeque<crate::agent::workers::Asked>,
+    /// Worker operations the user allowed for the rest of this session.
+    workers_allowed: std::collections::HashSet<crate::agent::workers::WorkerOp>,
     /// What approved commands run with: sandboxed sessions only.
     commands: Option<commands::Commands>,
     /// The bash calls pi is running, and whose sandbox each tag is.
@@ -754,6 +777,7 @@ impl SessionTask {
         loop {
             let stop_deadline = self.stopping.as_ref().map(|(_, at)| *at);
             let question_deadline = self.question.as_ref().and_then(|q| q.deadline);
+            let worker_deadline = self.worker_question.as_ref().and_then(|q| q.deadline);
             let network_deadline = self
                 .network
                 .as_ref()
@@ -793,6 +817,9 @@ impl SessionTask {
                 }
                 _ = sleep_until(question_deadline.unwrap_or_else(Instant::now)), if question_deadline.is_some() => {
                     self.expire_question();
+                }
+                _ = sleep_until(worker_deadline.unwrap_or_else(Instant::now)), if worker_deadline.is_some() => {
+                    self.end_worker_question("timed out");
                 }
                 _ = sleep_until(network_deadline.unwrap_or_else(Instant::now)), if network_deadline.is_some() => {
                     self.expire_network_question();
@@ -924,6 +951,12 @@ impl SessionTask {
             SessionCmd::ProtectedWrite { request, reply } => self.protected_write(request, reply),
             SessionCmd::SettleProtectedWrite => {
                 self.settle_protected_write();
+                self.ask_next_process();
+                self.publish_view_state();
+            }
+            SessionCmd::WorkerQuestion { asked } => self.worker_question(asked),
+            SessionCmd::SettleWorkerQuestion => {
+                self.settle_worker_question();
                 self.ask_next_process();
                 self.publish_view_state();
             }
@@ -1224,6 +1257,12 @@ impl SessionTask {
                 if self.protected_write.as_ref().is_some_and(|w| w.id == id) {
                     self.answer_protected_write(&command);
                     // The status first, then the state with it: the dialog closes in every client.
+                    self.sync_shared();
+                    self.publish_view_state();
+                    return;
+                }
+                if self.worker_question.as_ref().is_some_and(|q| q.id == id) {
+                    self.answer_worker_question(&command);
                     self.sync_shared();
                     self.publish_view_state();
                     return;
@@ -2032,10 +2071,12 @@ impl SessionTask {
     /// Settles the ones that can't be answered any more first.
     fn asking(&mut self) -> bool {
         self.settle_protected_write();
+        self.settle_worker_question();
         self.settle_question();
         self.settle_process();
         self.settle_network();
         self.protected_write.is_some()
+            || self.worker_question.is_some()
             || self.question.is_some()
             || self.process.asking.is_some()
             || self.network.as_ref().is_some_and(|n| n.asking.is_some())
@@ -2067,8 +2108,9 @@ impl SessionTask {
 
     /// Shows the next process question when nothing else is being asked. Called whenever the slot may have freed.
     fn ask_next_process(&mut self) {
-        // A held connection is waiting for an answer: its question goes first.
+        // A held connection is waiting for an answer: its question goes first, then an agent's waiting worker call.
         self.ask_next_network();
+        self.ask_next_worker();
         if self.asking() {
             return;
         }
@@ -2135,6 +2177,99 @@ impl SessionTask {
         self.ask_next_process();
         self.sync_shared();
         self.publish_view_state();
+    }
+
+    /// A worker operation's question: answered "for this session" at once when the user allowed the operation earlier
+    /// in this session; otherwise queued for the slot and asked, with a dialog every client shows, when it's free.
+    fn worker_question(&mut self, asked: crate::agent::workers::Asked) {
+        if asked.operation().is_some_and(|op| self.workers_allowed.contains(&op)) {
+            asked.approve_for_session();
+            return;
+        }
+        self.worker_queue.push_back(asked);
+        self.ask_next_process();
+        self.publish_view_state();
+    }
+
+    /// Shows the oldest waiting worker question when the slot is free, dropping ones whose asker left meanwhile; one
+    /// for an operation the user allowed for this session while it waited is answered at once.
+    fn ask_next_worker(&mut self) {
+        while !self.asking() {
+            let Some(asked) = self.worker_queue.pop_front() else {
+                return;
+            };
+            if asked.abandoned() {
+                continue;
+            }
+            if asked.operation().is_some_and(|op| self.workers_allowed.contains(&op)) {
+                asked.approve_for_session();
+                continue;
+            }
+            self.show_worker_question(asked);
+        }
+    }
+
+    fn show_worker_question(&mut self, asked: crate::agent::workers::Asked) {
+        self.next_internal += 1;
+        let id = format!("piton:worker:{}", self.next_internal);
+        crate::log!("session {}: asking about a worker operation", lock(&self.shared).key);
+        let record = asked.dialog(&id);
+        self.worker_question = Some(PendingWorkerQuestion {
+            id,
+            asked,
+            deadline: self.config.approval_timeout.deadline(Instant::now()),
+        });
+        // To every client like a dialog of pi's, and kept for replay until it's answered.
+        self.on_pi_line(record.to_string());
+    }
+
+    /// A client's answer to the worker question: answered, or shown again.
+    fn answer_worker_question(&mut self, answer: &Map<String, Value>) {
+        use crate::agent::workers::Answered;
+        let Some(pending) = self.worker_question.take() else {
+            return;
+        };
+        match pending.asked.answer(answer) {
+            Answered::AskAgain(asked) => self.show_worker_question(asked),
+            Answered::Done { for_session } => {
+                if let Some(op) = for_session {
+                    self.workers_allowed.insert(op);
+                }
+                self.ask_next_process();
+            }
+        }
+    }
+
+    /// Ends the worker question unanswered (`why`): the asker hears no, and the dialog closes everywhere.
+    fn end_worker_question(&mut self, why: &str) {
+        let Some(pending) = self.worker_question.take() else {
+            return;
+        };
+        crate::log!("session {}: a worker question {why}", lock(&self.shared).key);
+        self.replay.answer_dialog(&pending.id);
+        // Dropping the question closes its reply: the operation doesn't happen.
+        drop(pending);
+        self.ask_next_process();
+        self.sync_shared();
+        self.publish_view_state();
+    }
+
+    /// Ends a worker question that can no longer be answered: its dialog left (the run ended) or the asker stopped
+    /// waiting.
+    fn settle_worker_question(&mut self) {
+        let Some(pending) = &self.worker_question else { return };
+        let gone = !self.replay.has_dialog(&pending.id);
+        if !gone && !pending.asked.abandoned() {
+            return;
+        }
+        let Some(pending) = self.worker_question.take() else {
+            return;
+        };
+        crate::log!("session {}: a worker question ended unanswered", lock(&self.shared).key);
+        if !gone {
+            self.replay.answer_dialog(&pending.id);
+            self.sync_shared();
+        }
     }
 
     /// Ends a pending protected write that can no longer be answered: its dialog left (the run it belonged to ended,

@@ -65,6 +65,8 @@ Session modes (`/permissions-mode` and auto-accept) never weaken explicit `deny`
 
 Exact literal `true` and `false` Bash commands are built-in allow rules. Session modes and explicit deny or ask rules still take precedence.
 
+The [workers](../workers/) extension's tools (`create_worker`, `list_workers`, `delete_worker`) are left to piton's daemon, which decides them from `[workers.permissions]` and asks the user itself: no rule or session mode here applies to them.
+
 **What a block does:**
 
 - A `deny` blocks only that call and returns the cause to the model without ending the turn, so the model can recover. The reason names the matched rule, plus the command node for Bash, or the session mode, `default_mode`, an unparseable command, or missing MCP metadata.

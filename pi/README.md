@@ -21,6 +21,7 @@ Upgrading from an older version? See the [upgrade guide](UPGRADING.md).
 - [**rules**](extensions/rules/) — rule files injected into system prompt
 - [**status**](extensions/status/) — runtime and rate-limit status entries for pi.nvim
 - [**web-search**](extensions/web-search/) — `web_search` tool via Brave Search API
+- [**workers**](extensions/workers/) — `create_worker`, `list_workers`, `delete_worker`: worker operations through piton's daemon, which asks the user
 
 ## Skills
 

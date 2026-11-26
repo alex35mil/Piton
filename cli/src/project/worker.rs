@@ -75,21 +75,22 @@ pub struct WorkerInfo {
     pub path: PathBuf,
     pub source: PathBuf,
     pub label: String,
-    pub issue: Option<String>,
+    /// The stable ID of the work item (a tracker issue or Project, an incoming pull request) the worker is for.
+    pub item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRequest {
     /// The source checkout, or any worker of it.
-    pub from: PathBuf,
+    pub source: PathBuf,
     /// Folder suffix; normalized to lowercase words joined by `-`.
     pub name: String,
     /// Shown name; defaults to `name`.
     #[serde(default)]
     pub label: Option<String>,
-    /// Tracker item the worker is for.
+    /// The stable ID of the work item the worker is for.
     #[serde(default)]
-    pub issue: Option<String>,
+    pub item_id: Option<String>,
     /// How the source is fast-forwarded when the update changes protected files.
     #[serde(default)]
     pub update: CreateUpdate,
@@ -119,6 +120,9 @@ pub enum WorkerRefusal {
     NotAWorker { path: PathBuf },
     #[error("{path} has uncommitted changes or unpushed commits")]
     Leftovers { path: PathBuf, lines: Vec<String> },
+    /// A session asked about a checkout outside its own project (its source and that source's workers).
+    #[error("{} isn't in this session's project ({})", path.display(), project.display())]
+    OutsideProject { path: PathBuf, project: PathBuf },
     /// The source's configuration is invalid: fix it, then retry.
     #[error("{message}")]
     InvalidConfiguration { message: String },
@@ -127,11 +131,11 @@ pub enum WorkerRefusal {
     SourceFetch { checkout: PathBuf, message: String },
     /// Fast-forwarding the source changes protected files: retry with the user's answer. Nothing has changed.
     #[error(transparent)]
-    ProtectedUpdate(Blocked),
-    /// Fast-forwarding the source changes protected files, and the user's `piton(git-pull)` deny rule refuses it.
+    ProtectedFilesUpdate(Blocked),
+    /// Fast-forwarding the source changes protected files, and `protected_files_update = "deny"` refuses it.
     #[error(
-        "updating {checkout} changes protected files ({}), and a `piton(git-pull)` deny rule in [tools.permissions] \
-         refuses it; update the source by hand",
+        "updating {checkout} changes protected files ({}), and `protected_files_update = \"deny\"` in \
+         [workers.permissions] refuses it; update the source by hand",
         files.join(", ")
     )]
     UpdateDenied { checkout: PathBuf, files: Vec<String> },
@@ -166,7 +170,7 @@ impl From<ProjectError> for WorkerRefusal {
 impl From<UpdateError> for WorkerRefusal {
     fn from(e: UpdateError) -> Self {
         match e {
-            UpdateError::Blocked(blocked) => Self::ProtectedUpdate(*blocked),
+            UpdateError::Blocked(blocked) => Self::ProtectedFilesUpdate(*blocked),
             UpdateError::Denied { checkout, files } => Self::UpdateDenied { checkout, files },
             UpdateError::Fetch { ref checkout, .. } | UpdateError::NoBranch { ref checkout, .. } => Self::SourceFetch {
                 checkout: checkout.clone(),
@@ -179,13 +183,13 @@ impl From<UpdateError> for WorkerRefusal {
 
 type Result<T> = std::result::Result<T, WorkerRefusal>;
 
-/// What the source checkout's permission rules say about an update that changes protected files. The update runs on
-/// the host, so the host's rules apply: `[tools.permissions]` and `[tools.permissions.host]`.
-fn pull_rule(
+/// The source checkout's `[workers.permissions]`, from its configuration chain, the committed file's `"allow"`s kept as
+/// `filter` says.
+pub fn permissions(
     source: &Path,
     paths: &crate::config::Paths,
     filter: &crate::config::GrantFilter,
-) -> Result<source::PullRule> {
+) -> Result<crate::config::WorkerPermissions> {
     let workspace = project::Workspace {
         path: source.to_path_buf(),
         checkout: source.to_path_buf(),
@@ -193,10 +197,19 @@ fn pull_rule(
     };
     let resolved = crate::config::resolve(&workspace, paths, crate::config::Runtime::Host, filter)
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
-    let tools = resolved
-        .tools
+    let workers = resolved
+        .workers
         .map_err(|e| WorkerRefusal::InvalidConfiguration { message: e.to_string() })?;
-    Ok(source::PullRule::of(&tools.permissions.merged))
+    Ok(workers.permissions)
+}
+
+/// What `[workers.permissions] protected_files_update` says about an update that changes protected files.
+fn pull_rule(
+    source: &Path,
+    paths: &crate::config::Paths,
+    filter: &crate::config::GrantFilter,
+) -> Result<crate::config::PermissionMode> {
+    Ok(permissions(source, paths, filter)?.get(crate::config::WorkerPermission::ProtectedFilesUpdate))
 }
 
 fn failed(message: impl Into<String>) -> WorkerRefusal {
@@ -242,21 +255,17 @@ pub fn create(
     filter: &crate::config::GrantFilter,
     git: &dyn GitRunner,
 ) -> Result<WorkerInfo> {
-    let source = source_of(&request.from)?;
+    let source = source_of(&request.source)?;
     let normalized = normalize_name(&request.name);
     if normalized.is_empty() {
         return Err(WorkerRefusal::InvalidName {
             name: request.name.clone(),
         });
     }
-    let file_name = format!(
-        "{}{WORKER_SEPARATOR}{normalized}",
-        source.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-    );
-    let path = source
-        .parent()
-        .map(|p| p.join(&file_name))
-        .ok_or_else(|| failed("source has no parent"))?;
+    if source.parent().is_none() {
+        return Err(failed("source has no parent"));
+    }
+    let path = path(&source, &request.name);
     if path.symlink_metadata().is_ok() {
         return Err(WorkerRefusal::Exists { path });
     }
@@ -286,7 +295,7 @@ pub fn create(
         for (key, value) in [
             ("agent.source", Some(source.to_string_lossy().into_owned())),
             ("agent.label", Some(label.clone())),
-            ("agent.issue", request.issue.clone()),
+            ("agent.itemId", request.item_id.clone()),
         ] {
             if let Some(value) = value {
                 git_ok(&path, &["config", "--local", key, &value]).map_err(failed)?;
@@ -309,8 +318,18 @@ pub fn create(
         path,
         source,
         label,
-        issue: request.issue.clone(),
+        item_id: request.item_id.clone(),
     })
+}
+
+/// Where a worker of `source` named `name` lives: `<parent>/<repo>--<normalized name>`.
+pub fn path(source: &Path, name: &str) -> PathBuf {
+    let file_name = format!(
+        "{}{WORKER_SEPARATOR}{}",
+        source.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        normalize_name(name)
+    );
+    source.parent().unwrap_or(source).join(file_name)
 }
 
 /// The source's default branch when it's clean and on it.
@@ -465,7 +484,7 @@ pub fn info(path: &Path) -> Result<WorkerInfo> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
         }),
-        issue: get("agent.issue"),
+        item_id: get("agent.itemId"),
         source,
         path,
     })
@@ -554,7 +573,7 @@ pub fn plan_removal(
             let rule = pull_rule(&worker.source, paths, filter)?;
             match source::plan(git, &worker.source, &branch, update.into(), rule) {
                 Ok(plan) => AfterRemoval::Update(plan),
-                Err(UpdateError::Blocked(blocked)) => return Err(WorkerRefusal::ProtectedUpdate(*blocked)),
+                Err(UpdateError::Blocked(blocked)) => return Err(WorkerRefusal::ProtectedFilesUpdate(*blocked)),
                 // The user's rule: the worker goes, the source stays as it is.
                 Err(e @ UpdateError::Denied { .. }) => stale(e.to_string()),
                 Err(
@@ -878,10 +897,10 @@ mod tests {
         let (_dir, source) = fixture();
         let info = create_with_host(
             &CreateRequest {
-                from: source.clone(),
+                source: source.clone(),
                 name: "Fix X".into(),
                 label: None,
-                issue: Some("KID-5".into()),
+                item_id: Some("KID-5".into()),
                 update: CreateUpdate::Ask,
             },
             None,
@@ -913,10 +932,10 @@ mod tests {
         // Creating from a worker clones its source.
         let second = create_with_host(
             &CreateRequest {
-                from: worker.clone(),
+                source: worker.clone(),
                 name: "two".into(),
                 label: Some("Second".into()),
-                issue: None,
+                item_id: None,
                 update: CreateUpdate::Ask,
             },
             None,
@@ -971,10 +990,10 @@ mod tests {
 
     fn request(source: &Path, name: &str, update: CreateUpdate) -> CreateRequest {
         CreateRequest {
-            from: source.to_path_buf(),
+            source: source.to_path_buf(),
             name: name.into(),
             label: None,
-            issue: None,
+            item_id: None,
             update,
         }
     }
@@ -982,7 +1001,7 @@ mod tests {
     /// An update that changes protected files refuses creation before anything changes; with the approval of that
     /// commit, the daemon writes the approved files and the merge still runs in the sandbox.
     #[test]
-    fn creation_asks_before_a_protected_update() {
+    fn creation_asks_before_a_protected_files_update() {
         let (_dir, source) = fixture();
         let p = paths(source.parent().unwrap());
         let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
@@ -995,8 +1014,8 @@ mod tests {
             &crate::config::GrantFilter::All,
             &git,
         ) {
-            Err(WorkerRefusal::ProtectedUpdate(blocked)) => blocked,
-            other => panic!("expected ProtectedUpdate, got {other:?}"),
+            Err(WorkerRefusal::ProtectedFilesUpdate(blocked)) => blocked,
+            other => panic!("expected ProtectedFilesUpdate, got {other:?}"),
         };
         assert_eq!(blocked.files, [".piton/config.toml"]);
         assert_eq!(blocked.target, target);
@@ -1005,8 +1024,8 @@ mod tests {
         assert_eq!(git.ran("merge"), 0);
 
         // Typed for clients: the refusal's fields at the top level.
-        let json = serde_json::to_value(WorkerRefusal::ProtectedUpdate(blocked)).unwrap();
-        assert_eq!(json["kind"], "protected_update");
+        let json = serde_json::to_value(WorkerRefusal::ProtectedFilesUpdate(blocked)).unwrap();
+        assert_eq!(json["kind"], "protected_files_update");
         assert_eq!(json["files"][0], ".piton/config.toml");
         assert_eq!(json["target"], target.as_str());
 
@@ -1037,16 +1056,17 @@ mod tests {
         assert_eq!((git.ran("fetch"), git.ran("merge")), (1, 1));
     }
 
-    /// `piton(git-pull)` in the source's `[tools.permissions]` answers the question before anyone is asked: `allow` applies
-    /// the protected files; `deny` refuses creation and leaves the source as it is on deletion; `ask` asks.
+    /// `[workers.permissions] protected_files_update` in the source's configuration answers the question before anyone
+    /// is asked: `allow` applies the protected files; `deny` refuses creation and leaves the source as it is on deletion;
+    /// `ask` asks.
     #[test]
-    fn the_git_pull_rule_decides_first() {
+    fn the_protected_files_update_setting_decides_first() {
         let (_dir, source) = fixture();
         let p = paths(source.parent().unwrap());
         // As a project's setup keeps it: local configuration outside Git.
         std::fs::write(source.join(".git/info/exclude"), "/.piton/*.local.*\n").unwrap();
-        let rule = |list: &str| {
-            let text = format!("[tools.permissions]\n{list} = [\"piton(git-pull)\"]\n");
+        let rule = |mode: &str| {
+            let text = format!("[workers.permissions]\nprotected_files_update = \"{mode}\"\n");
             std::fs::write(source.join(".piton/config.local.toml"), text).unwrap();
         };
         let one = create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p).unwrap();
@@ -1072,7 +1092,7 @@ mod tests {
         assert_eq!(json["kind"], "update_denied");
         let warning = remove_with(&one, false, &DeleteUpdate::Ask, None).unwrap();
         assert!(
-            warning.is_some_and(|w| w.contains("piton(git-pull)")),
+            warning.is_some_and(|w| w.contains("protected_files_update")),
             "deleted, the source left"
         );
         assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), before);
@@ -1103,31 +1123,30 @@ mod tests {
                 &crate::config::GrantFilter::All,
                 &Recorder::default()
             ),
-            Err(WorkerRefusal::ProtectedUpdate(_))
+            Err(WorkerRefusal::ProtectedFilesUpdate(_))
         ));
     }
 
+    /// A repository's committed `"allow"` counts only when trust keeps it; its `"deny"` always does.
     #[test]
-    fn git_pull_rules_combine_strictly() {
-        let settings = |allow: &[&str], ask: &[&str], deny: &[&str]| crate::config::PermissionSettings {
-            allow: allow.iter().map(|s| s.to_string()).collect(),
-            ask: ask.iter().map(|s| s.to_string()).collect(),
-            deny: deny.iter().map(|s| s.to_string()).collect(),
-            ..Default::default()
-        };
-        let rule = |a: &[&str], b: &[&str], c: &[&str]| source::PullRule::of(&settings(a, b, c));
-        const PULL: &str = "piton(git-pull)";
-        let pull = PULL;
-        assert_eq!(rule(&[], &[], &[]), source::PullRule::Ask);
-        assert_eq!(rule(&[pull], &[], &[]), source::PullRule::Allow);
-        assert_eq!(rule(&[pull], &[pull], &[]), source::PullRule::Ask);
-        assert_eq!(rule(&[pull], &[], &["*"]), source::PullRule::Deny);
-        assert_eq!(
-            rule(&["bash(*)"], &[], &[]),
-            source::PullRule::Ask,
-            "other tools' rules"
-        );
-        assert_eq!(rule(&["*"], &[], &[]), source::PullRule::Allow);
+    fn a_committed_allow_needs_trust() {
+        use crate::config::{GrantFilter, PermissionMode, WorkerPermission::ProtectedFilesUpdate};
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        std::fs::write(
+            source.join(".piton/config.toml"),
+            "[workers.permissions]\nprotected_files_update = \"allow\"\n",
+        )
+        .unwrap();
+        let mode = |filter| permissions(&source, &p, &filter).unwrap().get(ProtectedFilesUpdate);
+        assert_eq!(mode(GrantFilter::All), PermissionMode::Allow);
+        assert_eq!(mode(GrantFilter::None), PermissionMode::Ask);
+        std::fs::write(
+            source.join(".piton/config.toml"),
+            "[workers.permissions]\nprotected_files_update = \"deny\"\n",
+        )
+        .unwrap();
+        assert_eq!(mode(GrantFilter::None), PermissionMode::Deny);
     }
 
     /// Deletion asks before it deletes anything; the answer updates on the host or leaves the source behind.
@@ -1141,8 +1160,8 @@ mod tests {
         let target = push_upstream(&source, ".piton/config.toml");
 
         match remove_now(&one, false, None) {
-            Err(WorkerRefusal::ProtectedUpdate(blocked)) => assert_eq!(blocked.target, target),
-            other => panic!("expected ProtectedUpdate, got {other:?}"),
+            Err(WorkerRefusal::ProtectedFilesUpdate(blocked)) => assert_eq!(blocked.target, target),
+            other => panic!("expected ProtectedFilesUpdate, got {other:?}"),
         }
         assert!(one.path.exists(), "nothing deleted before the answer");
 
@@ -1189,10 +1208,10 @@ mod tests {
         let p = paths(source.parent().unwrap());
         match create_with_host(
             &CreateRequest {
-                from: source,
+                source,
                 name: "x".into(),
                 label: None,
-                issue: None,
+                item_id: None,
                 update: CreateUpdate::Ask,
             },
             None,
@@ -1223,10 +1242,10 @@ mod tests {
         git(&source, &["push", "-q"]);
         let mise = isolated_mise(&dir.path().join("mise-state"));
         let request = |name: &str| CreateRequest {
-            from: source.clone(),
+            source: source.clone(),
             name: name.into(),
             label: None,
-            issue: None,
+            item_id: None,
             update: CreateUpdate::Ask,
         };
 
@@ -1271,10 +1290,10 @@ mod tests {
         let (_dir, source) = fixture();
         let worker = create_with_host(
             &CreateRequest {
-                from: source.clone(),
+                source: source.clone(),
                 name: "sub".into(),
                 label: None,
-                issue: None,
+                item_id: None,
                 update: CreateUpdate::Ask,
             },
             None,
@@ -1305,10 +1324,10 @@ mod tests {
         let (_dir, source) = fixture();
         let info = create_with_host(
             &CreateRequest {
-                from: source.clone(),
+                source: source.clone(),
                 name: "pr-12".into(),
                 label: None,
-                issue: None,
+                item_id: None,
                 update: CreateUpdate::Ask,
             },
             None,

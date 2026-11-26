@@ -721,7 +721,7 @@ test("approved worker deletion retries with force through the daemon", function(
 end)
 
 local PROTECTED = {
-    kind = "protected_update",
+    kind = "protected_files_update",
     checkout = "/p/repo",
     upstream = "origin/main",
     target = string.rep("a", 40),

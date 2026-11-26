@@ -11,6 +11,7 @@
 //! - [`client`]: the Rust client of the channel, for `piton` running inside a sandbox.
 //! - [`answer`]: the answers every approval-gated request shares.
 //! - [`write`]: a protected write an agent asks for: the user's dialog, and the daemon's write once approved.
+//! - [`workers`]: worker operations an agent asks for: `[workers.permissions]`, the user's questions, and the operation.
 
 pub mod answer;
 pub mod block;
@@ -23,6 +24,7 @@ mod protected;
 pub mod question;
 mod run;
 mod socket;
+pub mod workers;
 mod write;
 
 #[cfg(test)]

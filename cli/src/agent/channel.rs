@@ -342,6 +342,18 @@ pub enum Request {
         #[serde(default)]
         upstream: Option<String>,
     },
+    /// Create a worker of the session's source (`workers.rs`), as `[workers.permissions] create_by_agent` says.
+    WorkerCreate {
+        name: String,
+        #[serde(default)]
+        label: Option<String>,
+        #[serde(default)]
+        item_id: Option<String>,
+    },
+    /// The session's source's workers.
+    WorkerList {},
+    /// Delete one of the session's source's workers, as `[workers.permissions] delete_by_agent` says.
+    WorkerDelete { path: std::path::PathBuf },
 }
 
 impl Request {
@@ -350,6 +362,9 @@ impl Request {
             Request::ProtectedWrite { .. } => "protected_write",
             Request::RunCommand { .. } => "run_command",
             Request::Launched { .. } => "launched",
+            Request::WorkerCreate { .. } => "worker_create",
+            Request::WorkerList {} => "worker_list",
+            Request::WorkerDelete { .. } => "worker_delete",
         }
     }
 
@@ -361,6 +376,11 @@ impl Request {
             // A plain call runs as the session's policy and saved entries say; a rerun asks.
             Request::RunCommand { .. } => Asks::When(super::question::Answer::OFFERED),
             Request::Launched { .. } => Asks::Never,
+            // Asks as `[workers.permissions]` says; listing never asks.
+            Request::WorkerCreate { .. } | Request::WorkerDelete { .. } => {
+                Asks::When(super::workers::WorkerAnswer::OFFERED)
+            }
+            Request::WorkerList {} => Asks::Never,
         }
     }
 }
@@ -380,10 +400,14 @@ pub enum Authorized {
         session: SessionKey,
         upstream: Option<String>,
     },
+    Worker {
+        session: SessionKey,
+        request: super::workers::WorkerRequest,
+    },
 }
 
-/// Which callers may send each request: pi's process writes protected files and runs bash calls; the launch helper
-/// reports pi's start; a bash call may send nothing yet (facts are its first, #405).
+/// Which callers may send each request: pi's process writes protected files, runs bash calls, and asks for worker
+/// operations; the launch helper reports pi's start; a bash call may send nothing yet (facts are its first, #405).
 pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused> {
     let not_allowed = |request: &Request| Refused::NotAllowed {
         caller: caller.kind(),
@@ -398,8 +422,24 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
         (Request::Launched { upstream }, Caller::Launcher { session }) => {
             Ok(Authorized::Launched { session, upstream })
         }
+        (Request::WorkerCreate { name, label, item_id }, Caller::Pi { session }) => Ok(Authorized::Worker {
+            session,
+            request: super::workers::WorkerRequest::Create { name, label, item_id },
+        }),
+        (Request::WorkerList {}, Caller::Pi { session }) => Ok(Authorized::Worker {
+            session,
+            request: super::workers::WorkerRequest::List,
+        }),
+        (Request::WorkerDelete { path }, Caller::Pi { session }) => Ok(Authorized::Worker {
+            session,
+            request: super::workers::WorkerRequest::Delete { path },
+        }),
         (
-            request @ (Request::ProtectedWrite { .. } | Request::RunCommand { .. }),
+            request @ (Request::ProtectedWrite { .. }
+            | Request::RunCommand { .. }
+            | Request::WorkerCreate { .. }
+            | Request::WorkerList {}
+            | Request::WorkerDelete { .. }),
             Caller::Call { .. } | Caller::Launcher { .. },
         ) => Err(not_allowed(&request)),
         (request @ Request::Launched { .. }, Caller::Pi { .. } | Caller::Call { .. }) => Err(not_allowed(&request)),
@@ -542,6 +582,9 @@ mod tests {
             r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":""}}"#,
             r#"{"token":"t","request":{"type":"run_command","call_id":"c","command":"ls","cwd":"/w"}}"#,
             r#"{"token":"t","request":{"type":"launched","upstream":"http://u"}}"#,
+            r#"{"token":"t","request":{"type":"worker_create","name":"x","item_id":"github:1"}}"#,
+            r#"{"token":"t","request":{"type":"worker_list"}}"#,
+            r#"{"token":"t","request":{"type":"worker_delete","path":"/p/r--x"}}"#,
         ];
         let allowed = |line: &str, caller| {
             let request = serde_json::from_str::<Envelope>(line).unwrap().request;
@@ -553,7 +596,14 @@ mod tests {
             .collect();
         assert_eq!(
             table,
-            [[true, false, false], [true, false, false], [false, false, true]]
+            [
+                [true, false, false],
+                [true, false, false],
+                [false, false, true],
+                [true, false, false],
+                [true, false, false],
+                [true, false, false]
+            ]
         );
         let request = serde_json::from_str::<Envelope>(lines[0]).unwrap().request;
         assert_eq!(
@@ -585,6 +635,14 @@ mod tests {
         );
         assert_eq!(
             parse(r#"{"token":"t","request":{"type":"launched"}}"#).asks(),
+            Asks::Never
+        );
+        assert_eq!(
+            parse(r#"{"token":"t","request":{"type":"worker_create","name":"x"}}"#).asks(),
+            Asks::When(offered(true, true))
+        );
+        assert_eq!(
+            parse(r#"{"token":"t","request":{"type":"worker_list"}}"#).asks(),
             Asks::Never
         );
     }

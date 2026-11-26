@@ -110,6 +110,16 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
             let response = launched(&daemon, session, pid, upstream);
             send(&mut write, &response).await;
         }
+        Authorized::Worker { session, request } => {
+            // Closing the connection before the user's answer withdraws the question; once approved, the operation runs
+            // as its own task to the end (`workers.rs`), and its answer is sent while the connection is open.
+            tokio::select! {
+                response = super::workers::serve(daemon.clone(), session, request) => {
+                    send(&mut write, &response).await;
+                }
+                _ = closed(&mut lines) => {}
+            }
+        }
     }
 }
 
