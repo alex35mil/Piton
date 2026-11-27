@@ -1479,7 +1479,7 @@ impl SessionTask {
             Question::Block(block) => match block.stage {
                 commands::Stage::Choice => crate::agent::question::rpc_dialog(&id, &block.question),
                 commands::Stage::Pattern(target, scope) => {
-                    crate::agent::question::rpc_pattern_dialog(&id, &block.request.command, target, scope)
+                    crate::agent::question::rpc_pattern_dialog(&id, &block.question.command, target, scope)
                 }
             },
             Question::Process(process) => crate::agent::block::process_dialog(
@@ -1551,8 +1551,9 @@ impl SessionTask {
         self.publish_view_state();
     }
 
-    /// A bash call the agent asks the daemon to run: refused unless it's a sandboxed session's running call; run with a
-    /// per-command grant that matches it; otherwise, for a rerun, asked of the user.
+    /// A run the agent or pi's process asks the daemon for: a bash call is refused unless it's a sandboxed session's
+    /// running call; anything a per-command grant matches runs with it; a rerun, or a widened or host run from pi's
+    /// process, is asked of the user.
     fn run_command(&mut self, request: crate::agent::RunRequest, reply: oneshot::Sender<crate::agent::RunDecision>) {
         use crate::agent::RunDecision;
         let key = lock(&self.shared).key;
@@ -1580,9 +1581,18 @@ impl SessionTask {
                 let decision = self.with_gate_user(decision);
                 let _ = reply.send(decision);
             }
-            commands::First::Ask { refusals, tag, note } => {
-                let asker = crate::agent::question::Asker::Agent {
-                    reason: request.reason.clone(),
+            commands::First::Ask {
+                refusals,
+                tag,
+                note,
+                widen,
+            } => {
+                let reason = request.reason.clone();
+                let asker = match &request.origin {
+                    crate::agent::run::Origin::Pi { .. } => crate::agent::question::Asker::Pi { reason },
+                    crate::agent::run::Origin::BashCall { .. } | crate::agent::run::Origin::Typed { .. } => {
+                        crate::agent::question::Asker::Agent { reason }
+                    }
                 };
                 self.next_internal += 1;
                 let question = commands.question(
@@ -1591,9 +1601,10 @@ impl SessionTask {
                     asker,
                     refusals,
                     note,
+                    &widen,
                 );
                 crate::log!("session {key}: asking to run a command outside the sandbox");
-                self.ask_question(question, request, tag, reply);
+                self.ask_question(question, request, tag, widen, reply);
             }
         }
     }
@@ -1605,15 +1616,17 @@ impl SessionTask {
         question: crate::agent::question::Question,
         request: crate::agent::RunRequest,
         tag: String,
+        widen: commands::Widen,
         reply: oneshot::Sender<crate::agent::RunDecision>,
     ) {
-        self.enqueue(Question::Block(commands::PendingQuestion {
+        self.enqueue(Question::Block(Box::new(commands::PendingQuestion {
             question,
             stage: commands::Stage::Choice,
             request,
             tag,
+            widen,
             reply,
-        }));
+        })));
     }
 
     /// A call that failed in the session's own sandbox: asked about when a block recorded for it is one an approved
@@ -1659,13 +1672,14 @@ impl SessionTask {
                     crate::agent::question::Asker::Piton,
                     refusals,
                     note,
+                    &commands::Widen::All,
                 );
                 crate::log!(
                     "session {key}: a command failed on a block; asking to run it again: {}",
                     blocks.join("; ")
                 );
                 let (decided, decision) = oneshot::channel();
-                self.ask_question(question, request, tag, decided);
+                self.ask_question(question, request, tag, commands::Widen::All, decided);
                 let _ = reply.send(Failed::Asked { blocks, decision });
             }
         }
@@ -1675,27 +1689,21 @@ impl SessionTask {
     /// pattern, or decide.
     fn answer_question(
         &mut self,
-        pending: commands::PendingQuestion,
+        pending: Box<commands::PendingQuestion>,
         deadline: Option<Instant>,
         answer: &Map<String, Value>,
     ) {
         let next = commands::rpc_answer(pending.stage, &pending.question, answer);
-        let pending = match next {
-            commands::Next::Decided(answer) => return self.decide_question(pending, answer),
-            commands::Next::AskAgain => commands::PendingQuestion {
-                stage: commands::Stage::Choice,
-                ..pending
-            },
-            commands::Next::Switch => commands::PendingQuestion {
-                question: pending.question.switched(),
-                stage: commands::Stage::Choice,
-                ..pending
-            },
-            commands::Next::AskPattern(target, scope) => commands::PendingQuestion {
-                stage: commands::Stage::Pattern(target, scope),
-                ..pending
-            },
-        };
+        let mut pending = pending;
+        match next {
+            commands::Next::Decided(answer) => return self.decide_question(*pending, answer),
+            commands::Next::AskAgain => pending.stage = commands::Stage::Choice,
+            commands::Next::Switch => {
+                pending.question = pending.question.switched();
+                pending.stage = commands::Stage::Choice;
+            }
+            commands::Next::AskPattern(target, scope) => pending.stage = commands::Stage::Pattern(target, scope),
+        }
         self.show(Question::Block(pending), deadline);
     }
 
@@ -1710,7 +1718,7 @@ impl SessionTask {
         let (pending, dialog) = self.questions.take_decided(question).ok_or_else(gone)?;
         // The `rpc` rendering's dialog closes in every attached client.
         self.replay.answer_dialog(&dialog);
-        self.decide_question(pending, answer);
+        self.decide_question(*pending, answer);
         self.ask_next();
         Ok(())
     }
@@ -1730,7 +1738,10 @@ impl SessionTask {
             Answer::Deny(()) => {
                 crate::log!("session {key}: the user denied running a command outside the sandbox");
                 // The agent mustn't ask again in this run for what the user just declined.
-                self.calls.decline(&pending.request.call_id);
+                match &pending.request.origin {
+                    crate::agent::run::Origin::BashCall { call_id, .. } => self.calls.decline(call_id),
+                    crate::agent::run::Origin::Typed { .. } | crate::agent::run::Origin::Pi { .. } => {}
+                }
                 RunDecision::NotRun {
                     reason: "the user declined to run it outside the sandbox; don't ask again for this command".into(),
                 }
@@ -1742,6 +1753,7 @@ impl SessionTask {
                         &pending.request,
                         &pending.tag,
                         target,
+                        &pending.widen,
                     )))
                 }
                 None => return,
@@ -1752,23 +1764,26 @@ impl SessionTask {
                         "session {key}: the user approved running a command {} for this session",
                         where_(target)
                     );
-                    commands.allow_for_session(&pending.request.command, target);
+                    commands.allow_for_session(&pending.question.command, &pending.widen, target);
                     RunDecision::Run(Box::new(commands.approved_rerun(
                         &pending.request,
                         &pending.tag,
                         target,
+                        &pending.widen,
                     )))
                 }
                 None => return,
             },
-            Answer::Always(always) => match &self.commands {
+            Answer::Always(always) => match &mut self.commands {
                 Some(commands) => {
                     let target = always.target;
                     let shown = always.pattern.pattern().to_string();
-                    let note = match commands.persist(always) {
+                    let note = match commands.persist(always, &pending.widen) {
                         Ok(path) => format!(" (saved `bash({shown})` in {}; new sessions use it)", path.display()),
                         Err(e) => format!(" (couldn't save the entry for `{shown}`: {e})"),
                     };
+                    // The session read its saved entries at launch: the exact command stays approved until it ends.
+                    commands.allow_for_session(&pending.question.command, &pending.widen, target);
                     crate::log!(
                         "session {key}: the user approved running a command {}{note}",
                         where_(target)
@@ -1777,6 +1792,7 @@ impl SessionTask {
                         &pending.request,
                         &pending.tag,
                         target,
+                        &pending.widen,
                     )))
                 }
                 None => return,
@@ -1834,6 +1850,7 @@ impl SessionTask {
                 .calls
                 .command_of(&id)
                 .map_or_else(|| "A command".to_string(), |c| format!("`{c}`")),
+            commands::TagOwner::PiRun => "A run from pi's process (an extension or a workflow tool)".to_string(),
             commands::TagOwner::Session
             | commands::TagOwner::GoneCall
             | commands::TagOwner::Typed
@@ -1960,14 +1977,14 @@ impl SessionTask {
         };
         let summary = refusal.summary();
         // A call's sandbox: kept for that call, shown when it's asked to run again. A typed command: the user saw it fail
-        // and it's never rerun. pi's own sandbox: lifted live. A call's background job outliving it: it can't take pi's
-        // token, so only an entry.
+        // and it's never rerun. A run from pi's process: its caller reads the exit and output. pi's own sandbox: lifted
+        // live. A call's background job outliving it: it can't take pi's token, so only an entry.
         let own = match self.calls.owner(&refusal.tag) {
             commands::TagOwner::Call(id) => {
                 self.calls.note(&id, commands::CallRefusal::from(&refusal));
                 return;
             }
-            commands::TagOwner::Typed | commands::TagOwner::Other => return,
+            commands::TagOwner::Typed | commands::TagOwner::PiRun | commands::TagOwner::Other => return,
             commands::TagOwner::Session => true,
             commands::TagOwner::GoneCall => false,
         };

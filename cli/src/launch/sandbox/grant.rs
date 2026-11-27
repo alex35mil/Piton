@@ -898,6 +898,171 @@ pub fn check_live(policy: &Policy, lift: &LiveLift, credentials: Credentials) ->
     }
 }
 
+/// What a widening asked by code in pi's process (#407) would reopen that an entry of the launch's own configuration
+/// closes. The user closed it, so no approval reopens it (the floor's "user's own `\"deny\"`, `\"read\"`, and `false`").
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WideningRefusal {
+    /// A switch the chain sets to `false`.
+    #[error("`{key} = false` in {} closes it", file.display())]
+    Switch { key: &'static str, file: PathBuf },
+    /// A path at or inside one the chain sets to `"deny"`, or to `"read"` when the request writes.
+    #[error("{asked} is inside `{table}.\"{closed}\" = \"{value}\"` in {}", file.display())]
+    Path {
+        asked: String,
+        table: &'static str,
+        closed: PathKey,
+        value: &'static str,
+        file: PathBuf,
+    },
+    /// A connection or service entry the chain sets to `"deny"`.
+    #[error("`{table}.\"{key}\" = \"deny\"` in {} closes it", file.display())]
+    Entry {
+        table: &'static str,
+        key: String,
+        file: PathBuf,
+    },
+    /// A path key that can't be expanded (an unset `$VAR`).
+    #[error("{0}")]
+    Unexpanded(String),
+}
+
+/// Checks `asked` against the launch's own `[sandbox]` chain: every key it would open that an entry there closes is
+/// refused, whichever file closes it. A request is resolved as the nearest file ([`Resolver::with`]), which would
+/// replace those values, and the policy takes the most specific path entry, so a path inside a closed folder is checked
+/// by containment, as the resolver checks a committed file's. `expand` turns a key into the absolute path the sandbox
+/// would use.
+pub fn check_widening(
+    config: &LaunchConfig,
+    asked: &GrantEntries,
+    expand: impl Fn(&PathKey) -> Result<PathBuf, String>,
+) -> Result<(), WideningRefusal> {
+    let settings = &config.sandbox;
+    let switches = [
+        (
+            "allow_tcp_listening",
+            asked.allow_tcp_listening,
+            &settings.allow_tcp_listening,
+        ),
+        (
+            "allow_git_control_files",
+            asked.allow_git_control_files,
+            &settings.allow_git_control_files,
+        ),
+        (
+            "allow_launching_apps",
+            asked.allow_launching_apps,
+            &settings.allow_launching_apps,
+        ),
+    ];
+    for (key, asked, set) in switches {
+        if let (Some(true), Some(Listed { value: false, file })) = (asked, set) {
+            return Err(WideningRefusal::Switch {
+                key,
+                file: file.clone(),
+            });
+        }
+    }
+    let expanded = |key: &PathKey| expand(key).map_err(WideningRefusal::Unexpanded);
+    // A path asked for `write` (or a socket `allow`) is closed by a `deny`, and a write also by the user's `read`.
+    let closed_by = |asked: &PathKey, writes: bool| -> Result<(), WideningRefusal> {
+        let path = expanded(asked)?;
+        for (key, entry) in &settings.filesystem {
+            let closes = match entry.value {
+                FileAccess::Deny => true,
+                FileAccess::Read => writes,
+                FileAccess::Write => false,
+            };
+            if closes && path.starts_with(expanded(key)?) {
+                return Err(WideningRefusal::Path {
+                    asked: asked.to_string(),
+                    table: "filesystem",
+                    closed: key.clone(),
+                    value: entry.value.name(),
+                    file: entry.file.clone(),
+                });
+            }
+        }
+        Ok(())
+    };
+    for (key, access) in &asked.filesystem {
+        match access {
+            FileAccess::Read => closed_by(key, false)?,
+            FileAccess::Write => closed_by(key, true)?,
+            // A deny only closes.
+            FileAccess::Deny => {}
+        }
+    }
+    let sockets = [
+        (
+            "network.unix_socket_connections",
+            &asked.network.unix_socket_connections,
+            &settings.unix_socket_connections,
+        ),
+        (
+            "network.unix_socket_bindings",
+            &asked.network.unix_socket_bindings,
+            &settings.unix_socket_bindings,
+        ),
+    ];
+    for (table, asked, set) in sockets {
+        for (key, effect) in asked {
+            match effect {
+                crate::config::Effect::Deny => continue,
+                crate::config::Effect::Allow => {}
+            }
+            // A socket under a folder the user denies is closed by that folder too.
+            closed_by(key, false)?;
+            let path = expanded(key)?;
+            for (closed, entry) in set {
+                match entry.value {
+                    crate::config::Effect::Allow => continue,
+                    crate::config::Effect::Deny => {}
+                }
+                if path.starts_with(expanded(closed)?) {
+                    return Err(WideningRefusal::Path {
+                        asked: key.to_string(),
+                        table,
+                        closed: closed.clone(),
+                        value: "deny",
+                        file: entry.file.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for (target, effect) in &asked.network.connections {
+        match effect {
+            crate::config::Effect::Deny => continue,
+            crate::config::Effect::Allow => {}
+        }
+        if let Some(entry) = settings.connections.get(target)
+            && entry.value == crate::config::Effect::Deny
+        {
+            return Err(WideningRefusal::Entry {
+                table: "network.connections",
+                key: target.to_string(),
+                file: entry.file.clone(),
+            });
+        }
+    }
+    for (key, effect) in &asked.macos.services {
+        match effect {
+            crate::config::Effect::Deny => continue,
+            crate::config::Effect::Allow => {}
+        }
+        if let Some(entry) = settings.services.get(key)
+            && entry.value == crate::config::Effect::Deny
+        {
+            return Err(WideningRefusal::Entry {
+                table: "macos.services",
+                key: key.to_string(),
+                file: entry.file.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// A rule's source, as a refusal names it.
 fn describe_source(source: &Source) -> String {
     match source {

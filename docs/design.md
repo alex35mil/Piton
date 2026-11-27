@@ -1292,7 +1292,7 @@ adds `reason`: `unknown_token`, `wrong_process`, or `not_yet`; `not_allowed` add
 | --- | --- | --- | --- |
 | `facts` | pi, a process pi started, a bash call | no | — |
 | `protected_write` | pi | yes (diff) | once |
-| `run_command` | pi | for a rerun | once |
+| `run` | pi | for a rerun, or a widened or host run from pi's process | once |
 | `launched` | launch helper | no | — |
 | `lift` | pi | unless a session approval covers it | once |
 | `lifts` | pi | no (a stream) | — |
@@ -1301,7 +1301,8 @@ adds `reason`: `unknown_token`, `wrong_process`, or `not_yet`; `not_allowed` add
 
 The socket server (`agent/socket.rs`) only reads the peer, parses, accepts the token, authorizes the request for its
 caller (`channel::authorize`, exhaustive), and dispatches to the request's handler (`facts.rs`, `write.rs`, `run.rs`,
-`lift.rs`, `workers.rs`, the launch). `lift` and `lifts` are described under "Lifts for pi's live sandbox" below.
+`lift.rs`, `workers.rs`, the launch). `lift` and `lifts` are described under "Lifts for pi's live sandbox" below, and
+`run` from pi's process under "Runs from pi's process".
 
 **Facts** (`agent/facts.rs`). `facts` answers the session's view in one line, `{"type": "facts", …}`, decided once at
 launch and kept on the session's handle:
@@ -1419,6 +1420,35 @@ widened with Seatbelt extension tokens, so a block in pi's own process needs no 
   (the question says so); bash calls can't, since each runs in a sandbox of its own. A file opened during a lift stays
   writable after release: the sandbox checks at `open`.
 
+**Runs from pi's process** (#407, `agent/run.rs`, `session/commands.rs`). Code in pi's process (an extension, a
+workflow tool) asks the daemon to run a program where it needs to, and the daemon decides as it does for bash calls.
+
+- **The request.** `run {origin, cwd, timeout?, reason?}`, one request for every run. `origin` is a sum type:
+  `{kind: "bash_call", call_id, command, env, rerun?}` (the agent's bash tool call), `{kind: "typed", command, env}`
+  (a `!` command), or `{kind: "pi", program, runtime}`. A pi run's `program` is `{kind: "shell", command}` (pi's shell
+  and `shellCommandPrefix`) or `{kind: "exec", argv}` (no shell); its `runtime` is `{kind: "sandbox"}`, `{kind:
+  "widened", grants}` (`[sandbox]` keys, exactly what a narrowed `[[sandbox.commands]]` grant takes), or `{kind:
+  "host"}`. Only pi's process sends `run`.
+- **The decision**, in order: `cwd` must be inside the checkout or its source; a saved `[[sandbox.commands]]` entry
+  matching the program's text (an `argv` as shell words) decides; a session approval for that text and widening
+  decides; the session's own sandbox runs without asking; a widened or host run asks the user, the block question with
+  an asker of `pi` ("An extension asks to run this…"), whose sandbox side lists the entries it adds.
+- **The user's own entries hold.** Before asking, a widening is checked against the launch's `[sandbox]` chain
+  (`grant::check_widening`): a switch any level sets to `false`, a path at or inside one set to `"deny"` (or `"read"`,
+  for a write), sockets included, and a connection or service set to `"deny"` refuse it without asking (`not_run`,
+  naming the entry and its file). The widening is then resolved as a narrowed grant in the project's own file
+  (`Resolver::with`), so the floor holds too.
+- **Answers:** once, for this session, always (a `[[sandbox.commands]]` entry: `runtime = "host"`, or `runtime =
+  "sandbox"` with the entries asked for as its `grant`; the session also approves the exact text until it ends, since
+  saved entries are read at launch), or deny.
+- **Where it runs.** Its sandbox carries the pi-run tag (`<session tag>-p`), so its refusals are never taken for pi's
+  own (no notice, no lift question). It gets the session's launch environment, or `host_env` on the host; a pi run
+  sends none. It isn't asked about after it fails: its caller reads the exit and the output.
+- **The client** is `pi/extensions/__lib/run.ts`, `runProgram(program, {cwd, where, reason})`, returning `exited`
+  (code and output), `timedOut`, or `notRun`. Outside a session, or in a host session, it runs the program itself.
+  The workflow deletes branches through it, widened by `allow_git_control_files` (`git branch -D` rewrites
+  `.git/config`): after shipping and after a failed initialization.
+
 ### Asking when the sandbox blocks
 
 When the sandbox blocks something a sandboxed agent needs, the user is asked (#241), and nothing runs fully
@@ -1450,9 +1480,10 @@ it, or the host with what put it there), so nothing runs on the host by default:
 with no helper and no policy, and only a saved `runtime = "host"` entry or the user's answer makes one.
 
 - The permissions extension registers pi's own bash tool definition (rendering, truncation, session environment) with
-  operations that send `run_command {call_id, command, cwd, timeout, env, reason?, rerun?}` on the channel
-  and stream the answer (output chunks, then the exit, a timeout, or why it didn't run), and handles `user_bash` the
-  same way (`call_id: "user:<n>"`). Outside a daemon-launched sandboxed session pi's own bash stays.
+  operations that send `run {origin: {kind: "bash_call", call_id, command, env, rerun?}, cwd, timeout, reason?}` on the
+  channel and stream the answer (output chunks, then the exit, a timeout, or why it didn't run), and handles
+  `user_bash` the same way (`origin: {kind: "typed", command, env}`). Outside a daemon-launched sandboxed session pi's
+  own bash stays.
 - The daemon accepts a request only for a bash call pi reported running (`tool_execution_start`) with exactly that
   command, once per call; a rerun only when that call's arguments asked for it (`rerun: {runtime}`). A typed
   command always runs at the session's policy. The daemon picks the shell and `shellCommandPrefix` from pi's settings

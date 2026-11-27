@@ -27,7 +27,7 @@ pub enum Question {
     /// A protected write the agent asked for (`agent.sock` `protected_write`).
     ProtectedWrite(PendingWrite),
     /// The block question for a bash call: the agent's rerun request, or Piton's own after the call failed on a block.
-    Block(commands::PendingQuestion),
+    Block(Box<commands::PendingQuestion>),
     /// A blocked process that isn't a bash call (an MCP server, an extension, pi).
     Process(commands::ProcessQuestion),
     /// A connection the gate holds, with every connection waiting on the same destination.
@@ -311,7 +311,7 @@ impl Questions {
 
     /// The showing block question, when a `view` client decided its typed question (`session.decide`), with the dialog
     /// its `rpc` rendering showed.
-    pub fn take_decided(&mut self, question: &str) -> Option<(commands::PendingQuestion, String)> {
+    pub fn take_decided(&mut self, question: &str) -> Option<(Box<commands::PendingQuestion>, String)> {
         match self.showing_block() {
             Some((block, _)) if block.question.id == question => {}
             Some(_) | None => return None,
@@ -432,29 +432,33 @@ mod tests {
     fn block(id: &str) -> (Question, oneshot::Receiver<RunDecision>) {
         let (reply, decision) = oneshot::channel();
         let request = RunRequest {
-            call_id: "c1".into(),
-            command: "husky install".into(),
+            origin: agent::run::Origin::BashCall {
+                call_id: "c1".into(),
+                command: "husky install".into(),
+                env: Default::default(),
+                rerun: None,
+            },
             cwd: "/w".into(),
             timeout: None,
-            env: Default::default(),
             reason: None,
-            rerun: None,
         };
-        let question = Question::Block(commands::PendingQuestion {
+        let question = Question::Block(Box::new(commands::PendingQuestion {
             question: agent::question::Question {
                 id: id.into(),
-                command: request.command.clone(),
+                command: request.command_text(),
                 asker: Asker::Piton,
                 refusals: Vec::new(),
                 note: None,
                 writable_vars: Vec::new(),
                 runtime: Target::Sandbox,
+                widening: agent::question::Widening::All,
             },
             stage: commands::Stage::Choice,
             request,
             tag: "t-1".into(),
+            widen: commands::Widen::All,
             reply,
-        });
+        }));
         (question, decision)
     }
 

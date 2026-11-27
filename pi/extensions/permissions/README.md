@@ -97,7 +97,7 @@ Setup's `configure_permissions` merges approved MCP `allow` and `ask` lists into
 
 In a sandboxed session Piton's daemon launched (`PITON_AGENT_SOCKET` and `PITON_AGENT_TOKEN` set, and the session's
 runtime `sandbox`), the extension registers pi's own `bash` tool definition with operations that send each call to
-the daemon through the channel (`__lib/agent.ts`), without pi's token in the call's environment (the daemon gives each
+the daemon through the channel (`__lib/agent.ts`, `run` with a `bash_call` origin, or `typed` for `!`), without pi's token in the call's environment (the daemon gives each
 call a token of its own), and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
 sandbox, so the daemon runs each in its own, tagged with the call (`sandbox.ts`). pi's rendering, truncation,
 `shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `rerun`
@@ -111,6 +111,10 @@ result ends with them (`structuredContent.blocks`). When one of them is liftable
 first run's exit. The tool adds a system-prompt guideline: a failure like "Operation not permitted" or `open` error
 -54 is likely a block even when none is listed, so ask with `rerun`, unless the user already declined. Permission
 rules still decide first. Elsewhere pi's own bash stays. See "Asking when the sandbox blocks" in `docs/design.md`.
+
+Code in pi's process that needs to run a program outside the session's sandbox uses `__lib/run.ts` (`runProgram`):
+the same `run` request with a `pi` origin, its sandbox widened by named `[sandbox]` entries or on the host, decided and
+asked by the daemon. See "Runs from pi's process" in `docs/design.md`.
 
 The daemon matches `[[sandbox.commands]]` grants with a Rust port of this extension's Bash analysis and glob; both
 run the cases in `pi/tests/fixtures/bash-matching.json`.

@@ -24,6 +24,7 @@ import {
     type Addon,
     type LiftGranted,
 } from "../extensions/__lib/lift.ts"
+import { runProgram, type Program } from "../extensions/__lib/run.ts"
 import { compile } from "../extensions/__lib/schema.ts"
 import {
     BLOCKED_SEPARATOR,
@@ -105,6 +106,8 @@ function context(cwd: string) {
 }
 
 const out = (s: string): RunLine => ({ type: "output", data: Buffer.from(s).toString("base64") })
+/** The command a `run` request carries, from its origin. */
+const commandOf = (request: Record<string, unknown>) => (request.origin as { command?: string } | undefined)?.command
 const text = (result: { content: { type: string; text?: string }[] }) =>
     result.content.map((part) => part.text ?? "").join("\n")
 
@@ -182,13 +185,15 @@ describe("bash in a sandboxed session under piton", () => {
                     "streamed",
                 )
                 const [request] = daemon.requests
-                assert.equal(request!.type, "run_command")
+                assert.equal(request!.type, "run")
                 assert.equal(request!.token, "token")
-                assert.equal(request!.call_id, "call-7")
-                assert.equal(request!.command, "husky install", "the agent's command, unprefixed")
-                assert.deepEqual(request!.rerun, { runtime: "host" }, "the hinted runtime")
+                const origin = request!.origin as Record<string, unknown>
+                assert.equal(origin.kind, "bash_call")
+                assert.equal(origin.call_id, "call-7")
+                assert.equal(origin.command, "husky install", "the agent's command, unprefixed")
+                assert.deepEqual(origin.rerun, { runtime: "host" }, "the hinted runtime")
                 assert.equal(request!.reason, "hooks")
-                const env = request!.env as Record<string, string>
+                const env = origin.env as Record<string, string>
                 assert.equal(env.PI_SESSION_ID, "s", "pi's session variables")
                 assert.ok(env.PATH!.startsWith(path.join(daemon.dir, "agent", "bin")), "pi's bin folder first")
                 assert.ok(!("PITON_AGENT_TOKEN" in env), "pi's token never reaches a call")
@@ -217,7 +222,7 @@ describe("bash in a sandboxed session under piton", () => {
 
     it("reports a command the daemon didn't run, and stops a running one", async () => {
         const daemon = await fakeDaemon((request) =>
-            request.command === "wait" ? [] : [{ type: "not_run", reason: "the user denied it" }],
+            commandOf(request) === "wait" ? [] : [{ type: "not_run", reason: "the user denied it" }],
         )
         try {
             const { bash } = await register(daemon.socket)
@@ -244,7 +249,7 @@ describe("bash in a sandboxed session under piton", () => {
 
     it("says where a widened or host run ran, and nothing for the session's own sandbox", async () => {
         const daemon = await fakeDaemon((request) =>
-            request.command === "plain"
+            commandOf(request) === "plain"
                 ? [out("ok\n"), { type: "exit", code: 0 }]
                 : [{ type: "ran", runtime: "host", by: "approval" }, out("probed\n"), { type: "exit", code: 1 }],
         )
@@ -269,7 +274,7 @@ describe("bash in a sandboxed session under piton", () => {
 
     it("lists a failed run's blocks; Piton's rerun replaces the result, a denial keeps the first exit", async () => {
         const daemon = await fakeDaemon((request) => {
-            switch (request.command) {
+            switch (commandOf(request)) {
                 case "reported":
                     return [
                         out("denied\n"),
@@ -384,9 +389,9 @@ describe("bash in a sandboxed session under piton", () => {
                 assert.equal(result.exitCode, 0)
                 assert.deepEqual(chunks, ["listed\n"])
                 const [request] = daemon.requests
-                assert.equal(request!.command, "ls", "pi's prefix removed")
-                assert.match(String(request!.call_id), /^user:\d+$/)
-                assert.ok(!("rerun" in request!), "a typed command never asks for a rerun")
+                const origin = request!.origin as Record<string, unknown>
+                assert.equal(origin.kind, "typed", "a typed command, never a rerun")
+                assert.equal(origin.command, "ls", "pi's prefix removed")
             })
         } finally {
             await daemon.close()
@@ -586,6 +591,77 @@ describe("lifts for pi's live sandbox", { skip: process.platform !== "darwin" },
         } finally {
             resetAddon()
             await new Promise<void>((resolve) => server.close(() => resolve()))
+            fs.rmSync(dir, { recursive: true, force: true })
+        }
+    })
+})
+
+describe("runs from pi's process", () => {
+    const argv = ["git", "branch", "-D", "x"]
+    const where = { kind: "widened", grants: { allow_git_control_files: true } } as const
+
+    it("asks the daemon in a sandboxed session and collects the output", async () => {
+        const daemon = await fakeDaemon(() => [
+            { type: "ran", runtime: "sandbox", by: "approval" },
+            out("Deleted branch x\n"),
+            { type: "exit", code: 0 },
+        ])
+        try {
+            const env = { PITON_AGENT_SOCKET: daemon.socket, PITON_AGENT_TOKEN: "token" }
+            const outcome = await runProgram(
+                { kind: "exec", argv },
+                { cwd: daemon.dir, where, reason: "delete it", env, runtime: async () => "sandbox" },
+            )
+            assert.deepEqual(outcome, { kind: "exited", code: 0, output: "Deleted branch x\n" })
+            assert.deepEqual(daemon.requests[0], {
+                type: "run",
+                token: "token",
+                origin: { kind: "pi", program: { kind: "exec", argv }, runtime: where },
+                cwd: daemon.dir,
+                reason: "delete it",
+            })
+        } finally {
+            await daemon.close()
+        }
+    })
+
+    it("reports a denial without running", async () => {
+        const daemon = await fakeDaemon(() => [{ type: "not_run", reason: "the user declined" }])
+        try {
+            const env = { PITON_AGENT_SOCKET: daemon.socket, PITON_AGENT_TOKEN: "token" }
+            const outcome = await runProgram(
+                { kind: "exec", argv },
+                { cwd: daemon.dir, where, reason: "r", env, runtime: async () => "sandbox" },
+            )
+            assert.deepEqual(outcome, { kind: "notRun", reason: "the user declined" })
+        } finally {
+            await daemon.close()
+        }
+    })
+
+    it("runs here outside a session and in a host session, with no shell for an argv", async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piton-run-"))
+        const daemon = await fakeDaemon(() => [])
+        try {
+            const program: Program = { kind: "exec", argv: ["printf", "[%s]", "$HOME; x"] }
+            const here = await runProgram(program, { cwd: dir, where, reason: "r", env: { PATH: "/usr/bin:/bin" } })
+            assert.deepEqual(here, { kind: "exited", code: 0, output: "[$HOME; x]" })
+            const host = await runProgram(program, {
+                cwd: dir,
+                where,
+                reason: "r",
+                env: { PATH: "/usr/bin:/bin", PITON_AGENT_SOCKET: daemon.socket, PITON_AGENT_TOKEN: "t" },
+                runtime: async () => "host",
+            })
+            assert.deepEqual(host, here)
+            assert.deepEqual(daemon.requests, [], "a host session's pi isn't sandboxed")
+            const failed = await runProgram(
+                { kind: "shell", command: "echo no >&2; exit 3" },
+                { cwd: dir, where, reason: "r", env: { PATH: "/usr/bin:/bin" } },
+            )
+            assert.deepEqual(failed, { kind: "exited", code: 3, output: "no\n" })
+        } finally {
+            await daemon.close()
             fs.rmSync(dir, { recursive: true, force: true })
         }
     })

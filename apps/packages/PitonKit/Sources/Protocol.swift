@@ -326,8 +326,19 @@ public struct Question: Codable, Sendable, Hashable, Identifiable {
         case command
     }
 
+    /// Who brought the question.
+    public enum Asker: String, Codable, Sendable {
+        /// The agent asked to run its command again.
+        case agent
+        /// The command failed on a block, and Piton asks to run it again.
+        case piton
+        /// Code in pi's process (an extension, a workflow tool) asks to run a program outside the session's sandbox.
+        case pi
+    }
+
     public let id: String
     public let kind: Kind
+    public let asker: Asker
     public let command: String
     public let reason: String?
     /// What the sandbox refused when the command last ran (`operation path`).
@@ -362,7 +373,7 @@ public struct Question: Codable, Sendable, Hashable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, command, reason, refusals, note, runtime, wording
+        case id, kind, asker, command, reason, refusals, note, runtime, wording
         case suggestedPattern = "suggested_pattern"
         case writableVars = "writable_vars"
     }

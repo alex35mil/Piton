@@ -33,7 +33,7 @@ const source =
     "# Plan\n\n## Overview\n\nKeep the request and show the plan.\n\n### Plan highlights\n\n- One comment.\n\n## Implementation\n\nUpdate the plan.\n"
 const token = "ab345678-1234-4567-8901-123456789abc"
 
-function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
+async function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-publication-"))
     const git = (...args: string[]) => cp.execFileSync("git", args, { cwd: root, stdio: "pipe" })
     git("init", "-b", "main")
@@ -111,7 +111,7 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
     const common = { title: "Work", slug: "work", request, object: object(42) }
     const parent =
         kind === "task"
-            ? initializeEntity(
+            ? await initializeEntity(
                   { ...common, entity: "epic", title: "Parent", slug: "parent", object: object(41) },
                   { cwd: root },
               )
@@ -127,7 +127,7 @@ function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
             : kind === "gig"
               ? { ...common, entity: kind, kind: "feature" as const }
               : { ...common, entity: kind, parentEpicDir: parent!.directory }
-    const initialized = initializeEntity(input, { cwd: root })
+    const initialized = await initializeEntity(input, { cwd: root })
     const directory = initialized.directory
     // Every Epic here publishes `source`, whose accepted Task list is empty.
     for (const epic of [kind === "epic" ? directory : parent?.directory])
@@ -180,7 +180,7 @@ function envelope(value: unknown, mode: "raw" | "text" | "structured") {
 }
 
 describe("managed GitHub plan comments", () => {
-    it("defines strict comment publication states", () => {
+    it("defines strict comment publication states", async () => {
         for (const state of [
             { state: "unpublished" },
             { state: "pending", token },
@@ -200,7 +200,7 @@ describe("managed GitHub plan comments", () => {
     for (const mode of ["raw", "text", "structured"] as const)
         for (const shape of ["minimal", "full"] as const)
             it(`records ${shape} comment creation and updates the same comment (${mode})`, async () => {
-                const f = fixture()
+                const f = await fixture()
                 try {
                     const prepared = await f.prepare()
                     assert.ok(prepared.state === "mutation-needed")
@@ -233,7 +233,7 @@ describe("managed GitHub plan comments", () => {
             })
 
     it("preserves pending publication for invalid minimal and full creation evidence", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed")
@@ -285,7 +285,7 @@ describe("managed GitHub plan comments", () => {
     })
 
     it("re-issues the same create when a complete read finds the pending comment was never posted", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed")
@@ -329,7 +329,7 @@ describe("managed GitHub plan comments", () => {
     })
 
     it("pins the plan comment on its first publication only, with the registered token", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
@@ -377,7 +377,7 @@ describe("managed GitHub plan comments", () => {
     })
 
     it("pins a pending plan comment that recovery identifies", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
@@ -395,10 +395,14 @@ describe("managed GitHub plan comments", () => {
     })
 
     for (const [name, failure, reason] of [
-        ["a missing token", (f: ReturnType<typeof fixture>) => delete f.github.env.PIN_TOKEN, /PIN_TOKEN is not set/],
+        [
+            "a missing token",
+            (f: Awaited<ReturnType<typeof fixture>>) => delete f.github.env.PIN_TOKEN,
+            /PIN_TOKEN is not set/,
+        ],
         [
             "a network error",
-            (f: ReturnType<typeof fixture>) => {
+            (f: Awaited<ReturnType<typeof fixture>>) => {
                 f.github.respond = () => {
                     throw new TypeError("fetch failed")
                 }
@@ -407,14 +411,14 @@ describe("managed GitHub plan comments", () => {
         ],
         [
             "a GitHub refusal",
-            (f: ReturnType<typeof fixture>) => {
+            (f: Awaited<ReturnType<typeof fixture>>) => {
                 f.github.respond = () => Response.json({ message: "Must have admin rights" }, { status: 403 })
             },
             /^HTTP 403: Must have admin rights$/,
         ],
     ] as const)
         it(`keeps the publication and reports a failed pin on ${name}`, async () => {
-            const f = fixture()
+            const f = await fixture()
             try {
                 failure(f)
                 const prepared = await f.prepare()
@@ -436,7 +440,7 @@ describe("managed GitHub plan comments", () => {
     for (const kind of ["epic", "task", "gig"] as const)
         for (const adopted of [false, true])
             it(`uses one comment for ${kind}/${adopted ? "adopted" : "new"}`, async () => {
-                const f = fixture(kind, adopted)
+                const f = await fixture(kind, adopted)
                 try {
                     const brief = fs.readFileSync(path.join(f.root, f.directory, "brief.md"), "utf8")
                     const prepared = await f.prepare()
@@ -506,7 +510,7 @@ describe("managed GitHub plan comments", () => {
             })
 
     it("publishes a synchronized parent Epic update and announces it from the Task", async () => {
-        const f = fixture("task")
+        const f = await fixture("task")
         try {
             assert.ok(f.parentDirectory)
             const epicDir = f.parentDirectory
@@ -602,7 +606,7 @@ describe("managed GitHub plan comments", () => {
     })
 
     it("rejects a Gig plan update without an announcement or with a Task origin", async () => {
-        const f = fixture("gig")
+        const f = await fixture("gig")
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
@@ -628,7 +632,7 @@ describe("managed GitHub plan comments", () => {
     })
 
     it("refuses to publish an Epic plan whose Task list isn't the accepted one", async () => {
-        const f = fixture("epic")
+        const f = await fixture("epic")
         try {
             const withTask = `${source}\n## Tasks\n\n### Parser\n\n**Kind:** \`feature\`\n**Summary:** Parse.\n\nParse it.\n`
             await assert.rejects(f.prepare(withTask), /differs from the accepted one[\s\S]*Task 1: added "Parser"/)
@@ -640,8 +644,8 @@ describe("managed GitHub plan comments", () => {
         }
     })
 
-    it("rejects a saved presented or accepted summary in the tracker record", () => {
-        const f = fixture("gig")
+    it("rejects a saved presented or accepted summary in the tracker record", async () => {
+        const f = await fixture("gig")
         try {
             for (const state of ["presented", "accepted"]) {
                 const planAnnouncement = { state, summary: "Early.", after: planFingerprint(source) }
@@ -658,7 +662,7 @@ describe("managed GitHub plan comments", () => {
 
     for (const kind of ["epic", "gig"] as const)
         it(`finishes a ${kind} announcement when the plan update landed without being recorded`, async () => {
-            const f = fixture(kind)
+            const f = await fixture(kind)
             try {
                 const run = (input: Record<string, unknown>) =>
                     f.publish({ entityDir: f.directory, ...input } as TrackerPublicationInput)
@@ -705,7 +709,7 @@ describe("managed GitHub plan comments", () => {
         })
 
     it("resolves availability and validates source before saving a creation attempt", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             await assert.rejects(f.prepare(source, new Map()), /unavailable/)
             await assert.rejects(f.prepare("No overview"), /Overview/)
@@ -720,7 +724,7 @@ describe("managed GitHub plan comments", () => {
 
     for (const mode of ["raw", "text", "structured"] as const)
         it(`recovers interrupted creation on later pages (${mode}) and reads uncertain updates`, async () => {
-            const f = fixture()
+            const f = await fixture()
             try {
                 const prepared = await f.prepare()
                 assert.ok(prepared.state === "mutation-needed")
@@ -754,7 +758,7 @@ describe("managed GitHub plan comments", () => {
         })
 
     it("preserves pending state for duplicate, incomplete, errored and wrong-scope evidence", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed")

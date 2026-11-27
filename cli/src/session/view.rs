@@ -1528,6 +1528,7 @@ mod tests {
                 },
             ],
             runtime: crate::agent::question::Target::Sandbox,
+            widening: crate::agent::question::Widening::All,
         }
         .view();
         let snapshot_before = view.snapshot(50).to_string();

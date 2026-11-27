@@ -354,17 +354,30 @@ export interface Rerun {
     runtime: "sandbox" | "host"
 }
 
+/** What a run from pi's process runs: a shell command (pi's shell and prefix), or a program with no shell. */
+export type Program = { kind: "shell"; command: string } | { kind: "exec"; argv: string[] }
+
+/**
+ * Where a run from pi's process asks to run: the session's own sandbox (never asked), the sandbox widened by
+ * `[sandbox]` entries (as a narrowed `[[sandbox.commands]]` grant takes them), or the host. The daemon decides.
+ */
+export type RunWhere = { kind: "sandbox" } | { kind: "widened"; grants: Record<string, unknown> } | { kind: "host" }
+
+/** Who a run is for. */
+export type RunOrigin =
+    /** The agent's bash tool call; `env` is pi's shell environment, used when it runs with the session's own rules. */
+    | { kind: "bash_call"; call_id: string; command: string; env: Record<string, string>; rerun?: Rerun }
+    /** A command the user typed (`!`): always the session's own rules. */
+    | { kind: "typed"; command: string; env: Record<string, string> }
+    /** Code in pi's process (an extension, a workflow tool). */
+    | { kind: "pi"; program: Program; runtime: RunWhere }
+
 export interface RunRequest {
-    /** pi's tool call id, or `user:<n>` for a `!` command. */
-    call_id: string
-    command: string
+    origin: RunOrigin
     cwd: string
     timeout?: number
-    /** pi's shell environment for the command: used when it runs with the session's own rules. */
-    env: Record<string, string>
+    /** Why it should run outside the session's sandbox, shown to the user. */
     reason?: string
-    /** The agent's rerun request, with the runtime it hints; absent for a plain call or a `!` command. */
-    rerun?: Rerun
 }
 
 /** A worker, as the daemon reports it. */
@@ -490,7 +503,7 @@ export function run(
 ): Promise<RunEnd> {
     return send<RunLine, RunEnd>(
         session,
-        { type: "run_command", ...request },
+        { type: "run", ...request },
         (line) => {
             switch (line.type) {
                 case "exit":

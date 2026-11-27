@@ -763,6 +763,14 @@ and is refused when no app handles it or the app is one the sandbox could have w
 process that isn't a command (an MCP server, an extension) is asked about with `"<name>" = "allow"` in
 `[sandbox.macos.services]`.
 
+An extension or workflow tool can ask to run a program outside the session's sandbox too: with a few `[sandbox]`
+entries added ("Run in a wider sandbox?", which names them), or on the host. The question says an extension asks, and
+the answers are the same. **Always** saves a per-command entry whose `grant` is the entries it asked for (or
+`runtime = "host"`), and runs that exact command without asking for the rest of the session. A request that would
+reopen what your own entries close (a `false` switch, a path at or inside your `"deny"`, or a write inside your
+`"read"`) is refused without asking. The workflow deletes a branch this way after shipping, with Git's control files
+open, since `git branch -D` rewrites `.git/config`; saving `bash(git branch -D *)` in the sandbox stops the question.
+
 Per-command entries, in any `config.toml` or `config.local.toml` (a repository's committed one only once you trust it).
 `runtime` is required: `"sandbox"` with a `grant`, or `"host"` without one.
 
@@ -845,7 +853,8 @@ a time:
   sandbox that can read it isn't started. For `claude`, it names the `pi-claude-code` preset with a setup token.
 - **Git's hooks and configuration** (`.git/hooks/`, `.git/config`), when pi's sandbox can't be widened while it runs
   (otherwise pi's own write is asked about): what Git skipped (`git push -u` sets an upstream; `git branch -D` drops a
-  branch's section; a hook isn't installed). Git carries on.
+  branch's section; a hook isn't installed). Git carries on. The workflow's own branch deletions don't hit this: they
+  run through the daemon with Git's control files open.
 - What the floor blocks, and what nothing can lift.
 
 A command the agent runs keeps the rerun question for every block, credentials and Git's files included.

@@ -346,10 +346,16 @@ pub enum Request {
     Facts {},
     /// Write a protected file, after the user approves the diff (`write.rs`).
     ProtectedWrite { path: std::path::PathBuf, content: String },
-    /// Run a bash call or a `!` command through the daemon (`run.rs`).
-    RunCommand {
-        #[serde(flatten)]
-        request: super::RunRequest,
+    /// Run a bash call, a `!` command, or a program from pi's process through the daemon (`run.rs`).
+    Run {
+        origin: super::run::Origin,
+        cwd: std::path::PathBuf,
+        /// Seconds.
+        #[serde(default)]
+        timeout: Option<f64>,
+        /// Why it should run outside the session's sandbox, shown to the user.
+        #[serde(default)]
+        reason: Option<String>,
     },
     /// The helper is about to become pi: its process is pi's, and behind fnox with a filtered network, fnox's proxy
     /// URL is the gate's route.
@@ -385,7 +391,7 @@ impl Request {
         match self {
             Request::Facts {} => "facts",
             Request::ProtectedWrite { .. } => "protected_write",
-            Request::RunCommand { .. } => "run_command",
+            Request::Run { .. } => "run",
             Request::Launched { .. } => "launched",
             Request::WorkerCreate { .. } => "worker_create",
             Request::WorkerList {} => "worker_list",
@@ -401,8 +407,9 @@ impl Request {
             Request::Facts {} => Asks::Never,
             // A write changes what later sessions may do: once (the diff as shown or the user's version), or deny.
             Request::ProtectedWrite { .. } => Asks::Always(super::write::WriteAnswer::OFFERED),
-            // A plain call runs as the session's policy and saved entries say; a rerun asks.
-            Request::RunCommand { .. } => Asks::When(super::question::Answer::OFFERED),
+            // A plain call, a typed command, or a run in the session's own sandbox runs as the policy and saved entries
+            // say; a rerun, or a widened or host run from pi's process, asks.
+            Request::Run { .. } => Asks::When(super::question::Answer::OFFERED),
             Request::Launched { .. } => Asks::Never,
             // Asks as `[workers.permissions]` says; listing never asks.
             Request::WorkerCreate { .. } | Request::WorkerDelete { .. } => {
@@ -426,7 +433,7 @@ pub enum Authorized {
         session: SessionKey,
         request: super::write::WriteRequest,
     },
-    RunCommand {
+    Run {
         session: SessionKey,
         request: super::RunRequest,
     },
@@ -464,7 +471,23 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
             session,
             request: super::write::WriteRequest { path, content },
         }),
-        (Request::RunCommand { request }, Caller::Pi { session }) => Ok(Authorized::RunCommand { session, request }),
+        (
+            Request::Run {
+                origin,
+                cwd,
+                timeout,
+                reason,
+            },
+            Caller::Pi { session },
+        ) => Ok(Authorized::Run {
+            session,
+            request: super::RunRequest {
+                origin,
+                cwd,
+                timeout,
+                reason,
+            },
+        }),
         (Request::Launched { upstream }, Caller::Launcher { session }) => {
             Ok(Authorized::Launched { session, upstream })
         }
@@ -487,7 +510,7 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
         (Request::Lifts {}, Caller::Pi { session }) => Ok(Authorized::Lifts { session }),
         (
             request @ (Request::ProtectedWrite { .. }
-            | Request::RunCommand { .. }
+            | Request::Run { .. }
             | Request::Lift { .. }
             | Request::Lifts {}
             | Request::WorkerCreate { .. }
@@ -661,7 +684,8 @@ mod tests {
         let lines = [
             r#"{"token":"t","request":{"type":"facts"}}"#,
             r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":""}}"#,
-            r#"{"token":"t","request":{"type":"run_command","call_id":"c","command":"ls","cwd":"/w"}}"#,
+            r#"{"token":"t","request":{"type":"run","origin":{"kind":"bash_call","call_id":"c","command":"ls"},"cwd":"/w"}}"#,
+            r#"{"token":"t","request":{"type":"run","origin":{"kind":"pi","program":{"kind":"exec","argv":["git","branch","-D","x"]},"runtime":{"kind":"widened","grants":{"allow_git_control_files":true}}},"cwd":"/w","reason":"r"}}"#,
             r#"{"token":"t","request":{"type":"launched","upstream":"http://u"}}"#,
             r#"{"token":"t","request":{"type":"lift","targets":[{"kind":"write","path":"/w/.git/config"},{"kind":"listen"}],"reason":"r"}}"#,
             r#"{"token":"t","request":{"type":"lifts"}}"#,
@@ -688,6 +712,9 @@ mod tests {
             table,
             [
                 [true, true, true, false],
+                [true, false, false, false],
+                // Runs: a bash call's run and a run from pi's process, both pi's own requests; a call, or a process pi
+                // started, can't ask for more than its own sandbox.
                 [true, false, false, false],
                 [true, false, false, false],
                 [false, false, false, true],
@@ -731,7 +758,8 @@ mod tests {
             Asks::Always(offered(false, false))
         );
         assert_eq!(
-            parse(r#"{"token":"t","request":{"type":"run_command","call_id":"c","command":"ls","cwd":"/w"}}"#).asks(),
+            parse(r#"{"token":"t","request":{"type":"run","origin":{"kind":"typed","command":"ls"},"cwd":"/w"}}"#)
+                .asks(),
             Asks::When(offered(true, true))
         );
         assert_eq!(
