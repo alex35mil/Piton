@@ -76,8 +76,14 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
         }
         case "linear-issue": {
             const configured = requireTracker(roles, `${resource} resource IDs`)
-            if (configured.provider !== "linear" || tracker.provider !== "linear" || tracker.resource === "project")
+            if (
+                configured.provider !== "linear" ||
+                tracker.provider !== "linear" ||
+                tracker.resource === "project" ||
+                status.entity !== "task"
+            )
                 throw new Error("resource IDs require a Linear issue")
+            const parent = status.parent
             scope = {
                 ...common,
                 kind: resource,
@@ -85,9 +91,11 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
                 team: configured.team,
                 issueId: tracker.external.issueId,
                 relationship: (() => {
-                    switch (tracker.parent.kind) {
-                        case "project":
-                            return { kind: "project" as const, projectId: tracker.parent.projectId }
+                    switch (parent.kind) {
+                        case "epic":
+                            if (parent.epic.provider !== "linear")
+                                throw new Error("a Linear Task's parent Epic must be a Linear Project")
+                            return { kind: "project" as const, projectId: parent.epic.projectId }
                         case "none":
                             return { kind: "projectless" as const }
                     }

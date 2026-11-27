@@ -114,6 +114,7 @@ function fixture() {
         title: "Example",
         entity: "task",
         kind: "refactor",
+        parent: { kind: "none" },
         branch: { state: "ready", name: prScope.head, start: "main", target: "main", source: "generated" },
         tracker: {
             provider: "github",

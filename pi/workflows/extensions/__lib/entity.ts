@@ -20,8 +20,11 @@ import { AcceptedTaskSchema, readEpicTasks } from "./epic-tasks.js"
 import { writeTextAtomically } from "./files.js"
 import {
     assertTrackerRecordInvariants,
+    describeTaskParent,
     EntityTrackerSchema,
     ForgeRecordSchema,
+    isEpicTrackerItem,
+    TaskTrackerParentSchema,
     trackerReference,
 } from "../integrations/records.js"
 
@@ -105,10 +108,12 @@ const epicProperties = {
     entity: Type.Literal("epic"),
     acceptedTasks: Type.Optional(Type.Array(AcceptedTaskSchema)),
 }
-// A Task's parent comes from its directory (`taskParent`), not from metadata.
+// The tracker decides a Task's parent, read at init and checked again on resume; `parent` records it, and the
+// directory (`taskParent`) mirrors it.
 const taskProperties = {
     entity: Type.Literal("task"),
     kind: DeliverableKindSchema,
+    parent: TaskTrackerParentSchema,
     // Epic Tasks only: a fingerprint of the Task issue body (its design) the Task last synced from. Absent
     // until `record_task_design` first runs. A standalone Task's issue body is its Request, not a design.
     design: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$" })),
@@ -232,25 +237,20 @@ function assertTaskParentInvariants(task: TaskStatus, entityDirectory: string, f
         return fail(error instanceof Error ? error.message : String(error))
     }
     const tracker = task.tracker
+    const recorded = task.parent
     switch (parent.kind) {
         case "none":
+            if (recorded.kind !== "none")
+                fail(`the Task's parent is ${describeTaskParent(recorded)}, but it lives under ${TASK_ROOT}`)
             if (task.design !== undefined) fail("a standalone Task has no design; its issue body is the Request")
-            if (tracker.provider === "linear" && tracker.resource === "issue" && tracker.parent.kind !== "none")
-                fail("a standalone Task's Linear issue must have no Project")
             return
         case "epic": {
             const epic = readEntityStatus(parent.directory)
             if (epic.entity !== "epic") return fail("Task container is not an Epic")
             if (tracker.provider === "local") return fail("an Epic Task can't be local; its Epic created its issue")
             if (tracker.provider !== epic.tracker.provider) fail("Task and parent Epic use different trackers")
-            if (
-                tracker.provider === "linear" &&
-                tracker.resource === "issue" &&
-                epic.tracker.provider === "linear" &&
-                epic.tracker.resource === "project" &&
-                (tracker.parent.kind !== "project" || tracker.parent.projectId !== epic.tracker.external.projectId)
-            )
-                fail("Linear Task Project does not match its parent Epic Project")
+            if (recorded.kind !== "epic" || !isEpicTrackerItem(epic.tracker, recorded.epic))
+                fail(`the Task's parent is ${describeTaskParent(recorded)}, not the Epic it lives under`)
             // The tracker owns the Task's relationship; the local plan copy may lag.
             if (task.branch.start !== epic.branch.name && task.branch.start !== epic.branch.target)
                 fail("Task base is neither the containing Epic branch nor its default target")

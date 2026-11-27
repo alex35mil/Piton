@@ -20,13 +20,16 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 
 ## Initialization
 
-| Work | Before creating the tracker object | From a GitHub issue | From a Linear object |
-| --- | --- | --- | --- |
-| Epic | `preflight_epic` | `init_github_epic` | `init_linear_epic` |
-| Task | `preflight_task`, for standalone work; an Epic Task adopts its queued issue | `init_github_task` | `init_linear_task` |
+| Work | Before creating the tracker object | Initialize |
+| --- | --- | --- |
+| Epic | `preflight_epic` | `init_github_epic` or `init_linear_epic`, with the tracker object |
+| Task | `preflight_task`, for standalone work; an Epic Task adopts its queued issue | `init_task`, with the issue's tracker reads |
 
-- `route_task` decides how a `/task` request starts, from a Task path, an issue's reads, or new work. It never calls providers.
-- Preflight runs the local checks and changes nothing. The init tools take the tracker object, newly created or selected for adoption, in `object`.
+- The tracker decides a Task's parent. `route_task`, `init_task`, `check_task_parent`, and `restore_task` take the issue's reads (GitHub `issue_read` `get` and `get_parent`, plus the parent's `get` when asked; Linear `get_issue`) and derive the parent from them. None takes a parent as input. All read local artifacts and the given evidence only.
+- `route_task` decides how a `/task` request starts, from a Task path, an issue's reads and Status, or new work.
+- `check_task_parent` runs on every Task resume and stops a Task whose tracker parent changed.
+- `restore_task` recreates a Task started in another clone from its reads, its published plan, and its pushed branch.
+- Preflight runs the local checks and changes nothing.
 - `init_local_task` starts a standalone Task with no tracker item ([local Task](../skills/task/SKILL.md#local-task)). It needs no tracker.
 - `restore_epic` recreates a missing local Epic from its tracker read and published plan; `restore_epic_plan_source` returns an existing Epic's published plan as source without writing ([Epic restore](./epic.md#restore-an-epic)).
 - `accept_epic_tasks` saves an Epic's reviewed Task list as accepted after the user accepts it ([accepted Task list](./epic-tasks.md#accepted-task-list)).

@@ -24,6 +24,7 @@ import {
 } from "../workflows/extensions/integrations/tracker-publication.ts"
 import type { ProviderEvidence } from "../workflows/extensions/integrations/resource-id-operations.ts"
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
+import { githubReads } from "./workflow-issue-reads-fixture.ts"
 import { acceptTaskList, kindLabels } from "./workflow-phase-fixtures.ts"
 
 const tools = workflowMcpCatalog("github")
@@ -110,6 +111,7 @@ async function fixture(kind: "epic" | "task" | "standalone" = "standalone", adop
         ...(adopted ? { projectItemId: 200 } : {}),
     })
     const common = { title: "Work", slug: "work", request, object: object(42) }
+    const { object: _object, ...taskCommon } = common
     const parent =
         kind === "task"
             ? await initializeEntity(
@@ -126,14 +128,14 @@ async function fixture(kind: "epic" | "task" | "standalone" = "standalone", adop
         kind === "epic"
             ? { ...common, entity: kind }
             : kind === "standalone"
-              ? { ...common, entity: "task" as const, kind: "feature" as const, parent: { kind: "none" as const } }
+              ? { ...taskCommon, entity: "task" as const, kind: "feature" as const, reads: githubReads({ number: 42 }) }
               : {
-                    ...common,
+                    ...taskCommon,
                     entity: kind,
                     kind: "feature" as const,
-                    parent: { kind: "epic" as const, epicDir: parent!.directory },
+                    reads: githubReads({ number: 42, parent: 41 }),
                 }
-    const initialized = await initializeEntity(input, { cwd: root })
+    const initialized = await initializeEntity(input, { cwd: root, tools })
     const directory = initialized.directory
     // Every Epic here publishes `source`, whose accepted Task list is empty.
     for (const epic of [kind === "epic" ? directory : parent?.directory])

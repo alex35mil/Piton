@@ -147,7 +147,6 @@ function phaseItem(provider: "github" | "linear", fixture: Fixture): PhaseItem {
                     provider,
                     resource: "issue",
                     external: { issueId: "issue-uuid", identifier: "ENG-7" },
-                    parent: { kind: "project", projectId: "project-uuid" },
                     planDocument,
                 },
             }
@@ -158,7 +157,6 @@ function phaseItem(provider: "github" | "linear", fixture: Fixture): PhaseItem {
                     provider,
                     resource: "issue",
                     external: { issueId: "issue-uuid", identifier: "ENG-7" },
-                    parent: { kind: "none" },
                     planDocument,
                 },
             }
@@ -653,10 +651,6 @@ describe("shared workflow Phase", () => {
                                 provider,
                                 resource: "issue",
                                 external: { issueId: "issue-uuid", identifier: "ENG-2" },
-                                parent:
-                                    entity === "task"
-                                        ? { kind: "project", projectId: "project-uuid" }
-                                        : { kind: "none" },
                                 planDocument: { state: "unpublished" },
                             }
                 const childName = provider === "github" ? "2-example" : "ENG-2-example"
@@ -672,7 +666,21 @@ describe("shared workflow Phase", () => {
                         ...common,
                         entity: entity === "epic" ? "epic" : "task",
                         tracker: tracker(entity),
-                        ...(entity === "epic" ? {} : { kind: "feature" }),
+                        ...(entity === "epic"
+                            ? {}
+                            : {
+                                  kind: "feature",
+                                  parent:
+                                      entity === "task"
+                                          ? {
+                                                kind: "epic",
+                                                epic:
+                                                    provider === "github"
+                                                        ? { provider, issueNumber: 1 }
+                                                        : { provider, projectId: "project-uuid" },
+                                            }
+                                          : { kind: "none" },
+                              }),
                     }
                     if (entity === "epic") {
                         fs.writeFileSync(path.join(directory, "brief.md"), "# Brief\n")

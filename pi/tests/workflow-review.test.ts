@@ -177,6 +177,7 @@ describe("workflow reviewer isolation", () => {
                     slug: "example",
                     entity: "task",
                     kind: "feature",
+                    parent: { kind: "none" },
                     branch: { state: "ready", name: "7-example", start: "main", target: "main", source: "generated" },
                     tracker: {
                         provider: "github",
@@ -396,7 +397,7 @@ describe("workflow reviewer isolation", () => {
                 return after.filter((entry) => !before.includes(entry))
             }
             const standalone = (kind: string, files: Record<string, string>, slug: string) =>
-                entity(`.piton/.local/tasks/7-${slug}`, { entity: "task", kind }, files)
+                entity(`.piton/.local/tasks/7-${slug}`, { entity: "task", kind, parent: { kind: "none" } }, files)
             const result = { "result.md": "# Result\n\nDone.\n" }
 
             // Each rejected precondition leaves no new round behind.
@@ -430,7 +431,7 @@ describe("workflow reviewer isolation", () => {
                     "review_task",
                     entity(
                         ".piton/.local/tasks/orphan/tasks/7-example",
-                        { entity: "task", kind: "feature" },
+                        { entity: "task", kind: "feature", parent: { kind: "none" } },
                         { "plan.md": "# Plan\n" },
                     ),
                     "plan",
@@ -846,6 +847,7 @@ describe("workflow reviewer isolation", () => {
                     },
                     entity: "task",
                     kind: "bugfix",
+                    parent: { kind: "none" },
                 }),
             )
             const deliverablePrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, taskDir, {
@@ -1030,6 +1032,7 @@ describe("workflow reviewer isolation", () => {
                     slug: "example",
                     entity: "task",
                     kind: "feature",
+                    parent: { kind: "none" },
                     branch: { state: "ready", name: branch, start: "main", target: "main", source: "generated" },
                     tracker: {
                         provider: "github",
@@ -1102,7 +1105,7 @@ describe("workflow reviewer isolation", () => {
                 path.join(root, epicDir, "metadata.json"),
                 fs
                     .readFileSync(path.join(directory, "metadata.json"), "utf-8")
-                    .replace(/"entity":"task","kind":"feature"/, '"entity":"epic"'),
+                    .replace(/"entity":"task","kind":"feature","parent":\{"kind":"none"\}/, '"entity":"epic"'),
             )
             await assert.rejects(
                 respond.execute(

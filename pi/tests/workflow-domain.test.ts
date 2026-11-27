@@ -29,8 +29,17 @@ import {
     preflightEntity,
 } from "../workflows/extensions/init/entity.ts"
 import { formatInitializedEntity } from "../workflows/extensions/init/index.ts"
-import { routeTask, RouteTaskValidator } from "../workflows/extensions/init/route.ts"
+import {
+    checkTaskParent,
+    CheckTaskParentValidator,
+    routeTask,
+    RouteTaskValidator,
+} from "../workflows/extensions/init/route.ts"
+import { restoreTask, RestoreTaskValidator } from "../workflows/extensions/init/restore-task.ts"
+import { planPublicationMarker } from "../workflows/extensions/integrations/plan-publication.ts"
+import { renderProviderBody } from "../workflows/extensions/integrations/projection.ts"
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
+import { githubReads, linearReads } from "./workflow-issue-reads-fixture.ts"
 
 const repository = { owner: "example", repo: "project" }
 const forge = { provider: "github", mcpServer: "github", repository }
@@ -110,13 +119,16 @@ function linearIssue(identifier: string, extra: Record<string, string> = {}) {
     }
 }
 
-const standalone = (title: string, object: unknown) => ({
+// A Task's init input from an issue object: its tracker reads, standalone or under the named Epic. `init`
+// turns these into the reads `init_task` takes.
+type TaskObject = ReturnType<typeof issue> | ReturnType<typeof linearIssue>
+const standalone = (title: string, object: TaskObject) => ({
     entity: "task" as const,
     title,
     slug: slugify(title),
     request: title,
     kind: "chore" as const,
-    parent: { kind: "none" as const },
+    under: undefined as string | undefined,
     object,
 })
 const epic = (title: string, object: unknown) => ({
@@ -127,15 +139,31 @@ const epic = (title: string, object: unknown) => ({
     object,
 })
 // An Epic Task; `kind` must match its plan section's (planTask defaults to `feature`).
-const task = (title: string, epicDir: string, object: unknown, kind = "feature") => ({
+const task = (title: string, epicDir: string, object: TaskObject, kind = "feature") => ({
     entity: "task" as const,
     title,
     slug: slugify(title),
     request: title,
     kind,
-    parent: { kind: "epic" as const, epicDir },
+    under: epicDir as string | undefined,
     object,
 })
+
+/** The tracker reads for a Task issue object, its parent the Epic at `under` or none. */
+function readsFor(cwd: string, object: TaskObject, under: string | undefined) {
+    const epic = under ? readEntityStatus(path.join(cwd, under)) : undefined
+    if ("issueNumber" in object) {
+        const parent = epic && epic.tracker.provider === "github" ? epic.tracker.external.issueNumber : null
+        return githubReads({ number: object.issueNumber, parent })
+    }
+    // A Linear issue's Project is its own fact; `under` only names the expected Epic.
+    const extra = object as { projectId?: string; gitBranchName?: string }
+    return linearReads({
+        identifier: object.identifier,
+        ...(extra.projectId ? { projectId: extra.projectId } : {}),
+        ...(extra.gitBranchName ? { gitBranchName: extra.gitBranchName } : {}),
+    })
+}
 // One `## Tasks` section; tagged once issue processing has created or linked its issue, which then
 // holds the design. `extra` holds the optional `**Labels:**` and `**Status:**` lines.
 const planTask = (title: string, marker?: string, kind = "feature", extra = "") =>
@@ -144,10 +172,18 @@ const planTask = (title: string, marker?: string, kind = "feature", extra = "") 
 const epicPlan = (branch: string, target: "epic" | "default", ...tasks: string[]) =>
     `# Epic\n\n## Overview\n\nPlan.\n\n## Task delivery strategy\n\n**Task target:** \`${target}\`\n**Epic branch:** \`${branch}\`\n\nWhy.\n\n## Tasks\n\n${tasks.join("\n")}`
 
+const catalog = workflowMcpCatalog("github", "linear")
+
 async function init(cwd: string, input: unknown) {
-    return await initializeEntity(parse(EntityInitializationValidator, input), {
-        cwd,
-    })
+    const value = input as Record<string, unknown>
+    const taskInput =
+        value.entity === "task" && "object" in value
+            ? (() => {
+                  const { object, under, ...rest } = value as { object: TaskObject; under?: string }
+                  return { ...rest, reads: readsFor(cwd, object, under) }
+              })()
+            : input
+    return await initializeEntity(parse(EntityInitializationValidator, taskInput), { cwd, tools: catalog })
 }
 
 function writeMetadata(cwd: string, directory: string, status: unknown): void {
@@ -222,18 +258,13 @@ describe("workflow domain", () => {
 
     it("accepts only the tracker object that matches each entity", async () => {
         const check = (input: unknown) => EntityInitializationValidator.check(input)
-        assert.equal(check(standalone("Work", issue(1))), true)
-        assert.equal(check(standalone("Work", linearIssue("ENG-1"))), true)
-        assert.equal(
-            check(
-                standalone("Work", {
-                    projectId: "p",
-                    projectUrl: "https://linear.app/x/project/p",
-                    createdAt: "2026-10-01T09:00:00.000Z",
-                }),
-            ),
-            false,
-        )
+        const base = { entity: "task", title: "Work", slug: "work", request: "Work", kind: "chore" }
+        assert.equal(check({ ...base, reads: githubReads({ number: 1 }) }), true)
+        assert.equal(check({ ...base, reads: linearReads({ identifier: "ENG-1" }) }), true)
+        // The reads decide the issue and parent: a Task never takes them as input.
+        assert.equal(check({ ...base, object: issue(1) }), false)
+        assert.equal(check({ ...base, reads: githubReads({ number: 1 }), parent: { kind: "none" } }), false)
+        assert.equal(check({ ...base, reads: {} }), false)
         assert.equal(
             check(
                 epic("Work", {
@@ -245,9 +276,8 @@ describe("workflow domain", () => {
             true,
         )
         assert.equal(check({ ...epic("Work", issue(1)), kind: "feature" }), false)
-        assert.equal(check({ ...standalone("Work", issue(1)), kind: "review" }), false)
-        assert.equal(check(standalone("Work", linearIssue("eng-1"))), false)
-        assert.equal(check({ ...standalone("Work", issue(1)), priority: "High" }), false)
+        assert.equal(check({ ...base, kind: "review", reads: githubReads({ number: 1 }) }), false)
+        assert.equal(check({ ...base, priority: "High", reads: githubReads({ number: 1 }) }), false)
     })
 
     it("keeps an adopted item's publication signature out of the brief", async () => {
@@ -501,7 +531,7 @@ describe("workflow domain", () => {
                             }),
                         ),
                     ),
-                /does not belong to the parent Epic Project/,
+                /belongs to the Epic Project other, which this clone doesn't have/,
             )
             await assert.rejects(
                 () =>
@@ -575,7 +605,7 @@ describe("workflow domain", () => {
             const metadata = JSON.parse(fs.readFileSync(path.join(cwd, created.directory, "metadata.json"), "utf-8"))
             const epicDirectory = ".piton/.local/epics/20260102-local"
             fs.mkdirSync(path.join(cwd, epicDirectory), { recursive: true })
-            const { kind: _kind, ...epicMetadata } = metadata
+            const { kind: _kind, parent: _parent, ...epicMetadata } = metadata
             writeMetadata(cwd, epicDirectory, { ...epicMetadata, entity: "epic" })
             assert.throws(() => readEntityStatus(path.join(cwd, epicDirectory)), /an Epic can.t be local/)
         } finally {
@@ -604,7 +634,8 @@ describe("workflow domain", () => {
                     ),
                 /requires a Linear tracker/,
             )
-            await assert.rejects(() => init(github, standalone("Wrong provider", linearIssue("ENG-1"))), /GitHub issue/)
+            // Linear reads can't initialize a Task on a GitHub tracker.
+            await assert.rejects(() => init(github, standalone("Wrong provider", linearIssue("ENG-1"))), /issue_number/)
         } finally {
             fs.rmSync(linear, { recursive: true, force: true })
             fs.rmSync(github, { recursive: true, force: true })
@@ -701,23 +732,22 @@ describe("workflow domain", () => {
             for (const misplaced of [".piton/.local/epics/ENG-1-work", ".piton/.local/tasks/a/tasks/ENG-1-work"])
                 assert.throws(() => taskParent(path.join(cwd, misplaced)), /a Task lives under/)
 
-            // A standalone Linear issue has no Project; one that's in a Project is its Epic's Task.
+            // The tracker decides: an issue in a Project is that Epic's Task, so with no local Epic it refuses.
             await assert.rejects(
                 () => init(cwd, standalone("Work", linearIssue("ENG-1", { projectId: "project-uuid" }))),
-                /in a Project, so it isn't standalone/,
+                /belongs to the Epic Project project-uuid, which this clone doesn't have; restore the Epic first/,
             )
             const created = await init(cwd, standalone("Work", linearIssue("ENG-1")))
             assert.equal(created.directory, ".piton/.local/tasks/ENG-1-work")
             const status = created.status
-            if (status.entity !== "task" || status.tracker.provider !== "linear" || status.tracker.resource !== "issue")
-                assert.fail("expected a Linear Task")
-            assert.deepEqual(status.tracker.parent, { kind: "none" })
+            if (status.entity !== "task") assert.fail("expected a Task")
+            assert.deepEqual(status.parent, { kind: "none" })
             const directory = path.join(cwd, created.directory)
             for (const [candidate, error] of [
                 [{ ...status, design: "0".repeat(64) }, /a standalone Task has no design/],
                 [
-                    { ...status, tracker: { ...status.tracker, parent: { kind: "project", projectId: "p" } } },
-                    /standalone Task's Linear issue must have no Project/,
+                    { ...status, parent: { kind: "epic", epic: { provider: "linear", projectId: "p" } } },
+                    /parent is the Epic Project p, but it lives under/,
                 ],
             ] as const) {
                 writeMetadata(cwd, created.directory, candidate)
@@ -806,119 +836,124 @@ describe("workflow domain", () => {
     })
 })
 
-describe("Task routing", () => {
-    const catalog = workflowMcpCatalog("github", "linear")
-    const text = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] })
-    const githubRead = (method: string, issueNumber: number, response: unknown) => ({
-        tool: "mcp__github__issue_read",
-        arguments: { method, ...repository, issue_number: issueNumber },
-        response: text(response),
-    })
-    // Shapes copied from real issue_read responses: `get_parent` returns `{"parent": null}` or the parent summary.
-    const getIssue = (number: number, labels: string[] = []) => githubRead("get", number, { number, labels })
-    const getParent = (number: number, parent: number | null) =>
-        githubRead("get_parent", number, {
-            parent:
-                parent === null ? null : { number: parent, title: "Parent", url: "u", repository: "r", state: "OPEN" },
-        })
-    const linearRead = (id: string, projectId?: string) => ({
-        tool: "mcp__linear__get_issue",
-        arguments: { id },
-        response: text({ id, uuid: `${id.toLowerCase()}-uuid`, ...(projectId ? { projectId } : {}) }),
-    })
+describe("Task routing, parent checks, and restore", () => {
     const route = (cwd: string, target: unknown) => routeTask(cwd, parse(RouteTaskValidator, { target }), catalog)
+    const queued = { status: "Todo" }
+    // A GitHub tracker with the Epic Kind label configured, so a parent issue's labels tell an Epic apart.
+    const labelled = (cwd: string) => {
+        const tracker = requireTracker(loadIntegrationRoles(cwd), "test")
+        writeProjectConfig(cwd, { tracker: { ...tracker, labels: kindLabels() } })
+    }
+    const reason = (result: unknown) => (result as { reason?: string }).reason
+    const strip = <T extends { next?: string }>(result: T) => ({ ...result, next: undefined })
 
-    it("routes GitHub issues by their parent, asking for each read it needs", async () => {
+    it("routes GitHub issues by the tracker's parent, asking for each read it needs", async () => {
         const cwd = temporaryRepository()
         try {
-            const tracker = requireTracker(loadIntegrationRoles(cwd), "test")
-            writeProjectConfig(cwd, { tracker: { ...tracker, labels: kindLabels() } })
+            labelled(cwd)
             assert.equal(route(cwd, { kind: "new" }).route, "new")
-            const top = { kind: "issue", issue: getIssue(5) }
-            assert.deepEqual(route(cwd, top).route, "readHierarchy")
-            assert.equal(route(cwd, { ...top, hierarchy: getParent(5, null) }).route, "standalone")
+            const { issue: get, hierarchy } = githubReads({ number: 5 })
+            assert.equal(route(cwd, { kind: "issue", issue: get, ...queued }).route, "readRequired")
+            assert.equal(route(cwd, { kind: "issue", issue: get, hierarchy, ...queued }).route, "standalone")
             // A sub-issue of an issue that isn't a local Epic needs the parent's labels.
-            const sub = { ...top, hierarchy: getParent(5, 9) }
-            assert.equal(route(cwd, sub).route, "readParent")
-            assert.equal(route(cwd, { ...sub, parent: getIssue(9) }).route, "standalone")
-            assert.deepEqual(route(cwd, { ...sub, parent: getIssue(9, ["Kind: Epic"]) }), {
-                route: "restoreEpic",
-                epic: { provider: "github", issueNumber: 9 },
-                next: "Restore the Epic (restore_epic), then call route_task again with the same reads.",
-            })
-            assert.throws(() => route(cwd, { ...top, hierarchy: getParent(6, null) }), /issue_number must be 5/)
+            const sub = githubReads({ number: 5, parent: 9 })
+            assert.equal(
+                route(cwd, { kind: "issue", issue: sub.issue, hierarchy: sub.hierarchy, ...queued }).route,
+                "readRequired",
+            )
+            assert.equal(
+                route(cwd, { kind: "issue", ...githubReads({ number: 5, parent: 9, parentLabels: [] }), ...queued })
+                    .route,
+                "standalone",
+            )
+            assert.deepEqual(
+                strip(
+                    route(cwd, {
+                        kind: "issue",
+                        ...githubReads({ number: 5, parent: 9, parentLabels: ["Kind: Epic"] }),
+                        ...queued,
+                    }),
+                ),
+                { route: "restoreEpic", epic: { provider: "github", issueNumber: 9 }, next: undefined },
+            )
+            assert.throws(
+                () =>
+                    route(cwd, {
+                        kind: "issue",
+                        issue: get,
+                        hierarchy: githubReads({ number: 6 }).hierarchy,
+                        ...queued,
+                    }),
+                /issue_number must be 5/,
+            )
+            // Started in another clone: restore it rather than start it twice. Finished work stops.
+            assert.deepEqual(
+                strip(route(cwd, { kind: "issue", ...githubReads({ number: 5 }), status: "In Progress" })),
+                {
+                    route: "restoreTask",
+                    parent: { kind: "none" },
+                    next: undefined,
+                },
+            )
+            assert.equal(
+                reason(route(cwd, { kind: "issue", ...githubReads({ number: 5 }), status: "Done" })),
+                "finished",
+            )
 
             // A local Epic: its Tasks route by their plan marker.
             const created = await init(cwd, epic("Rollout", issue(9)))
             const epicPath = path.join(cwd, created.directory, "epic.md")
-            fs.writeFileSync(
-                epicPath,
+            const plan = (branch: string) =>
                 epicPlan(
-                    created.status.branch.name,
+                    branch,
                     "default",
                     planTask("Build", "#5", "bugfix"),
                     planTask("Drop", "#6", "chore", "**Status:** `canceled`\n"),
                     planTask("Later"),
-                ),
-            )
-            const child = (number: number) => ({
-                kind: "issue",
-                issue: getIssue(number),
-                hierarchy: getParent(number, 9),
-            })
-            const routed = route(cwd, child(5))
-            assert.deepEqual(
-                { ...routed, next: undefined },
-                {
-                    route: "epicTask",
-                    parent: { kind: "epic", epicDir: created.directory },
-                    marker: "#5",
-                    kind: "bugfix",
-                    taskTarget: "default",
-                    next: undefined,
-                },
-            )
-            assert.equal((route(cwd, child(6)) as { reason?: string }).reason, "canceled")
-            assert.equal((route(cwd, child(7)) as { reason?: string }).reason, "untagged")
-            fs.writeFileSync(epicPath, epicPlan("other", "default", planTask("Build", "#5", "bugfix")))
-            assert.equal((route(cwd, child(5)) as { reason?: string }).reason, "routing")
-            fs.writeFileSync(
-                epicPath,
-                epicPlan(created.status.branch.name, "default", planTask("Build", "#5", "bugfix")),
-            )
-
-            // Started Tasks resume, by issue or by path, with their parent.
-            const task = await init(cwd, {
-                ...standalone("Build", issue(5)),
+                )
+            fs.writeFileSync(epicPath, plan(created.status.branch.name))
+            const child = (number: number) => ({ kind: "issue", ...githubReads({ number, parent: 9 }), ...queued })
+            assert.deepEqual(strip(route(cwd, child(5))), {
+                route: "epicTask",
+                epicDir: created.directory,
+                marker: "#5",
                 kind: "bugfix",
-                parent: { kind: "epic", epicDir: created.directory },
+                taskTarget: "default",
+                next: undefined,
             })
-            const resumed = {
+            assert.equal(reason(route(cwd, child(6))), "canceled")
+            assert.equal(reason(route(cwd, child(7))), "untagged")
+            fs.writeFileSync(epicPath, plan("other"))
+            assert.equal(reason(route(cwd, child(5))), "routing")
+            fs.writeFileSync(epicPath, plan(created.status.branch.name))
+
+            // Started Tasks resume, by issue or by path; the Task records the tracker's parent.
+            const built = await init(cwd, task("Build", created.directory, issue(5), "bugfix"))
+            assert.deepEqual(built.status.entity === "task" && built.status.parent, {
+                kind: "epic",
+                epic: { provider: "github", issueNumber: 9 },
+            })
+            assert.deepEqual(strip(route(cwd, child(5))), {
                 route: "resume",
-                entityDir: task.directory,
-                parent: { kind: "epic", epicDir: created.directory },
-            }
-            assert.deepEqual({ ...route(cwd, child(5)), next: undefined }, { ...resumed, next: undefined })
-            assert.deepEqual(
-                { ...route(cwd, { kind: "path", path: task.directory }), next: undefined },
-                { ...resumed, next: undefined },
-            )
-            const solo = await init(cwd, standalone("Solo", issue(11)))
-            assert.deepEqual(route(cwd, { kind: "path", path: solo.directory }).route, "resume")
-            assert.deepEqual((route(cwd, { kind: "issue", issue: getIssue(11) }) as { parent?: unknown }).parent, {
-                kind: "none",
+                entityDir: built.directory,
+                next: undefined,
             })
+            assert.equal(route(cwd, { kind: "path", path: built.directory }).route, "resume")
             assert.throws(() => route(cwd, { kind: "path", path: created.directory }), /is an Epic/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
     })
 
-    it("asks the user when no Epic Kind label tells an Epic from an ordinary parent", () => {
+    it("asks the user when no Epic Kind label tells an Epic from an ordinary parent", async () => {
         const cwd = temporaryRepository()
         try {
-            const target = { kind: "issue", issue: getIssue(5), hierarchy: getParent(5, 9), parent: getIssue(9) }
-            assert.equal((route(cwd, target) as { reason?: string }).reason, "unclassified")
+            const reads = githubReads({ number: 5, parent: 9, parentLabels: [] })
+            assert.equal(reason(route(cwd, { kind: "issue", ...reads, ...queued })), "unclassified")
+            await assert.rejects(
+                () => init(cwd, { entity: "task", title: "W", slug: "w", request: "W", kind: "chore", reads }),
+                /no Epic Kind label/,
+            )
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -927,13 +962,18 @@ describe("Task routing", () => {
     it("routes Linear issues by their Project", async () => {
         const cwd = temporaryRepository("linear")
         try {
-            assert.equal(route(cwd, { kind: "issue", issue: linearRead("ENG-1") }).route, "standalone")
-            assert.deepEqual(
-                route(cwd, { kind: "issue", issue: linearRead("ENG-2", "project-uuid") }).route,
-                "restoreEpic",
+            assert.equal(
+                route(cwd, { kind: "issue", ...linearReads({ identifier: "ENG-1" }), ...queued }).route,
+                "standalone",
             )
+            const inProject = {
+                kind: "issue",
+                ...linearReads({ identifier: "ENG-2", projectId: "project-uuid" }),
+                ...queued,
+            }
+            assert.equal(route(cwd, inProject).route, "restoreEpic")
             assert.throws(
-                () => route(cwd, { kind: "issue", issue: linearRead("ENG-1"), hierarchy: getParent(1, null) }),
+                () => route(cwd, { ...inProject, hierarchy: githubReads({ number: 1 }).hierarchy }),
                 /for GitHub/,
             )
             const created = await init(
@@ -948,11 +988,191 @@ describe("Task routing", () => {
                 path.join(cwd, created.directory, "epic.md"),
                 epicPlan(created.status.branch.name, "epic", planTask("Wire", "ENG-2")),
             )
-            const routed = route(cwd, { kind: "issue", issue: linearRead("ENG-2", "project-uuid") })
+            const routed = route(cwd, inProject)
             assert.equal(routed.route, "epicTask")
             assert.equal((routed as { taskTarget?: string }).taskTarget, "epic")
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("stops a resumed Task whose tracker parent changed", async () => {
+        const cwd = temporaryRepository()
+        try {
+            labelled(cwd)
+            const check = (entityDir: string, reads: unknown) =>
+                checkTaskParent(cwd, parse(CheckTaskParentValidator, { entityDir, reads }), catalog)
+            const solo = await init(cwd, standalone("Solo", issue(11)))
+            assert.equal(check(solo.directory, githubReads({ number: 11 })).state, "unchanged")
+            const { issue: get } = githubReads({ number: 11 })
+            assert.equal(check(solo.directory, { issue: get }).state, "readRequired")
+            // Moved under an Epic on the tracker: the Task stops; nothing moves it.
+            const moved = check(solo.directory, githubReads({ number: 11, parent: 30, parentLabels: ["Kind: Epic"] }))
+            assert.equal(moved.state, "changed")
+            assert.match(
+                (moved as { detail: string }).detail,
+                /started under no parent \(standalone\), but the tracker now shows the Epic #30/,
+            )
+            assert.ok(fs.existsSync(path.join(cwd, solo.directory)))
+            assert.throws(() => check(solo.directory, githubReads({ number: 12 })), /not this Task's issue/)
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    // A clone with an `origin`, and a second clone that pushes a Task branch to it.
+    function withRemote(cwd: string): { origin: string; other: string } {
+        const origin = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-origin-"))
+        git(origin, ["init", "--bare", "-b", "main"])
+        git(cwd, ["remote", "add", "origin", origin])
+        git(cwd, ["push", "-q", "origin", "main"])
+        const other = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-other-"))
+        git(other, ["clone", "-q", origin, "."])
+        git(other, ["config", "user.email", "test@example.com"])
+        git(other, ["config", "user.name", "Test"])
+        return { origin, other }
+    }
+    function pushBranch(other: string, branch: string) {
+        git(other, ["switch", "-q", "-c", branch])
+        fs.writeFileSync(path.join(other, "work.txt"), `${branch}\n`)
+        git(other, ["add", "work.txt"])
+        git(other, ["commit", "-q", "-m", "work"])
+        git(other, ["push", "-q", "origin", branch])
+    }
+    const comments = (number: number, bodies: Array<{ id: number; body: string }> = []) => ({
+        tool: "mcp__github__issue_read",
+        arguments: { method: "get_comments", ...repository, issue_number: number, perPage: 100 },
+        response: {
+            content: [
+                {
+                    type: "text",
+                    text: JSON.stringify(
+                        bodies.map(({ id, body }) => ({
+                            id,
+                            body,
+                            html_url: `https://github.com/example/project/issues/${number}#issuecomment-${id}`,
+                        })),
+                    ),
+                },
+            ],
+        },
+    })
+
+    it("restores a standalone Task from the tracker and its pushed branch, never guessing the slug", async () => {
+        const cwd = temporaryRepository()
+        const { origin, other } = withRemote(cwd)
+        try {
+            labelled(cwd)
+            // The stored slug was shortened at start: the branch, not the title, names it.
+            const reads = githubReads({
+                number: 48,
+                title: "Merge one thing into another with an optional parent",
+                labels: ["Kind: Feature"],
+            })
+            const restore = (fetched: boolean, pages = [comments(48)]) =>
+                restoreTask(cwd, parse(RestoreTaskValidator, { reads, fetched, pages }), catalog)
+            assert.deepEqual(await restore(false), { state: "fetchRequired", command: ["git", "fetch", "origin"] })
+            await assert.rejects(() => restore(true), /never pushed its work/)
+            pushBranch(other, "48-merge-one-thing")
+            git(cwd, ["fetch", "-q", "origin"])
+            const restored = await restore(true)
+            if (restored.state !== "restored") assert.fail("expected a restore")
+            assert.equal(restored.directory, ".piton/.local/tasks/48-merge-one-thing")
+            assert.equal(restored.branch, "48-merge-one-thing")
+            assert.equal(restored.plan, "none")
+            const status = readEntityStatus(path.join(cwd, restored.directory))
+            assert.deepEqual(status.entity === "task" && [status.kind, status.parent], ["feature", { kind: "none" }])
+            assert.equal(
+                git(cwd, ["rev-parse", "48-merge-one-thing"]),
+                git(cwd, ["rev-parse", "origin/48-merge-one-thing"]),
+            )
+            assert.equal(fs.existsSync(path.join(cwd, restored.directory, "plan.md")), false)
+            await assert.rejects(() => restore(true), /already has a local Task/)
+            // Routing finds it now.
+            assert.equal(route(cwd, { kind: "issue", ...reads, status: "In Progress" }).route, "resume")
+
+            // A second branch matching the same reference is ambiguous.
+            pushBranch(other, "49-one")
+            git(other, ["switch", "-q", "main"])
+            pushBranch(other, "49-two")
+            git(cwd, ["fetch", "-q", "origin"])
+            await assert.rejects(
+                () =>
+                    restoreTask(
+                        cwd,
+                        parse(RestoreTaskValidator, {
+                            reads: githubReads({ number: 49, labels: ["Kind: Chore"] }),
+                            fetched: true,
+                            pages: [comments(49)],
+                        }),
+                        catalog,
+                    ),
+                /several remote branches match 49-/,
+            )
+            // Without a single Kind label, the user decides.
+            await assert.rejects(
+                () =>
+                    restoreTask(
+                        cwd,
+                        parse(RestoreTaskValidator, {
+                            reads: githubReads({ number: 48 }),
+                            fetched: true,
+                            pages: [comments(48)],
+                        }),
+                        catalog,
+                    ),
+                /already has a local Task/,
+            )
+        } finally {
+            for (const directory of [cwd, origin, other]) fs.rmSync(directory, { recursive: true, force: true })
+        }
+    })
+
+    it("restores an Epic Task under its local Epic with its published plan", async () => {
+        const cwd = temporaryRepository()
+        const { origin, other } = withRemote(cwd)
+        try {
+            labelled(cwd)
+            const created = await init(cwd, epic("Rollout", issue(9)))
+            fs.writeFileSync(
+                path.join(cwd, created.directory, "epic.md"),
+                epicPlan(created.status.branch.name, "default", planTask("Build", "#5", "bugfix")),
+            )
+            pushBranch(other, "5-build")
+            git(cwd, ["fetch", "-q", "origin"])
+            const plan = "# Plan\n\n## Overview\n\nDo it.\n\n## Steps\n\nOne.\n"
+            const source = `${renderProviderBody(plan, { kind: "github-plan-comment" })}\n\n${planPublicationMarker("5b2c8f0e-1d3a-4c6b-9e7f-2a4d6c8e0b1f")}`
+            const reads = githubReads({ number: 5, parent: 9 })
+            const restored = await restoreTask(
+                cwd,
+                parse(RestoreTaskValidator, { reads, fetched: true, pages: [comments(5, [{ id: 77, body: source }])] }),
+                catalog,
+            )
+            if (restored.state !== "restored") assert.fail("expected a restore")
+            assert.equal(restored.directory, path.join(created.directory, "tasks", "5-build"))
+            assert.equal(restored.plan, "restored")
+            const status = readEntityStatus(path.join(cwd, restored.directory))
+            if (status.entity !== "task" || status.tracker.provider !== "github") assert.fail("expected a GitHub Task")
+            assert.equal(status.kind, "bugfix")
+            assert.equal(status.tracker.planComment.state, "published")
+            assert.match(fs.readFileSync(path.join(cwd, restored.directory, "plan.md"), "utf-8"), /Do it\./)
+
+            // A queued sibling isn't restored: it starts. An Epic this clone lacks refuses.
+            await assert.rejects(
+                () =>
+                    restoreTask(
+                        cwd,
+                        parse(RestoreTaskValidator, {
+                            reads: githubReads({ number: 6, parent: 40, parentLabels: ["Kind: Epic"] }),
+                            fetched: true,
+                            pages: [],
+                        }),
+                        catalog,
+                    ),
+                /restore the Epic first/,
+            )
+        } finally {
+            for (const directory of [cwd, origin, other]) fs.rmSync(directory, { recursive: true, force: true })
         }
     })
 })

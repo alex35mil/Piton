@@ -23,6 +23,9 @@ import { beginUserReview, endUserReview } from "../workflows/extensions/delivera
 import { fixtureToolName, workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
 import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
 import { initializeEntity } from "../workflows/extensions/init/entity.ts"
+import { githubReads } from "./workflow-issue-reads-fixture.ts"
+
+const issueTools = workflowMcpCatalog("github")
 
 const repo = { owner: "example", repo: "project" }
 const statuses = {
@@ -121,14 +124,13 @@ async function submittedTask(root: string, withPullRequest = true) {
     const work = await initializeEntity(
         {
             entity: "task",
-            parent: { kind: "none" },
             title: "Cleanup",
             slug: "cleanup",
             request: "Clean the merged branch",
             kind: "chore",
-            object: issue(5),
+            reads: githubReads({ number: 5 }),
         },
-        { cwd: root },
+        { cwd: root, tools: issueTools },
     )
     if (withPullRequest) return recordPullRequest(root, work.directory)
     return { directory: work.directory, branch: work.status.branch.name, target: work.status.branch.target }
@@ -461,10 +463,9 @@ describe("Deliverable branch cleanup", () => {
                     slug: "child",
                     request: "Deliver the child",
                     kind: "feature",
-                    parent: { kind: "epic", epicDir: epic.directory },
-                    object: issue(11),
+                    reads: githubReads({ number: 11, parent: 10 }),
                 },
-                { cwd: root },
+                { cwd: root, tools: issueTools },
             )
             const recorded = recordPullRequest(root, task.directory)
             commitBranch(root, recorded.branch)
@@ -647,14 +648,13 @@ async function submittedTaskWithoutPr(root: string): Promise<string> {
     const work = await initializeEntity(
         {
             entity: "task",
-            parent: { kind: "none" },
             title: "Other",
             slug: "other",
             request: "Other work",
             kind: "chore",
-            object: issue(6),
+            reads: githubReads({ number: 6 }),
         },
-        { cwd: root },
+        { cwd: root, tools: issueTools },
     )
     return work.directory
 }

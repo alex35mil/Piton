@@ -77,7 +77,7 @@ describe("workflow tool discovery", () => {
             events: createEventBus(),
             registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
         } as never)
-        assert.equal(tools.length, 10)
+        assert.equal(tools.length, 11)
         assert.ok(!tools.some((tool) => tool.name === "init" || tool.name.endsWith("_gig")))
         for (const tool of tools) {
             assert.ok(Type.IsObject(tool.parameters))
@@ -94,28 +94,20 @@ describe("workflow tool discovery", () => {
         // New work is always standalone: preflight takes no parent.
         assert.ok(!accepts(preflight, { ...input, parent: { kind: "none" } }))
         const issue = { issueId: 123, issueNumber: 4, issueUrl: "https://github.com/o/r/issues/4" }
-        const none = { kind: "none" }
-        const epic = { kind: "epic", epicDir: ".piton/.local/epics/example" }
-        const github = tools.find((tool) => tool.name === "init_github_task")!.parameters
-        assert.ok(!accepts(github, input))
-        assert.ok(!accepts(github, { ...input, object: issue }), "a Task names its parent")
-        for (const parent of [none, epic]) {
-            assert.ok(accepts(github, { ...input, parent, object: issue }))
-            assert.ok(accepts(github, { ...input, parent, object: { ...issue, projectItemId: 456 } }))
-        }
-        assert.ok(!accepts(github, { ...input, parent: { kind: "epic" }, object: issue }))
-        assert.ok(!accepts(github, { ...input, parent: { ...none, epicDir: "x" }, object: issue }))
+        const read = { tool: "mcp__github__issue_read", arguments: {}, response: {} }
+        const init = tools.find((tool) => tool.name === "init_task")!.parameters
+        assert.ok(!tools.some((tool) => tool.name === "init_github_task" || tool.name === "init_linear_task"))
+        assert.ok(accepts(init, { ...input, reads: { issue: read, hierarchy: read } }))
+        assert.ok(accepts(init, { ...input, reads: { issue: read } }))
+        // The reads decide the issue and its parent; neither is input.
+        assert.ok(!accepts(init, { ...input, object: issue, reads: { issue: read } }), "no object input")
+        assert.ok(!accepts(init, { ...input, parent: { kind: "none" }, reads: { issue: read } }), "no parent input")
         const { kind: _kind, ...withoutKind } = input
-        assert.ok(!accepts(github, { ...withoutKind, parent: epic, object: issue }), "a Task always states its Kind")
-        const linear = tools.find((tool) => tool.name === "init_linear_task")!.parameters
-        assert.ok(!accepts(linear, { ...input, parent: none, object: issue }))
-        const linearIssue = { issueId: "uuid", identifier: "ENG-4", issueUrl: "https://linear.app/x/issue/ENG-4" }
-        assert.ok(accepts(linear, { ...input, parent: none, object: linearIssue }))
-        assert.ok(accepts(linear, { ...input, parent: epic, object: { ...linearIssue, projectId: "p" } }))
+        assert.ok(!accepts(init, { ...withoutKind, reads: { issue: read } }), "a Task always states its Kind")
         const local = tools.find((tool) => tool.name === "init_local_task")!.parameters
         assert.ok(accepts(local, input))
         assert.ok(!accepts(local, { ...input, object: issue }))
-        assert.ok(!accepts(local, { ...input, parent: none }))
+        assert.ok(!accepts(local, { ...input, parent: { kind: "none" } }))
     })
 
     it("discovers initialization through native Codemode without declaring or inlining the catalog", async () => {
@@ -128,26 +120,26 @@ describe("workflow tool discovery", () => {
         })
         try {
             assert.ok(h.session.getActiveToolNames().includes("codemode"))
-            assert.ok(!h.session.getActiveToolNames().includes("init_github_task"))
+            assert.ok(!h.session.getActiveToolNames().includes("init_task"))
             h.respond(
-                call({ name: "codemode", arguments: { code: 'text(await describeTool("init_github_task"));' } }),
+                call({ name: "codemode", arguments: { code: 'text(await describeTool("init_task"));' } }),
                 answer("Discovered."),
             )
             await h.prompt("Find the standalone initialization operation.")
             for (const request of h.requests) {
                 const tools = getCurrentTools(request.messages)
-                assert.ok(!tools.some((tool) => tool.name === "init_github_task"))
+                assert.ok(!tools.some((tool) => tool.name === "init_task"))
                 assert.ok(
-                    !tools.find((tool) => tool.name === "codemode")!.description.includes("tools.init_github_task"),
+                    !tools.find((tool) => tool.name === "codemode")!.description.includes("tools.init_task"),
                 )
             }
             const result = h.manager.buildSessionProjection().messages.find((message) => message.role === "toolResult")
-            assert.match(JSON.stringify(result), /init_github_task/)
-            assert.match(JSON.stringify(result), /issueNumber/)
+            assert.match(JSON.stringify(result), /init_task/)
+            assert.match(JSON.stringify(result), /get_parent/)
             assert.match(JSON.stringify(result), /refactor/)
             await h.reopen()
             assert.ok(h.session.getActiveToolNames().includes("codemode"))
-            assert.ok(!h.session.getActiveToolNames().includes("init_github_task"))
+            assert.ok(!h.session.getActiveToolNames().includes("init_task"))
         } finally {
             await h.cleanup()
         }

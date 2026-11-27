@@ -36,6 +36,7 @@ import { type EpicTask, epicTaskMarker, readEpicRouting, readEpicTasks } from ".
 import type { ResourceIds } from "../integrations/resource-ids.js"
 import { stripPublicationSignature } from "../integrations/publication.js"
 import { resourceIdsFromTrackerObject } from "./resource-ids.js"
+import { issueParent, type IssueReads, IssueReadsSchema } from "../integrations/issue-parent.js"
 import * as Git from "../__lib/git.js"
 import {
     assertArtifactPersistencePrepared,
@@ -47,11 +48,12 @@ import { LabelSelectionFailure, LabelSelectionSchema, selectedLabelNames } from 
 import {
     GitHubTrackerObjectSchema,
     GitHubTrackerObjectValidator,
-    LinearIssueObjectSchema,
-    LinearIssueObjectValidator,
+    describeTaskParent,
+    type EpicTrackerItem,
+    isEpicTrackerItem,
     LinearProjectObjectSchema,
     LinearProjectObjectValidator,
-    linearResourceFor,
+    type TaskTrackerParent,
     type TrackerObject,
     trackerRecordFromObject,
     trackerReference,
@@ -73,27 +75,6 @@ const baseProperties = {
             "User-approved durable Request; preserve meaning while correcting grammar, spelling, capitalization, punctuation, and formatting; use the workflow command argument for new work or the tracker item's title/name and description for adopted work, plus agreed clarifications",
     }),
 }
-// What a Task starts under. An Epic Task adopts the queued issue its Epic's issue processing created
-// or linked; the issue's marker selects the plan Task, whose Kind must match. A standalone Task has none.
-export const TaskParentInputSchema = Type.Union(
-    [
-        Type.Object(
-            {
-                kind: Type.Enum(["epic"], { type: "string" }),
-                epicDir: Type.String({
-                    minLength: 1,
-                    pattern: "^[^\\r\\n]+$",
-                    description: "The repo-relative parent Epic directory",
-                }),
-            },
-            { additionalProperties: false },
-        ),
-        Type.Object({ kind: Type.Enum(["none"], { type: "string" }) }, { additionalProperties: false }),
-    ],
-    { description: "The Task's parent: the Epic route_task named, or none for a standalone Task" },
-)
-export type TaskParentInput = Static<typeof TaskParentInputSchema>
-
 const epicProperties = { ...baseProperties, entity: Type.Literal("epic") }
 const taskEntityProperties = { ...baseProperties, kind: DeliverableKindSchema, entity: Type.Literal("task") }
 // Only new work picks labels before its tracker object exists; adopted work keeps its own.
@@ -118,9 +99,24 @@ export const EpicInitializationPropertiesSchema = Type.Object(
     Type.Omit(Type.Object(epicProperties), ["entity"]).properties,
     { additionalProperties: false },
 )
-/** A Task's init tool fields: its preflight's, without the labels, plus its parent. */
+/**
+ * A Task's init tool fields: its preflight's, without the labels, plus the issue's tracker reads. The reads,
+ * never caller input, decide the tracker object and the parent: an Epic Task adopts the queued issue its Epic's
+ * issue processing created, and the issue's marker selects the plan Task, whose Kind must match.
+ */
 export const TaskInitializationPropertiesSchema = Type.Object(
-    { ...Type.Omit(Type.Object(taskEntityProperties), ["entity"]).properties, parent: TaskParentInputSchema },
+    {
+        ...Type.Omit(Type.Object(taskEntityProperties), ["entity"]).properties,
+        reads: IssueReadsSchema,
+        projectItemId: Type.Optional(
+            Type.Integer({
+                minimum: 1,
+                maximum: Number.MAX_SAFE_INTEGER,
+                description:
+                    "GitHub, adopted work only: the numeric Project item ID from the Project read, recorded with the issue",
+            }),
+        ),
+    },
     { additionalProperties: false },
 )
 
@@ -134,11 +130,7 @@ export const EntityInitializationSchema = Type.Union([
         { additionalProperties: false },
     ),
     Type.Object(
-        {
-            ...TaskInitializationPropertiesSchema.properties,
-            entity: Type.Literal("task"),
-            object: Type.Union([GitHubTrackerObjectSchema, LinearIssueObjectSchema]),
-        },
+        { ...TaskInitializationPropertiesSchema.properties, entity: Type.Literal("task") },
         { additionalProperties: false },
     ),
 ])
@@ -159,7 +151,7 @@ export interface InitializedEntity {
     resourceIds: ResourceIds[]
 }
 
-/** A Task's parent, checked: its Epic's plan and routing, or none. An Epic has no parent. */
+/** A Task's parent, checked: its local Epic's plan and routing, or none. An Epic has no parent. */
 type PreparedParent = { kind: "epic"; epic: ParentEpic } | { kind: "none" }
 
 interface Prepared {
@@ -171,6 +163,13 @@ interface Prepared {
     parent: PreparedParent
 }
 
+/** A Task's tracker object and parent, as its issue reads decide them. */
+interface ResolvedTaskIssue {
+    object: TrackerObject
+    parent: TaskTrackerParent
+    prepared: PreparedParent
+}
+
 /** The local checks every initialization runs before anything is created. */
 function prepareRepository(cwd: string) {
     const root = project.resolveRootDir(cwd)
@@ -180,11 +179,15 @@ function prepareRepository(cwd: string) {
     return { root, projectConfig }
 }
 
-function prepare(input: PreflightInput | EntityInitialization, options: InitializeEntityOptions): Prepared {
+function prepare(
+    input: PreflightInput | EntityInitialization,
+    options: InitializeEntityOptions,
+    resolveParent: (root: string, tracker: TrackerConfig) => PreparedParent = () => ({ kind: "none" }),
+): Prepared {
     const { root, projectConfig } = prepareRepository(options.cwd)
     const tracker = requireTracker(loadIntegrationRoles(root), `${input.entity} initialization from a tracker item`)
     const slug = slugify(input.slug)
-    const parent = prepareParent(root, input)
+    const parent = resolveParent(root, tracker)
     const start = (() => {
         switch (parent.kind) {
             case "epic":
@@ -197,15 +200,57 @@ function prepare(input: PreflightInput | EntityInitialization, options: Initiali
     return { root, projectConfig, tracker, slug, start, parent }
 }
 
-// Preflight is for new work, which is always standalone: only an adopted Task names an Epic parent.
-function prepareParent(root: string, input: PreflightInput | EntityInitialization): PreparedParent {
-    if (!("parent" in input)) return { kind: "none" }
-    switch (input.parent.kind) {
-        case "epic":
-            return { kind: "epic", epic: readParentEpic(root, input.parent.epicDir) }
-        case "none":
-            return { kind: "none" }
+/**
+ * A Task issue's tracker object and parent, from its reads. A parent Epic must be local: restore it first
+ * when it isn't. The reads must be complete; a missing read refuses with the call to run.
+ */
+function resolveTaskIssue(
+    root: string,
+    tracker: TrackerConfig,
+    reads: IssueReads,
+    tools: McpToolCatalog,
+): ResolvedTaskIssue {
+    const result = issueParent(tracker, reads, tools, (epic) => findLocalEpic(root, epic) !== undefined)
+    switch (result.state) {
+        case "readRequired":
+            throw new Error(
+                `Task initialization needs the issue's ${result.as} read first: ${result.read.operation} ${JSON.stringify(result.read.arguments)}`,
+            )
+        case "unclassified":
+            throw new Error(
+                `${result.facts.label} is a sub-issue of #${result.parentNumber}, and no Epic Kind label is configured to tell whether #${result.parentNumber} is an Epic`,
+            )
+        case "resolved":
+            break
     }
+    const parent = result.parent
+    switch (parent.kind) {
+        case "none":
+            return { object: result.facts.object, parent, prepared: { kind: "none" } }
+        case "epic": {
+            const epic = findLocalEpic(root, parent.epic)
+            if (!epic)
+                throw new Error(
+                    `${result.facts.label} belongs to ${describeTaskParent(parent)}, which this clone doesn't have; restore the Epic first`,
+                )
+            return { object: result.facts.object, parent, prepared: { kind: "epic", epic: readParentEpic(root, epic) } }
+        }
+    }
+}
+
+/** The local Epic directory for a tracker item, when this clone has one. */
+export function findLocalEpic(root: string, epic: EpicTrackerItem): string | undefined {
+    const epicsRoot = path.join(root, EPIC_ROOT)
+    if (!fs.existsSync(epicsRoot)) return undefined
+    for (const entry of fs
+        .readdirSync(epicsRoot, { withFileTypes: true })
+        .sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory()) continue
+        const directory = path.join(epicsRoot, entry.name)
+        const status = readEntityStatus(directory)
+        if (status.entity === "epic" && isEpicTrackerItem(status.tracker, epic)) return path.relative(root, directory)
+    }
+    return undefined
 }
 
 // Runs every local check that doesn't need the tracker object, so a failure stops
@@ -244,17 +289,36 @@ export async function initializeEntity(
         const details = describeErrors(EntityInitializationValidator.errors(input)).join("; ")
         throw new Error(`invalid entity initialization: ${details}`)
     }
-    const prepared = prepare(input, options)
+    let resolved: ResolvedTaskIssue | undefined
+    const prepared = prepare(input, options, (root, tracker) => {
+        switch (input.entity) {
+            case "epic":
+                return { kind: "none" }
+            case "task":
+                resolved = resolveTaskIssue(root, tracker, input.reads, options.tools ?? new Map())
+                if (input.projectItemId !== undefined) {
+                    if (resolved.object.provider !== "github")
+                        throw new Error("projectItemId is a GitHub Project item; a Linear issue has none")
+                    resolved = { ...resolved, object: { ...resolved.object, projectItemId: input.projectItemId } }
+                }
+                return resolved.prepared
+        }
+    })
     const { root, tracker: configured, slug, start, parent } = prepared
-    const object = trackerObject(input, configured)
+    const object = (() => {
+        switch (input.entity) {
+            case "epic":
+                return epicTrackerObject(input, configured)
+            case "task":
+                return resolved!.object
+        }
+    })()
     const reference = trackerReference(object)
     const name = entityName(reference, slug)
     const relativeDirectory = (() => {
         if (input.entity === "epic") return path.join(EPIC_ROOT, name)
         switch (parent.kind) {
             case "epic": {
-                if (object.provider === "linear" && object.projectId !== parent.epic.trackerProjectId)
-                    throw new Error("Linear Task issue does not belong to the parent Epic Project")
                 // The marker selects the plan Task. Issue processing verified that the issue is a
                 // queued child of this Epic before it tagged the plan; adoption re-reads it.
                 const planned = plannedTaskFor(parent.epic, trackerReferenceLabel(reference)!)
@@ -265,10 +329,6 @@ export async function initializeEntity(
                 return path.join(parent.epic.directory, "tasks", name)
             }
             case "none":
-                if (object.provider === "linear" && object.projectId !== undefined)
-                    throw new Error(
-                        "this Linear issue is in a Project, so it isn't standalone; start it as that Epic's Task",
-                    )
                 return path.join(TASK_ROOT, name)
         }
     })()
@@ -298,7 +358,9 @@ export async function initializeEntity(
         }
         const status = parse(
             EntityStatusValidator,
-            input.entity === "epic" ? { ...common, entity: "epic" } : { ...common, entity: "task", kind: input.kind },
+            input.entity === "epic"
+                ? { ...common, entity: "epic" }
+                : { ...common, entity: "task", kind: input.kind, parent: resolved!.parent },
         )
         createEntityArtifacts(absoluteDirectory, input, status)
         return {
@@ -356,6 +418,8 @@ export async function initializeLocalTask(
             tracker,
             entity: "task",
             kind: input.kind,
+            // No tracker item, so no tracker parent: a local Task is always standalone.
+            parent: { kind: "none" },
         })
         createEntityArtifacts(absoluteDirectory, { entity: "task", request: input.request }, status)
         return { directory: relativeDirectory, status: readEntityStatus(absoluteDirectory), resourceIds: [] }
@@ -366,23 +430,19 @@ export async function initializeLocalTask(
     }
 }
 
-function trackerObject(input: EntityInitialization, tracker: TrackerConfig): TrackerObject {
+type EpicInitialization = Extract<EntityInitialization, { entity: "epic" }>
+
+/** An Epic's tracker object, as the caller gives it. A Task's comes from its reads (`resolveTaskIssue`). */
+function epicTrackerObject(input: EpicInitialization, tracker: TrackerConfig): TrackerObject {
     const provider = tracker.provider
     if (provider === "github") {
         if (!GitHubTrackerObjectValidator.check(input.object))
             throw new Error("initialization requires a GitHub issue for the configured GitHub tracker")
         return { provider, ...input.object }
     }
-    const resource = linearResourceFor(input.entity)
-    switch (resource) {
-        case "project":
-            if (!LinearProjectObjectValidator.check(input.object)) break
-            return { provider, resource, ...input.object }
-        case "issue":
-            if (!LinearIssueObjectValidator.check(input.object)) break
-            return { provider, resource, ...input.object }
-    }
-    throw new Error(`initialization requires a Linear ${resource} for the configured Linear tracker`)
+    if (!LinearProjectObjectValidator.check(input.object))
+        throw new Error("initialization requires a Linear Project for the configured Linear tracker")
+    return { provider, resource: "project", ...input.object }
 }
 
 function branchFor(prepared: Prepared, name: string, object: TrackerObject): string {
@@ -430,7 +490,6 @@ interface ParentEpic {
     label: string
     directory: string
     branch: string
-    trackerProjectId?: string
     tasks: EpicTask[]
 }
 
@@ -458,16 +517,11 @@ function readParentEpic(root: string, rawDirectory: string): ParentEpic {
     if (status.tracker.provider === "linear" && status.tracker.resource !== "project")
         throw new Error("parent Epic must be bound to a Linear Project")
     const started = readEpicTaskDirectories(directory)
-    const trackerProjectId =
-        status.tracker.provider === "linear" && status.tracker.resource === "project"
-            ? status.tracker.external.projectId
-            : undefined
 
     return {
         label: entityLabel(status),
         directory: path.relative(root, directory),
         branch: taskBranch,
-        ...(trackerProjectId ? { trackerProjectId } : {}),
         // A Task that already has a directory can't be started again.
         tasks: tasks.filter((task) => {
             const marker = epicTaskMarker(task)

@@ -6,10 +6,11 @@ allowed-tools:
     - "route_task"
     - "preflight_task"
     - "init_local_task"
-    - "init_github_task"
+    - "init_task"
+    - "check_task_parent"
+    - "restore_task"
     - "restore_epic"
     - "restore_epic_plan_source"
-    - "init_linear_task"
     - "review_task"
     - "review_epic"
     - "record_review_response"
@@ -69,7 +70,11 @@ The Deliverable lifecycle owns the shared flow. This file owns choosing the pare
 
 ## Resume
 
-Follow the Deliverable resume steps. The directory decides the parent. For an Epic Task, also:
+Follow the Deliverable resume steps. The tracker decides the parent; the Task recorded it at start.
+
+- **Parent check:** with a tracker item, call `check_task_parent` with the issue's fresh reads. On `changed`, stop and tell the user what moved; never move the Task.
+
+For an Epic Task, also:
 
 1. **Read the parent:** its `brief.md`, `metadata.json`, `notes.md` when present, and `epic.md`. The Task's stored start and target never change.
 2. **Design:** read the Task's issue fresh and follow [a started Task follows its issue](../../references/epic-tasks.md#task-designs).
@@ -78,13 +83,14 @@ Then continue through the Deliverable lifecycle.
 
 ## Initialize
 
-Call `route_task` with the Task path, the issue's read, or `new`, and run the reads it asks for. Follow its route; never infer the parent yourself:
+Call `route_task` with the Task path, the issue's reads and native Status, or `new`, and run the reads it asks for. Keep the reads for `init_task`. Follow its route; never infer the parent yourself:
 
 | Route | Start |
 | --- | --- |
 | `resume` | [Resume](#resume) |
 | `epicTask` | [Epic Task](#epic-task), with its parent and Kind |
 | `restoreEpic` | [Restore the Epic](../../references/epic.md#restore-an-epic), then route again |
+| `restoreTask` | Call `restore_task` with the reads and the [recovery](../../references/integrations/recovery.md#pending-plan-publication) plan reads, running the fetch it asks for, then [resume](#resume). When In Review, record its PR with `find_pull_request` first |
 | `standalone`, `new` | [Standalone Task](#standalone-task) |
 | `blocked` | Stop and tell the user the reason; ask on `unclassified` |
 
@@ -94,7 +100,7 @@ Follow the intake in [artifacts](../../references/artifacts.md#initialization-in
 
 1. **New work:** call `preflight_task`, then create the issue as the tracker reference describes.
 2. **Adoption:** read the tracker reference ([GitHub](../../references/integrations/tracker/github.md#adopt-selected-queued-work) or [Linear](../../references/integrations/tracker/linear.md#queue-intake-and-explicit-adoption)) and the [discussion rules](../../references/integrations/shared.md#provider-bodies), and complete its preflight.
-3. **Initialize:** call `init_github_task` or `init_linear_task` with the intake values, the parent `none`, and the issue as `object`.
+3. **Initialize:** call `init_task` with the intake values and the issue's reads. For new work, read the created issue first.
 4. **Before planning,** finish board setup.
 
 #### Local Task
@@ -106,7 +112,7 @@ With the tracker off, or to keep a Task off it, call `init_local_task` instead. 
 It starts from the queued issue its Epic's [Task issue processing](../../references/epic-tasks.md#task-issue-processing) created or linked, never a new one. `route_task` has checked the plan Task and the Epic's [routing](../../references/epic.md#routing).
 
 1. **Adopt the issue:** read the tracker reference ([GitHub](../../references/integrations/tracker/github.md#adopt-selected-queued-work) or [Linear](../../references/integrations/tracker/linear.md#queue-intake-and-explicit-adoption)) and the [discussion rules](../../references/integrations/shared.md#provider-bodies). Complete its Task adoption preflight, including the parent check, then follow the adopted intake in [artifacts](../../references/artifacts.md#initialization-inputs). The Kind is the route's plan Kind; a conflicting `kind` label stops for a user choice.
-2. **Initialize:** call `init_github_task` or `init_linear_task` with the route's `parent` and Kind, the title, Request, and slug, and the issue as `object`. It copies the routing into the Task's immutable `start` and `target` and never rewrites the plan.
+2. **Initialize:** call `init_task` with the route's Kind, the title, Request, and slug, and the issue's reads. It copies the routing into the Task's immutable `start` and `target` and never rewrites the plan.
 3. **Design:** call `record_task_design` with the adopted issue read: the issue body is the design the Task follows.
 
 Finish board setup before planning.

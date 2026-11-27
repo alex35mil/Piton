@@ -117,12 +117,7 @@ export const LinearProjectRecordSchema = Type.Object(
     },
     { additionalProperties: false },
 )
-// What a Linear issue belongs to: its parent Epic's Project, or nothing for a standalone Task.
-export const LinearIssueParentSchema = Type.Union([
-    Type.Object({ kind: Type.Literal("project"), projectId: OneLineSchema }, { additionalProperties: false }),
-    Type.Object({ kind: Type.Literal("none") }, { additionalProperties: false }),
-])
-export type LinearIssueParent = Static<typeof LinearIssueParentSchema>
+// A Task's Linear issue: identity only. Its parent Epic's Project, when it has one, lives in the Task's `parent`.
 export const LinearIssueRecordSchema = Type.Object(
     {
         provider: Type.Literal("linear"),
@@ -131,7 +126,6 @@ export const LinearIssueRecordSchema = Type.Object(
             { issueId: OneLineSchema, identifier: LinearIdentifierSchema },
             { additionalProperties: false },
         ),
-        parent: LinearIssueParentSchema,
         planDocument: PlanDocumentSchema,
         planAnnouncement: Type.Optional(PlanAnnouncementSchema),
     },
@@ -143,6 +137,79 @@ export const TrackerRecordSchema = Type.Union([
     LinearIssueRecordSchema,
 ])
 export const TrackerRecordValidator = compile(TrackerRecordSchema)
+
+/**
+ * A Task's parent as the tracker records it: an Epic, by its tracker item, or none. The tracker decides it
+ * (a GitHub sub-issue of an Epic-labelled issue, a Linear issue in a Project); the local directory mirrors it.
+ * Sub-tasks would add a Task parent here.
+ */
+export const TaskTrackerParentSchema = Type.Union([
+    Type.Object(
+        {
+            kind: Type.Literal("epic"),
+            epic: Type.Union([
+                Type.Object(
+                    { provider: Type.Literal("github"), issueNumber: Type.Integer({ minimum: 1 }) },
+                    { additionalProperties: false },
+                ),
+                Type.Object(
+                    { provider: Type.Literal("linear"), projectId: OneLineSchema },
+                    { additionalProperties: false },
+                ),
+            ]),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object({ kind: Type.Literal("none") }, { additionalProperties: false }),
+])
+export type TaskTrackerParent = Static<typeof TaskTrackerParentSchema>
+export type EpicTrackerItem = Extract<TaskTrackerParent, { kind: "epic" }>["epic"]
+
+/** Whether `record` is the Epic tracker item `epic` names. */
+export function isEpicTrackerItem(record: EntityTracker, epic: EpicTrackerItem): boolean {
+    switch (epic.provider) {
+        case "github":
+            return record.provider === "github" && record.external.issueNumber === epic.issueNumber
+        case "linear":
+            return (
+                record.provider === "linear" &&
+                record.resource === "project" &&
+                record.external.projectId === epic.projectId
+            )
+    }
+}
+
+/** Whether two parents are the same tracker fact. */
+export function sameTaskParent(left: TaskTrackerParent, right: TaskTrackerParent): boolean {
+    switch (left.kind) {
+        case "none":
+            return right.kind === "none"
+        case "epic": {
+            if (right.kind !== "epic") return false
+            const [a, b] = [left.epic, right.epic]
+            switch (a.provider) {
+                case "github":
+                    return b.provider === "github" && a.issueNumber === b.issueNumber
+                case "linear":
+                    return b.provider === "linear" && a.projectId === b.projectId
+            }
+        }
+    }
+}
+
+export function describeTaskParent(parent: TaskTrackerParent): string {
+    switch (parent.kind) {
+        case "none":
+            return "no parent (standalone)"
+        case "epic":
+            switch (parent.epic.provider) {
+                case "github":
+                    return `the Epic #${parent.epic.issueNumber}`
+                case "linear":
+                    return `the Epic Project ${parent.epic.projectId}`
+            }
+    }
+}
 export type TrackerRecord = Static<typeof TrackerRecordSchema>
 export type GitHubTrackerRecord = Static<typeof GitHubTrackerRecordSchema>
 export type LinearTrackerRecord = Exclude<TrackerRecord, GitHubTrackerRecord>
@@ -236,10 +303,6 @@ export function trackerRecordFromObject(
                             issueId: object.issueId,
                             identifier: object.identifier,
                         },
-                        parent:
-                            object.projectId === undefined
-                                ? { kind: "none" }
-                                : { kind: "project", projectId: object.projectId },
                         planDocument: { state: "unpublished" },
                     }
             }

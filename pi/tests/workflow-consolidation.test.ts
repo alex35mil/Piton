@@ -49,7 +49,7 @@ describe("workflow consolidation contracts", () => {
             const metadata = {
                 ...commonMetadata,
                 entity,
-                ...(entity === "epic" ? {} : { kind: "feature" }),
+                ...(entity === "epic" ? {} : { kind: "feature", parent: { kind: "none" } }),
             }
             assert.equal(EntityStatusValidator.check(metadata), true)
             for (const extra of [
@@ -97,14 +97,6 @@ describe("workflow consolidation contracts", () => {
                 planDocument: { state: "unpublished" },
                 resource: "issue",
                 external: { issueId: "issue", identifier: "ENG-2" },
-                parent: { kind: "project", projectId: "project" },
-            },
-            {
-                provider: "linear",
-                planDocument: { state: "unpublished" },
-                resource: "issue",
-                external: { issueId: "issue", identifier: "ENG-2" },
-                parent: { kind: "none" },
             },
             {
                 provider: "linear",

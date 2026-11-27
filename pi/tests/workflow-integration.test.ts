@@ -39,6 +39,7 @@ import { initializeEntity, initializeLocalTask } from "../workflows/extensions/i
 import { linearPriorityNumber } from "../workflows/extensions/integrations/records.ts"
 
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
+import { githubReads } from "./workflow-issue-reads-fixture.ts"
 
 const mcpTools = workflowMcpCatalog("github", "linear", "workflow-github", "workflow-linear")
 
@@ -138,7 +139,7 @@ function writeEntity(cwd: string, entity: "epic" | "task", name: string, tracker
         slug,
         title: slug,
         entity,
-        ...(entity === "epic" ? {} : { kind: "feature" }),
+        ...(entity === "epic" ? {} : { kind: "feature", parent: { kind: "none" } }),
         branch: {
             state: "ready",
             name: name.toLowerCase(),
@@ -176,7 +177,6 @@ function writeLinearTaskEntity(cwd: string): string {
             provider: "linear",
             resource: "issue",
             external: { issueId: "linear-uuid", identifier: "ENG-123" },
-            parent: { kind: "none" },
             planDocument: { state: "unpublished" },
         },
         "mixed-provider",
@@ -635,10 +635,9 @@ describe("workflow integration configuration", () => {
                     slug: "work",
                     request: "Work",
                     kind: "bugfix",
-                    parent: { kind: "none" },
-                    object: { issueId: 1, issueNumber: 7, issueUrl: "https://github.com/alex/example/issues/7" },
+                    reads: githubReads({ number: 7, repository: { owner: "alex", repo: "example" } }),
                 },
-                { cwd },
+                { cwd, tools: mcpTools },
             )
             const ctx = { cwd } as ExtensionContext
             const plan = (labels: unknown, names: string[]) =>

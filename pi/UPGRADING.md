@@ -2,13 +2,17 @@
 
 ## Gigs become standalone Tasks
 
-`/gig`, the `gig` skill, and the Gig entity are gone. `/task` starts any Deliverable: describe new work, name a tracker issue, or give an existing Task's path, and the new `route_task` tool decides whether it's standalone or one of an Epic's Tasks.
+`/gig`, the `gig` skill, and the Gig entity are gone. `/task` starts any Deliverable: describe new work, name a tracker issue, or give an existing Task's path. The tracker decides whether it's standalone or one of an Epic's Tasks: a GitHub sub-issue of an Epic-labelled issue, or a Linear issue in a Project, is that Epic's.
 
-- **Tools:** `preflight_gig`, `init_github_gig`, `init_linear_gig`, `init_local_gig`, and `review_gig` are removed. Use `preflight_task`, `init_github_task` and `init_linear_task` (with a `parent` of `{ kind: "epic", epicDir }` or `{ kind: "none" }`, and the Kind), `init_local_task`, and `review_task`. `inspect_adoption` and `inspect_queue_intake` take `task` instead of `gig`.
-- **Artifacts:** standalone Tasks live under `.piton/.local/tasks/`. Linear Task records are now `resource: "issue"` with a `parent`, replacing `task-issue` and `gig-issue`.
-- **Permissions:** rules that name a `*_gig` tool no longer match anything; rename them to the `*_task` tool.
+- **Tools:**
+  - Removed: `preflight_gig`, `init_github_gig`, `init_linear_gig`, `init_local_gig`, `review_gig`, `init_github_task`, and `init_linear_task`.
+  - Use `preflight_task`, `init_task`, `init_local_task`, and `review_task`. `init_task` takes the issue's tracker reads, which decide its identity and parent, instead of an `object` and a parent Epic directory.
+  - New: `route_task` decides how a `/task` request starts, `check_task_parent` stops a resumed Task whose tracker parent changed, and `restore_task` rebuilds a Task started in another clone from the tracker and its pushed branch.
+  - `inspect_adoption` and `inspect_queue_intake` take `task` instead of `gig`.
+- **Artifacts:** standalone Tasks live under `.piton/.local/tasks/`. Task metadata records its `parent`. Linear Task records are now `resource: "issue"`, replacing `task-issue` and `gig-issue`.
+- **Permissions:** rules that name a removed tool no longer match anything; rename them to the new one.
 
-**Before upgrading,** finish every Gig and every Linear Epic Task in flight. Nothing migrates: old `.piton/.local/gigs/` directories stay on disk and the new code doesn't read them, and Linear Task metadata written before this change fails validation.
+**Before upgrading,** finish every Gig and every Task in flight. Nothing migrates: old `.piton/.local/gigs/` directories stay on disk and the new code doesn't read them, and Task metadata written before this change, without `parent`, fails validation.
 
 ## Tool permissions move to `[tools.permissions]`
 

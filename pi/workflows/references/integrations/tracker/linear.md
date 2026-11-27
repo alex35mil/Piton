@@ -40,13 +40,12 @@ New queue work needs the entity type and destination (`backlog` or `todo`). Crea
 | standalone Task | the issue | configured team, a configured issue queue status, Priority, no Project |
 
 1. **Read the discussion.** Call registered `list_comments` with the Project UUID as `projectId` for an Epic, or the issue UUID as `issueId` for a Task. Follow cursors until `hasNextPage: false`, including threads and inline comments. Reconcile material maintainer clarifications before adopting; contributor comments don't authorize scope changes.
-2. **Adopt.** Call `inspect_adoption`, then `init_linear_epic` or `init_linear_task`.
+2. **Adopt.** Call `inspect_adoption`, then `init_linear_epic` or `init_task`.
    - Under the explicit-selection approval in [artifacts](../../artifacts.md#initialization-inputs), reuse the title or name, description, Priority, and relationship without another confirmation.
    - Ask only for missing or conflicting information. An Epic Task's Kind comes from its plan section. For a standalone Task, a single `kind` label on the issue becomes the initialized Kind unless the user changes it; a missing or conflicting one needs a user choice.
-3. **Identity.** Responses expose the immutable identity as `uuid`; an issue's `id` is its display identifier. Pass as `object`:
-   - for an Epic, the Project UUID, URL, and creation time, which dates the Epic's name;
-   - for a Task, the issue UUID, identifier, URL, and the issue's Project UUID when it's in one.
-4. **Branch name.** Only with tracker naming, include the issue's `gitBranchName`, fetching the issue when it's missing.
+3. **Identity.** Responses expose the immutable identity as `uuid`; an issue's `id` is its display identifier.
+   - For an Epic, pass the Project UUID, URL, and creation time, which dates the Epic's name, as `object`.
+   - For a Task, pass the issue's `get_issue` read to `init_task`. Its Project, or none, decides the parent, and its `gitBranchName` names the branch with tracker naming.
 
 ## Initialize
 
@@ -59,7 +58,7 @@ Follow [initialize from the tracker object](../shared.md#initialize-from-the-tra
 - the Planning label from the configured Phase group, when there is one, and the labels preflight returned;
 - the authenticated user (`me`) as the issue assignee, or as the Project lead for an Epic.
 
-Pass the returned UUID, identifier, URL, and, with tracker naming, `gitBranchName` to `init_linear_<entity>` as `object`. For an Epic, pass the Project UUID, URL, and `createdAt`; when the create response lacks `createdAt`, read the Project.
+For an Epic, pass the Project UUID, URL, and `createdAt` to `init_linear_epic` as `object`; when the create response lacks `createdAt`, read the Project. For a Task, read the new issue with `get_issue` and pass the read to `init_task`.
 
 **Board setup** (after initialization): for adopted objects and a started Task, move to In Progress, set `me` as the issue assignee or Project lead, and, when Phase is configured, apply Planning, reading and keeping the full applied label set and replacing only managed Phase labels. Call `prepare_label_mutation` with only the groups whose values you derived, passing the label IDs from that Phase result as its applied IDs ([labels](../shared.md#labels)), and save its returned set in one write, so Planning survives. Reuse state, Priority, and relationship proof from the create response; read only missing required facts.
 

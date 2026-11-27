@@ -155,7 +155,7 @@ Precedence is in [core approvals](./core.md#approvals).
 .piton/.local/epics/<epic>/tasks/<reference>-<slug>/
 .piton/.local/tasks/<reference>-<slug>/
   brief.md             # Approved Request.
-  metadata.json        # Kind, tracker identity, branch contract, PR intent. The parent comes from the directory.
+  metadata.json        # Kind, parent, tracker identity, branch contract, PR intent.
   plan.md              # Work plan; absent on the direct path.
   result.md            # Feature, Bugfix, Refactor, Chore: delivered outcome and actual verification.
   report.md            # Research, Audit: the result; kept when the work continues into implementation.
@@ -167,7 +167,7 @@ Precedence is in [core approvals](./core.md#approvals).
   reviews/<phase>-NNN/ # Review round files, below.
 ```
 
-- Every Task shares the Deliverable lifecycle and these meanings. Its parent is where its directory lives: an Epic's `tasks/`, or the standalone `tasks/` root. Only an Epic Task may update its Epic's artifacts; its parent identity is the containing Epic directory plus its exact marker.
+- Every Task shares the Deliverable lifecycle and these meanings. The tracker decides its parent (an Epic, or none); metadata records it, the directory mirrors it (an Epic's `tasks/`, or the `tasks/` root), and resume re-checks it. Only an Epic Task may update its Epic's artifacts; its parent identity is the containing Epic directory plus its exact marker.
 - `metadata.branch` records the branch name, start, target, and whether the name was generated or tracker-provided.
 - An Epic Task's stored start and target never change when its Epic's routing later changes.
 - `metadata.json` is authoritative for kind.

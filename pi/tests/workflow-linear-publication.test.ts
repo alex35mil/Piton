@@ -19,6 +19,7 @@ import { PlanDocumentValidator } from "../workflows/extensions/integrations/plan
 import { trackerPublication } from "../workflows/extensions/integrations/tracker-publication.ts"
 import type { ProviderEvidence } from "../workflows/extensions/integrations/resource-id-operations.ts"
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
+import { linearReads } from "./workflow-issue-reads-fixture.ts"
 import { linearPhases } from "./workflow-phase-fixtures.ts"
 
 const tools = workflowMcpCatalog("linear")
@@ -95,18 +96,20 @@ async function fixture(kind: "epic" | "task" | "standalone" = "standalone") {
               ? {
                     ...common,
                     entity: "task" as const,
-                    object: { ...issue, projectId: "project-uuid" },
                     kind: "feature" as const,
-                    parent: { kind: "epic" as const, epicDir: parentDirectory! },
+                    reads: linearReads({
+                        identifier: issue.identifier,
+                        uuid: issue.issueId,
+                        projectId: "project-uuid",
+                    }),
                 }
               : {
                     ...common,
                     entity: "task" as const,
                     kind: "feature" as const,
-                    parent: { kind: "none" as const },
-                    object: issue,
+                    reads: linearReads({ identifier: issue.identifier, uuid: issue.issueId }),
                 }
-    const initialized = await initializeEntity(initialization, { cwd: root })
+    const initialized = await initializeEntity(initialization, { cwd: root, tools })
     const directory = initialized.directory
     // Every Epic here publishes `source`, whose accepted Task list is empty.
     for (const epic of [kind === "epic" ? directory : parentDirectory])

@@ -20,6 +20,7 @@ import { LinearPhaseInputValidator, linearPhaseFacts } from "../workflows/extens
 import { GitHubPhaseInputValidator } from "../workflows/extensions/integrations/github-phase-evidence.ts"
 import { claudeCodeSchema } from "./claude-code-schema-fixture.ts"
 import { githubPhaseReads } from "./workflow-phase-fixtures.ts"
+import { githubReads } from "./workflow-issue-reads-fixture.ts"
 import {
     codingFactories,
     expectedWorkflowTools,
@@ -270,7 +271,7 @@ describe("workflow model-facing contracts", () => {
                 call({
                     name: "codemode",
                     arguments: {
-                        code: 'text(await describeTool("init_github_task")); text(await tools.mcp__memory__echo({}));',
+                        code: 'text(await describeTool("init_task")); text(await tools.mcp__memory__echo({}));',
                     },
                 }),
                 answer("Done."),
@@ -366,7 +367,7 @@ describe("workflow model-facing contracts", () => {
             const h = await nativeSessionFixture({
                 extensions: [
                     ...codingFactories,
-                    memoryMcp("github", ["projects_get", "projects_write"]),
+                    memoryMcp("github", ["issue_read", "projects_get", "projects_write"]),
                     ...workflowFactories,
                 ],
                 tools: ["+codemode"],
@@ -446,11 +447,11 @@ describe("workflow model-facing contracts", () => {
                 // Project setup runs only in the source checkout; a worker uses the source's.
                 await invoke(
                     worker
-                        ? 'text(await tools.prepare_artifacts({})); text(await describeTool("init_github_task"));'
-                        : 'text(await tools.inspect_project_setup({})); text(await tools.prepare_artifacts({})); text(await describeTool("init_github_task"));',
+                        ? 'text(await tools.prepare_artifacts({})); text(await describeTool("init_task"));'
+                        : 'text(await tools.inspect_project_setup({})); text(await tools.prepare_artifacts({})); text(await describeTool("init_task"));',
                 )
                 await invoke(
-                    'text(await tools.preflight_task({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor"})); text(await tools.init_github_task({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor",parent:{kind:"none"},object:{issueId:900,issueNumber:9,issueUrl:"https://github.com/fixture/app/issues/9"}}));',
+                    `text(await tools.preflight_task({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor"})); text(await tools.init_task({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor",reads:${JSON.stringify(githubReads({ number: 9, repository: { owner: "fixture", repo: "app" } }))}}));`,
                 )
                 const directory = ".piton/.local/tasks/9-fixture-work"
                 if (!worker) assert.ok(fs.lstatSync(path.join(h.root, ".piton/.local")).isDirectory())
