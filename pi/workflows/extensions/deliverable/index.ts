@@ -17,7 +17,7 @@ import {
 import { beginUserReview, endUserReview } from "./user-review.js"
 
 const UserReviewInputSchema = Type.Object(
-    { entityDir: Type.String({ minLength: 1, description: "Task or Gig directory" }) },
+    { entityDir: Type.String({ minLength: 1, description: "Task directory" }) },
     { additionalProperties: false },
 )
 const UserReviewInputValidator = compile(UserReviewInputSchema)
@@ -29,7 +29,7 @@ export default function (pi: ExtensionAPI): void {
         name: "cleanup_delivery_branch",
         label: "cleanup_delivery_branch",
         description:
-            "Execute an explicitly approved post-merge Task/Gig branch cleanup in the current clone from the exact configured pull_request_read get evidence for the recorded PR. Validates current state and never deletes a remote branch.",
+            "Execute an explicitly approved post-merge Task branch cleanup in the current clone from the exact configured pull_request_read get evidence for the recorded PR. Validates current state and never deletes a remote branch.",
         parameters: DeliveryCleanupInputSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const input = parse(DeliveryCleanupInputValidator, params)
@@ -45,7 +45,7 @@ export default function (pi: ExtensionAPI): void {
         name: "prepare_merge_resolution_comment",
         label: "prepare_merge_resolution_comment",
         description:
-            "After an approved push of a Task/Gig merge-conflict resolution, render the PR comment that records it: the push-approved summary and the merge commit's git show --remerge-diff, folded in <details>. Validates that the stored branch ends in a pushed merge of the stored target that resolved conflicts. Returns the native comment call to run unchanged; never calls providers.",
+            "After an approved push of a Task merge-conflict resolution, render the PR comment that records it: the push-approved summary and the merge commit's git show --remerge-diff, folded in <details>. Validates that the stored branch ends in a pushed merge of the stored target that resolved conflicts. Returns the native comment call to run unchanged; never calls providers.",
         parameters: MergeResolutionCommentInputSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const result = prepareMergeResolutionComment(ctx.cwd, parseMergeResolutionCommentInput(params), catalog)
@@ -59,7 +59,7 @@ export default function (pi: ExtensionAPI): void {
         name: "begin_user_review",
         label: "begin_user_review",
         description:
-            "Put a Task or Gig branch's diff in the current checkout for the user's review ('show me the diff'): HEAD detaches at the merge base with the target, so committed work shows as staged. Only HEAD moves; uncommitted work stays as it was. With no commits ahead, returns `uncommitted` and changes nothing. End with end_user_review before committing, submitting, or applying a fix.",
+            "Put a Task branch's diff in the current checkout for the user's review ('show me the diff'): HEAD detaches at the merge base with the target, so committed work shows as staged. Only HEAD moves; uncommitted work stays as it was. With no commits ahead, returns `uncommitted` and changes nothing. End with end_user_review before committing, submitting, or applying a fix.",
         parameters: UserReviewInputSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const input = parse(UserReviewInputValidator, params)
@@ -71,7 +71,7 @@ export default function (pi: ExtensionAPI): void {
         name: "end_user_review",
         label: "end_user_review",
         description:
-            "End a Task or Gig user review in the current checkout: reattach HEAD to the branch. Only HEAD moves; edits made during the review stay as uncommitted changes on the branch. Refuses, changing nothing, when HEAD is no longer at the review base, such as after a commit during the review.",
+            "End a Task user review in the current checkout: reattach HEAD to the branch. Only HEAD moves; edits made during the review stay as uncommitted changes on the branch. Refuses, changing nothing, when HEAD is no longer at the review base, such as after a commit during the review.",
         parameters: UserReviewInputSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const input = parse(UserReviewInputValidator, params)

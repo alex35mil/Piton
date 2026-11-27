@@ -17,7 +17,7 @@ const OPERATIONS = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-mer
 function deliverableBranch(cwd: string, entityDir: string) {
     const root = project.resolveRootDir(cwd)
     const status = readEntityStatus(resolveEntityDirectory(root, cwd, entityDir))
-    if (status.entity === "epic") throw new Error("User review is for a Task or Gig branch")
+    if (status.entity === "epic") throw new Error("User review is for a Task branch")
     for (const name of OPERATIONS)
         if (fs.existsSync(Git.run(root, ["rev-parse", "--path-format=absolute", "--git-path", name])))
             throw new Error(`A Git operation is in progress (${name}); finish it first. Nothing changed`)

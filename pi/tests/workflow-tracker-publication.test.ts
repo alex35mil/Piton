@@ -33,7 +33,8 @@ const source =
     "# Plan\n\n## Overview\n\nKeep the request and show the plan.\n\n### Plan highlights\n\n- One comment.\n\n## Implementation\n\nUpdate the plan.\n"
 const token = "ab345678-1234-4567-8901-123456789abc"
 
-async function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
+// `standalone` is a Task with no parent Epic.
+async function fixture(kind: "epic" | "task" | "standalone" = "standalone", adopted = false) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-publication-"))
     const git = (...args: string[]) => cp.execFileSync("git", args, { cwd: root, stdio: "pipe" })
     git("init", "-b", "main")
@@ -124,9 +125,14 @@ async function fixture(kind: "epic" | "task" | "gig" = "gig", adopted = false) {
     const input =
         kind === "epic"
             ? { ...common, entity: kind }
-            : kind === "gig"
-              ? { ...common, entity: kind, kind: "feature" as const }
-              : { ...common, entity: kind, parentEpicDir: parent!.directory }
+            : kind === "standalone"
+              ? { ...common, entity: "task" as const, kind: "feature" as const, parent: { kind: "none" as const } }
+              : {
+                    ...common,
+                    entity: kind,
+                    kind: "feature" as const,
+                    parent: { kind: "epic" as const, epicDir: parent!.directory },
+                }
     const initialized = await initializeEntity(input, { cwd: root })
     const directory = initialized.directory
     // Every Epic here publishes `source`, whose accepted Task list is empty.
@@ -437,7 +443,7 @@ describe("managed GitHub plan comments", () => {
             }
         })
 
-    for (const kind of ["epic", "task", "gig"] as const)
+    for (const kind of ["epic", "task", "standalone"] as const)
         for (const adopted of [false, true])
             it(`uses one comment for ${kind}/${adopted ? "adopted" : "new"}`, async () => {
                 const f = await fixture(kind, adopted)
@@ -452,7 +458,7 @@ describe("managed GitHub plan comments", () => {
                     const pending = f.saved().tracker.planComment
                     assert.equal(pending.state, "pending")
                     assert.ok(prepared.mutation.arguments.body.endsWith(planPublicationMarker(pending.token)))
-                    assert.doesNotMatch(prepared.mutation.arguments.body, /(?:GIG|TASK|EPIC)-|\.piton\//)
+                    assert.doesNotMatch(prepared.mutation.arguments.body, /(?:TASK|EPIC)-|\.piton\//)
                     assert.match(
                         prepared.mutation.arguments.body,
                         /^# Plan\n\nKeep the request and show the plan\.\n\n## Highlights\n\n- One comment\.\n\n<details>\n<summary>Full plan<\/summary>/,
@@ -605,8 +611,8 @@ describe("managed GitHub plan comments", () => {
         }
     })
 
-    it("rejects a Gig plan update without an announcement or with a Task origin", async () => {
-        const f = await fixture("gig")
+    it("rejects a standalone Task plan update without an announcement or with a Task origin", async () => {
+        const f = await fixture("standalone")
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed" && typeof prepared.mutation.arguments.body === "string")
@@ -623,7 +629,7 @@ describe("managed GitHub plan comments", () => {
             await assert.rejects(update(), /announcement/)
             await assert.rejects(
                 update({ origin: { kind: "task", entityDir: f.directory }, summary: "Revised." }),
-                /gig plan update has no Task origin/,
+                /Task plan update has no Task origin/,
             )
             assert.equal("planAnnouncement" in f.saved().tracker, false)
         } finally {
@@ -645,7 +651,7 @@ describe("managed GitHub plan comments", () => {
     })
 
     it("rejects a saved presented or accepted summary in the tracker record", async () => {
-        const f = await fixture("gig")
+        const f = await fixture("standalone")
         try {
             for (const state of ["presented", "accepted"]) {
                 const planAnnouncement = { state, summary: "Early.", after: planFingerprint(source) }
@@ -660,7 +666,7 @@ describe("managed GitHub plan comments", () => {
         }
     })
 
-    for (const kind of ["epic", "gig"] as const)
+    for (const kind of ["epic", "standalone"] as const)
         it(`finishes a ${kind} announcement when the plan update landed without being recorded`, async () => {
             const f = await fixture(kind)
             try {

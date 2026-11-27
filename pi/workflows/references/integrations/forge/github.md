@@ -8,6 +8,6 @@ This procedure extends [integration roles](../shared.md). Ordinary resume never 
 
 Submission, revisions, and choosing an existing PR are in [Deliverable submission](../../deliverable/submission.md).
 
-## Shipping a Task or Gig
+## Shipping a Task
 
 The shipping procedure is in [Deliverable shipping](../../deliverable/shipping.md). It uses the [repository merge contract](./merge.md), shared with incoming PR shipping. Missing merge evidence blocks completion even when every mutation succeeded.

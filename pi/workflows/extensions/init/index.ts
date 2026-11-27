@@ -6,16 +6,15 @@ import {
     EntityInitializationValidator,
     EpicInitializationPropertiesSchema,
     EpicPreflightSchema,
-    GigInitializationPropertiesSchema,
-    GigPreflightSchema,
     initializeEntity,
-    initializeLocalGig,
+    initializeLocalTask,
     type InitializedEntity,
-    LocalGigInitializationSchema,
-    LocalGigInitializationValidator,
+    LocalTaskInitializationSchema,
+    LocalTaskInitializationValidator,
     preflightEntity,
     PreflightValidator,
     TaskInitializationPropertiesSchema,
+    TaskPreflightSchema,
 } from "./entity.js"
 import {
     restoreEpic,
@@ -29,9 +28,8 @@ import { workflowTools } from "../__lib/tools.js"
 import { observeMcpTools } from "../../../extensions/__lib/mcp.js"
 import {
     GitHubTrackerObjectSchema,
-    LinearGigIssueObjectSchema,
+    LinearIssueObjectSchema,
     LinearProjectObjectSchema,
-    LinearTaskIssueObjectSchema,
 } from "../integrations/records.js"
 import { seedInitializedEntityResourceIds } from "./resource-ids.js"
 
@@ -50,43 +48,38 @@ export default function (pi: ExtensionAPI): void {
         },
         {
             entity: "task",
-            preflight: undefined,
-            common: TaskInitializationPropertiesSchema,
-            linear: LinearTaskIssueObjectSchema,
-        },
-        {
-            entity: "gig",
-            preflight: Type.Object(Type.Omit(GigPreflightSchema, ["entity"]).properties, {
+            // New work is always a standalone Task: an Epic Task adopts the issue its Epic created.
+            preflight: Type.Object(Type.Omit(TaskPreflightSchema, ["entity"]).properties, {
                 additionalProperties: false,
             }),
-            common: GigInitializationPropertiesSchema,
-            linear: LinearGigIssueObjectSchema,
+            common: TaskInitializationPropertiesSchema,
+            linear: LinearIssueObjectSchema,
         },
     ] as const
     for (const variant of entities) {
         const common = variant.common
         const preflight = variant.preflight
-        // A Task never creates its tracker issue: it starts from the queued issue its
-        // parent Epic's issue processing created, so it has no preflight.
-        const preflightValidator = preflight ? compile(preflight) : undefined
-        if (preflight && preflightValidator)
-            tools.registerTool({
-                name: `preflight_${variant.entity}`,
-                label: `preflight_${variant.entity}`,
-                description: `Run every local check for an approved new ${variant.entity} before its tracker object is created, and return the labels to create it with. Changes nothing; a failure means nothing should be created on the tracker.`,
-                parameters: preflight,
-                async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-                    const input = parse(PreflightValidator, {
-                        ...parse(preflightValidator, params),
-                        entity: variant.entity,
-                    })
-                    const result = preflightEntity(input, { cwd: ctx.cwd, tools: mcpTools })
-                    return {
-                        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-                        details: result,
-                    }
-                },
-            })
+        const preflightValidator = compile(preflight)
+        tools.registerTool({
+            name: `preflight_${variant.entity}`,
+            label: `preflight_${variant.entity}`,
+            description:
+                variant.entity === "task"
+                    ? "Run every local check for an approved new standalone Task before its tracker issue is created, and return the labels to create it with. Changes nothing; a failure means nothing should be created on the tracker."
+                    : "Run every local check for an approved new Epic before its tracker object is created, and return the labels to create it with. Changes nothing; a failure means nothing should be created on the tracker.",
+            parameters: preflight,
+            async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+                const input = parse(PreflightValidator, {
+                    ...parse(preflightValidator, params),
+                    entity: variant.entity,
+                })
+                const result = preflightEntity(input, { cwd: ctx.cwd, tools: mcpTools })
+                return {
+                    content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+                    details: result,
+                }
+            },
+        })
         for (const [provider, object] of [
             ["github", GitHubTrackerObjectSchema],
             ["linear", variant.linear],
@@ -99,8 +92,8 @@ export default function (pi: ExtensionAPI): void {
                 label: name,
                 description:
                     variant.entity === "task"
-                        ? `Start a Task from its parent Epic's queued ${provider === "github" ? "GitHub issue" : "Linear issue"}, selected by the marker its plan section carries. Takes the Kind from that section, names the directory and branch from the issue, and records its Resource IDs.`
-                        : `Initialize an approved ${variant.entity} from its existing ${provider === "github" ? "GitHub issue" : "Linear object"}, newly created or explicitly selected. Names the directory and branch from the tracker object and records its Resource IDs.`,
+                        ? `Start a Task from its ${provider === "github" ? "GitHub" : "Linear"} issue, with the parent route_task named. An Epic Task adopts its Epic's queued issue: the issue's marker selects the plan Task, whose Kind must match, and the Epic's routing sets the branch base. A standalone Task starts from and targets the repository default. Names the directory and branch from the issue and records its Resource IDs.`
+                        : `Initialize an approved Epic from its existing ${provider === "github" ? "GitHub issue" : "Linear Project"}, newly created or explicitly selected. Names the directory and branch from the tracker object and records its Resource IDs.`,
                 parameters,
                 async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
                     const input = parse(EntityInitializationValidator, {
@@ -119,13 +112,13 @@ export default function (pi: ExtensionAPI): void {
     }
 
     tools.registerTool({
-        name: "init_local_gig",
-        label: "init_local_gig",
+        name: "init_local_task",
+        label: "init_local_task",
         description:
-            "Initialize an approved Gig with no tracker item, for a project without a tracker or work the user keeps off it. Names the directory and branch from today's date and the slug (<YYYYMMDD>-<slug>), starting from and targeting the repository default branch. A local Gig has no Phase, lifecycle, Priority, labels, or plan publication; every tracker step refuses for it.",
-        parameters: LocalGigInitializationSchema,
+            "Initialize an approved standalone Task with no tracker item, for a project without a tracker or work the user keeps off it. Names the directory and branch from today's date and the slug (<YYYYMMDD>-<slug>), starting from and targeting the repository default branch. A local Task has no Phase, lifecycle, Priority, labels, or plan publication; every tracker step refuses for it.",
+        parameters: LocalTaskInitializationSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const initialized = await initializeLocalGig(parse(LocalGigInitializationValidator, params), {
+            const initialized = await initializeLocalTask(parse(LocalTaskInitializationValidator, params), {
                 cwd: ctx.cwd,
             })
             return {
@@ -167,7 +160,7 @@ export function formatInitializedEntity(initialized: Pick<InitializedEntity, "di
     const branch = initialized.status.branch
     const board =
         initialized.status.tracker.provider === "local"
-            ? "This Gig is local: skip board setup and every tracker step."
+            ? "This Task is local: skip board setup and every tracker step."
             : "Next: set up the board (Project membership, Status, Priority, Assignee, and Phase and labels when configured)."
     return [
         `Initialized ${initialized.directory}.`,

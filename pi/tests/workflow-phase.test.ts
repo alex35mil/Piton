@@ -113,7 +113,11 @@ function linearFacts(): Extract<NativePhaseFacts, { provider: "linear" }> {
 }
 const lifecycles: LifecycleState[] = ["backlog", "todo", "inProgress", "inReview", "done", "canceled"]
 
-function phaseItem(provider: "github" | "linear", entity: "epic" | "task" | "gig"): PhaseItem {
+// `standalone` is a Task with no parent Epic: on Linear, an issue in no Project.
+type Fixture = "epic" | "task" | "standalone"
+
+function phaseItem(provider: "github" | "linear", fixture: Fixture): PhaseItem {
+    const entity = fixture === "epic" ? "epic" : "task"
     if (provider === "github")
         return {
             entity,
@@ -125,7 +129,7 @@ function phaseItem(provider: "github" | "linear", entity: "epic" | "task" | "gig
             },
         }
     const planDocument = { state: "unpublished" } as const
-    switch (entity) {
+    switch (fixture) {
         case "epic":
             return {
                 entity,
@@ -141,18 +145,20 @@ function phaseItem(provider: "github" | "linear", entity: "epic" | "task" | "gig
                 entity,
                 tracker: {
                     provider,
-                    resource: "task-issue",
-                    external: { issueId: "issue-uuid", identifier: "ENG-7", projectId: "project-uuid" },
+                    resource: "issue",
+                    external: { issueId: "issue-uuid", identifier: "ENG-7" },
+                    parent: { kind: "project", projectId: "project-uuid" },
                     planDocument,
                 },
             }
-        case "gig":
+        case "standalone":
             return {
                 entity,
                 tracker: {
                     provider,
-                    resource: "gig-issue",
+                    resource: "issue",
                     external: { issueId: "issue-uuid", identifier: "ENG-7" },
+                    parent: { kind: "none" },
                     planDocument,
                 },
             }
@@ -164,17 +170,17 @@ const resolveTool = (server: string, operation: string) => `mcp__${server}__${op
 /** Plans for the entity's item on the tracker's provider, resolving tools by the fixture naming. */
 function planPhaseMutation(
     tracker: typeof github | typeof linear,
-    entity: "epic" | "task" | "gig",
+    fixture: Fixture,
     phase: Parameters<typeof planForItem>[2],
     lifecycle: LifecycleState,
     facts: NativePhaseFacts,
 ) {
-    return planForItem(tracker, phaseItem(tracker.provider, entity), phase, lifecycle, facts, resolveTool)
+    return planForItem(tracker, phaseItem(tracker.provider, fixture), phase, lifecycle, facts, resolveTool)
 }
 
 describe("shared workflow Phase", () => {
     it("projects a Phase only while In Progress, and clears it otherwise, for every entity and provider", () => {
-        for (const entity of ["epic", "task", "gig"] as const) {
+        for (const entity of ["epic", "task", "standalone"] as const) {
             for (const phase of ["planning", "execution", "selfReview"] as const) {
                 assert.equal(PhaseValidator.check(phase), true)
                 for (const lifecycle of lifecycles) {
@@ -224,24 +230,24 @@ describe("shared workflow Phase", () => {
                 updated_field: { name: "Phase", value },
             },
         })
-        const set = planPhaseMutation(github, "gig", "execution", "inProgress", githubFacts)
+        const set = planPhaseMutation(github, "standalone", "execution", "inProgress", githubFacts)
         assert.deepEqual(set, {
             assignment: { provider: "github", field: "Phase", value: "Execution" },
             nativeChanged: true,
             mutation: githubCall("Execution"),
         })
         const selected = { ...githubFacts, current: "Execution" }
-        assert.deepEqual(planPhaseMutation(github, "gig", null, "inReview", selected), {
+        assert.deepEqual(planPhaseMutation(github, "standalone", null, "inReview", selected), {
             assignment: { provider: "github", field: "Phase", value: null },
             nativeChanged: true,
             mutation: githubCall(null),
         })
-        assert.equal("mutation" in planPhaseMutation(github, "gig", "execution", "inProgress", selected), false)
+        assert.equal("mutation" in planPhaseMutation(github, "standalone", "execution", "inProgress", selected), false)
 
         for (const [entity, tool, id] of [
             ["epic", "mcp__linear__save_project", "project-uuid"],
             ["task", "mcp__linear__save_issue", "issue-uuid"],
-            ["gig", "mcp__linear__save_issue", "issue-uuid"],
+            ["standalone", "mcp__linear__save_issue", "issue-uuid"],
         ] as const) {
             const labels = ["customer-label", "other-execution", "execution"]
             assert.deepEqual(planPhaseMutation(linear, entity, "execution", "inProgress", linearFacts()), {
@@ -261,18 +267,27 @@ describe("shared workflow Phase", () => {
             throw new Error("no registered tool")
         }
         assert.throws(
-            () => planForItem(github, phaseItem("github", "gig"), "execution", "inProgress", githubFacts, missing),
+            () =>
+                planForItem(github, phaseItem("github", "standalone"), "execution", "inProgress", githubFacts, missing),
             /no registered tool/,
         )
         assert.throws(
-            () => planForItem(github, phaseItem("linear", "gig"), "execution", "inProgress", githubFacts, resolveTool),
+            () =>
+                planForItem(
+                    github,
+                    phaseItem("linear", "standalone"),
+                    "execution",
+                    "inProgress",
+                    githubFacts,
+                    resolveTool,
+                ),
             /provider/,
         )
     })
 
     it("returns only how the tracker shows Phase, with no local Phase", () => {
         for (const tracker of [github, linear]) {
-            const contract = phaseProjectionContract(tracker, "gig")
+            const contract = phaseProjectionContract(tracker, "task")
             if (contract.state !== "configured") assert.fail("expected configured Phase")
             assert.deepEqual(Object.keys(contract).sort(), ["authority", "representation", "state"])
             assert.equal(contract.representation.provider, tracker.provider)
@@ -289,29 +304,32 @@ describe("shared workflow Phase", () => {
             [linearWithout, linearFacts()],
         ] as const) {
             assert.equal(trackerPhase(tracker).state, "notConfigured")
-            assert.equal(phaseProjectionContract(tracker, "gig").state, "notConfigured")
-            assert.throws(() => planPhaseMutation(tracker, "gig", "execution", "inProgress", facts), /isn't configured/)
+            assert.equal(phaseProjectionContract(tracker, "task").state, "notConfigured")
+            assert.throws(
+                () => planPhaseMutation(tracker, "standalone", "execution", "inProgress", facts),
+                /isn't configured/,
+            )
         }
-        assert.throws(() => resolveLinearPhaseGroup(linearWithout, "gig", linearFacts().catalog), /isn't configured/)
+        assert.throws(() => resolveLinearPhaseGroup(linearWithout, "task", linearFacts().catalog), /isn't configured/)
     })
 
     it("recognizes no-op and clearing assignments without losing unrelated labels", () => {
         const facts = linearFacts()
         facts.applied = ["customer-label", "execution", "other-execution"]
-        assert.equal(planPhaseMutation(linear, "gig", "execution", "inProgress", facts).nativeChanged, false)
-        const cleared = planPhaseMutation(linear, "gig", null, "inReview", facts)
+        assert.equal(planPhaseMutation(linear, "standalone", "execution", "inProgress", facts).nativeChanged, false)
+        const cleared = planPhaseMutation(linear, "standalone", null, "inReview", facts)
         assert.equal(cleared.assignment.provider, "linear")
         if (cleared.assignment.provider !== "linear") assert.fail("expected Linear")
         assert.deepEqual(cleared.assignment.labels, ["customer-label", "other-execution"])
         assert.equal(cleared.nativeChanged, true)
         assert.equal(
-            planPhaseMutation(github, "gig", "selfReview", "inProgress", {
+            planPhaseMutation(github, "standalone", "selfReview", "inProgress", {
                 ...githubFacts,
                 current: "Self-Review",
             }).nativeChanged,
             false,
         )
-        assert.equal(planPhaseMutation(github, "gig", null, "done", githubFacts).nativeChanged, false)
+        assert.equal(planPhaseMutation(github, "standalone", null, "done", githubFacts).nativeChanged, false)
     })
 
     it("requires the exact GitHub field name and type", () => {
@@ -321,13 +339,16 @@ describe("shared workflow Phase", () => {
         ])
             assert.throws(
                 () =>
-                    planPhaseMutation(github, "gig", "planning", "inProgress", {
+                    planPhaseMutation(github, "standalone", "planning", "inProgress", {
                         ...githubFacts,
                         field,
                     }),
                 /Phase/,
             )
-        assert.throws(() => planPhaseMutation(github, "gig", "planning", "inProgress", linearFacts()), /provider/)
+        assert.throws(
+            () => planPhaseMutation(github, "standalone", "planning", "inProgress", linearFacts()),
+            /provider/,
+        )
         assert.equal(NativePhaseFactsValidator.check(githubFacts), true)
         assert.equal(NativePhaseFactsValidator.check(linearFacts()), true)
     })
@@ -355,7 +376,13 @@ describe("shared workflow Phase", () => {
         // Targets Planning while In Progress and clears Phase otherwise, as the agent would.
         const plan = (reads: Reads) => {
             const { lifecycle, native } = facts(reads)
-            return planPhaseMutation(github, "gig", lifecycle === "inProgress" ? "planning" : null, lifecycle, native)
+            return planPhaseMutation(
+                github,
+                "standalone",
+                lifecycle === "inProgress" ? "planning" : null,
+                lifecycle,
+                native,
+            )
         }
 
         it("extracts lifecycle and Phase from one item read as the MCP returns it", () => {
@@ -369,7 +396,7 @@ describe("shared workflow Phase", () => {
                 },
             })
             assert.equal(
-                planPhaseMutation(github, "gig", "execution", selected.lifecycle, selected.native).nativeChanged,
+                planPhaseMutation(github, "standalone", "execution", selected.lifecycle, selected.native).nativeChanged,
                 false,
             )
             assert.partialDeepStrictEqual(plan(githubPhaseReads(target, null)), {
@@ -533,7 +560,7 @@ describe("shared workflow Phase", () => {
         for (const mutate of invalid) {
             const facts = linearFacts()
             mutate(facts)
-            assert.throws(() => resolveLinearPhaseGroup(linear, "gig", facts.catalog), /Phase/)
+            assert.throws(() => resolveLinearPhaseGroup(linear, "task", facts.catalog), /Phase/)
         }
         const project = linearFacts()
         project.catalog[0].groupType = null
@@ -558,7 +585,7 @@ describe("shared workflow Phase", () => {
         const facts = linearFacts()
         facts.catalog[0].name = "Project Phase"
         assert.doesNotThrow(() => resolveLinearPhaseGroup(tracker, "epic", facts.catalog))
-        assert.throws(() => resolveLinearPhaseGroup(tracker, "gig", facts.catalog), /Phase/)
+        assert.throws(() => resolveLinearPhaseGroup(tracker, "task", facts.catalog), /Phase/)
     })
 
     it("loads the shared Phase operation without a Pi runtime", () => {
@@ -604,7 +631,7 @@ describe("shared workflow Phase", () => {
             for (const provider of ["github", "linear"] as const) {
                 const epicName = provider === "github" ? "1-example" : "20261001-example"
                 const epicDir = path.join(root, provider, ".piton/.local/epics", epicName)
-                const tracker = (entity: "epic" | "task" | "gig") =>
+                const tracker = (entity: Fixture) =>
                     provider === "github"
                         ? {
                               provider,
@@ -624,26 +651,26 @@ describe("shared workflow Phase", () => {
                             }
                           : {
                                 provider,
-                                resource: entity === "task" ? "task-issue" : "gig-issue",
-                                external: {
-                                    issueId: "issue-uuid",
-                                    identifier: "ENG-2",
-                                    ...(entity === "task" ? { projectId: "project-uuid" } : {}),
-                                },
+                                resource: "issue",
+                                external: { issueId: "issue-uuid", identifier: "ENG-2" },
+                                parent:
+                                    entity === "task"
+                                        ? { kind: "project", projectId: "project-uuid" }
+                                        : { kind: "none" },
                                 planDocument: { state: "unpublished" },
                             }
                 const childName = provider === "github" ? "2-example" : "ENG-2-example"
-                for (const entity of ["epic", "task", "gig"] as const) {
+                for (const entity of ["epic", "task", "standalone"] as const) {
                     const directory =
                         entity === "epic"
                             ? epicDir
                             : entity === "task"
                               ? path.join(epicDir, "tasks", childName)
-                              : path.join(root, provider, ".piton/.local/gigs", childName)
+                              : path.join(root, provider, ".piton/.local/tasks", childName)
                     fs.mkdirSync(directory, { recursive: true })
                     const metadata = {
                         ...common,
-                        entity,
+                        entity: entity === "epic" ? "epic" : "task",
                         tracker: tracker(entity),
                         ...(entity === "epic" ? {} : { kind: "feature" }),
                     }

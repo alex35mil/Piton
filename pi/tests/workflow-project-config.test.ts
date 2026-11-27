@@ -312,9 +312,9 @@ describe("workflow project configuration", () => {
                     fs.writeFileSync(path.join(root, ".piton/config.toml"), scenario.project)
                 }
                 if (scenario.name === "existing") {
-                    fs.mkdirSync(path.join(root, ".piton/.local/gigs/example"), { recursive: true })
+                    fs.mkdirSync(path.join(root, ".piton/.local/tasks/example"), { recursive: true })
                     fs.writeFileSync(
-                        path.join(root, ".piton/.local/gigs/example/metadata.json"),
+                        path.join(root, ".piton/.local/tasks/example/metadata.json"),
                         JSON.stringify({
                             tracker: { provider: "github", external: { issueNumber: 2 } },
                         }),
@@ -379,7 +379,7 @@ describe("workflow project configuration", () => {
                 if (scenario.name === "existing") {
                     assert.deepEqual(snapshot.boundEntityTrackers, [
                         {
-                            path: ".piton/.local/gigs/example/metadata.json",
+                            path: ".piton/.local/tasks/example/metadata.json",
                             entity: "example",
                             provider: "github",
                             reference: "#2",
@@ -870,7 +870,7 @@ describe("workflow project configuration", () => {
         try {
             writeConfig(root, config())
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
-            const gig = path.join(root, ".piton", ".local", "gigs", "example")
+            const gig = path.join(root, ".piton", ".local", "tasks", "example")
             fs.mkdirSync(gig, { recursive: true })
             fs.writeFileSync(path.join(gig, "metadata.json"), "{}\n")
             prepareArtifactPersistence(root)
@@ -915,16 +915,16 @@ describe("workflow project configuration", () => {
         try {
             writeConfig(root, config())
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
-            const gig = path.join(root, ".piton", ".local", "gigs", "example")
+            const gig = path.join(root, ".piton", ".local", "tasks", "example")
             fs.mkdirSync(gig, { recursive: true })
             fs.writeFileSync(path.join(gig, "notes.md"), "# Notes\n")
-            git(root, ["add", "-f", ".piton/.local/gigs/example/notes.md"])
+            git(root, ["add", "-f", ".piton/.local/tasks/example/notes.md"])
             const indexBefore = git(root, ["ls-files", "--stage"])
             assert.throws(() => prepareArtifactPersistence(root), /\.piton\/\.local\/ must remain outside Git/)
             assert.equal(git(root, ["ls-files", "--stage"]), indexBefore)
 
             git(root, ["commit", "-m", "tracked local artifact"])
-            git(root, ["rm", "--cached", ".piton/.local/gigs/example/notes.md"])
+            git(root, ["rm", "--cached", ".piton/.local/tasks/example/notes.md"])
             const stagedBefore = git(root, ["diff", "--cached", "--raw"])
             assert.throws(() => prepareArtifactPersistence(root), /must remain outside Git/)
             assert.equal(git(root, ["diff", "--cached", "--raw"]), stagedBefore)

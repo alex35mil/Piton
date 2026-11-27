@@ -1,6 +1,6 @@
 # Planning
 
-The shared planning protocol for Epic, Task, and Gig. Entity and kind skills define plan content, and Bugfix defines when inquiry turns into investigation. When reviewing, read [review](./review.md). When changing Phase, read [Phase](./phase.md).
+The shared planning protocol for Epic and Task. Entity and kind skills define plan content, and Bugfix defines when inquiry turns into investigation. When reviewing, read [review](./review.md). When changing Phase, read [Phase](./phase.md).
 
 ## Research and inquiry
 
@@ -16,7 +16,7 @@ The shared planning protocol for Epic, Task, and Gig. Entity and kind skills def
 
 ## Choose the path
 
-A Task or Gig takes one of two paths. Say which in one line before continuing. "plan it" and "just do it" override the choice.
+A Task takes one of two paths. Say which in one line before continuing. "plan it" and "just do it" override the choice.
 
 | Path | When | What it skips |
 | --- | --- | --- |
@@ -33,7 +33,7 @@ A Task or Gig takes one of two paths. Say which in one line before continuing. "
 | Entity | Plan |
 | --- | --- |
 | Epic | `epic.md` |
-| Task, Gig | `plan.md` |
+| Task | `plan.md` |
 
 - Write the plan directly. It's the only plan file; there is no separate draft.
 - Write the smallest self-contained plan that carries every settled decision. Entity skills define its content and review criteria.
@@ -50,18 +50,18 @@ Apply this bar when planning, implementing, and handling review findings. Review
 - Handling that shapes the core design, such as new state, a queue, or a protocol change, goes in the plan highlights.
 - When unsure, leave the case out and list it under `## Unhandled cases` in `plan.md`, or in `result.md` when found during implementation: one line with the case and why it was left out. List only cases you or a reviewer seriously considered; omit the section when empty.
 
-## Task and Gig plans
+## Task plans
 
-The plan informs the user. It waits for approval only when the item is marked (below). Without a tracker, or for a local Gig, skip the Phase, publication, and gate steps ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
+The plan informs the user. It waits for approval only when the item is marked (below). Without a tracker, or for a local Task, skip the Phase, publication, and gate steps ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
 
-1. Set Planning with the Phase tool for the configured tracker when Phase is configured, then call `review_task` or `review_gig` with `phase: "plan"`. Handle the cycle as described in [review](./review.md).
+1. Set Planning with the Phase tool for the configured tracker when Phase is configured, then call `review_task` with `phase: "plan"`. Handle the cycle as described in [review](./review.md).
 2. Publish the plan, as described in [provider bodies](./integrations/shared.md#provider-bodies).
 3. Check [plan approval](#plan-approval). When the plan waits, keep Planning and stop with about five highlights, any [unhandled cases](#credible-cases), any open concerns from the review, any questions, and a request to approve.
 4. Otherwise set Execution (when Phase is configured) and send one message: about five highlights, any unhandled cases, any open concerns, and any questions. With no question, continue into implementation in the same turn. The user can interrupt at any time.
 
 ### Plan approval
 
-A Task or Gig plan waits for the user's approval when its tracker item carries the `plan` value of the configured `gate` label group. The user sets that label; never add or remove it yourself.
+A Task plan waits for the user's approval when its tracker item carries the `plan` value of the configured `gate` label group. The user sets that label; never add or remove it yourself.
 
 - **Check:** when `inspect_integrations` shows a `gate` group with a `plan` value, read the item's labels fresh and call `inspect_gate` with `gate: "plan"`. Check before choosing the path and again after publication, so a label added during planning counts.
 - **Chat wins:** "wait for my approval" makes any plan wait; "just do it" lets a marked plan continue. Both apply to this run only.

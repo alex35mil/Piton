@@ -1126,7 +1126,8 @@ describe("Task design", () => {
                         title: "Parser",
                         slug: "parser",
                         request: "Parse the input.",
-                        parentEpicDir: directory,
+                        kind: "feature",
+                        parent: { kind: "epic", epicDir: directory },
                         object:
                             provider === "github"
                                 ? {

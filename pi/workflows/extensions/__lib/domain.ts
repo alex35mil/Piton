@@ -5,9 +5,10 @@ import { PITON_DIR } from "../../../extensions/__lib/settings.js"
 // Everything under the local root is machine-local and never committed.
 export const PROJECT_LOCAL_ROOT = `${PITON_DIR}/.local`
 export const EPIC_ROOT = `${PROJECT_LOCAL_ROOT}/epics`
-export const GIG_ROOT = `${PROJECT_LOCAL_ROOT}/gigs`
+// Standalone Tasks: those with no parent Epic. An Epic's Tasks live under its own `tasks/`.
+export const TASK_ROOT = `${PROJECT_LOCAL_ROOT}/tasks`
 
-export const EntityTypeSchema = Type.Enum(["epic", "task", "gig"], {
+export const EntityTypeSchema = Type.Enum(["epic", "task"], {
     type: "string",
 })
 export type EntityType = Static<typeof EntityTypeSchema>
@@ -84,7 +85,7 @@ export type Priority = Static<typeof PrioritySchema>
 // Project, which has no number, its creation date so Epics still sort chronologically.
 export const LINEAR_IDENTIFIER_PATTERN = "^[A-Z][A-Z0-9]*-[1-9][0-9]*$"
 export const TIMESTAMP_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\\r\\n]+$"
-// A local Gig has no tracker object; its creation date names it, like a Linear Project.
+// A local Task has no tracker object; its creation date names it, like a Linear Project.
 export type TrackerReference =
     | { provider: "github"; issueNumber: number }
     | { provider: "linear"; identifier: string }

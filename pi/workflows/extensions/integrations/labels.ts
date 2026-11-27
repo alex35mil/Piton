@@ -2,7 +2,7 @@ import { type Static, Type } from "typebox"
 
 import { type DeliverableKind, DeliverableKindSchema, type EntityType } from "../__lib/domain.js"
 
-/** Workflow items that carry labels: Epics, and Deliverables (Tasks and Gigs). */
+/** Workflow items that carry labels: Epics, and Deliverables (Tasks). */
 export const LabelItemTypeSchema = Type.Enum(["epic", "deliverable"], { type: "string" })
 export type LabelItemType = Static<typeof LabelItemTypeSchema>
 
@@ -11,7 +11,6 @@ export function labelItemType(entity: EntityType): LabelItemType {
         case "epic":
             return "epic"
         case "task":
-        case "gig":
             return "deliverable"
     }
 }
@@ -136,7 +135,7 @@ export type LinearPhaseGroups = Static<typeof LinearPhaseGroupsSchema>
 export const KIND_GROUP_KEY = "kind"
 
 /**
- * The reserved group whose values mark a Task or Gig with gates: points where the workflow stops for
+ * The reserved group whose values mark a Task with gates: points where the workflow stops for
  * the user's approval. The user sets them on the tracker item; the workflow only reads them.
  */
 export const GATE_GROUP_KEY = "gate"

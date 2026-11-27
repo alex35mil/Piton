@@ -26,7 +26,7 @@ Adoption applies only to an explicitly selected existing issue, before initializ
 
    The Project item can supply a numeric issue ID that the issue read omits.
 5. Under the explicit-selection approval in [artifacts](../../artifacts.md#initialization-inputs), reuse the title, description, copied Priority, and any configured Kind without another confirmation. A Task's Kind comes from its plan section. Ask only for missing or conflicting information.
-6. Call `init_github_epic`, `init_github_task`, or `init_github_gig` with the numeric issue ID, number, URL, and Project-item ID as `object`.
+6. Call `init_github_epic` or `init_github_task` with the numeric issue ID, number, URL, and Project-item ID as `object`.
 
 **Stops adoption:** the wrong repository, Project, or parent, a non-queue Status, ambiguity, denied access, or an unconfigured Priority.
 

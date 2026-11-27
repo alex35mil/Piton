@@ -35,7 +35,7 @@ import registerIntegrations, {
 } from "../workflows/extensions/integrations/index.ts"
 
 import { verifyMarkdownProjection } from "../workflows/extensions/integrations/projection.ts"
-import { initializeEntity, initializeLocalGig } from "../workflows/extensions/init/entity.ts"
+import { initializeEntity, initializeLocalTask } from "../workflows/extensions/init/entity.ts"
 import { linearPriorityNumber } from "../workflows/extensions/integrations/records.ts"
 
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
@@ -109,7 +109,7 @@ function withoutLabels<T extends object>(tracker: T): Omit<T, "labels"> {
 const queueSelection = {
     operation: "queueIntake" as const,
     target: "current" as const,
-    entity: "gig" as const,
+    entity: "task" as const,
     priority: "High",
     kind: "refactor" as const,
 }
@@ -131,8 +131,8 @@ function prepareWorkflowProject(root: string, tracker: unknown = config()): void
     writeProjectConfig(root, { branchFormat: "identifier-title", tracker, forge: forgeConfig() })
 }
 
-function writeEntity(cwd: string, entity: "epic" | "gig", name: string, tracker: unknown, slug: string): string {
-    const directory = path.join(".piton", ".local", entity === "epic" ? "epics" : "gigs", name)
+function writeEntity(cwd: string, entity: "epic" | "task", name: string, tracker: unknown, slug: string): string {
+    const directory = path.join(".piton", ".local", entity === "epic" ? "epics" : "tasks", name)
     fs.mkdirSync(path.join(cwd, directory), { recursive: true })
     const metadata = {
         slug,
@@ -152,10 +152,10 @@ function writeEntity(cwd: string, entity: "epic" | "gig", name: string, tracker:
     return directory
 }
 
-function writeGitHubGigEntity(cwd: string): string {
+function writeGitHubTaskEntity(cwd: string): string {
     return writeEntity(
         cwd,
-        "gig",
+        "task",
         "42-github-provider",
         {
             provider: "github",
@@ -167,15 +167,16 @@ function writeGitHubGigEntity(cwd: string): string {
     )
 }
 
-function writeLinearGigEntity(cwd: string): string {
+function writeLinearTaskEntity(cwd: string): string {
     return writeEntity(
         cwd,
-        "gig",
+        "task",
         "ENG-123-mixed-provider",
         {
             provider: "linear",
-            resource: "gig-issue",
+            resource: "issue",
             external: { issueId: "linear-uuid", identifier: "ENG-123" },
+            parent: { kind: "none" },
             planDocument: { state: "unpublished" },
         },
         "mixed-provider",
@@ -225,7 +226,7 @@ describe("workflow-source queue context", () => {
             assert.equal(
                 IntegrationContextValidator.check({
                     operation: "resume",
-                    entityDir: "gig",
+                    entityDir: "task",
                     target,
                 }),
                 false,
@@ -233,7 +234,7 @@ describe("workflow-source queue context", () => {
             assert.equal(
                 IntegrationContextValidator.check({
                     operation: "adopt",
-                    entity: "gig",
+                    entity: "task",
                     target,
                 }),
                 false,
@@ -256,8 +257,8 @@ describe("workflow-source queue context", () => {
             }),
             false,
         )
-        // Accepted Epic plans create every Task issue; Tasks are never queued directly.
-        assert.equal(IntegrationContextValidator.check({ ...queueSelection, entity: "task" }), false)
+        // A queued Task is standalone; accepted Epic plans create every Epic Task issue.
+        assert.equal(IntegrationContextValidator.check({ ...queueSelection, entity: "gig" }), false)
         assert.equal(IntegrationContextValidator.check({ ...queueSelection, entity: "epic" }), true)
     })
 
@@ -360,10 +361,10 @@ describe("workflow-source queue context", () => {
             assert.equal(context.roles.tracker?.provider, "github")
         }
         assert.deepEqual(fileSnapshot(f.source), before)
-        assert.equal(buildIntegrationContext(ctx, { operation: "adopt", entity: "gig" }, mcpTools).state, "enabled")
+        assert.equal(buildIntegrationContext(ctx, { operation: "adopt", entity: "task" }, mcpTools).state, "enabled")
 
         // The source checkout keeps its real folder and addresses entities.
-        assert.equal(buildIntegrationContext(f.ctx, { operation: "adopt", entity: "gig" }, mcpTools).state, "enabled")
+        assert.equal(buildIntegrationContext(f.ctx, { operation: "adopt", entity: "task" }, mcpTools).state, "enabled")
 
         // An unlinked worker still inspects and queues, but can't address an entity.
         fs.rmSync(path.join(worker, ".piton/.local"))
@@ -371,8 +372,8 @@ describe("workflow-source queue context", () => {
         for (const input of [{ operation: "inspect" as const, target: "current" as const }, queueSelection])
             assert.equal(buildIntegrationContext(ctx, input, mcpTools).state, "enabled")
         for (const input of [
-            { operation: "adopt" as const, entity: "gig" as const },
-            { operation: "resume" as const, entityDir: ".piton/.local/gigs/1-work" },
+            { operation: "adopt" as const, entity: "task" as const },
+            { operation: "resume" as const, entityDir: ".piton/.local/tasks/1-work" },
         ])
             assert.throws(() => buildIntegrationContext(ctx, input, mcpTools), /isn't linked to its source checkout/)
     })
@@ -549,9 +550,9 @@ describe("workflow integration configuration", () => {
             await commands.get("todo")!.handler("", context)
             assert.deepEqual(notices, ["Usage: /backlog <potential work>", "Usage: /todo <queued work>"])
             await commands.get("backlog")!.handler("Capture a potential idea", context)
-            assert.match(sent, /Use the backlog skill.*external Backlog intake, not Epic\/Task\/Gig initialization/)
+            assert.match(sent, /Use the backlog skill.*external Backlog intake, not Epic or Task initialization/)
             await commands.get("todo")!.handler("Queue committed work", context)
-            assert.match(sent, /Use the todo skill.*external Todo intake, not Epic\/Task\/Gig initialization/)
+            assert.match(sent, /Use the todo skill.*external Todo intake, not Epic or Task initialization/)
             assert.equal(fs.existsSync(path.join(cwd, ".piton")), false)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
@@ -601,7 +602,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
-            const entityDir = writeLinearGigEntity(cwd)
+            const entityDir = writeLinearTaskEntity(cwd)
             assert.throws(
                 () =>
                     buildIntegrationContext({ cwd } as ExtensionContext, { operation: "resume", entityDir }, mcpTools),
@@ -627,13 +628,14 @@ describe("workflow integration configuration", () => {
             }
             prepareWorkflowProject(cwd, { ...config(), labels: { groups: { ...kindLabels().groups, area, perf } } })
             prepareArtifactPersistence(cwd)
-            const gig = await initializeEntity(
+            const work = await initializeEntity(
                 {
-                    entity: "gig",
+                    entity: "task",
                     title: "Work",
                     slug: "work",
                     request: "Work",
                     kind: "bugfix",
+                    parent: { kind: "none" },
                     object: { issueId: 1, issueNumber: 7, issueUrl: "https://github.com/alex/example/issues/7" },
                 },
                 { cwd },
@@ -645,7 +647,7 @@ describe("workflow integration configuration", () => {
                         ctx,
                         {
                             operation: "labelMutation",
-                            entityDir: gig.directory,
+                            entityDir: work.directory,
                             ...(labels ? { labels } : {}),
                             current: { provider: "github", names },
                         } as Parameters<typeof buildIntegrationContext>[1],
@@ -850,12 +852,12 @@ describe("workflow integration configuration", () => {
             }
             prepareWorkflowProject(cwd, tracker)
             prepareArtifactPersistence(cwd)
-            const entityDir = writeGitHubGigEntity(cwd)
+            const entityDir = writeGitHubTaskEntity(cwd)
             const ctx = { cwd } as ExtensionContext
             const inputs: Parameters<typeof buildIntegrationContext>[1][] = [
                 { operation: "inspect", target: "current" },
                 queueSelection,
-                { operation: "adopt", entity: "gig" },
+                { operation: "adopt", entity: "task" },
                 { operation: "initialize", entityDir },
                 { operation: "resume", entityDir },
                 { operation: "artifactProjection", entityDir },
@@ -901,7 +903,7 @@ describe("workflow integration configuration", () => {
             // Adoption lists each group for the item type by label name, without setup-only fields.
             const { epic: _epic, ...deliverableKinds } = kindLabelNames
             assert.deepEqual(
-                buildIntegrationContext(ctx, { operation: "adopt", entity: "gig" }, mcpTools).labelGroups,
+                buildIntegrationContext(ctx, { operation: "adopt", entity: "task" }, mcpTools).labelGroups,
                 {
                     kind: { cardinality: "exactlyOne", values: deliverableKinds },
                     area: { cardinality: "oneOrMore", values: { cli: "Area: CLI" } },
@@ -925,7 +927,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
-            const entityDir = writeGitHubGigEntity(cwd)
+            const entityDir = writeGitHubTaskEntity(cwd)
             const ctx = { cwd } as ExtensionContext
             const source = "# Result\n\n## Overview\n\nDelivered.\n\n## Verification\n\nTests passed.\n"
             const trackerBody =
@@ -972,7 +974,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
-            const entityDir = writeGitHubGigEntity(cwd)
+            const entityDir = writeGitHubTaskEntity(cwd)
             const ctx = { cwd } as ExtensionContext
             type Tool = Parameters<ExtensionAPI["registerTool"]>[0]
             const tools = new Map<string, Tool>()
@@ -1003,7 +1005,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd, linearConfig())
             prepareArtifactPersistence(cwd)
-            const entityDir = writeLinearGigEntity(cwd)
+            const entityDir = writeLinearTaskEntity(cwd)
             const ctx = { cwd } as ExtensionContext
 
             const trackerSide = buildIntegrationContext(ctx, queueSelection, mcpTools)
@@ -1033,7 +1035,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
-            const entityDir = writeGitHubGigEntity(cwd)
+            const entityDir = writeGitHubTaskEntity(cwd)
             const ctx = { cwd } as ExtensionContext
             const source = "# Result\n\n## Overview\n\nDelivered.\n\n## Verification\n\nTests passed.\n"
 
@@ -1077,13 +1079,13 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("treats a local Gig as tracker-off while the forge steps still run", async () => {
+    it("treats a local Task as tracker-off while the forge steps still run", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
             const ctx = { cwd } as ExtensionContext
-            const { directory: entityDir } = await initializeLocalGig(
+            const { directory: entityDir } = await initializeLocalTask(
                 { title: "Local", slug: "local", request: "Local work.", kind: "chore" },
                 { cwd, now: new Date("2026-03-04T00:00:00Z") },
             )
@@ -1104,7 +1106,7 @@ describe("workflow integration configuration", () => {
                                 : { operation, entityDir },
                             mcpTools,
                         ),
-                    /this Gig is local/,
+                    /this Task is local/,
                 )
             assert.doesNotMatch(
                 renderEntityProviderBody(ctx, {
@@ -1119,7 +1121,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("renders Epic and Gig trackers losslessly without local mutations", async () => {
+    it("renders Epic and Task trackers losslessly without local mutations", async () => {
         const githubEpic = {
             provider: "github",
             repository: { owner: "alex", repo: "example" },
@@ -1136,16 +1138,16 @@ describe("workflow integration configuration", () => {
             planDocument: { state: "unpublished" },
         }
         for (const provider of ["github", "linear"] as const) {
-            for (const entity of ["epic", "gig"] as const) {
+            for (const entity of ["epic", "task"] as const) {
                 const cwd = temporaryProject()
                 try {
                     prepareWorkflowProject(cwd, provider === "github" ? config() : linearConfig())
                     prepareArtifactPersistence(cwd)
                     const entityDir =
-                        entity === "gig"
+                        entity === "task"
                             ? provider === "github"
-                                ? writeGitHubGigEntity(cwd)
-                                : writeLinearGigEntity(cwd)
+                                ? writeGitHubTaskEntity(cwd)
+                                : writeLinearTaskEntity(cwd)
                             : provider === "github"
                               ? writeEntity(cwd, "epic", "7-rollout", githubEpic, "rollout")
                               : writeEntity(cwd, "epic", "20261001-rollout", linearEpic, "rollout")
@@ -1178,7 +1180,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd, linearConfig())
             prepareArtifactPersistence(cwd)
-            const entityDir = writeLinearGigEntity(cwd)
+            const entityDir = writeLinearTaskEntity(cwd)
             const projection = buildIntegrationContext(
                 { cwd } as ExtensionContext,
                 { operation: "artifactProjection", entityDir },
@@ -1217,7 +1219,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
-            const entityDir = writeGitHubGigEntity(cwd)
+            const entityDir = writeGitHubTaskEntity(cwd)
             const context = buildIntegrationContext(
                 { cwd } as ExtensionContext,
                 {
@@ -1249,7 +1251,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
-            const entityDir = writeGitHubGigEntity(cwd)
+            const entityDir = writeGitHubTaskEntity(cwd)
             type Tool = Parameters<ExtensionAPI["registerTool"]>[0]
             const tools = new Map<string, Tool>()
             let publish: ((data: unknown) => void) | undefined
@@ -1323,7 +1325,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("decides plan approval for a Task or Gig from its labels, and refuses an Epic", async () => {
+    it("decides plan approval for a Task from its labels, and refuses an Epic", async () => {
         const cwd = temporaryProject()
         try {
             const gate = {
@@ -1337,7 +1339,7 @@ describe("workflow integration configuration", () => {
                 labels: { groups: { ...tracker.labels!.groups, gate } },
             })
             prepareArtifactPersistence(cwd)
-            const gig = writeGitHubGigEntity(cwd)
+            const work = writeGitHubTaskEntity(cwd)
             const epic = writeEntity(
                 cwd,
                 "epic",
@@ -1368,11 +1370,11 @@ describe("workflow integration configuration", () => {
                         undefined,
                         withToolExecution({ cwd } as ExtensionContext),
                     )
-            assert.deepEqual((await inspect(gig, ["Kind: Feature", "Gate: Plan"])).details, {
+            assert.deepEqual((await inspect(work, ["Kind: Feature", "Gate: Plan"])).details, {
                 gate: "awaitApproval",
                 label: "Gate: Plan",
             })
-            assert.equal(((await inspect(gig, ["Kind: Feature"])).details as { gate: string }).gate, "continue")
+            assert.equal(((await inspect(work, ["Kind: Feature"])).details as { gate: string }).gate, "continue")
             await assert.rejects(inspect(epic, ["Gate: Plan"]), /Epic plan always waits/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
@@ -1384,7 +1386,7 @@ describe("workflow integration configuration", () => {
         try {
             prepareWorkflowProject(cwd, linearConfig())
             prepareArtifactPersistence(cwd)
-            const entityDir = writeLinearGigEntity(cwd)
+            const entityDir = writeLinearTaskEntity(cwd)
             const base = {
                 team: null,
                 parentId: null,

@@ -50,9 +50,9 @@ export function resourceIdsFromTrackerObject(
                     kind: "linear-issue",
                     issueId: object.issueId,
                     relationship:
-                        object.resource === "task-issue"
-                            ? { kind: "project", projectId: object.projectId }
-                            : { kind: "projectless" },
+                        object.projectId === undefined
+                            ? { kind: "projectless" }
+                            : { kind: "project", projectId: object.projectId },
                 },
                 value: { identifier: object.identifier, url: object.issueUrl },
             }),

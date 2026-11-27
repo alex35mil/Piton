@@ -96,6 +96,6 @@ Workflow skills list routine `.piton/` bookkeeping in `allowed-tools`, including
 
 Workflow reviewers run headless under the user's permission settings. An `ask` result there blocks the call, because there's no UI to answer it.
 
-- Epic, Task, and Gig reviewers use `read`, `grep`, `find`, `ls`, and the read-only `git_read`. Incoming-PR reviewers use the first four.
+- Epic and Task reviewers use `read`, `grep`, `find`, `ls`, and the read-only `git_read`. Incoming-PR reviewers use the first four.
 - When the effective `default_mode` is `ask`, tell the user to allow those tools by name in their own settings, or reviewers can't inspect the repository.
 - `configure_permissions` accepts only MCP selectors, so the user edits these rules by hand. Never add them without approval.

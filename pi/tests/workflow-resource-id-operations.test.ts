@@ -47,7 +47,7 @@ const prScope = {
     ...common,
     kind: "github-pull-request" as const,
     repository: repo,
-    head: "gig-branch",
+    head: "task-branch",
     target: "main",
 }
 const itemScope = {
@@ -62,7 +62,7 @@ const pr = {
     state: "open",
     draft: false,
     html_url: "https://github.com/alex/example/pull/7",
-    head: { ref: "gig-branch", repo: { full_name: "alex/example" } },
+    head: { ref: "task-branch", repo: { full_name: "alex/example" } },
     base: { ref: "main", repo: { full_name: "alex/example" } },
 }
 const evidence = {
@@ -70,7 +70,7 @@ const evidence = {
     arguments: { method: "get", ...repo, pullNumber: 7 },
     response: pr,
 }
-// A fresh read of the fixture Gig's issue #23, which PR creation takes its title from.
+// A fresh read of the fixture Task's issue #23, which PR creation takes its title from.
 const issueRead = (title = "Example", issueNumber = 23) => ({
     tool: "mcp__github__issue_read",
     arguments: { method: "get", ...repo, issue_number: issueNumber },
@@ -107,12 +107,12 @@ function fixture() {
         forge: { provider: "github", mcpServer: "github", repository: repo },
     })
     prepareArtifactPersistence(root)
-    const directory = path.join(root, ".piton/.local/gigs", common.entity)
+    const directory = path.join(root, ".piton/.local/tasks", common.entity)
     fs.mkdirSync(directory, { recursive: true })
     const metadata: Record<string, unknown> = {
         slug: "example",
         title: "Example",
-        entity: "gig",
+        entity: "task",
         kind: "refactor",
         branch: { state: "ready", name: prScope.head, start: "main", target: "main", source: "generated" },
         tracker: {
@@ -675,11 +675,12 @@ describe("resource ID operations", () => {
         }
     })
 
-    it("reads a Linear Gig issue's title by its stored UUID", () => {
+    it("reads a standalone Task Linear issue's title by its stored UUID", () => {
         const record = {
             provider: "linear" as const,
-            resource: "gig-issue" as const,
+            resource: "issue" as const,
             external: { issueId: "issue-uuid", identifier: "ENG-5" },
+            parent: { kind: "none" as const },
             planDocument: { state: "unpublished" as const },
         }
         const tracker = { provider: "linear", mcpServer: "linear" } as never
@@ -710,8 +711,8 @@ describe("resource ID operations", () => {
                 fs.writeFileSync(path.join(directory, "metadata.json"), JSON.stringify(metadata))
                 return beginPullRequestCreation(f.root, directory, read, mcpTools)
             }
-            // A local Gig has no issue: a read is refused, and the stored title stands.
-            const localDir = path.join(f.root, ".piton/.local/gigs/20261001-example")
+            // A local Task has no issue: a read is refused, and the stored title stands.
+            const localDir = path.join(f.root, ".piton/.local/tasks/20261001-example")
             fs.cpSync(path.join(f.directory, "reviews"), path.join(localDir, "reviews"), { recursive: true })
             const local = { ...withoutForge, tracker: { provider: "local", createdAt: "2026-10-01T00:00:00Z" } }
             await assert.rejects(begin(local, issueRead("Retitled"), localDir), /no issue to read/)
@@ -719,7 +720,7 @@ describe("resource ID operations", () => {
             assert.equal(localBegun.mutation.arguments.title, "Example")
             assert.deepEqual(localBegun.title, { state: "unchanged" })
 
-            // With the tracker role off, a tracked Gig still submits with its stored title.
+            // With the tracker role off, a tracked Task still submits with its stored title.
             writeProjectConfig(f.root, {
                 tracker: { provider: "none" },
                 forge: { provider: "github", mcpServer: "github", repository: repo },

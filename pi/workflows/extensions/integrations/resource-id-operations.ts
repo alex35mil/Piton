@@ -84,10 +84,14 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
                 mcpServer: configured.mcpServer,
                 team: configured.team,
                 issueId: tracker.external.issueId,
-                relationship:
-                    tracker.resource === "task-issue"
-                        ? { kind: "project", projectId: tracker.external.projectId }
-                        : { kind: "projectless" },
+                relationship: (() => {
+                    switch (tracker.parent.kind) {
+                        case "project":
+                            return { kind: "project" as const, projectId: tracker.parent.projectId }
+                        case "none":
+                            return { kind: "projectless" as const }
+                    }
+                })(),
             }
             break
         }
@@ -280,7 +284,7 @@ export function resourceIdsFromRead(
                 if (response.projectId !== scope.relationship.projectId)
                     throw new Error("Linear issue does not match the durable Task Project")
             } else if (response.projectId !== undefined && response.projectId !== null)
-                throw new Error("Linear Gig issue is not projectless")
+                throw new Error("Linear standalone Task issue is not projectless")
             return parseResourceIds({
                 scope,
                 value: { identifier: text(response.id, "issue identifier"), url: text(response.url, "issue URL") },

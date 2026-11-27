@@ -1,6 +1,6 @@
 # Ship a Deliverable
 
-Read this when the user explicitly asks to ship a Task or Gig: "ship it", "ship this", "finish it", or equivalent.
+Read this when the user explicitly asks to ship a Task: "ship it", "ship this", "finish it", or equivalent.
 
 ## What shipping authorizes
 

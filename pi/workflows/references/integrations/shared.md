@@ -12,9 +12,9 @@ The local entity artifacts stay authoritative for everything else.
 A role is off when its table is missing, or set to `provider = "none"` ([setup](../setup.md#integration-configuration)). `inspect_integrations` and every context report each role as `enabled` or `disabled` with the reason.
 
 - **Steps that need an off role refuse** and name the role and why. Report it in one line and continue with the steps that don't need it. Never work around a refusal.
-- **Tracker off:** skip the tracker item, board setup, lifecycle, Priority, Phase, labels, gates, and plan publication. Start Gigs with `init_local_gig` ([local Gig](../../skills/gig/SKILL.md#local-gig)). Epics and Tasks need the tracker: say so and stop.
+- **Tracker off:** skip the tracker item, board setup, lifecycle, Priority, Phase, labels, gates, and plan publication. Start standalone Tasks with `init_local_task` ([local Task](../../skills/task/SKILL.md#local-task)). Epics and Epic Tasks need the tracker: say so and stop.
 - **Forge off:** stop after the local commits. Submission and shipping need the forge.
-- **A local Gig** has no tracker item, so it treats the tracker as off even when one is configured.
+- **A local Task** has no tracker item, so it treats the tracker as off even when one is configured.
 - Reviews, verification, commits, and the standalone `review` need neither role.
 
 - A configured role isn't proof its provider tools are available. Follow each role's provider reference.
@@ -40,7 +40,7 @@ These tools read local configuration, authority, and entity state. They never ca
 | Correct lifecycle, Priority, or Task hierarchy (tracker only) | `prepare_tracker_mutation` |
 | Set an item's labels from a selection, or follow a Kind change (tracker only) | `prepare_label_mutation` |
 | Set or clear native Phase | `prepare_github_phase_mutation`, `prepare_linear_phase_mutation`, with the fresh facts in [Phase](../phase.md#fresh-native-facts) |
-| Ship a Task or Gig | `prepare_integration_shipping`, then `prepare_integration_merge` only when a merge is needed |
+| Ship a Task | `prepare_integration_shipping`, then `prepare_integration_merge` only when a merge is needed |
 
 - `target: "current"` covers ordinary work. `target: "workflow"` is only for workflow-problem reports through Todo and for [session analysis](../session-analysis.md) searches; when reporting, read [queue](../queue.md#prepare-a-workflow-report). Use the returned tracker configuration.
 - The returned local `projectRoot` is never report content. Missing or invalid source configuration stops with a corrective error, without starting setup or falling back.
@@ -80,7 +80,7 @@ These tools read local configuration, authority, and entity state. They never ca
 
 The tracker object comes first; the local entity is named from it. New work and adoption end in the same initialization call.
 
-1. **Preflight new work.** Call `preflight_epic` or `preflight_gig` with the approved values, the label selection included. It returns the labels to create the object with. A Task never creates its object; it adopts the issue its parent's [Task issue processing](../epic-tasks.md#task-issue-processing) created. It runs every local check that doesn't need the tracker object and changes nothing. A failure stops before anything is created on the tracker.
+1. **Preflight new work.** Call `preflight_epic` or `preflight_task` with the approved values, the label selection included. It returns the labels to create the object with. New Task work is always standalone; an Epic Task never creates its object, it adopts the issue its Epic's [Task issue processing](../epic-tasks.md#task-issue-processing) created. It runs every local check that doesn't need the tracker object and changes nothing. A failure stops before anything is created on the tracker.
 2. **Get the object.**
    - New work: create only the tracker object, with the approved title and Request, as the provider reference describes. No search first.
    - Adoption: use the explicitly selected object after its provider preflight.
@@ -144,7 +144,7 @@ The same contract applies when an open PR's synchronized `result.md` or `report.
 
 ### Plan-update notes
 
-Editing a published plan notifies nobody, so every update to a published Epic, Task, or Gig plan also posts one discussion comment on that entity's own tracker item: a GitHub issue comment, or a Linear Project or issue comment. The first publication has no note. Post it without asking.
+Editing a published plan notifies nobody, so every update to a published Epic or Task plan also posts one discussion comment on that entity's own tracker item: a GitHub issue comment, or a Linear Project or issue comment. The first publication has no note. Post it without asking.
 
 1. **Write** a one-line summary of what changed and why; say when the change is only editorial. Pass it as `announcement.summary` to `prepare_tracker_publication_update`. Set `announcement.origin` only for an Epic update made from one of its Tasks.
 2. **Rendering** is code-owned: `**Plan updated**`, `from Task <marker>` when an Epic update came from a Task, the summary, a link to the plan, and a folded diff of the published plan against the new one. An oversized diff is left out.
@@ -163,7 +163,7 @@ Identical source returns `unchanged`; nothing is published or announced.
 
 ## Branch contract
 
-Every initialized entity has a ready branch contract: exact `name`, `start`, `target`, and a generated or tracker source. With Linear's `tracker` format, a Task or Gig uses the issue's exact `gitBranchName` and an Epic uses its dated directory name. Never invent or rewrite a provider-generated name.
+Every initialized entity has a ready branch contract: exact `name`, `start`, `target`, and a generated or tracker source. With Linear's `tracker` format, a Task uses the issue's exact `gitBranchName` and an Epic uses its dated directory name. Never invent or rewrite a provider-generated name.
 
 ## Workflow-first updates
 

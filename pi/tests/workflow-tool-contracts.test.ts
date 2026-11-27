@@ -111,7 +111,7 @@ describe("workflow model-facing contracts", () => {
         const names = new Set<string>(expectedWorkflowTools)
         const guide = fs.readFileSync("workflows/references/tools.md", "utf8")
         for (const name of names) assert.ok(guide.includes(`\`${name}\``), `discovery guide must name ${name}`)
-        for (const skill of ["epic", "task", "gig", "pr", "project-setup", "backlog", "todo"]) {
+        for (const skill of ["epic", "task", "pr", "project-setup", "backlog", "todo"]) {
             const source = fs.readFileSync(`workflows/skills/${skill}/SKILL.md`, "utf8")
             const frontmatter = source.split("---")[1]
             for (const [, name] of frontmatter.matchAll(/^ +-[ ]+"([^"]+)"$/gm)) {
@@ -270,7 +270,7 @@ describe("workflow model-facing contracts", () => {
                 call({
                     name: "codemode",
                     arguments: {
-                        code: 'text(await describeTool("init_github_gig")); text(await tools.mcp__memory__echo({}));',
+                        code: 'text(await describeTool("init_github_task")); text(await tools.mcp__memory__echo({}));',
                     },
                 }),
                 answer("Done."),
@@ -297,16 +297,16 @@ describe("workflow model-facing contracts", () => {
             extensions: [...codingFactories, ...workflowFactories],
             tools: ["+codemode"],
             setup() {
-                writePermissions("global", { defaultMode: "deny", allow: ["codemode"], deny: ["preflight_gig"] })
+                writePermissions("global", { defaultMode: "deny", allow: ["codemode"], deny: ["preflight_task"] })
             },
         })
         try {
-            assert.ok(h.session.getAllTools().some((t) => t.name === "preflight_gig"))
+            assert.ok(h.session.getAllTools().some((t) => t.name === "preflight_task"))
             h.respond(
                 call({
                     name: "codemode",
                     arguments: {
-                        code: 'text(await tools.preflight_gig({title:"Blocked",slug:"blocked",request:"Do not execute.",kind:"refactor"}));',
+                        code: 'text(await tools.preflight_task({title:"Blocked",slug:"blocked",request:"Do not execute.",kind:"refactor"}));',
                     },
                 }),
                 answer("Denied."),
@@ -315,11 +315,11 @@ describe("workflow model-facing contracts", () => {
             const result = h.manager.buildSessionProjection().messages.find((m) => m.role === "toolResult")
             const outcome = json(result)
             assert.equal(outcome.isError, true)
-            assert.equal(outcome.details.calls[0].name, "preflight_gig")
+            assert.equal(outcome.details.calls[0].name, "preflight_task")
             // A deny fails only the nested call; it doesn't cancel the turn.
             assert.equal(outcome.details.calls[0].status, "error")
-            assert.ok(JSON.stringify(outcome).includes("Denied by permission rule `preflight_gig`"))
-            assert.equal(fs.existsSync(path.join(h.root, ".piton/.local/gigs")), false)
+            assert.ok(JSON.stringify(outcome).includes("Denied by permission rule `preflight_task`"))
+            assert.equal(fs.existsSync(path.join(h.root, ".piton/.local/tasks")), false)
         } finally {
             await h.cleanup()
         }
@@ -446,13 +446,13 @@ describe("workflow model-facing contracts", () => {
                 // Project setup runs only in the source checkout; a worker uses the source's.
                 await invoke(
                     worker
-                        ? 'text(await tools.prepare_artifacts({})); text(await describeTool("init_github_gig"));'
-                        : 'text(await tools.inspect_project_setup({})); text(await tools.prepare_artifacts({})); text(await describeTool("init_github_gig"));',
+                        ? 'text(await tools.prepare_artifacts({})); text(await describeTool("init_github_task"));'
+                        : 'text(await tools.inspect_project_setup({})); text(await tools.prepare_artifacts({})); text(await describeTool("init_github_task"));',
                 )
                 await invoke(
-                    'text(await tools.preflight_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor"})); text(await tools.init_github_gig({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor",object:{issueId:900,issueNumber:9,issueUrl:"https://github.com/fixture/app/issues/9"}}));',
+                    'text(await tools.preflight_task({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor"})); text(await tools.init_github_task({title:"Fixture work",slug:"fixture-work",request:"Do fixture work.",kind:"refactor",parent:{kind:"none"},object:{issueId:900,issueNumber:9,issueUrl:"https://github.com/fixture/app/issues/9"}}));',
                 )
-                const directory = ".piton/.local/gigs/9-fixture-work"
+                const directory = ".piton/.local/tasks/9-fixture-work"
                 if (!worker) assert.ok(fs.lstatSync(path.join(h.root, ".piton/.local")).isDirectory())
                 assert.ok(fs.existsSync(path.join(h.root, directory, "metadata.json")))
                 const metadataPath = path.join(h.root, directory, "metadata.json")
@@ -479,7 +479,7 @@ describe("workflow model-facing contracts", () => {
                 }
                 await h.session.reload()
                 await invoke(
-                    `text(await tools.resume_integration({entityDir:${JSON.stringify(directory)}})); text(await describeTool("review_gig"));`,
+                    `text(await tools.resume_integration({entityDir:${JSON.stringify(directory)}})); text(await describeTool("review_task"));`,
                 )
                 await h.reopen()
                 await invoke(

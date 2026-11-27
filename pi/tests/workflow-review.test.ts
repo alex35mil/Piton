@@ -150,7 +150,6 @@ describe("workflow reviewer isolation", () => {
             "review",
             "review_epic",
             "review_task",
-            "review_gig",
             "record_review_response",
         ])
     })
@@ -160,7 +159,7 @@ describe("workflow reviewer isolation", () => {
             const repository = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-review-phase-tools-"))
             // A worker's .piton/.local is a symlink to its source checkout's directory.
             const source = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-review-source-"))
-            const entityDir = ".piton/.local/gigs/7-example"
+            const entityDir = ".piton/.local/tasks/7-example"
             const directory = path.join(repository, entityDir)
             const metadataPath = path.join(directory, "metadata.json")
             try {
@@ -176,7 +175,7 @@ describe("workflow reviewer isolation", () => {
                 const metadata = {
                     title: "Example",
                     slug: "example",
-                    entity: "gig",
+                    entity: "task",
                     kind: "feature",
                     branch: { state: "ready", name: "7-example", start: "main", target: "main", source: "generated" },
                     tracker: {
@@ -196,7 +195,7 @@ describe("workflow reviewer isolation", () => {
                     on() {},
                     registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
                 } as never)
-                const review = tools.find((tool) => tool.name === "review_gig")!
+                const review = tools.find((tool) => tool.name === "review_task")!
                 const respond = tools.find((tool) => tool.name === "record_review_response")!
                 const ctx = { cwd: repository } as never
                 const stopBeforeRunner = new Error("Reached the reviewer subprocess boundary")
@@ -314,8 +313,8 @@ describe("workflow reviewer isolation", () => {
 
                 if (layout === "linked") {
                     // Everything was written through the link into the source checkout's directory.
-                    assert.ok(fs.existsSync(path.join(source, "gigs/7-example/reviews/plan-001/candidate.md")))
-                    assert.ok(fs.existsSync(path.join(source, "gigs/7-example/reviews/final-001/candidate.md")))
+                    assert.ok(fs.existsSync(path.join(source, "tasks/7-example/reviews/plan-001/candidate.md")))
+                    assert.ok(fs.existsSync(path.join(source, "tasks/7-example/reviews/final-001/candidate.md")))
                 }
             } finally {
                 fs.rmSync(repository, { recursive: true, force: true })
@@ -396,23 +395,28 @@ describe("workflow reviewer isolation", () => {
                     : []
                 return after.filter((entry) => !before.includes(entry))
             }
-            const gig = (kind: string, files: Record<string, string>, slug: string) =>
-                entity(`.piton/.local/gigs/7-${slug}`, { entity: "gig", kind }, files)
+            const standalone = (kind: string, files: Record<string, string>, slug: string) =>
+                entity(`.piton/.local/tasks/7-${slug}`, { entity: "task", kind }, files)
             const result = { "result.md": "# Result\n\nDone.\n" }
 
             // Each rejected precondition leaves no new round behind.
             for (const [tool, directory, phase, message] of [
-                ["review_gig", gig("feature", {}, "no-plan"), "plan", /plan review requires plan\.md/],
+                ["review_task", standalone("feature", {}, "no-plan"), "plan", /plan review requires plan\.md/],
                 [
-                    "review_gig",
-                    gig("feature", { "report.md": "# Report\n\nDone.\n" }, "no-result"),
+                    "review_task",
+                    standalone("feature", { "report.md": "# Report\n\nDone.\n" }, "no-result"),
                     "final",
                     /requires a non-empty result\.md/,
                 ],
-                ["review_gig", gig("research", result, "no-report"), "final", /requires a non-empty report\.md/],
                 [
-                    "review_gig",
-                    gig("feature", { ...result, "pending.md": "# Pending\n\n- [ ] Open\n" }, "pending"),
+                    "review_task",
+                    standalone("research", result, "no-report"),
+                    "final",
+                    /requires a non-empty report\.md/,
+                ],
+                [
+                    "review_task",
+                    standalone("feature", { ...result, "pending.md": "# Pending\n\n- [ ] Open\n" }, "pending"),
                     "final",
                     /requires zero unchecked pending entries/,
                 ],
@@ -425,22 +429,22 @@ describe("workflow reviewer isolation", () => {
                 [
                     "review_task",
                     entity(
-                        ".piton/.local/gigs/orphan/tasks/7-example",
+                        ".piton/.local/tasks/orphan/tasks/7-example",
                         { entity: "task", kind: "feature" },
                         { "plan.md": "# Plan\n" },
                     ),
                     "plan",
                     // Reading a Task's metadata already requires its containing Epic.
-                    /Task is not contained under/,
+                    /a Task lives under/,
                 ],
             ] as const)
                 assert.deepEqual(await run(tool, directory, phase, message), [], `${tool} ${phase}: ${message}`)
 
             // Once fixed, the first real review takes round 001.
-            const fixed = gig("feature", {}, "fixed")
-            assert.deepEqual(await run("review_gig", fixed, "final", /requires a non-empty result\.md/), [])
+            const fixed = standalone("feature", {}, "fixed")
+            assert.deepEqual(await run("review_task", fixed, "final", /requires a non-empty result\.md/), [])
             fs.writeFileSync(path.join(fixed, "result.md"), result["result.md"])
-            assert.deepEqual(await run("review_gig", fixed, "final", stopBeforeRunner), ["final-001"])
+            assert.deepEqual(await run("review_task", fixed, "final", stopBeforeRunner), ["final-001"])
         } finally {
             fs.rmSync(repository, { recursive: true, force: true })
         }
@@ -699,15 +703,15 @@ describe("workflow reviewer isolation", () => {
         )
         assert.equal(
             ReviewRequestValidator.check({
-                entity: "gig",
-                entityDir: ".piton/.local/gigs/example",
+                entity: "task",
+                entityDir: ".piton/.local/tasks/example",
                 phase: "plan",
                 epicDir: ".piton/.local/epics/example",
             }),
             false,
         )
         // Each input exists only for the category that uses it.
-        const gig = { entity: "gig", entityDir: ".piton/.local/gigs/example" }
+        const standalone = { entity: "task", entityDir: ".piton/.local/tasks/example" }
         const checks: Array<[Record<string, unknown>, boolean]> = [
             [{ phase: "conflict-plan", resolution: "Keep both lines." }, true],
             [{ phase: "conflict-plan" }, false],
@@ -726,7 +730,7 @@ describe("workflow reviewer isolation", () => {
             [{ phase: "conflict-merge", newReview: "Scope grew." }, false],
         ]
         for (const [input, valid] of checks)
-            assert.equal(ReviewRequestValidator.check({ ...gig, ...input }), valid, JSON.stringify(input))
+            assert.equal(ReviewRequestValidator.check({ ...standalone, ...input }), valid, JSON.stringify(input))
         assert.equal(
             ReviewRequestValidator.check({
                 entity: "epic",
@@ -824,12 +828,12 @@ describe("workflow reviewer isolation", () => {
             assert.match(prompt, /Return only one JSON object/)
             assert.doesNotMatch(prompt, /## Findings/)
 
-            const gigDir = path.join(repository, ".piton", ".local", "gigs", "7-example")
-            fs.mkdirSync(path.join(gigDir, "reviews"), { recursive: true })
-            fs.writeFileSync(path.join(gigDir, "brief.md"), "# Brief\n")
-            fs.writeFileSync(path.join(gigDir, "plan.md"), "# Root cause\n\nUnique bugfix evidence.\n")
+            const taskDir = path.join(repository, ".piton", ".local", "tasks", "7-example")
+            fs.mkdirSync(path.join(taskDir, "reviews"), { recursive: true })
+            fs.writeFileSync(path.join(taskDir, "brief.md"), "# Brief\n")
+            fs.writeFileSync(path.join(taskDir, "plan.md"), "# Root cause\n\nUnique bugfix evidence.\n")
             fs.writeFileSync(
-                path.join(gigDir, "metadata.json"),
+                path.join(taskDir, "metadata.json"),
                 JSON.stringify({
                     title: "Example",
                     branch: { state: "ready", name: "7-example", start: "main", target: "main", source: "generated" },
@@ -840,11 +844,11 @@ describe("workflow reviewer isolation", () => {
                         external: { issueNumber: 7 },
                         planComment: { state: "unpublished" },
                     },
-                    entity: "gig",
+                    entity: "task",
                     kind: "bugfix",
                 }),
             )
-            const deliverablePrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, gigDir, {
+            const deliverablePrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, taskDir, {
                 phase: "interim",
             })
             assert.ok(deliverablePrompt.includes(policies))
@@ -863,40 +867,40 @@ describe("workflow reviewer isolation", () => {
 
             // Final review requires the kind's completion artifact.
             assert.throws(
-                () => assertReviewPreconditions(gigDir, "final"),
+                () => assertReviewPreconditions(taskDir, "final"),
                 /bugfix final review requires a non-empty result\.md/,
             )
-            const draftPath = path.join(gigDir, "result.md")
+            const draftPath = path.join(taskDir, "result.md")
             fs.writeFileSync(
                 draftPath,
                 "# Result\n\n## Overview\n\n- Fixed the defect.\n\n## Verification\n\n- `test` — passed\n",
             )
-            const pendingPath = path.join(gigDir, "pending.md")
+            const pendingPath = path.join(taskDir, "pending.md")
             assert.equal(fs.existsSync(pendingPath), false)
-            assert.doesNotThrow(() => assertReviewPreconditions(gigDir, "final"))
+            assert.doesNotThrow(() => assertReviewPreconditions(taskDir, "final"))
             // Interim review needs no completion artifact.
             fs.rmSync(draftPath)
-            assert.doesNotThrow(() => assertReviewPreconditions(gigDir, "interim"))
+            assert.doesNotThrow(() => assertReviewPreconditions(taskDir, "interim"))
             fs.writeFileSync(draftPath, "# Result\n\n## Overview\n\n- Fixed the defect.\n")
 
             fs.writeFileSync(pendingPath, "# Pending\n\n- [x] Resolved item\n")
-            assert.doesNotThrow(() => assertReviewPreconditions(gigDir, "final"))
+            assert.doesNotThrow(() => assertReviewPreconditions(taskDir, "final"))
             for (const entry of ["- [ ] Unresolved item", "1. [ ] Ordered unresolved item"]) {
                 fs.writeFileSync(pendingPath, `# Pending\n\n${entry}\n`)
                 assert.throws(
-                    () => assertReviewPreconditions(gigDir, "final"),
+                    () => assertReviewPreconditions(taskDir, "final"),
                     /requires zero unchecked pending entries; unresolved entries: line 3/,
                 )
             }
             fs.writeFileSync(pendingPath, "# Pending\n")
 
             // The final round reviews its snapshot of the artifact; the other kind's artifact is context only.
-            const finalSnapshot = await snapshotCandidate(gigDir, "result.md", "final", 1)
-            assert.equal(finalSnapshot, path.join(reviewRoundDir(gigDir, "final", 1), "candidate.md"))
+            const finalSnapshot = await snapshotCandidate(taskDir, "result.md", "final", 1)
+            assert.equal(finalSnapshot, path.join(reviewRoundDir(taskDir, "final", 1), "candidate.md"))
             assert.equal(fs.readFileSync(finalSnapshot, "utf-8"), fs.readFileSync(draftPath, "utf-8"))
             fs.writeFileSync(draftPath, "# Result\n\nEdited after the snapshot.\n")
-            fs.writeFileSync(path.join(gigDir, "report.md"), "# Research report\n\nPrior research conclusion.\n")
-            const finalPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, gigDir, {
+            fs.writeFileSync(path.join(taskDir, "report.md"), "# Research report\n\nPrior research conclusion.\n")
+            const finalPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, taskDir, {
                 phase: "final",
                 completionSnapshot: finalSnapshot,
             })
@@ -907,10 +911,10 @@ describe("workflow reviewer isolation", () => {
             assert.doesNotMatch(finalPrompt, /Edited after the snapshot/)
             assert.match(finalPrompt, /# report\.md \(context\)/)
             assert.match(finalPrompt, /Prior research conclusion/)
-            fs.rmSync(path.join(gigDir, "report.md"))
+            fs.rmSync(path.join(taskDir, "report.md"))
             fs.writeFileSync(finalSnapshot, " \n")
             await assert.rejects(
-                buildDeliverableReviewPrompt({ cwd: repository } as never, gigDir, {
+                buildDeliverableReviewPrompt({ cwd: repository } as never, taskDir, {
                     phase: "final",
                     completionSnapshot: finalSnapshot,
                 }),
@@ -918,31 +922,31 @@ describe("workflow reviewer isolation", () => {
             )
             fs.rmSync(draftPath)
 
-            const metadataPath = path.join(gigDir, "metadata.json")
-            const reportDraftPath = path.join(gigDir, "report.md")
+            const metadataPath = path.join(taskDir, "metadata.json")
+            const reportDraftPath = path.join(taskDir, "report.md")
             for (const kind of ["audit", "research"] as const) {
                 const currentMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8")) as Record<string, unknown>
                 fs.writeFileSync(metadataPath, JSON.stringify({ ...currentMetadata, kind }))
                 fs.rmSync(reportDraftPath, { force: true })
                 // A result.md never satisfies a kind that delivers a report.
-                fs.writeFileSync(path.join(gigDir, "result.md"), "# Result\n\nWrong artifact.\n")
+                fs.writeFileSync(path.join(taskDir, "result.md"), "# Result\n\nWrong artifact.\n")
                 assert.throws(
-                    () => assertReviewPreconditions(gigDir, "final"),
+                    () => assertReviewPreconditions(taskDir, "final"),
                     new RegExp(`${kind} final review requires a non-empty report\\.md`),
                 )
-                fs.rmSync(path.join(gigDir, "result.md"))
+                fs.rmSync(path.join(taskDir, "result.md"))
                 for (const content of ["", " \n\t"]) {
                     fs.writeFileSync(reportDraftPath, content)
                     assert.throws(
-                        () => assertReviewPreconditions(gigDir, "final"),
+                        () => assertReviewPreconditions(taskDir, "final"),
                         new RegExp(`${kind} final review requires a non-empty report\\.md`),
                     )
                 }
             }
 
             fs.writeFileSync(reportDraftPath, "# Research report\n\nSupported conclusion.\n")
-            const researchSnapshot = await snapshotCandidate(gigDir, "report.md", "final", 2)
-            const researchPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, gigDir, {
+            const researchSnapshot = await snapshotCandidate(taskDir, "report.md", "final", 2)
+            const researchPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, taskDir, {
                 phase: "final",
                 completionSnapshot: researchSnapshot,
             })
@@ -952,7 +956,7 @@ describe("workflow reviewer isolation", () => {
                 metadataPath,
                 JSON.stringify({ ...JSON.parse(fs.readFileSync(metadataPath, "utf-8")), kind: "audit" }),
             )
-            const auditPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, gigDir, {
+            const auditPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, taskDir, {
                 phase: "final",
                 completionSnapshot: researchSnapshot,
             })
@@ -960,8 +964,8 @@ describe("workflow reviewer isolation", () => {
             assert.doesNotMatch(auditPrompt, /direct path/)
 
             // Without a plan the Deliverable took the direct path, and the brief is the requirement.
-            fs.rmSync(path.join(gigDir, "plan.md"))
-            const directPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, gigDir, {
+            fs.rmSync(path.join(taskDir, "plan.md"))
+            const directPrompt = await buildDeliverableReviewPrompt({ cwd: repository } as never, taskDir, {
                 phase: "final",
                 completionSnapshot: researchSnapshot,
             })
@@ -1015,7 +1019,7 @@ describe("workflow reviewer isolation", () => {
             fs.mkdirSync(path.join(root, ".piton"))
             writeProjectConfig(root, { branchFormat: "identifier-title" })
             prepareArtifactPersistence(root)
-            const entityDir = ".piton/.local/gigs/7-example"
+            const entityDir = ".piton/.local/tasks/7-example"
             const directory = path.join(root, entityDir)
             fs.mkdirSync(directory, { recursive: true })
             fs.writeFileSync(path.join(directory, "plan.md"), "# Plan\n\n## Overview\n\nAccepted.\n")
@@ -1024,7 +1028,7 @@ describe("workflow reviewer isolation", () => {
                 JSON.stringify({
                     title: "Example",
                     slug: "example",
-                    entity: "gig",
+                    entity: "task",
                     kind: "feature",
                     branch: { state: "ready", name: branch, start: "main", target: "main", source: "generated" },
                     tracker: {
@@ -1041,7 +1045,7 @@ describe("workflow reviewer isolation", () => {
                 on() {},
                 registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
             } as never)
-            const review = tools.find((tool) => tool.name === "review_gig")!
+            const review = tools.find((tool) => tool.name === "review_task")!
             const stop = new Error("Reached the reviewer subprocess boundary")
             const ctx = { cwd: root } as never
             const run = (params: Record<string, unknown>) =>
@@ -1098,7 +1102,7 @@ describe("workflow reviewer isolation", () => {
                 path.join(root, epicDir, "metadata.json"),
                 fs
                     .readFileSync(path.join(directory, "metadata.json"), "utf-8")
-                    .replace(/"entity":"gig","kind":"feature"/, '"entity":"epic"'),
+                    .replace(/"entity":"task","kind":"feature"/, '"entity":"epic"'),
             )
             await assert.rejects(
                 respond.execute(

@@ -212,7 +212,7 @@ describe("maintainer-controlled incoming PR Project", () => {
                 }).state,
                 "blocked",
             )
-            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/tasks")), false)
         } finally {
             f.close()
         }

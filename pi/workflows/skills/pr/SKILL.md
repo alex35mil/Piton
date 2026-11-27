@@ -1,6 +1,6 @@
 ---
 name: pr
-description: "Use for /pr <URL>, /pr #NN, or an explicit request to inspect, review, or integrate an existing incoming GitHub pull request. Does not initialize an Epic, Task, or Gig."
+description: "Use for /pr <URL>, /pr #NN, or an explicit request to inspect, review, or integrate an existing incoming GitHub pull request. Does not initialize an Epic or Task."
 allowed-tools:
     - "inspect_session_analysis"
     - "inspect_integrations"
@@ -16,7 +16,7 @@ allowed-tools:
 
 # Incoming pull request
 
-Review an existing contribution privately, then publish, fix, push, or merge only with the maintainer's separate approvals. Never initialize an Epic, Task, or Gig, or adopt the contribution into a workflow-created branch contract.
+Review an existing contribution privately, then publish, fix, push, or merge only with the maintainer's separate approvals. Never initialize an Epic or Task, or adopt the contribution into a workflow-created branch contract.
 
 ## Read first
 

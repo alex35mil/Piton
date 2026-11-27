@@ -6,7 +6,13 @@ import { type Static, Type } from "typebox"
 import { compile } from "../../../extensions/__lib/schema.js"
 import type { McpToolCatalog } from "../../../extensions/__lib/mcp.js"
 import * as project from "../../../extensions/__lib/project.js"
-import { type EntityStatus, readEntityStatus, resolveEntityDirectory, writeEntityStatus } from "../__lib/entity.js"
+import {
+    type EntityStatus,
+    readEntityStatus,
+    resolveEntityDirectory,
+    taskParent,
+    writeEntityStatus,
+} from "../__lib/entity.js"
 import { assertArtifactPersistencePrepared } from "../__lib/project-config.js"
 import { loadIntegrationRoles, requireTracker, type TrackerConfig } from "./config.js"
 import { readTrackerIssue, trackerIssueBody } from "./issue-read.js"
@@ -66,6 +72,13 @@ function context(cwd: string, entityDir: string) {
     const directory = resolveEntityDirectory(root, cwd, entityDir)
     const status = readEntityStatus(directory)
     if (status.entity !== "task") throw new Error("a design check needs a Task")
+    // Only an Epic's Task issue holds a design; a standalone Task's issue body is its Request.
+    switch (taskParent(directory).kind) {
+        case "epic":
+            break
+        case "none":
+            throw new Error("a standalone Task has no design: its issue body is the Request")
+    }
     assertEntityTracker(status, tracker)
     return { directory, status, tracker }
 }

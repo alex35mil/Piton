@@ -35,8 +35,7 @@ export function readTrackerIssue(
             switch (record.resource) {
                 case "project":
                     throw new Error(`${label} needs a Linear issue, not a Project`)
-                case "task-issue":
-                case "gig-issue":
+                case "issue":
                     break
             }
             const expected = { id: record.external.issueId }

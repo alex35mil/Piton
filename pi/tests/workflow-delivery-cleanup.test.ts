@@ -120,7 +120,8 @@ function recordPullRequest(root: string, directory: string) {
 async function submittedGig(root: string, withPullRequest = true) {
     const gig = await initializeEntity(
         {
-            entity: "gig",
+            entity: "task",
+            parent: { kind: "none" },
             title: "Cleanup",
             slug: "cleanup",
             request: "Clean the merged branch",
@@ -458,7 +459,8 @@ describe("Deliverable branch cleanup", () => {
                     title: "Child",
                     slug: "child",
                     request: "Deliver the child",
-                    parentEpicDir: epic.directory,
+                    kind: "feature",
+                    parent: { kind: "epic", epicDir: epic.directory },
                     object: issue(11),
                 },
                 { cwd: root },
@@ -643,7 +645,8 @@ describe("Deliverable merge-resolution comment", () => {
 async function submittedGigWithoutPr(root: string): Promise<string> {
     const gig = await initializeEntity(
         {
-            entity: "gig",
+            entity: "task",
+            parent: { kind: "none" },
             title: "Other",
             slug: "other",
             request: "Other work",

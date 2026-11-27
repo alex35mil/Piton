@@ -309,8 +309,7 @@ export function planPhaseMutation(
             switch (record.resource) {
                 case "project":
                     return call("save_project", { id: record.external.projectId, labels })
-                case "task-issue":
-                case "gig-issue":
+                case "issue":
                     return call("save_issue", { id: record.external.issueId, labels })
             }
         })

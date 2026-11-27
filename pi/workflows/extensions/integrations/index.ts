@@ -121,7 +121,7 @@ const AcceptEpicTasksValidator = compile(AcceptEpicTasksSchema)
 
 export const InspectGateSchema = Type.Object(
     {
-        entityDir: Type.String({ minLength: 1, description: "The Task or Gig directory" }),
+        entityDir: Type.String({ minLength: 1, description: "The Task directory" }),
         gate: Type.Union([GateSchema], { description: "The stop point to check" }),
         current: LabelFactsSchema,
     },
@@ -129,7 +129,7 @@ export const InspectGateSchema = Type.Object(
 )
 const InspectGateValidator = compile(InspectGateSchema)
 
-const ContextEntitySchema = Type.Enum(["epic", "task", "gig"], { type: "string" })
+const ContextEntitySchema = Type.Enum(["epic", "task"], { type: "string" })
 const ContextTargetSchema = Type.Enum(["current", "workflow"], { type: "string" })
 export const IntegrationContextSchema = Type.Union([
     IncomingMergeContextSchema,
@@ -143,8 +143,12 @@ export const IntegrationContextSchema = Type.Union([
         {
             operation: Type.Literal("queueIntake"),
             target: ContextTargetSchema,
-            // Tasks are never queued directly; accepted Epic plans create their issues.
-            entity: Type.Enum(["epic", "gig"], { type: "string" }),
+            // `task` queues a standalone Task. An Epic's Tasks are never queued directly: accepted Epic plans
+            // create their issues.
+            entity: Type.Enum(["epic", "task"], {
+                type: "string",
+                description: "An Epic, or a standalone Task",
+            }),
             priority: Type.String({ minLength: 1 }),
             kind: Type.Enum(["not set", "feature", "bugfix", "research", "refactor", "audit", "chore", "epic"], {
                 type: "string",
@@ -250,7 +254,7 @@ export default function (pi: ExtensionAPI): void {
                         "",
                         request,
                         "",
-                        `Use the ${queue.skill} skill. This is external ${queue.label} intake, not Epic/Task/Gig initialization.`,
+                        `Use the ${queue.skill} skill. This is external ${queue.label} intake, not Epic or Task initialization.`,
                     ].join("\n"),
                 )
             },
@@ -370,7 +374,7 @@ export default function (pi: ExtensionAPI): void {
         name: "inspect_session_analysis",
         label: "inspect_session_analysis",
         description:
-            "Read whether a finished Task, Gig, Epic, or incoming PR ends with the in-chat session analysis: on in a development install (the pi package running from a git checkout of piton) unless `[debugging] session_analysis = false` in the global config.host.toml, off otherwise. Reads local settings only; never calls providers or changes configuration.",
+            "Read whether a finished Task, Epic, or incoming PR ends with the in-chat session analysis: on in a development install (the pi package running from a git checkout of piton) unless `[debugging] session_analysis = false` in the global config.host.toml, off otherwise. Reads local settings only; never calls providers or changes configuration.",
         parameters: Type.Object({}, { additionalProperties: false }),
         async execute() {
             const result = { sessionAnalysis: loadSessionAnalysis() }
@@ -382,7 +386,7 @@ export default function (pi: ExtensionAPI): void {
         name: "inspect_gate",
         label: "inspect_gate",
         description:
-            "Decide whether a Task or Gig waits for the user's approval at one gate, from the item's fresh labels: `awaitApproval` when it carries that gate's configured `gate` label, otherwise `continue`. Reads local configuration only; never calls providers or changes labels.",
+            "Decide whether a Task waits for the user's approval at one gate, from the item's fresh labels: `awaitApproval` when it carries that gate's configured `gate` label, otherwise `continue`. Reads local configuration only; never calls providers or changes labels.",
         parameters: InspectGateSchema,
         async execute(_id, params, _signal, _onUpdate, ctx) {
             const input = parse(InspectGateValidator, params)
@@ -391,7 +395,7 @@ export default function (pi: ExtensionAPI): void {
             const entity = readWorkflowEntity(ctx.cwd, input.entityDir)
             assertEntityTracker(entity.status, tracker)
             if (entity.status.entity === "epic")
-                throw new Error("gates apply to a Task or Gig; an Epic plan always waits for acceptance")
+                throw new Error("gates apply to a Task; an Epic plan always waits for acceptance")
             const result = gateOutcome(tracker, input.gate, input.current)
             return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
         },
@@ -653,14 +657,14 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
     assertArtifactPersistencePrepared(cwd)
     if (persistsEntityArtifacts(operation)) assertWorkerArtifactsLinked(cwd)
     const entity = entityDir ? readWorkflowEntity(cwd, entityDir) : undefined
-    // A local Gig has no tracker item: tracker steps refuse for it, and others treat the tracker as off.
+    // A local Task has no tracker item: tracker steps refuse for it, and others treat the tracker as off.
     const trackedEntity = entity?.status.tracker.provider !== "local"
     if (entity && role === "tracker") requireTrackerItem(entity.status.tracker, name)
     const entityTracker = trackedEntity ? configuredTracker : undefined
     if (entity && entityTracker && role !== "forge") assertEntityTracker(entity.status, entityTracker)
     if (entity && configuredForge && role !== "tracker") assertEntityForge(entity.status, configuredForge)
     if ((operation === "shippingRead" || operation === "shippingMerge") && entity?.status.entity === "epic")
-        throw new Error("shipping operations require a Task or Gig")
+        throw new Error("shipping operations require a Task")
     let shipping: GitHubMergeDecision | undefined
     if (input.operation === "shippingMerge") {
         const status = entity!.status
@@ -681,11 +685,11 @@ function readProjectIntegrationContext(cwd: string, input: WorkflowContextInput,
                       reason: "shipping requires locally recorded PR resource IDs; investigate and record the exact PR first",
                   }
     }
-    // The tracker as the entity sees it: a local Gig has no tracker item, so its tracker reads as off.
+    // The tracker as the entity sees it: a local Task has no tracker item, so its tracker reads as off.
     const tracker = <T extends { provider: TrackerConfig["provider"] }>(shape: (config: TrackerConfig) => T) =>
         trackedEntity
             ? roleContext("tracker", mapRole(roles.tracker, shape), (config) => config.provider)
-            : { state: "disabled" as const, reason: "This Gig is local: it has no tracker item." }
+            : { state: "disabled" as const, reason: "This Task is local: it has no tracker item." }
     const forge = () => roleContext("forge", roles.forge, (config) => config.provider)
     const base = <O extends WorkflowContextInput["operation"]>(operation: O) => ({
         state: "enabled" as const,

@@ -33,7 +33,8 @@ const token = "ab345678-1234-4567-8901-123456789abc"
 const documentId = "document-uuid"
 const url = "https://linear.app/example/document/plan-slug"
 
-async function fixture(kind: "epic" | "task" | "gig" = "gig") {
+// `standalone` is a Task with no parent Epic.
+async function fixture(kind: "epic" | "task" | "standalone" = "standalone") {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "linear-publication-"))
     const git = (...args: string[]) => cp.execFileSync("git", args, { cwd: root, stdio: "pipe" })
     git("init", "-b", "main")
@@ -95,12 +96,14 @@ async function fixture(kind: "epic" | "task" | "gig" = "gig") {
                     ...common,
                     entity: "task" as const,
                     object: { ...issue, projectId: "project-uuid" },
-                    parentEpicDir: parentDirectory!,
+                    kind: "feature" as const,
+                    parent: { kind: "epic" as const, epicDir: parentDirectory! },
                 }
               : {
                     ...common,
-                    entity: "gig" as const,
+                    entity: "task" as const,
                     kind: "feature" as const,
+                    parent: { kind: "none" as const },
                     object: issue,
                 }
     const initialized = await initializeEntity(initialization, { cwd: root })
@@ -227,7 +230,7 @@ describe("managed Linear plan documents", () => {
         ])
             assert.equal(PlanDocumentValidator.check(state), false)
     })
-    for (const kind of ["epic", "task", "gig"] as const)
+    for (const kind of ["epic", "task", "standalone"] as const)
         it(`publishes and updates ${kind}`, async () => {
             const f = await fixture(kind)
             try {
@@ -240,7 +243,7 @@ describe("managed Linear plan documents", () => {
                 assert.ok(typeof args.content === "string")
                 assert.match(args.content, /^Keep the original request\.\n\n## Highlights/)
                 assert.match(args.content, /\n>>> Full plan\n[\s\S]*\n>>>$/)
-                assert.doesNotMatch(args.content, /GIG-|TASK-|EPIC-|\.piton\/|<!--/)
+                assert.doesNotMatch(args.content, /TASK-|EPIC-|\.piton\/|<!--/)
                 assert.equal(
                     args[kind === "epic" ? "project" : "issue"],
                     kind === "epic" ? "project-uuid" : "issue-uuid",
@@ -481,7 +484,7 @@ describe("managed Linear plan documents", () => {
         }
     })
 
-    for (const kind of ["epic", "gig"] as const)
+    for (const kind of ["epic", "standalone"] as const)
         it(`creates again when a complete listing finds no Plan document on the parent (${kind})`, async () => {
             const f = await fixture(kind)
             try {
@@ -537,7 +540,7 @@ describe("managed Linear plan documents", () => {
         }
     })
 
-    for (const kind of ["epic", "task", "gig"] as const)
+    for (const kind of ["epic", "task", "standalone"] as const)
         it(`announces a ${kind} plan update as a comment on its own parent with a folded diff`, async () => {
             const f = await fixture(kind)
             const parentArgument = kind === "epic" ? { projectId: "project-uuid" } : { issueId: "issue-uuid" }

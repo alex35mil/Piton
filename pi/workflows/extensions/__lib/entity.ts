@@ -10,7 +10,8 @@ import {
     ReadyBranchContractSchema,
     EPIC_ROOT,
     entityName,
-    GIG_ROOT,
+    PROJECT_LOCAL_ROOT,
+    TASK_ROOT,
     type LifecycleState,
     slugify,
     trackerReferenceLabel,
@@ -32,11 +33,30 @@ export function resolveEntityPath(root: string, cwd: string, raw: string): strin
         : raw === PITON_DIR || raw.startsWith(`${PITON_DIR}${path.sep}`)
           ? path.resolve(root, raw)
           : path.resolve(cwd, raw)
-    const allowedRoots = [path.join(root, EPIC_ROOT), path.join(root, GIG_ROOT)]
+    const allowedRoots = [path.join(root, EPIC_ROOT), path.join(root, TASK_ROOT)]
     if (!allowedRoots.some((allowed) => resolved.startsWith(`${allowed}${path.sep}`))) {
-        throw new Error(`entity directory must be inside ${EPIC_ROOT} or ${GIG_ROOT}`)
+        throw new Error(`entity directory must be inside ${EPIC_ROOT} or ${TASK_ROOT}`)
     }
     return resolved
+}
+
+/**
+ * Where a Task belongs, from where its directory lives: under an Epic's `tasks/`, or under the standalone
+ * `tasks/` root. Every decision that depends on a Task's parent matches on this.
+ */
+export type TaskParent = { kind: "epic"; directory: string } | { kind: "none" }
+
+const pathEndsWith = (directory: string, relative: string) =>
+    directory.endsWith(`${path.sep}${path.join(...relative.split("/"))}`)
+
+export function taskParent(taskDirectory: string): TaskParent {
+    const container = path.dirname(path.resolve(taskDirectory))
+    if (path.basename(container) === "tasks") {
+        const owner = path.dirname(container)
+        if (pathEndsWith(owner, PROJECT_LOCAL_ROOT)) return { kind: "none" }
+        if (pathEndsWith(path.dirname(owner), EPIC_ROOT)) return { kind: "epic", directory: owner }
+    }
+    throw new Error(`a Task lives under ${TASK_ROOT} or ${EPIC_ROOT}/<epic>/tasks: ${taskDirectory}`)
 }
 
 export function resolveEntityDirectory(root: string, cwd: string, raw: string): string {
@@ -75,7 +95,7 @@ const baseMetadataProperties = {
     slug: OneLineSchema,
     title: OneLineSchema,
     branch: ReadyBranchContractSchema,
-    // The tracker item, or `local` for a Gig kept off the tracker.
+    // The tracker item, or `local` for a standalone Task kept off the tracker.
     tracker: EntityTrackerSchema,
     forge: Type.Optional(ForgeRecordSchema),
 }
@@ -85,12 +105,12 @@ const epicProperties = {
     entity: Type.Literal("epic"),
     acceptedTasks: Type.Optional(Type.Array(AcceptedTaskSchema)),
 }
-const gigProperties = { entity: Type.Literal("gig"), kind: DeliverableKindSchema }
+// A Task's parent comes from its directory (`taskParent`), not from metadata.
 const taskProperties = {
     entity: Type.Literal("task"),
     kind: DeliverableKindSchema,
-    // A fingerprint of the Task issue body (its design) the Task last synced from. Absent until
-    // `record_task_design` first runs, for example on a Task started before designs were tracked.
+    // Epic Tasks only: a fingerprint of the Task issue body (its design) the Task last synced from. Absent
+    // until `record_task_design` first runs. A standalone Task's issue body is its Request, not a design.
     design: Type.Optional(Type.String({ pattern: "^[0-9a-f]{64}$" })),
 }
 
@@ -98,11 +118,7 @@ function entitySchema<P extends TProperties>(properties: P) {
     return Type.Object({ ...baseMetadataProperties, ...properties }, { additionalProperties: false })
 }
 
-export const EntityStatusSchema = Type.Union([
-    entitySchema(epicProperties),
-    entitySchema(gigProperties),
-    entitySchema(taskProperties),
-])
+export const EntityStatusSchema = Type.Union([entitySchema(epicProperties), entitySchema(taskProperties)])
 export const EntityStatusValidator = compile(EntityStatusSchema)
 export type EntityStatus = Static<typeof EntityStatusSchema>
 
@@ -195,48 +211,52 @@ function assertEntityStatusInvariants(status: EntityStatus, entityDirectory: str
     if (status.forge && (status.forge.head !== status.branch.name || status.forge.target !== status.branch.target))
         fail("forge association must match the branch contract")
 
-    const expectedBase =
-        status.entity === "task"
-            ? (() => {
-                  const tasksDirectory = path.dirname(path.resolve(entityDirectory))
-                  const actualParentDirectory = path.dirname(tasksDirectory)
-                  const epicsDirectory = path.dirname(actualParentDirectory)
-                  if (
-                      path.basename(tasksDirectory) !== "tasks" ||
-                      !epicsDirectory.endsWith(`${path.sep}${path.join(...EPIC_ROOT.split("/"))}`)
-                  ) {
-                      fail(`Task is not contained under ${EPIC_ROOT}/<epic>/tasks`)
-                  }
-                  const parent = readEntityStatus(actualParentDirectory)
-                  if (status.entity !== "task") return fail("Task status lost its entity discriminator")
-                  if (parent.entity !== "epic") fail("Task container is not an Epic")
-                  assertTaskTrackerParent(status, parent, fail)
-                  if (status.branch.start !== parent.branch.name && status.branch.start !== parent.branch.target) {
-                      fail("Task base is neither the containing Epic branch nor its default target")
-                  }
-                  if (status.branch.start !== status.branch.target) {
-                      fail("Task start and target must use the same containing-Epic base")
-                  }
-                  // The tracker owns the Task's relationship; the local plan copy may lag.
-                  return status.branch.start
-              })()
-            : status.branch.start
-
-    if (status.branch.start !== expectedBase || status.branch.target !== expectedBase) {
-        fail("branch start/target do not match the entity branch contract")
+    // Every entity starts from and delivers to one branch.
+    if (status.branch.start !== status.branch.target)
+        fail("branch start/target do not match the entity branch contract: both name the same branch")
+    switch (status.entity) {
+        case "epic":
+            return
+        case "task":
+            return assertTaskParentInvariants(status, entityDirectory, fail)
     }
 }
 
-function assertTaskTrackerParent(task: EntityStatus, parent: EntityStatus, fail: (message: string) => never): void {
-    if (task.tracker.provider !== parent.tracker.provider) fail("Task and parent Epic use different trackers")
-    if (
-        task.tracker.provider === "linear" &&
-        task.tracker.resource === "task-issue" &&
-        parent.tracker.provider === "linear" &&
-        parent.tracker.resource === "project" &&
-        task.tracker.external.projectId !== parent.tracker.external.projectId
-    )
-        fail("Linear Task Project does not match its parent Epic Project")
+type TaskStatus = Extract<EntityStatus, { entity: "task" }>
+
+function assertTaskParentInvariants(task: TaskStatus, entityDirectory: string, fail: (message: string) => never) {
+    let parent: TaskParent
+    try {
+        parent = taskParent(entityDirectory)
+    } catch (error) {
+        return fail(error instanceof Error ? error.message : String(error))
+    }
+    const tracker = task.tracker
+    switch (parent.kind) {
+        case "none":
+            if (task.design !== undefined) fail("a standalone Task has no design; its issue body is the Request")
+            if (tracker.provider === "linear" && tracker.resource === "issue" && tracker.parent.kind !== "none")
+                fail("a standalone Task's Linear issue must have no Project")
+            return
+        case "epic": {
+            const epic = readEntityStatus(parent.directory)
+            if (epic.entity !== "epic") return fail("Task container is not an Epic")
+            if (tracker.provider === "local") return fail("an Epic Task can't be local; its Epic created its issue")
+            if (tracker.provider !== epic.tracker.provider) fail("Task and parent Epic use different trackers")
+            if (
+                tracker.provider === "linear" &&
+                tracker.resource === "issue" &&
+                epic.tracker.provider === "linear" &&
+                epic.tracker.resource === "project" &&
+                (tracker.parent.kind !== "project" || tracker.parent.projectId !== epic.tracker.external.projectId)
+            )
+                fail("Linear Task Project does not match its parent Epic Project")
+            // The tracker owns the Task's relationship; the local plan copy may lag.
+            if (task.branch.start !== epic.branch.name && task.branch.start !== epic.branch.target)
+                fail("Task base is neither the containing Epic branch nor its default target")
+            return
+        }
+    }
 }
 
 // Progress for every planned Task, from the plan and fresh tracker lifecycle for every

@@ -1,6 +1,6 @@
 # Deliverable
 
-Task and Gig are the two Deliverable variants. Both follow this lifecycle exactly. Their skills add only initialization and, for Task, parent synchronization.
+A Task is the Deliverable: standalone, or one of an Epic's Tasks. Every Task follows this lifecycle exactly. The Task skill adds initialization and, for an Epic Task, parent synchronization.
 
 Related files, read when the step is reached:
 
@@ -27,7 +27,7 @@ Related files, read when the step is reached:
 Initialization starts from the tracker object ([integration roles](./integrations/shared.md#initialize-from-the-tracker-object)), then `initialize_integration` sets up the board. On resume, reuse the `resume_integration` result from the artifact gate.
 
 - Read [integration roles](./integrations/shared.md), then the provider reference for each enabled role: [GitHub tracker](./integrations/tracker/github.md) or [Linear tracker](./integrations/tracker/linear.md), and [GitHub forge](./integrations/forge/github.md). Report an unavailable role without blocking the other.
-- A role that's off, or a local Gig, skips its steps throughout this lifecycle ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
+- A role that's off, or a local Task, skips its steps throughout this lifecycle ([when a role is off](./integrations/shared.md#when-a-role-is-off)).
 - Permission denial, invalid configuration, or provider failure: follow the [MCP boundary](./core.md#mcp-boundary). Nothing local replaces an unavailable tracker.
 
 After every `plan.md` change, publish the plan as described in [provider bodies](./integrations/shared.md#provider-bodies). Once it's published, each change posts a one-line [plan-update note](./integrations/shared.md#plan-update-notes), without asking.
@@ -49,7 +49,7 @@ Every Deliverable has exactly one kind: `feature`, `bugfix`, `refactor`, `resear
 
 1. Ask only for context that inspection can't recover and that changes reproduction, expected behavior, scope, evidence, or access. When enough is known, investigate.
 2. Investigate the symptom and evidence before editing product code. When investigation exposes an unresolved product decision, stop and ask.
-3. Once the cause is evidenced, write `plan.md` with Root cause, Symptom, Evidence, Cause, Proposed fix, and Verify. Then follow the shared [Task and Gig plan](./planning.md#task-and-gig-plans) steps.
+3. Once the cause is evidenced, write `plan.md` with Root cause, Symptom, Evidence, Cause, Proposed fix, and Verify. Then follow the shared [Task plan](./planning.md#task-plans) steps.
 4. Edit product code only after the plan review cycle finishes. When the report makes the cause evident, the direct path skips steps 2 and 3.
 
 ### Research and audit reports
@@ -74,10 +74,10 @@ Every plan, interim, and final review follows [review](./review.md).
 1. Set Execution whenever implementation begins or resumes after Self-Review. Lifecycle stays `inProgress`.
 2. Implement the complete change at its owning abstraction. Leave unrelated working-tree changes untouched.
 3. Run focused checks while developing. Run all plan and Project Policy verification before final review.
-4. A Task runs its skill's parent synchronization. A Gig has none.
+4. An Epic Task runs its skill's parent synchronization. A standalone Task has none.
 5. Write or update the [completion artifact](#completion-artifact): `result.md` for feature, bugfix, refactor, and chore; `report.md` for research and audit. Never claim verification that didn't run.
 6. Resolve every unchecked `pending.md` entry, or move it to separately queued work. A missing file counts as empty.
-7. Set Self-Review when Phase is configured, then call `review_task` or `review_gig` with `phase: "final"` and handle the cycle. The reviewer sees the completion artifact and every change on the branch.
+7. Set Self-Review when Phase is configured, then call `review_task` with `phase: "final"` and handle the cycle. The reviewer sees the completion artifact and every change on the branch.
 8. **Stop with one message:**
    - the completion artifact's Overview, and its unhandled cases, one line each;
    - any open concerns from the review, one line each;

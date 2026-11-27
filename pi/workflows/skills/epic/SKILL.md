@@ -58,7 +58,7 @@ When reviewing, read [review](../../references/review.md). When writing human-fa
 
 ## Start or resume
 
-An Epic needs the tracker: accepting its plan creates the Task issues. When the tracker is off, say so and offer a Gig instead ([when a role is off](../../references/integrations/shared.md#when-a-role-is-off)).
+An Epic needs the tracker: accepting its plan creates the Task issues. When the tracker is off, say so and offer a standalone Task instead ([when a role is off](../../references/integrations/shared.md#when-a-role-is-off)).
 
 Follow the preparation and entity-selection gates in [artifacts](../../references/artifacts.md#initialization-inputs) for an Epic under `.piton/.local/epics/`. When this clone has no local directory for the Epic, [restore it](../../references/epic.md#restore-an-epic) first.
 

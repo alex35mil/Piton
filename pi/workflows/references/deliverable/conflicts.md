@@ -1,6 +1,6 @@
 # Resolve merge conflicts
 
-Read this when GitHub rejects a Task or Gig merge because the PR conflicts with its target.
+Read this when GitHub rejects a Task merge because the PR conflicts with its target.
 
 The branch takes one ordinary merge commit of the target. History isn't rewritten, nothing is force-pushed, and the PR records exactly what the resolution changed. Two adversarial reviews check the resolution: one before it's made and one after.
 
@@ -12,7 +12,7 @@ The branch takes one ordinary merge commit of the target. History isn't rewritte
 4. **Plan** in Execution, returning native Status to In Progress as for any correction on submitted work. Write a plain-words resolution plan:
    - each conflicting file, what each side changed, and how each conflict is kept or combined;
    - a **Target changes to keep** section: for each of those commits, its SHA and PR, the fix or behavior that must survive, and how the resolution keeps it. A commit without a PR is described from its diff and message.
-5. **Review the plan.** Set Self-Review when Phase is configured ([Phase](../phase.md#when-phase-isnt-configured)), then call `review_task` or `review_gig` with `phase: "conflict-plan"` and the plan as `resolution`. Follow [review](../review.md) until it approves; the merge review requires an approved resolution plan.
+5. **Review the plan.** Set Self-Review when Phase is configured ([Phase](../phase.md#when-phase-isnt-configured)), then call `review_task` with `phase: "conflict-plan"` and the plan as `resolution`. Follow [review](../review.md) until it approves; the merge review requires an approved resolution plan.
 6. **Present** the reviewed plan in chat; no file is written. Accepting it authorizes only the local merge commit.
 
 ## Resolve

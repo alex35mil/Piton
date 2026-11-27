@@ -45,7 +45,7 @@ const finding = {
 
 describe("workflow consolidation contracts", () => {
     it("keeps a strict metadata boundary with no local lifecycle, ID, or authority", () => {
-        for (const entity of ["epic", "task", "gig"] as const) {
+        for (const entity of ["epic", "task"] as const) {
             const metadata = {
                 ...commonMetadata,
                 entity,
@@ -54,7 +54,7 @@ describe("workflow consolidation contracts", () => {
             assert.equal(EntityStatusValidator.check(metadata), true)
             for (const extra of [
                 { state: "inProgress" },
-                { id: "GIG-01KDVDNA00" },
+                { id: "TASK-01KDVDNA00" },
                 { authority: { kind: "tracker", provider: "github" } },
                 { integrations: [] },
                 { parentEpic: "example" },
@@ -95,18 +95,16 @@ describe("workflow consolidation contracts", () => {
             {
                 provider: "linear",
                 planDocument: { state: "unpublished" },
-                resource: "task-issue",
-                external: {
-                    issueId: "issue",
-                    identifier: "ENG-2",
-                    projectId: "project",
-                },
+                resource: "issue",
+                external: { issueId: "issue", identifier: "ENG-2" },
+                parent: { kind: "project", projectId: "project" },
             },
             {
                 provider: "linear",
                 planDocument: { state: "unpublished" },
-                resource: "gig-issue",
+                resource: "issue",
                 external: { issueId: "issue", identifier: "ENG-2" },
+                parent: { kind: "none" },
             },
             {
                 provider: "linear",
@@ -174,21 +172,21 @@ describe("workflow consolidation contracts", () => {
     it("preserves caller-relative bases and rejects paths outside workflow roots", () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-paths-"))
         try {
-            const entity = path.join(root, ".piton", ".local", "gigs", "example")
+            const entity = path.join(root, ".piton", ".local", "tasks", "example")
             fs.mkdirSync(entity, { recursive: true })
             const cwd = path.join(root, "src")
-            assert.equal(resolveEntityPath(root, cwd, ".piton/.local/gigs/example"), entity)
-            assert.equal(resolveEntityPath(root, cwd, "../.piton/.local/gigs/example"), entity)
-            assert.equal(resolveEntityPath(root, root, ".piton/.local/gigs/example"), entity)
+            assert.equal(resolveEntityPath(root, cwd, ".piton/.local/tasks/example"), entity)
+            assert.equal(resolveEntityPath(root, cwd, "../.piton/.local/tasks/example"), entity)
+            assert.equal(resolveEntityPath(root, root, ".piton/.local/tasks/example"), entity)
             assert.equal(resolveEntityDirectory(root, cwd, entity), entity)
             for (const raw of [
-                ".piton/.local/gigs",
-                ".piton/.local/gigs/../../outside",
-                ".piton/.local/gigs-sibling/example",
+                ".piton/.local/tasks",
+                ".piton/.local/tasks/../../outside",
+                ".piton/.local/tasks-sibling/example",
             ]) {
                 assert.throws(() => resolveEntityPath(root, root, raw), /must be inside/)
             }
-            assert.throws(() => resolveEntityDirectory(root, root, ".piton/.local/gigs/missing"), /does not exist/)
+            assert.throws(() => resolveEntityDirectory(root, root, ".piton/.local/tasks/missing"), /does not exist/)
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }

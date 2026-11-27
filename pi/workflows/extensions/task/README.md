@@ -1,3 +1,3 @@
 # Task extension
 
-Registers `/task`. Task is the parent-Epic specialization of the shared Deliverable workflow. Initialization requires prepared project configuration, renders the one project-wide format, and copies the parent Epic's current Epic/default target into the Task's immutable branch contract.
+Registers `/task`, the one command for Deliverable work. A Task's parent is an Epic or none. Initialization requires prepared project configuration and renders the one project-wide format. A standalone Task starts from and targets the repository default; an Epic Task copies its Epic's current Epic or default target into its immutable branch contract. Linear `tracker` uses the exact issue branch without fallback.

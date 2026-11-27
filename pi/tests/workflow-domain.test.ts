@@ -15,12 +15,17 @@ import { kindLabels, linearKindGroup, linearPhases, phaseValues } from "./workfl
 
 import { compile, parse, SchemaValidationError } from "../extensions/__lib/schema.ts"
 import { entityName, formatBranchName, readyBranch, slugify } from "../workflows/extensions/__lib/domain.ts"
-import { readEntityStatus, readEpicTaskProgress, writeEntityStatus } from "../workflows/extensions/__lib/entity.ts"
+import {
+    readEntityStatus,
+    readEpicTaskProgress,
+    taskParent,
+    writeEntityStatus,
+} from "../workflows/extensions/__lib/entity.ts"
 import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
 import {
     EntityInitializationValidator,
     initializeEntity,
-    initializeLocalGig,
+    initializeLocalTask,
     preflightEntity,
 } from "../workflows/extensions/init/entity.ts"
 import { formatInitializedEntity } from "../workflows/extensions/init/index.ts"
@@ -103,12 +108,13 @@ function linearIssue(identifier: string, extra: Record<string, string> = {}) {
     }
 }
 
-const gig = (title: string, object: unknown) => ({
-    entity: "gig" as const,
+const standalone = (title: string, object: unknown) => ({
+    entity: "task" as const,
     title,
     slug: slugify(title),
     request: title,
     kind: "chore" as const,
+    parent: { kind: "none" as const },
     object,
 })
 const epic = (title: string, object: unknown) => ({
@@ -118,12 +124,14 @@ const epic = (title: string, object: unknown) => ({
     request: title,
     object,
 })
-const task = (title: string, parentEpicDir: string, object: unknown) => ({
+// An Epic Task; `kind` must match its plan section's (planTask defaults to `feature`).
+const task = (title: string, epicDir: string, object: unknown, kind = "feature") => ({
     entity: "task" as const,
     title,
     slug: slugify(title),
     request: title,
-    parentEpicDir,
+    kind,
+    parent: { kind: "epic" as const, epicDir },
     object,
 })
 // One `## Tasks` section; tagged once issue processing has created or linked its issue, which then
@@ -212,11 +220,11 @@ describe("workflow domain", () => {
 
     it("accepts only the tracker object that matches each entity", async () => {
         const check = (input: unknown) => EntityInitializationValidator.check(input)
-        assert.equal(check(gig("Work", issue(1))), true)
-        assert.equal(check(gig("Work", linearIssue("ENG-1"))), true)
+        assert.equal(check(standalone("Work", issue(1))), true)
+        assert.equal(check(standalone("Work", linearIssue("ENG-1"))), true)
         assert.equal(
             check(
-                gig("Work", {
+                standalone("Work", {
                     projectId: "p",
                     projectUrl: "https://linear.app/x/project/p",
                     createdAt: "2026-10-01T09:00:00.000Z",
@@ -235,16 +243,16 @@ describe("workflow domain", () => {
             true,
         )
         assert.equal(check({ ...epic("Work", issue(1)), kind: "feature" }), false)
-        assert.equal(check({ ...gig("Work", issue(1)), kind: "review" }), false)
-        assert.equal(check(gig("Work", linearIssue("eng-1"))), false)
-        assert.equal(check({ ...gig("Work", issue(1)), priority: "High" }), false)
+        assert.equal(check({ ...standalone("Work", issue(1)), kind: "review" }), false)
+        assert.equal(check(standalone("Work", linearIssue("eng-1"))), false)
+        assert.equal(check({ ...standalone("Work", issue(1)), priority: "High" }), false)
     })
 
     it("keeps an adopted item's publication signature out of the brief", async () => {
         const cwd = temporaryRepository()
         try {
             const signed = (footer: string) => ({
-                ...gig("Signed", issue(8)),
+                ...standalone("Signed", issue(8)),
                 request: `Signed\n\nDo it.\n\n${footer}\n`,
             })
             const created = await init(cwd, signed("<sub>Sent via Pi. Model: x/y.</sub>"))
@@ -258,10 +266,10 @@ describe("workflow domain", () => {
                 "# Brief\n\nSigned\n\nDo it.\n",
             )
             await assert.rejects(
-                () => init(cwd, { ...gig("Only", issue(9)), request: "<sub>Sent via Pi. Model: x/y.</sub>" }),
+                () => init(cwd, { ...standalone("Only", issue(9)), request: "<sub>Sent via Pi. Model: x/y.</sub>" }),
                 /request is empty/,
             )
-            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/gigs/9-only")), false)
+            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/tasks/9-only")), false)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -271,7 +279,7 @@ describe("workflow domain", () => {
         const cwd = temporaryRepository()
         try {
             git(cwd, ["switch", "-c", "other-local-branch"])
-            const initialized = await init(cwd, gig("Local only", issue(5)))
+            const initialized = await init(cwd, standalone("Local only", issue(5)))
             assert.equal(initialized.status.branch.start, "other-local-branch")
             assert.equal(initialized.status.branch.target, "other-local-branch")
             assert.equal(git(cwd, ["remote"]), "")
@@ -327,17 +335,24 @@ describe("workflow domain", () => {
                 () => init(cwd, task("Later", created.directory, issue(16))),
                 /no Task tagged #16; finish the Epic's issue processing/,
             )
-            await assert.rejects(() => init(cwd, task("Dropped", created.directory, issue(15))), /canceled/)
+            await assert.rejects(() => init(cwd, task("Dropped", created.directory, issue(15), "chore")), /canceled/)
+            await assert.rejects(
+                () => init(cwd, task("Build it", created.directory, issue(13), "feature")),
+                /gives #13 the Kind bugfix, not feature/,
+            )
 
-            const built = await init(cwd, task("Build it", created.directory, issue(13)))
+            const built = await init(cwd, task("Build it", created.directory, issue(13), "bugfix"))
             assert.equal(built.directory, ".piton/.local/epics/12-shared-workflow/tasks/13-build-it")
             assert.equal(built.status.branch.name, "13-build-it")
             assert.equal(built.status.branch.start, "12-shared-workflow")
-            // The plan section supplies the Kind; initialization never rewrites the plan.
+            // The plan section's Kind must match; initialization never rewrites the plan.
             assert.equal(built.status.entity === "task" && built.status.kind, "bugfix")
             assert.equal(fs.readFileSync(epicPath, "utf-8"), plan)
             assert.deepEqual(readEntityStatus(path.join(cwd, built.directory)), built.status)
-            await assert.rejects(() => init(cwd, task("Build it", created.directory, issue(13))), /no Task tagged #13/)
+            await assert.rejects(
+                () => init(cwd, task("Build it", created.directory, issue(13), "bugfix")),
+                /no Task tagged #13/,
+            )
 
             const lifecycles = { "#13": "inProgress", "#14": "todo", "#15": "canceled" } as const
             assert.deepEqual(readEpicTaskProgress(epicDir, lifecycles), {
@@ -513,7 +528,7 @@ describe("workflow domain", () => {
         }
     })
 
-    it("initializes a local Gig without a tracker item under every branch format", async () => {
+    it("initializes a local Task without a tracker item under every branch format", async () => {
         const now = new Date("2026-11-17T23:30:00Z")
         const local = { title: "Offline work", slug: "offline-work", request: "Offline work.", kind: "chore" as const }
         for (const [format, branch] of [
@@ -523,11 +538,11 @@ describe("workflow domain", () => {
         ] as const) {
             const cwd = temporaryRepository("linear")
             try {
-                // No tracker at all: a local Gig doesn't need one.
+                // No tracker at all: a local Task doesn't need one.
                 writeProjectConfig(cwd, { branchFormat: format, tracker: { provider: "none" }, username: "alex" })
                 prepareArtifactPersistence(cwd)
-                const created = await initializeLocalGig(local, { cwd, now })
-                assert.equal(created.directory, ".piton/.local/gigs/20261117-offline-work")
+                const created = await initializeLocalTask(local, { cwd, now })
+                assert.equal(created.directory, ".piton/.local/tasks/20261117-offline-work")
                 assert.equal(created.status.branch.name, branch)
                 assert.equal(created.status.branch.start, "main")
                 assert.deepEqual(created.status.tracker, { provider: "local", createdAt: now.toISOString() })
@@ -536,7 +551,7 @@ describe("workflow domain", () => {
                 assert.match(formatInitializedEntity(created), /local/)
                 assert.equal(git(cwd, ["rev-parse", "--verify", branch]).length, 40)
                 assert.deepEqual(readEntityStatus(path.join(cwd, created.directory)), created.status)
-                await assert.rejects(() => initializeLocalGig(local, { cwd, now }), /already exists/)
+                await assert.rejects(() => initializeLocalTask(local, { cwd, now }), /already exists/)
             } finally {
                 fs.rmSync(cwd, { recursive: true, force: true })
             }
@@ -547,8 +562,11 @@ describe("workflow domain", () => {
         const cwd = temporaryRepository()
         try {
             writeProjectConfig(cwd, { tracker: { provider: "none" } })
-            await assert.rejects(() => init(cwd, gig("Tracked", issue(3))), /needs the tracker, which is turned off/)
-            const created = await initializeLocalGig(
+            await assert.rejects(
+                () => init(cwd, standalone("Tracked", issue(3))),
+                /needs the tracker, which is turned off/,
+            )
+            const created = await initializeLocalTask(
                 { title: "Local", slug: "local", request: "Local.", kind: "chore" },
                 { cwd, now: new Date("2026-01-02T00:00:00Z") },
             )
@@ -557,7 +575,7 @@ describe("workflow domain", () => {
             fs.mkdirSync(path.join(cwd, epicDirectory), { recursive: true })
             const { kind: _kind, ...epicMetadata } = metadata
             writeMetadata(cwd, epicDirectory, { ...epicMetadata, entity: "epic" })
-            assert.throws(() => readEntityStatus(path.join(cwd, epicDirectory)), /only a Gig can be local/)
+            assert.throws(() => readEntityStatus(path.join(cwd, epicDirectory)), /an Epic can.t be local/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -567,14 +585,14 @@ describe("workflow domain", () => {
         const linear = temporaryRepository("linear")
         const github = temporaryRepository("github", "tracker")
         try {
-            const created = await init(linear, gig("Static", linearIssue("ENG-9")))
+            const created = await init(linear, standalone("Static", linearIssue("ENG-9")))
             assert.equal(created.status.branch.name, "eng-9-static")
             assert.equal(created.status.branch.source, "generated")
             assert.throws(
                 () =>
                     preflightEntity(
                         {
-                            entity: "gig",
+                            entity: "task",
                             title: "Work",
                             slug: "work",
                             request: "Work",
@@ -584,7 +602,7 @@ describe("workflow domain", () => {
                     ),
                 /requires a Linear tracker/,
             )
-            await assert.rejects(() => init(github, gig("Wrong provider", linearIssue("ENG-1"))), /GitHub issue/)
+            await assert.rejects(() => init(github, standalone("Wrong provider", linearIssue("ENG-1"))), /GitHub issue/)
         } finally {
             fs.rmSync(linear, { recursive: true, force: true })
             fs.rmSync(github, { recursive: true, force: true })
@@ -603,12 +621,12 @@ describe("workflow domain", () => {
             writeProjectConfig(cwd, { tracker: { ...tracker, labels: { groups: { ...kindLabels().groups, area } } } })
             const base = { title: "Work", slug: "work", request: "Work" }
             assert.deepEqual(
-                preflightEntity({ ...base, entity: "gig", kind: "chore", labels: { area: ["fe"] } }, { cwd }).labels,
+                preflightEntity({ ...base, entity: "task", kind: "chore", labels: { area: ["fe"] } }, { cwd }).labels,
                 ["Area: FE", "Kind: Chore"],
             )
             assert.deepEqual(preflightEntity({ ...base, entity: "epic" }, { cwd }).labels, ["Kind: Epic"])
             assert.throws(
-                () => preflightEntity({ ...base, entity: "gig", kind: "chore", labels: { area: ["be"] } }, { cwd }),
+                () => preflightEntity({ ...base, entity: "task", kind: "chore", labels: { area: ["be"] } }, { cwd }),
                 /labels: label group "area" has no value "be"/,
             )
         } finally {
@@ -623,7 +641,7 @@ describe("workflow domain", () => {
             writeProjectConfig(cwd, { tracker: { ...tracker, labels: { groups: { kind: linearKindGroup() } } } })
             const base = { title: "Work", slug: "work", request: "Work" }
             assert.deepEqual(preflightEntity({ ...base, entity: "epic" }, { cwd }).labels, [])
-            assert.deepEqual(preflightEntity({ ...base, entity: "gig", kind: "chore" }, { cwd }).labels, [
+            assert.deepEqual(preflightEntity({ ...base, entity: "task", kind: "chore" }, { cwd }).labels, [
                 "Kind: Chore",
             ])
         } finally {
@@ -638,13 +656,13 @@ describe("workflow domain", () => {
             assert.throws(
                 () =>
                     preflightEntity(
-                        { entity: "gig", title: "Orphan", slug: "-", request: "Orphan", kind: "feature" },
+                        { entity: "task", title: "Orphan", slug: "-", request: "Orphan", kind: "feature" },
                         { cwd },
                     ),
                 /slug must contain/,
             )
             assert.equal(git(cwd, ["for-each-ref", "--format=%(refname)"]), before)
-            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/tasks")), false)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -655,16 +673,73 @@ describe("workflow domain", () => {
         try {
             git(cwd, ["branch", "40-conflict", "main"])
             await assert.rejects(
-                () => init(cwd, gig("Conflict", issue(40))),
+                () => init(cwd, standalone("Conflict", issue(40))),
                 /workflow branch already exists: 40-conflict/,
             )
             assert.ok(git(cwd, ["show-ref", "--verify", "refs/heads/40-conflict"]))
-            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/gigs/40-conflict")), false)
+            assert.equal(fs.existsSync(path.join(cwd, ".piton/.local/tasks/40-conflict")), false)
 
-            const first = await init(cwd, gig("Kept", issue(41)))
+            const first = await init(cwd, standalone("Kept", issue(41)))
             git(cwd, ["branch", "-D", "41-kept"])
-            await assert.rejects(() => init(cwd, gig("Kept", issue(41))), /entity directory already exists/)
+            await assert.rejects(() => init(cwd, standalone("Kept", issue(41))), /entity directory already exists/)
             assert.ok(fs.existsSync(path.join(cwd, first.directory, "metadata.json")))
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("derives a Task's parent from its directory and holds each parent to its invariants", async () => {
+        const cwd = temporaryRepository("linear")
+        try {
+            assert.deepEqual(taskParent(path.join(cwd, ".piton/.local/tasks/ENG-1-work")), { kind: "none" })
+            assert.deepEqual(taskParent(path.join(cwd, ".piton/.local/epics/20261002-e/tasks/ENG-1-work")), {
+                kind: "epic",
+                directory: path.join(cwd, ".piton/.local/epics/20261002-e"),
+            })
+            for (const misplaced of [".piton/.local/epics/ENG-1-work", ".piton/.local/tasks/a/tasks/ENG-1-work"])
+                assert.throws(() => taskParent(path.join(cwd, misplaced)), /a Task lives under/)
+
+            // A standalone Linear issue has no Project; one that's in a Project is its Epic's Task.
+            await assert.rejects(
+                () => init(cwd, standalone("Work", linearIssue("ENG-1", { projectId: "project-uuid" }))),
+                /in a Project, so it isn't standalone/,
+            )
+            const created = await init(cwd, standalone("Work", linearIssue("ENG-1")))
+            assert.equal(created.directory, ".piton/.local/tasks/ENG-1-work")
+            const status = created.status
+            if (status.entity !== "task" || status.tracker.provider !== "linear" || status.tracker.resource !== "issue")
+                assert.fail("expected a Linear Task")
+            assert.deepEqual(status.tracker.parent, { kind: "none" })
+            const directory = path.join(cwd, created.directory)
+            for (const [candidate, error] of [
+                [{ ...status, design: "0".repeat(64) }, /a standalone Task has no design/],
+                [
+                    { ...status, tracker: { ...status.tracker, parent: { kind: "project", projectId: "p" } } },
+                    /standalone Task's Linear issue must have no Project/,
+                ],
+            ] as const) {
+                writeMetadata(cwd, created.directory, candidate)
+                assert.throws(() => readEntityStatus(directory), error)
+            }
+
+            // An Epic Task can't be local: its Epic created its issue.
+            const rollout = await init(
+                cwd,
+                epic("Rollout", {
+                    projectId: "project-uuid",
+                    projectUrl: "https://linear.app/example/project/rollout",
+                    createdAt: "2026-10-02T09:00:00.000Z",
+                }),
+            )
+            const local = path.join(rollout.directory, "tasks", "20261002-local")
+            fs.mkdirSync(path.join(cwd, local), { recursive: true })
+            writeMetadata(cwd, local, {
+                ...status,
+                slug: "local",
+                branch: { ...status.branch, name: "20261002-local" },
+                tracker: { provider: "local", createdAt: "2026-10-02T10:00:00.000Z" },
+            })
+            assert.throws(() => readEntityStatus(path.join(cwd, local)), /an Epic Task can't be local/)
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
@@ -673,13 +748,13 @@ describe("workflow domain", () => {
     it("rejects metadata that disagrees with its directory, branch, or PR intent", async () => {
         const cwd = temporaryRepository()
         try {
-            const created = await init(cwd, gig("Invariant checks", issue(50)))
+            const created = await init(cwd, standalone("Invariant checks", issue(50)))
             const directory = path.join(cwd, created.directory)
             const status = created.status
-            if (status.entity !== "gig") assert.fail("expected Gig")
+            if (status.entity !== "task") assert.fail("expected Task")
             writeEntityStatus(directory, { ...status, kind: "audit" })
             const changed = readEntityStatus(directory)
-            assert.equal(changed.entity === "gig" ? changed.kind : undefined, "audit")
+            assert.equal(changed.entity === "task" ? changed.kind : undefined, "audit")
             const cases: Array<[unknown, RegExp]> = [
                 [{ ...status, slug: "Not normalized" }, /slug is not normalized/],
                 [{ ...status, slug: "other" }, /directory name does not match/],
@@ -704,7 +779,7 @@ describe("workflow domain", () => {
                     /forge association/,
                 ],
                 [{ ...status, state: "inProgress" }, /invalid entity metadata/],
-                [{ ...status, id: "GIG-01KDVDNA00" }, /invalid entity metadata/],
+                [{ ...status, id: "TASK-01KDVDNA00" }, /invalid entity metadata/],
             ]
             for (const [candidate, error] of cases) {
                 writeMetadata(cwd, created.directory, candidate)
@@ -718,10 +793,10 @@ describe("workflow domain", () => {
     it("discovers the recorded default branch from existing work", async () => {
         const cwd = temporaryRepository()
         try {
-            await init(cwd, gig("Earlier", issue(60)))
+            await init(cwd, standalone("Earlier", issue(60)))
             git(cwd, ["switch", "-c", "work"])
             git(cwd, ["branch", "another"])
-            const later = await init(cwd, gig("Later", issue(61)))
+            const later = await init(cwd, standalone("Later", issue(61)))
             assert.equal(later.status.branch.start, "main")
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
