@@ -3,6 +3,7 @@ name: task
 description: "Use for Deliverable work: a standalone Task under <repo>/.piton/.local/tasks/, or one Epic's Task under <repo>/.piton/.local/epics/<epic>/tasks/. Initializes or resumes it, then follows the shared Deliverable lifecycle."
 allowed-tools:
     - "inspect_session_analysis"
+    - "route_task"
     - "preflight_task"
     - "init_local_task"
     - "init_github_task"
@@ -77,13 +78,15 @@ Then continue through the Deliverable lifecycle.
 
 ## Initialize
 
-| Request | Start |
-| --- | --- |
-| A Task directory, or an issue with one | [Resume](#resume) |
-| An Epic's issue: on GitHub, a sub-issue of an issue labelled Epic; on Linear, an issue in a Project | [Epic Task](#epic-task) |
-| Any other issue, or a description | [Standalone Task](#standalone-task) |
+Call `route_task` with the Task path, the issue's read, or `new`, and run the reads it asks for. Follow its route; never infer the parent yourself:
 
-Ask when the parent can't be told from an ordinary issue.
+| Route | Start |
+| --- | --- |
+| `resume` | [Resume](#resume) |
+| `epicTask` | [Epic Task](#epic-task), with its parent and Kind |
+| `restoreEpic` | [Restore the Epic](../../references/epic.md#restore-an-epic), then route again |
+| `standalone`, `new` | [Standalone Task](#standalone-task) |
+| `blocked` | Stop and tell the user the reason; ask on `unclassified` |
 
 ### Standalone Task
 
@@ -100,19 +103,11 @@ With the tracker off, or to keep a Task off it, call `init_local_task` instead. 
 
 ### Epic Task
 
-It starts from the queued issue its Epic's [Task issue processing](../../references/epic-tasks.md#task-issue-processing) created or linked, never a new one.
+It starts from the queued issue its Epic's [Task issue processing](../../references/epic-tasks.md#task-issue-processing) created or linked, never a new one. `route_task` has checked the plan Task and the Epic's [routing](../../references/epic.md#routing).
 
-1. **Find the parent and Task:** the issue's Epic, and the plan Task its marker tags.
-   - When this clone has no local directory for the Epic, [restore it](../../references/epic.md#restore-an-epic).
-   - An untagged Task means issue processing hasn't finished: resume the Epic first.
-   - A canceled Task can't start.
-2. **Adopt the issue:** read the tracker reference ([GitHub](../../references/integrations/tracker/github.md#adopt-selected-queued-work) or [Linear](../../references/integrations/tracker/linear.md#queue-intake-and-explicit-adoption)) and the [discussion rules](../../references/integrations/shared.md#provider-bodies). Complete its Task adoption preflight, including the parent check, then follow the adopted intake in [artifacts](../../references/artifacts.md#initialization-inputs). The Kind comes from the plan's `**Kind:**` line; a conflicting `kind` label stops for a user choice.
-3. **Routing:** the parent's `**Task target:**` line decides the target ([Epic routing](../../references/epic.md#routing)). When it's missing or conflicts with the intended target, ask the user before starting. An `epic` target needs the Epic branch locally.
-4. **Initialize:** call `init_github_task` or `init_linear_task` with the Epic as `parent`, the plan Task's Kind, the title, Request, and slug, and the issue as `object`.
-   - The issue's marker selects the plan Task, whose Kind must match. The plan is never rewritten.
-   - The tool names the directory and branch from the issue. The `tracker` format uses the Linear issue's `gitBranchName`.
-   - Then call `record_task_design` with the adopted issue read: the issue body is the design the Task follows.
-5. **Targets:** the Task copies the routing into its immutable `start` and `target`, either the Epic branch or the repository default. No delivery check runs.
+1. **Adopt the issue:** read the tracker reference ([GitHub](../../references/integrations/tracker/github.md#adopt-selected-queued-work) or [Linear](../../references/integrations/tracker/linear.md#queue-intake-and-explicit-adoption)) and the [discussion rules](../../references/integrations/shared.md#provider-bodies). Complete its Task adoption preflight, including the parent check, then follow the adopted intake in [artifacts](../../references/artifacts.md#initialization-inputs). The Kind is the route's plan Kind; a conflicting `kind` label stops for a user choice.
+2. **Initialize:** call `init_github_task` or `init_linear_task` with the route's `parent` and Kind, the title, Request, and slug, and the issue as `object`. It copies the routing into the Task's immutable `start` and `target` and never rewrites the plan.
+3. **Design:** call `record_task_design` with the adopted issue read: the issue body is the design the Task follows.
 
 Finish board setup before planning.
 

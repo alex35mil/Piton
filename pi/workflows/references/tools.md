@@ -25,6 +25,7 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 | Epic | `preflight_epic` | `init_github_epic` | `init_linear_epic` |
 | Task | `preflight_task`, for standalone work; an Epic Task adopts its queued issue | `init_github_task` | `init_linear_task` |
 
+- `route_task` decides how a `/task` request starts, from a Task path, an issue's reads, or new work. It never calls providers.
 - Preflight runs the local checks and changes nothing. The init tools take the tracker object, newly created or selected for adoption, in `object`.
 - `init_local_task` starts a standalone Task with no tracker item ([local Task](../skills/task/SKILL.md#local-task)). It needs no tracker.
 - `restore_epic` recreates a missing local Epic from its tracker read and published plan; `restore_epic_plan_source` returns an existing Epic's published plan as source without writing ([Epic restore](./epic.md#restore-an-epic)).

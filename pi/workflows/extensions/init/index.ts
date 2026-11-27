@@ -32,6 +32,7 @@ import {
     LinearProjectObjectSchema,
 } from "../integrations/records.js"
 import { seedInitializedEntityResourceIds } from "./resource-ids.js"
+import { routeTask, RouteTaskSchema, RouteTaskValidator } from "./route.js"
 
 export default function (pi: ExtensionAPI): void {
     const tools = workflowTools(pi, "initialization")
@@ -110,6 +111,18 @@ export default function (pi: ExtensionAPI): void {
             })
         }
     }
+
+    tools.registerTool({
+        name: "route_task",
+        label: "route_task",
+        description:
+            "Decide how a /task request starts: resume an existing Task, start an Epic's Task (with its parent, marker, plan Kind, and routing), restore a missing Epic first, start a standalone Task, start new standalone work, ask for one more read, or stop with a reason. Takes a Task path, a tracker issue's reads, or new work. Reads local artifacts and the given evidence only; never calls providers or writes.",
+        parameters: RouteTaskSchema,
+        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+            const result = routeTask(ctx.cwd, parse(RouteTaskValidator, params), mcpTools)
+            return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result }
+        },
+    })
 
     tools.registerTool({
         name: "init_local_task",

@@ -241,6 +241,7 @@ describe("workflow guidance structure", () => {
                 "inspect_session_analysis",
                 "inspect_integrations",
                 "inspect_gate",
+                "route_task",
                 "preflight_task",
                 "init_local_task",
             ],

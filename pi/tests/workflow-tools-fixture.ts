@@ -34,6 +34,7 @@ export const expectedWorkflowTools = [
     "init_github_task",
     "init_linear_task",
     "init_local_task",
+    "route_task",
     "restore_epic",
     "restore_epic_plan_source",
     "begin_resource_creation",

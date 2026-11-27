@@ -29,6 +29,8 @@ import {
     preflightEntity,
 } from "../workflows/extensions/init/entity.ts"
 import { formatInitializedEntity } from "../workflows/extensions/init/index.ts"
+import { routeTask, RouteTaskValidator } from "../workflows/extensions/init/route.ts"
+import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
 
 const repository = { owner: "example", repo: "project" }
 const forge = { provider: "github", mcpServer: "github", repository }
@@ -798,6 +800,157 @@ describe("workflow domain", () => {
             git(cwd, ["branch", "another"])
             const later = await init(cwd, standalone("Later", issue(61)))
             assert.equal(later.status.branch.start, "main")
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+})
+
+describe("Task routing", () => {
+    const catalog = workflowMcpCatalog("github", "linear")
+    const text = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] })
+    const githubRead = (method: string, issueNumber: number, response: unknown) => ({
+        tool: "mcp__github__issue_read",
+        arguments: { method, ...repository, issue_number: issueNumber },
+        response: text(response),
+    })
+    // Shapes copied from real issue_read responses: `get_parent` returns `{"parent": null}` or the parent summary.
+    const getIssue = (number: number, labels: string[] = []) => githubRead("get", number, { number, labels })
+    const getParent = (number: number, parent: number | null) =>
+        githubRead("get_parent", number, {
+            parent:
+                parent === null ? null : { number: parent, title: "Parent", url: "u", repository: "r", state: "OPEN" },
+        })
+    const linearRead = (id: string, projectId?: string) => ({
+        tool: "mcp__linear__get_issue",
+        arguments: { id },
+        response: text({ id, uuid: `${id.toLowerCase()}-uuid`, ...(projectId ? { projectId } : {}) }),
+    })
+    const route = (cwd: string, target: unknown) => routeTask(cwd, parse(RouteTaskValidator, { target }), catalog)
+
+    it("routes GitHub issues by their parent, asking for each read it needs", async () => {
+        const cwd = temporaryRepository()
+        try {
+            const tracker = requireTracker(loadIntegrationRoles(cwd), "test")
+            writeProjectConfig(cwd, { tracker: { ...tracker, labels: kindLabels() } })
+            assert.equal(route(cwd, { kind: "new" }).route, "new")
+            const top = { kind: "issue", issue: getIssue(5) }
+            assert.deepEqual(route(cwd, top).route, "readHierarchy")
+            assert.equal(route(cwd, { ...top, hierarchy: getParent(5, null) }).route, "standalone")
+            // A sub-issue of an issue that isn't a local Epic needs the parent's labels.
+            const sub = { ...top, hierarchy: getParent(5, 9) }
+            assert.equal(route(cwd, sub).route, "readParent")
+            assert.equal(route(cwd, { ...sub, parent: getIssue(9) }).route, "standalone")
+            assert.deepEqual(route(cwd, { ...sub, parent: getIssue(9, ["Kind: Epic"]) }), {
+                route: "restoreEpic",
+                epic: { provider: "github", issueNumber: 9 },
+                next: "Restore the Epic (restore_epic), then call route_task again with the same reads.",
+            })
+            assert.throws(() => route(cwd, { ...top, hierarchy: getParent(6, null) }), /issue_number must be 5/)
+
+            // A local Epic: its Tasks route by their plan marker.
+            const created = await init(cwd, epic("Rollout", issue(9)))
+            const epicPath = path.join(cwd, created.directory, "epic.md")
+            fs.writeFileSync(
+                epicPath,
+                epicPlan(
+                    created.status.branch.name,
+                    "default",
+                    planTask("Build", "#5", "bugfix"),
+                    planTask("Drop", "#6", "chore", "**Status:** `canceled`\n"),
+                    planTask("Later"),
+                ),
+            )
+            const child = (number: number) => ({
+                kind: "issue",
+                issue: getIssue(number),
+                hierarchy: getParent(number, 9),
+            })
+            const routed = route(cwd, child(5))
+            assert.deepEqual(
+                { ...routed, next: undefined },
+                {
+                    route: "epicTask",
+                    parent: { kind: "epic", epicDir: created.directory },
+                    marker: "#5",
+                    kind: "bugfix",
+                    taskTarget: "default",
+                    next: undefined,
+                },
+            )
+            assert.equal((route(cwd, child(6)) as { reason?: string }).reason, "canceled")
+            assert.equal((route(cwd, child(7)) as { reason?: string }).reason, "untagged")
+            fs.writeFileSync(epicPath, epicPlan("other", "default", planTask("Build", "#5", "bugfix")))
+            assert.equal((route(cwd, child(5)) as { reason?: string }).reason, "routing")
+            fs.writeFileSync(
+                epicPath,
+                epicPlan(created.status.branch.name, "default", planTask("Build", "#5", "bugfix")),
+            )
+
+            // Started Tasks resume, by issue or by path, with their parent.
+            const task = await init(cwd, {
+                ...standalone("Build", issue(5)),
+                kind: "bugfix",
+                parent: { kind: "epic", epicDir: created.directory },
+            })
+            const resumed = {
+                route: "resume",
+                entityDir: task.directory,
+                parent: { kind: "epic", epicDir: created.directory },
+            }
+            assert.deepEqual({ ...route(cwd, child(5)), next: undefined }, { ...resumed, next: undefined })
+            assert.deepEqual(
+                { ...route(cwd, { kind: "path", path: task.directory }), next: undefined },
+                { ...resumed, next: undefined },
+            )
+            const solo = await init(cwd, standalone("Solo", issue(11)))
+            assert.deepEqual(route(cwd, { kind: "path", path: solo.directory }).route, "resume")
+            assert.deepEqual((route(cwd, { kind: "issue", issue: getIssue(11) }) as { parent?: unknown }).parent, {
+                kind: "none",
+            })
+            assert.throws(() => route(cwd, { kind: "path", path: created.directory }), /is an Epic/)
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("asks the user when no Epic Kind label tells an Epic from an ordinary parent", () => {
+        const cwd = temporaryRepository()
+        try {
+            const target = { kind: "issue", issue: getIssue(5), hierarchy: getParent(5, 9), parent: getIssue(9) }
+            assert.equal((route(cwd, target) as { reason?: string }).reason, "unclassified")
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
+    it("routes Linear issues by their Project", async () => {
+        const cwd = temporaryRepository("linear")
+        try {
+            assert.equal(route(cwd, { kind: "issue", issue: linearRead("ENG-1") }).route, "standalone")
+            assert.deepEqual(
+                route(cwd, { kind: "issue", issue: linearRead("ENG-2", "project-uuid") }).route,
+                "restoreEpic",
+            )
+            assert.throws(
+                () => route(cwd, { kind: "issue", issue: linearRead("ENG-1"), hierarchy: getParent(1, null) }),
+                /for GitHub/,
+            )
+            const created = await init(
+                cwd,
+                epic("Rollout", {
+                    projectId: "project-uuid",
+                    projectUrl: "https://linear.app/example/project/rollout",
+                    createdAt: "2026-10-02T09:00:00.000Z",
+                }),
+            )
+            fs.writeFileSync(
+                path.join(cwd, created.directory, "epic.md"),
+                epicPlan(created.status.branch.name, "epic", planTask("Wire", "ENG-2")),
+            )
+            const routed = route(cwd, { kind: "issue", issue: linearRead("ENG-2", "project-uuid") })
+            assert.equal(routed.route, "epicTask")
+            assert.equal((routed as { taskTarget?: string }).taskTarget, "epic")
         } finally {
             fs.rmSync(cwd, { recursive: true, force: true })
         }
