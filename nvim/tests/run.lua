@@ -147,13 +147,13 @@ test("default tab opens the relative file and calls pi.show after setting cwd an
     local shown = 0
     fake_pi(function(opts)
         shown = shown + 1
-        equal({ layout = "float", draft = "/gig test " }, opts)
+        equal({ layout = "float", draft = "/task test " }, opts)
         equal(path, vim.fn.getcwd())
         equal(path .. "/file.txt", vim.api.nvim_buf_get_name(0))
         equal({ icon = config.get().icons.agent, name = "Fix login" }, vim.t.piton_label)
     end)
     local count = #vim.api.nvim_list_tabpages()
-    tabs.open({ path = path, label = "Fix login" }, "file.txt", "/gig test ")
+    tabs.open({ path = path, label = "Fix login" }, "file.txt", "/task test ")
     equal(count + 1, #vim.api.nvim_list_tabpages())
     equal(1, shown)
     equal(vim.api.nvim_get_current_tabpage(), tabs.find(path))
@@ -471,7 +471,9 @@ end
 
 local function summary(items)
     return vim.tbl_map(function(item)
-        return { item.id, item.section, item.kind.kind, item.kind.board }
+        -- A Task reads as `task:<parent>`.
+        local kind = item.kind.kind == "task" and ("task:" .. item.kind.parent.kind) or item.kind.kind
+        return { item.id, item.section, kind, item.kind.board }
     end, items)
 end
 
@@ -501,7 +503,7 @@ test("GitHub tracker and forge list each incoming pull request once, board ones 
     })
     local items = queue.load(source)
     equal({
-        { "github:o/r#3", "todo", "gig", nil },
+        { "github:o/r#3", "todo", "task:none", nil },
         { "github:o/r#7", "pull_requests", "pr", "backlog" },
         { "github:o/r#5", "pull_requests", "pr", nil },
         { "github:o/r#10", "pull_requests", "pr", nil },
@@ -524,7 +526,7 @@ test("Linear tracker with a GitHub forge lists the forge's incoming pull request
             {
                 id = "i1",
                 identifier = "ENG-1",
-                title = "A gig",
+                title = "A standalone Task",
                 url = "https://linear.app/i1",
                 priority = 0,
                 prioritySortOrder = 1,
@@ -534,7 +536,7 @@ test("Linear tracker with a GitHub forge lists the forge's incoming pull request
     })
     local items = queue.load(source)
     equal({
-        { "linear:issue:i1", "todo", "gig", nil },
+        { "linear:issue:i1", "todo", "task:none", nil },
         { "github:acme/app#5", "pull_requests", "pr", nil },
         { "github:acme/app#7", "pull_requests", "pr", nil },
         { "github:acme/app#10", "pull_requests", "pr", nil },
@@ -556,7 +558,7 @@ test("without a GitHub forge the queue lists no pull requests, board ones includ
     for _, forge in ipairs({ vim.NIL, { provider = "none" } }) do
         fake_roles(source, GITHUB_TRACKER, forge ~= vim.NIL and forge or nil)
         local requests = fake_providers({ board = board, open = OPEN })
-        equal({ { "github:o/r#3", "todo", "gig", nil } }, summary(queue.load(source)))
+        equal({ { "github:o/r#3", "todo", "task:none", nil } }, summary(queue.load(source)))
         equal({ { "board", "TRACKER_TOKEN" } }, requests)
     end
     fake_roles(source, LINEAR_TRACKER, { provider = "none" })
@@ -623,6 +625,33 @@ test("queue reads its tracker and credential through piton config get", function
         stdout = vim.json.encode({ format = 1, error = { kind = "invalid", message = "invalid config.toml" } }),
     }
     fails("invalid config.toml", function() queue.load(source) end)
+end)
+
+test("queue tells Epic Tasks from standalone Tasks and starts both with /task", function()
+    local queue = require("piton.queue")
+    local github = require("piton.queue.github")
+    local epic_label = "Kind: Epic"
+    local labelled = function(...)
+        return { nodes = vim.tbl_map(function(name)
+            return { name = name }
+        end, { ... }) }
+    end
+    equal({ kind = "epic" }, github.kind({ labels = labelled(epic_label) }, epic_label))
+    equal({ kind = "task", parent = { kind = "none" } }, github.kind({ labels = labelled() }, epic_label))
+    -- A sub-issue of an ordinary issue is standalone.
+    equal(
+        { kind = "task", parent = { kind = "none" } },
+        github.kind({ parent = { number = 4, title = "Plain", labels = labelled() } }, epic_label)
+    )
+    local child = github.kind({ parent = { number = 9, title = "Rollout", labels = labelled(epic_label) } }, epic_label)
+    equal({ kind = "task", parent = { kind = "epic", epic = { mention = "#9", marker = "#9", title = "Rollout" } } }, child)
+    equal({ kind = "unclassified" }, github.kind({ labels = labelled() }, nil))
+    local item = function(kind)
+        return { id = "x", section = "todo", mention = "#5", marker = "#5", title = "Build", url = "u", kind = kind }
+    end
+    equal("/task #5 Build ", queue.command(item(child)))
+    equal("/task #5 Build ", queue.command(item({ kind = "task", parent = { kind = "none" } })))
+    equal(nil, queue.command(item({ kind = "unclassified" })))
 end)
 
 test("queue requests run curl in the source through the configured credential hook", function()
