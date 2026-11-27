@@ -1,10 +1,10 @@
 //! A sandboxed session's filtered network: its gate, the proxy user of each sandbox it runs (pi's and each bash call's),
 //! and the decision for each connection the gate holds. The decision, in order: the sandbox's
 //! `[sandbox.network.connections]` entries, pi's trusted hosts (`pi::catalog`), the hosts the user allowed for this
-//! session, a `silence` entry (refused without asking), else the user is asked while the connection waits, one question
-//! at a time, sharing the session's question slot.
+//! session, a `silence` entry (refused without asking), else the user is asked while the connection waits: a
+//! [`NetworkQuestion`] in the session's questions (`questions.rs`), which every connection to the same destination joins.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use tokio::sync::oneshot;
 
@@ -23,13 +23,32 @@ pub struct Waiting {
     pub reply: oneshot::Sender<Verdict>,
 }
 
-/// The question showing for a connection, and the connections waiting on the same destination.
-pub struct Asking {
-    pub dialog_id: String,
+/// The question for a destination, and the connections waiting on it.
+pub struct NetworkQuestion {
     pub to: Destination,
     pub waiting: Vec<Waiting>,
-    /// When it's refused unanswered; none when `approval_timeout` is `"never"`.
-    pub deadline: Option<tokio::time::Instant>,
+}
+
+impl NetworkQuestion {
+    pub fn new(waiting: Waiting) -> Self {
+        Self {
+            to: waiting.to.clone(),
+            waiting: vec![waiting],
+        }
+    }
+
+    /// Drops the connections that stopped waiting (the gate let them go): true when none is left.
+    pub fn prune(&mut self) -> bool {
+        self.waiting.retain(|w| !w.reply.is_closed());
+        self.waiting.is_empty()
+    }
+
+    /// Answers every connection waiting on it.
+    pub fn settle(self, verdict: &Verdict) {
+        for waiting in self.waiting {
+            let _ = waiting.reply.send(verdict.clone());
+        }
+    }
 }
 
 /// The session's network.
@@ -42,8 +61,6 @@ pub struct Network {
     policies: HashMap<String, Policy>,
     /// Destinations the user allowed for this session.
     allowed: Vec<Destination>,
-    pub asking: Option<Asking>,
-    pub queued: VecDeque<Waiting>,
 }
 
 impl Network {
@@ -54,8 +71,6 @@ impl Network {
             ssh,
             policies: HashMap::new(),
             allowed: Vec::new(),
-            asking: None,
-            queued: VecDeque::new(),
         }
     }
 
@@ -148,15 +163,6 @@ impl Network {
             }
         }
     }
-
-    /// Answers every connection waiting on the question showing.
-    pub fn settle(&mut self, verdict: &Verdict) {
-        if let Some(asking) = self.asking.take() {
-            for waiting in asking.waiting {
-                let _ = waiting.reply.send(verdict.clone());
-            }
-        }
-    }
 }
 
 /// A refusal's reason when the user refused or didn't answer.
@@ -196,6 +202,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         }
     }
 

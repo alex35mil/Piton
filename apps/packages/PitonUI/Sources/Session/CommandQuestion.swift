@@ -2,8 +2,8 @@ import PitonKit
 import SwiftUI
 
 /// The block question for a command: the agent asks to run it again after the sandbox blocked it. A switch picks where
-/// it runs (a widened sandbox or the host), and the answers act there: once, deny, or always for this command or a
-/// pattern, in this project or everywhere. Left and right arrows move the switch with a hardware keyboard.
+/// it runs (a widened sandbox or the host), and the answers act there: once, this command for the session, deny, or
+/// always for this command or a pattern, in this project or everywhere. Left and right arrows move the switch with a hardware keyboard.
 struct CommandQuestionCard: View {
     let question: Question
     let decide: (Decision) -> Void
@@ -27,11 +27,19 @@ struct CommandQuestionCard: View {
         }
     }
 
+    /// A bash call runs again; a program from pi's process runs for the first time.
+    private var title: String {
+        switch question.asker {
+        case .agent, .piton: "Run again?"
+        case .pi: "Run?"
+        }
+    }
+
     private var variableCount: Int { question.writableVars.reduce(0) { $0 + $1.names.count } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionLabel("Run again?", color: color)
+            SectionLabel(title, color: color)
             Text(question.command).font(typography.data(.callout)).textSelection(.enabled)
             if let reason = question.reason {
                 Text("Why: \(reason)").font(typography.content(.callout)).foregroundStyle(Theme.secondary)
@@ -76,6 +84,8 @@ struct CommandQuestionCard: View {
             HStack {
                 Button(runtime == .host ? "Run once on the host" : "Allow once") { decide(.once(runtime)) }
                     .buttonStyle(OutlineButtonStyle(prominent: true, color: color))
+                Button("For this session") { decide(.session(runtime)) }
+                    .buttonStyle(OutlineButtonStyle(color: color))
                 Button("Deny") { decide(.deny) }
                     .buttonStyle(OutlineButtonStyle(color: Theme.secondary))
             }

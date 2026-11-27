@@ -106,6 +106,120 @@ pub struct Policy {
     /// session it came from (`(with message "piton-<tag>")`). Empty: untagged (`piton sandbox show`, tests).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tag: String,
+    /// Whether a token can reopen this sandbox's liftable denies while it runs: pi's own sandbox only (#408).
+    #[serde(default)]
+    pub lifts: Lifts,
+}
+
+/// Whether a sandbox carries the companion rules a lift token reopens (`agent/lift.rs`).
+///
+/// Each liftable deny is followed by `(allow <op> (require-all <its filter> (require-not <each earlier floor deny's
+/// filter>)… (extension "<class>")))`, in Piton's own classes. A floor deny after it wins by order, and one before it is
+/// excluded, so a token reopens only what a liftable deny closed (docs/pi-findings.md, "Lifts").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Lifts {
+    /// No companions: a bash call's sandbox (never given a token), `piton sandbox show`.
+    #[default]
+    Off,
+    /// pi's own sandbox, with whether the credential denies are floor (fnox on).
+    Pi { credentials: super::grant::Credentials },
+}
+
+/// The extension classes of Piton's tokens: reads (credentials), writes (files, folders, socket connects and binds),
+/// Mach services, and TCP listening.
+pub const LIFT_READ: &str = "com.piton.lift.read";
+pub const LIFT_WRITE: &str = "com.piton.lift.write";
+pub const LIFT_MACH: &str = "com.piton.lift.mach";
+pub const LIFT_LISTEN: &str = "com.piton.lift.listen";
+
+/// The class that reopens a deny of `operation`, when one does.
+fn lift_class(operation: &str) -> Option<&'static str> {
+    match operation {
+        "file-write*" | "network-outbound" | "network-bind" => Some(LIFT_WRITE),
+        "file-read-data" => Some(LIFT_READ),
+        "mach-lookup" => Some(LIFT_MACH),
+        "network-inbound" => Some(LIFT_LISTEN),
+        _ => None,
+    }
+}
+
+/// One emitted rule, marked for companions: a deny is floor or liftable; anything else is emitted as is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Emitted {
+    Plain(String),
+    Deny { rule: String, liftable: bool },
+}
+
+impl Emitted {
+    fn rule(&self) -> &str {
+        match self {
+            Emitted::Plain(rule) | Emitted::Deny { rule, .. } => rule,
+        }
+    }
+}
+
+/// The rules in order, each liftable deny followed by its companion under [`Lifts::Pi`]. Every floor deny of the same
+/// operation is excluded from a companion, wherever it stands: one after it wins by order anyway, and one before it
+/// would otherwise be reopened (Seatbelt's last match). A floor deny of a whole operation leaves its liftable denies
+/// without companions.
+fn with_companions(emitted: Vec<Emitted>, lifts: Lifts) -> Vec<String> {
+    match lifts {
+        Lifts::Off => return emitted.iter().map(|e| e.rule().to_string()).collect(),
+        Lifts::Pi { .. } => {}
+    }
+    let floors: Vec<(String, String)> = emitted
+        .iter()
+        .filter_map(|e| match e {
+            Emitted::Deny { rule, liftable: false } => split_deny(rule),
+            Emitted::Deny { liftable: true, .. } | Emitted::Plain(_) => None,
+        })
+        .collect();
+    let companion = |operation: &str, filter: &str| -> Option<String> {
+        let class = lift_class(operation)?;
+        let mut terms: Vec<String> = Vec::new();
+        if !filter.is_empty() {
+            terms.push(filter.to_string());
+        }
+        for (op, floor) in &floors {
+            if op != operation {
+                continue;
+            }
+            if floor.is_empty() {
+                return None;
+            }
+            let excluded = format!("(require-not {floor})");
+            if !terms.contains(&excluded) {
+                terms.push(excluded);
+            }
+        }
+        terms.push(format!("(extension \"{class}\")"));
+        Some(match terms.as_slice() {
+            [only] => format!("(allow {operation} {only})"),
+            _ => format!("(allow {operation} (require-all {}))", terms.join(" ")),
+        })
+    };
+    let mut out = Vec::with_capacity(emitted.len() * 2);
+    for e in emitted {
+        match e {
+            Emitted::Plain(rule) | Emitted::Deny { rule, liftable: false } => out.push(rule),
+            Emitted::Deny { rule, liftable: true } => {
+                let extra = split_deny(&rule).and_then(|(op, filter)| companion(&op, &filter));
+                out.push(rule);
+                out.extend(extra);
+            }
+        }
+    }
+    out
+}
+
+/// `(deny <operation> <filter>)` as its parts; `None` for anything else.
+fn split_deny(rule: &str) -> Option<(String, String)> {
+    let body = rule.strip_prefix("(deny ")?.strip_suffix(')')?;
+    Some(match body.split_once(' ') {
+        Some((operation, filter)) => (operation.to_string(), filter.to_string()),
+        None => (body.to_string(), String::new()),
+    })
 }
 
 /// The prefix of every launch's tag in the kernel's log.
@@ -446,9 +560,15 @@ impl Policy {
 
     /// The listening rule, after every other network rule: closed refuses every TCP `listen()` (nono allows it); open
     /// emits nothing. `tcp`, not `ip`: an `ip` filter also refuses UDP replies, DNS included (docs/pi-findings.md).
-    fn listen_rules(&self) -> Vec<String> {
+    /// Closed is liftable; the user's own `false` is floor.
+    fn listen_rules(&self) -> Vec<Emitted> {
+        let deny = |liftable| Emitted::Deny {
+            rule: LISTEN_DENY.to_string(),
+            liftable,
+        };
         match &self.listen {
-            Listen::Closed | Listen::Denied { .. } => vec![LISTEN_DENY.to_string()],
+            Listen::Closed => vec![deny(true)],
+            Listen::Denied { .. } => vec![deny(false)],
             Listen::Open { .. } => Vec::new(),
         }
     }
@@ -499,14 +619,18 @@ impl Policy {
     }
 
     /// The Mach service and app rules, after the path rules and before the keychain's: under a list, every lookup is
-    /// denied and the listed ones allowed again (nono allows every lookup first).
-    fn service_rules(&self) -> Vec<String> {
+    /// denied and the listed ones allowed again (nono allows every lookup first). The closed list is liftable; a deny the
+    /// user wrote is floor, any other entry's deny (a preset's) liftable.
+    fn service_rules(&self) -> Vec<Emitted> {
         let mut out = Vec::new();
         match &self.services {
             Services::Every { .. } => {}
             Services::Listed { grants } => {
                 // Least specific first: Seatbelt's last match decides, as `decide_service` does.
-                out.push("(deny mach-lookup)".to_string());
+                out.push(Emitted::Deny {
+                    rule: "(deny mach-lookup)".to_string(),
+                    liftable: true,
+                });
                 let mut sorted: Vec<&ServiceGrant> = grants.iter().collect();
                 sorted.sort_by_key(|g| (g.key.specificity(), effect_rank(g.effect)));
                 for grant in sorted {
@@ -514,7 +638,7 @@ impl Policy {
                         Effect::Allow => "allow",
                         Effect::Deny => "deny",
                     };
-                    out.push(match &grant.key {
+                    let rule = match &grant.key {
                         ServiceKey::Every => format!("({effect} mach-lookup)"),
                         ServiceKey::Name(ServiceName::Exact(name)) => {
                             format!("({effect} mach-lookup (global-name \"{name}\"))")
@@ -522,6 +646,22 @@ impl Policy {
                         ServiceKey::Name(ServiceName::Prefix(start)) => {
                             format!("({effect} mach-lookup (global-name-prefix \"{start}\"))")
                         }
+                    };
+                    out.push(match grant.effect {
+                        Effect::Allow => Emitted::Plain(rule),
+                        Effect::Deny => Emitted::Deny {
+                            rule,
+                            liftable: match &grant.source {
+                                Source::Config { .. } => false,
+                                Source::Workspace
+                                | Source::BuiltIn { .. }
+                                | Source::AgentDir
+                                | Source::Preset { .. }
+                                | Source::NonoGroup { .. }
+                                | Source::Piton { .. }
+                                | Source::FnoxConfig => true,
+                            },
+                        },
                     });
                 }
             }
@@ -530,8 +670,8 @@ impl Policy {
             // The default refuses both; with a tag, its records carry it.
             Apps::Closed | Apps::Denied { .. } => {}
             Apps::Open { .. } => {
-                out.push("(allow lsopen)".to_string());
-                out.push("(allow appleevent-send)".to_string());
+                out.push(Emitted::Plain("(allow lsopen)".to_string()));
+                out.push(Emitted::Plain("(allow appleevent-send)".to_string()));
             }
         }
         out
@@ -545,11 +685,25 @@ impl Policy {
     /// one wins: docs/pi-findings.md), so a refusal of any operation reaches its call; and a tagged
     /// `(deny file-write*)` for writes outside every grant. Neither shadows anything: the library grants no writes of its
     /// own for Piton's capability set, and every allow comes after them.
+    ///
+    /// Under [`Lifts::Pi`], each liftable deny is followed by its companion ([`with_companions`]); the leading write
+    /// deny is liftable (writes outside every grant), so pi's sandbox is always tagged when it carries companions.
     pub fn seatbelt(&self) -> Result<Vec<String>, String> {
-        let tagged = self.seatbelt_untagged()?;
+        let mut emitted = self.emitted()?;
         if self.tag.is_empty() {
-            return Ok(tagged);
+            return Ok(with_companions(emitted, self.lifts));
         }
+        emitted.splice(
+            0..0,
+            [
+                Emitted::Plain("(deny default)".into()),
+                Emitted::Deny {
+                    rule: "(deny file-write*)".into(),
+                    liftable: true,
+                },
+            ],
+        );
+        let tagged = with_companions(emitted, self.lifts);
         let message = format!("(with message \"{TAG_PREFIX}{}\")", escape_tag(&self.tag));
         let tag = |rule: String| match rule.strip_prefix("(deny ").and_then(|r| r.strip_suffix(')')) {
             Some(body) => format!("(deny {body} {message})"),
@@ -557,15 +711,36 @@ impl Policy {
         };
         let is_network = |rule: &String| rule.starts_with("(allow network") || rule.starts_with("(deny network");
         let (network, other): (Vec<String>, Vec<String>) = tagged.into_iter().partition(is_network);
-        let mut out = vec![tag("(deny default)".into()), tag("(deny file-write*)".into())];
-        out.extend(other.into_iter().map(tag));
-        out.extend(network.into_iter().map(tag));
-        Ok(out)
+        Ok(other.into_iter().chain(network).map(tag).collect())
     }
 
-    fn seatbelt_untagged(&self) -> Result<Vec<String>, String> {
-        let mut out = Vec::new();
+    /// The credentials setting liftability is judged under: fnox's, for pi's sandbox; floor otherwise (no companions
+    /// are emitted then, so it decides nothing).
+    fn lift_credentials(&self) -> super::grant::Credentials {
+        match self.lifts {
+            Lifts::Pi { credentials } => credentials,
+            Lifts::Off => super::grant::Credentials::Floor,
+        }
+    }
+
+    /// The rules before companions and tags, each deny marked floor or liftable.
+    fn emitted(&self) -> Result<Vec<Emitted>, String> {
+        use super::grant::{Liftability, liftability};
+        let credentials = self.lift_credentials();
+        let mut out: Vec<Emitted> = Vec::new();
+        let marked = |rule: String, liftable: bool| match rule.starts_with("(deny ") {
+            true => Emitted::Deny { rule, liftable },
+            false => Emitted::Plain(rule),
+        };
         for rule in &self.rules {
+            let liftable = match rule.effect {
+                Effect::Allow => false,
+                Effect::Deny => match liftability(rule, credentials) {
+                    Liftability::Liftable(_) => true,
+                    Liftability::Floor(_) => false,
+                },
+            };
+            let mut push = |text: String| out.push(marked(text, liftable));
             let filter = |path: &Path, network: bool| -> Result<String, String> {
                 let p = escape(path)?;
                 Ok(match (&rule.target, network) {
@@ -592,12 +767,12 @@ impl Policy {
                         source: source.clone(),
                         checkout: checkout.clone(),
                     };
-                    out.extend(roots.seatbelt_rules());
+                    roots.seatbelt_rules().into_iter().for_each(&mut push);
                     continue;
                 }
                 Target::GitControl { control } => {
                     // Write denies only, like the protected files.
-                    out.extend(control.seatbelt_rules());
+                    control.seatbelt_rules().into_iter().for_each(&mut push);
                     continue;
                 }
             };
@@ -606,57 +781,70 @@ impl Policy {
                     (Effect::Allow, Access::Read) => {
                         // Seatbelt ranks a rule's action above its order: a later `file-read*` allow loses to an
                         // earlier `file-read-data` deny. Name the actions the deny names, so the later allow wins.
-                        out.push(format!("(allow file-read* {})", filter(path, false)?));
-                        out.push(format!("(allow file-read-data {})", filter(path, false)?));
-                        out.push(format!("(allow file-read-metadata {})", filter(path, false)?));
-                        out.push(format!("(allow process-exec* {})", filter(path, false)?));
-                        out.push(format!("(allow file-map-executable {})", filter(path, false)?));
+                        push(format!("(allow file-read* {})", filter(path, false)?));
+                        push(format!("(allow file-read-data {})", filter(path, false)?));
+                        push(format!("(allow file-read-metadata {})", filter(path, false)?));
+                        push(format!("(allow process-exec* {})", filter(path, false)?));
+                        push(format!("(allow file-map-executable {})", filter(path, false)?));
                     }
-                    (Effect::Allow, Access::Write) => out.push(format!("(allow file-write* {})", filter(path, false)?)),
+                    (Effect::Allow, Access::Write) => push(format!("(allow file-write* {})", filter(path, false)?)),
                     (Effect::Allow, Access::Connect) => {
-                        out.push(format!("(allow network-outbound {})", filter(path, true)?));
+                        push(format!("(allow network-outbound {})", filter(path, true)?));
                     }
                     (Effect::Allow, Access::Bind) => {
-                        out.push(format!("(allow network-bind {})", filter(path, true)?));
+                        push(format!("(allow network-bind {})", filter(path, true)?));
                     }
                     (Effect::Deny, Access::Read) => {
                         // A denied file can still be listed and stat'ed, as nono's deny groups do.
-                        out.push(format!("(allow file-read-metadata {})", filter(path, false)?));
-                        out.push(format!("(deny file-read-data {})", filter(path, false)?));
-                        out.push(format!("(deny process-exec* {})", filter(path, false)?));
-                        out.push(format!("(deny file-map-executable {})", filter(path, false)?));
+                        push(format!("(allow file-read-metadata {})", filter(path, false)?));
+                        push(format!("(deny file-read-data {})", filter(path, false)?));
+                        push(format!("(deny process-exec* {})", filter(path, false)?));
+                        push(format!("(deny file-map-executable {})", filter(path, false)?));
                     }
-                    (Effect::Deny, Access::Write) => out.push(format!("(deny file-write* {})", filter(path, false)?)),
+                    (Effect::Deny, Access::Write) => push(format!("(deny file-write* {})", filter(path, false)?)),
                     (Effect::Deny, Access::Connect) => {
-                        out.push(format!("(deny network-outbound {})", filter(path, true)?));
+                        push(format!("(deny network-outbound {})", filter(path, true)?));
                     }
                     (Effect::Deny, Access::Bind) => {
-                        out.push(format!("(deny network-bind {})", filter(path, true)?));
+                        push(format!("(deny network-bind {})", filter(path, true)?));
                     }
                 }
             }
         }
         out.extend(self.service_rules());
         // The keychain's services decide after every service rule, so no entry (a `com.apple.*` prefix) reopens them;
-        // the library's own denies come before the platform rules and carry no message.
-        let effect = match self.keychain {
-            true => "allow",
-            false => "deny",
+        // the library's own denies come before the platform rules and carry no message. Liftable while fnox is off.
+        let keychain_liftable = match credentials {
+            super::grant::Credentials::Liftable => true,
+            super::grant::Credentials::Floor => false,
         };
         for service in KEYCHAIN_SERVICES {
-            out.push(format!("({effect} mach-lookup (global-name \"{service}\"))"));
+            out.push(match self.keychain {
+                true => Emitted::Plain(format!("(allow mach-lookup (global-name \"{service}\"))")),
+                false => Emitted::Deny {
+                    rule: format!("(deny mach-lookup (global-name \"{service}\"))"),
+                    liftable: keychain_liftable,
+                },
+            });
         }
         // Network rules after the rest, keeping their own order, after the base's socket denies: a path filter on a
         // network operation matches Unix sockets only, so TCP stays as the library leaves it.
-        let (network, other): (Vec<String>, Vec<String>) = out
-            .into_iter()
-            .partition(|rule| rule.starts_with("(allow network") || rule.starts_with("(deny network"));
-        let base = SOCKET_BASE.iter().map(|rule| rule.to_string());
+        let (network, other): (Vec<Emitted>, Vec<Emitted>) = out.into_iter().partition(|e| {
+            let rule = e.rule();
+            rule.starts_with("(allow network") || rule.starts_with("(deny network")
+        });
+        // The base's socket denies close what no entry opened: liftable.
+        let base = SOCKET_BASE.iter().map(|rule| Emitted::Deny {
+            rule: rule.to_string(),
+            liftable: true,
+        });
+        // TCP and UDP port rules: the gate's question lifts hosts, never a token, so they take no part in companions.
+        let ports = self.network_rules().into_iter().map(Emitted::Plain);
         Ok(other
             .into_iter()
             .chain(base)
             .chain(network)
-            .chain(self.network_rules())
+            .chain(ports)
             .chain(self.listen_rules())
             .collect())
     }
@@ -741,7 +929,7 @@ mod tests {
             effect,
             access: access.to_vec(),
             target: Target::Subpath { path: path.into() },
-            source: Source::Piton { what: what.into() },
+            source: Source::BuiltIn { what: what.into() },
         }
     }
 
@@ -768,6 +956,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a);
         assert!(d("/etc/hosts", Access::Read).allowed);
@@ -817,6 +1006,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         };
         let d = |p: &str, a| policy.decide(Path::new(p), a).allowed;
         assert!(!d("/H/.SSH/id_ed25519", Access::Read));
@@ -840,7 +1030,9 @@ mod tests {
                     target: Target::Literal {
                         path: "/s/agent.sock".into(),
                     },
-                    source: Source::Piton { what: "agent".into() },
+                    source: Source::Piton {
+                        area: crate::launch::sandbox::PitonArea::AgentSocket,
+                    },
                 },
                 rule(Effect::Allow, &[Access::Read], "/s/logs", "logs"),
                 Rule {
@@ -863,6 +1055,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         };
         assert!(policy.decide(Path::new("/a/lock-1/x"), Access::Write).allowed);
         assert!(!policy.decide(Path::new("/a/lock"), Access::Write).allowed);
@@ -960,6 +1153,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         }
     }
 

@@ -21,6 +21,7 @@ Upgrading from an older version? See the [upgrade guide](UPGRADING.md).
 - [**rules**](extensions/rules/) — rule files injected into system prompt
 - [**status**](extensions/status/) — runtime and rate-limit status entries for pi.nvim
 - [**web-search**](extensions/web-search/) — `web_search` tool via Brave Search API
+- [**workers**](extensions/workers/) — `create_worker`, `list_workers`, `delete_worker`: worker operations through piton's daemon, which asks the user
 
 ## Skills
 
@@ -46,4 +47,4 @@ Every project uses a tracker (GitHub or Linear) and a GitHub forge. The tracker 
 
 ## Parallel workers
 
-Run several Gigs or Tasks at once, each in its own copy-on-write copy of the repository with Pi inside Piton's sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and `PITON_RUNTIME=sandbox` lets them use separate `[tools.permissions.sandbox]` rules. Piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).
+Run several Gigs or Tasks at once, each in its own copy-on-write copy of the repository with Pi inside Piton's sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and a sandboxed session's runtime lets them use separate `[tools.permissions.sandbox]` rules. Piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).

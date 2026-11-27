@@ -30,8 +30,8 @@ pub use self::{
         paths::{AGENTS_DIR, LOCAL_DIR, PITON_DIR, Paths, Scope, Sharing, expand_home, home},
         tables::{
             AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Effect, FileAccess,
-            Grant, GrantEntries, Listed, NetworkTarget, Origin, PathKey, PermissionSettings, Preset, Profile,
-            Reconfirm, ServiceKey, ServiceName, Silence, SilenceTarget,
+            Grant, GrantEntries, Listed, NetworkTarget, Origin, PathKey, PermissionMode, Preset, Profile, Reconfirm,
+            ServiceKey, ServiceName, Silence, SilenceTarget, WorkerPermission, WorkerPermissions,
         },
     },
     read::{

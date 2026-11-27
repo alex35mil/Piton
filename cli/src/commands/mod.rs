@@ -25,8 +25,9 @@ pub use self::{control::control, logging::logging_state};
 // Unknown flags are errors, as with clap (usage's default treats them as values).
 #[usage(bin = "piton", version = crate::VERSION, unknown_flags = "error", completion)]
 struct Cli {
-    /// The global configuration folder (default $XDG_CONFIG_HOME/piton, else ~/.config/piton).
-    #[usage(long, global, env = "PITON_CONFIG_HOME")]
+    /// The global configuration folder (default: the session's inside one, else $XDG_CONFIG_HOME/piton, else
+    /// ~/.config/piton).
+    #[usage(long, global)]
     config_home: Option<PathBuf>,
     /// Daemon socket; overrides the config.
     #[usage(long, global, env = "PITON_SOCKET")]
@@ -231,7 +232,7 @@ enum ConfigAction {
         /// Workspace (default: current directory).
         #[usage(long)]
         workspace: Option<PathBuf>,
-        /// host or sandbox (default: from PITON_RUNTIME).
+        /// host or sandbox (default: the session's inside one, else host).
         #[usage(long)]
         runtime: Option<String>,
         /// Only the global tier's settings for the pi package that never depend on a project (`[debugging]` from
@@ -318,6 +319,9 @@ enum SandboxAction {
         #[usage(long)]
         workspace: Option<PathBuf>,
     },
+    /// Print `true` when this process runs inside a sandbox, else `false`, as the kernel says (no daemon or
+    /// configuration needed). For tasks that can't nest a sandbox, or must run on the host.
+    Inside,
 }
 
 /// The access `piton sandbox why` checks besides reading: one at most.
@@ -338,24 +342,26 @@ pub enum WhyAccess {
 
 #[derive(Subcommands)]
 enum WorkerAction {
-    /// Clone the source of FROM into `<parent>/<repo>--<name>`.
+    /// Clone SOURCE into `<parent>/<repo>--<name>`.
     Create {
         name: String,
         /// The source checkout or any of its workers (default: current directory).
         #[usage(long)]
-        from: Option<PathBuf>,
+        source: Option<PathBuf>,
         #[usage(long)]
         label: Option<String>,
+        /// The stable ID of the work item (a tracker issue or Project, an incoming pull request) the worker is for.
         #[usage(long)]
-        issue: Option<String>,
+        item_id: Option<String>,
         /// Approve this commit's changes to protected files: Piton writes them, the rest of the update runs in the sandbox.
         #[usage(long, value_name = "SHA")]
         approve_source_update: Option<String>,
     },
-    /// List the workers of FROM's source, with their live sessions.
+    /// List the workers of SOURCE, with their live sessions.
     Ls {
+        /// The source checkout or any of its workers (default: current directory).
         #[usage(long)]
-        from: Option<PathBuf>,
+        source: Option<PathBuf>,
     },
     /// Stop the worker's sessions and delete it.
     Delete {
@@ -396,8 +402,7 @@ pub fn main() -> ExitCode {
     let cli = Cli::parse();
     // Commands that need neither the config nor the runtime.
     match &cli.command {
-        Cmd::Service { action } => return service(action, cli.config_home.as_deref()),
-        Cmd::Config { action } => return config::run(action),
+        Cmd::Config { action } => return config::run(action, cli.config_home.as_deref()),
         Cmd::SandboxExec { command } => {
             let command: Vec<std::ffi::OsString> = command.iter().map(Into::into).collect();
             let error = crate::launch::sandbox::exec(&command);
@@ -445,11 +450,56 @@ pub fn main() -> ExitCode {
         | Cmd::Trust { .. }
         | Cmd::Setup { .. }
         | Cmd::Sandbox { .. }
-        | Cmd::Logging { .. } => {}
+        | Cmd::Logging { .. }
+        | Cmd::Service { .. } => {}
+    }
+    // Inside a session, every command that reads the daemon's configuration uses the session's global tier, and `piton
+    // sandbox show|why` its kept grants too (`facts`): the workspace's environment can't move them. The daemon itself
+    // uses its own; the launch helpers returned above without reading any.
+    let view = match &cli.command {
+        // Needs neither the daemon nor the configuration: asked where the daemon may be missing (mise tasks).
+        Cmd::Sandbox {
+            action: SandboxAction::Inside,
+        } => {
+            println!("{}", crate::launch::sandbox::inside());
+            return ExitCode::SUCCESS;
+        }
+        Cmd::Sandbox { .. }
+        | Cmd::Attach
+        | Cmd::Ls { .. }
+        | Cmd::Start { .. }
+        | Cmd::Stop { .. }
+        | Cmd::Worker { .. }
+        | Cmd::State { .. }
+        | Cmd::Trust { .. }
+        | Cmd::Setup { .. }
+        | Cmd::Logging { .. }
+        | Cmd::Service { .. } => match crate::agent::facts::View::current() {
+            Ok(view) => view,
+            Err(e) => {
+                eprintln!("piton: {e}");
+                return ExitCode::from(3);
+            }
+        },
+        Cmd::Daemon
+        | Cmd::Config { .. }
+        | Cmd::SandboxExec { .. }
+        | Cmd::LaunchExec { .. }
+        | Cmd::GateConnect { .. }
+        | Cmd::Tools
+        | Cmd::Completion { .. } => crate::agent::facts::View::NoSession,
+    };
+    let config_home = match (&cli.config_home, &view) {
+        (Some(dir), _) => Some(dir.clone()),
+        (None, crate::agent::facts::View::Session(facts)) => Some(facts.global.clone()),
+        (None, crate::agent::facts::View::NoSession) => None,
+    };
+    if let Cmd::Service { action } = &cli.command {
+        return service(action, config_home.as_deref());
     }
     // Setup reports a broken configuration (its configuration step) instead of refusing to start over it.
     let loaded = match &cli.command {
-        Cmd::Setup { .. } => Ok(crate::config::daemon_lenient(cli.config_home.as_deref())),
+        Cmd::Setup { .. } => Ok(crate::config::daemon_lenient(config_home.as_deref())),
         Cmd::Daemon
         | Cmd::Attach
         | Cmd::Ls { .. }
@@ -466,7 +516,7 @@ pub fn main() -> ExitCode {
         | Cmd::LaunchExec { .. }
         | Cmd::GateConnect { .. }
         | Cmd::Tools
-        | Cmd::Completion { .. } => crate::config::daemon(cli.config_home.as_deref()),
+        | Cmd::Completion { .. } => crate::config::daemon(config_home.as_deref()),
     };
     let config = match loaded {
         Ok(mut config) => match (cli.socket, crate::config::Build::CURRENT) {
@@ -498,14 +548,14 @@ pub fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let code = runtime.block_on(run(cli.command, config));
+    let code = runtime.block_on(run(cli.command, config, view));
     crate::logging::flush();
     // `piton attach` may still be blocked reading stdin on a blocking thread; don't wait for it.
     runtime.shutdown_background();
     code
 }
 
-async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
+async fn run(command: Cmd, config: crate::config::DaemonConfig, view: crate::agent::facts::View) -> ExitCode {
     match command {
         Cmd::Service { .. }
         | Cmd::Completion { .. }
@@ -516,7 +566,7 @@ async fn run(command: Cmd, config: crate::config::DaemonConfig) -> ExitCode {
         | Cmd::Tools => {
             unreachable!("handled before the runtime starts")
         }
-        Cmd::Sandbox { action } => sandbox::run(action, &config).await,
+        Cmd::Sandbox { action } => sandbox::run(action, &config, &view).await,
         Cmd::Daemon => match crate::daemon::run(config).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

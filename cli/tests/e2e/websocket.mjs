@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
@@ -34,7 +34,7 @@ function setup() {
     const whoisFile = join(dir, "whois.json");
     writeFileSync(whoisFile, OWN_PHONE);
     const log = join(dir, "piton.log");
-    const config = writeConfig(dir, {
+    writeConfig(dir, {
         daemon: {
             socket: join(dir, "piton.sock"),
             log,
@@ -48,12 +48,12 @@ function setup() {
         host: { default_attach_mode: "host", stop_empty_session_after: "60s", roots: [root] },
     });
     const stopped = join(dir, "tailscale-stopped");
-    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40", PITON_FAKE_WHOIS: whoisFile, PITON_FAKE_STOPPED: stopped, PITON_LOGS_DIR: join(dir, "logging") };
+    const env = testEnv({ PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40", PITON_FAKE_WHOIS: whoisFile, PITON_FAKE_STOPPED: stopped, PITON_LOGS_DIR: join(dir, "logging") });
     return { dir, ws, whoisFile, log, stopped, env };
 }
 
 function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(piton, pitonArgs(ctx.dir, ["daemon"]), { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     d.err = () => err;
@@ -135,7 +135,7 @@ const tests = {
         await a.closedP;
         await sleep(100);
         assert.ok(!readFileSync(ctx.log, "utf8").includes("TCP accepted"));
-        execFileSync(piton, ["logging", "debug", "--until-disabled"], { env: ctx.env });
+        execFileSync(piton, pitonArgs(ctx.dir, ["logging", "debug", "--until-disabled"]), { env: ctx.env });
         const b = wsClient(ctx, "debug");
         assert.equal(await b.opened, true);
         const listed = await b.req("sessions.list");
@@ -144,7 +144,7 @@ const tests = {
         await b.closedP;
         await sleep(100);
         assert.equal((readFileSync(ctx.log, "utf8").match(/TCP accepted/g) ?? []).length, 1);
-        execFileSync(piton, ["logging", "info"], { env: ctx.env });
+        execFileSync(piton, pitonArgs(ctx.dir, ["logging", "info"]), { env: ctx.env });
         const c = wsClient(ctx, "info-again");
         assert.equal(await c.opened, true);
         const again = await c.req("sessions.list");

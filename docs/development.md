@@ -55,6 +55,9 @@ docs/              confirmed documentation
 - Protocol fixtures (`apps/packages/PitonKit/Tests/Fixtures`) are written by the daemon test `fixtures`
   (`cli/src/session/view.rs`), which fails when they're stale. After a protocol change, run
   `PITON_WRITE_FIXTURES=1 cargo test fixtures` in `cli/`, then fix PitonKit until `mise run apps:test` passes.
+- Every tool the pi package registers works with every model: one tool per operation, a plain object root, string
+  enums (`.agents/rules/tool-schemas.md`, #81). `pi/tests/tool-schemas.test.ts` checks every registered tool, including
+  against Claude Code's schema normalization.
 - The app integration tests always run this checkout's debug build (`cli/target/debug/piton`), never the installed
   `piton` the daemon names in a session's `PITON_BIN`: `apps:test` and `apps:test:e2e` build it first, and a bare
   `swift test` fails them when it's missing.
@@ -149,9 +152,10 @@ use the attempt stages, error codes, event timestamps, and collector freshness a
 
 ## Sandboxed agent workers
 
-- Every sandboxed pi gets `PITON_RUNTIME=sandbox` from the daemon. The Swift tasks then turn off SwiftPM's and the
-  compiler's own sandboxes (`--disable-sandbox`, `OTHER_SWIFT_FLAGS=-disable-sandbox`), since macOS doesn't nest
-  sandboxes. `mise run --dry-run <task>` shows the command.
+- Tasks ask this checkout's build whether they run inside a sandbox (`cli/target/debug/piton sandbox inside`, which
+  asks the kernel; each such task depends on `cli:build`), never the installed `piton`, which may predate the code.
+  Inside one, the Swift tasks turn off SwiftPM's and the compiler's own sandboxes (`--disable-sandbox`,
+  `OTHER_SWIFT_FLAGS=-disable-sandbox`), since macOS doesn't nest sandboxes, and host-only tasks refuse.
 - `[sandbox]` in `.piton/config.toml` turns on the `swift` and `rust` presets: SwiftPM's and clang's caches, Xcode's
   DerivedData, and cargo's registry and locks. Everything else this project needs (Xcode's preferences, Piton's logs)
   is readable by default; the daemon's sockets and database stay closed. It's read from the source checkout, so an

@@ -1,4 +1,4 @@
-import { resetGlobalSettings, TEST_CONFIG_HOME } from "./host-runtime.ts"
+import { resetGlobalSettings, TEST_CONFIG_HOME, trustRepository } from "./host-runtime.ts"
 import { type PermissionsFixture, writePermissions } from "./config-fixture.ts"
 
 import assert from "node:assert/strict"
@@ -33,6 +33,8 @@ function fixture() {
     git(root, "init", "-b", "main")
     git(root, "config", "core.excludesFile", "/dev/null")
     resetGlobalSettings()
+    // As a trusted repository: its committed permissions apply (and are validated).
+    trustRepository(root)
     const real = fs.realpathSync(root)
     const paths = {
         global: path.join(TEST_CONFIG_HOME, "config.toml"),

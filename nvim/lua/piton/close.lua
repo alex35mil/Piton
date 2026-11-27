@@ -37,7 +37,7 @@ end
 
 --- The answer to an update of the source that changes protected files: nil keeps the agent.
 ---@param agent Agent
----@param refusal { kind: "protected_update", target: string, checkout: string }
+---@param refusal { kind: "protected_files_update", target: string, checkout: string }
 ---@return PitonSourceUpdate?
 local function source_update(agent, refusal)
     local question = cli.describe(refusal)
@@ -90,8 +90,8 @@ function M.delete(agent)
             force = true
             result = cli.delete(agent.path, force, update)
         end
-        if result.kind == "refused" and result.refusal.kind == "protected_update" then
-            update = source_update(agent, result.refusal --[[@as { kind: "protected_update", target: string, checkout: string }]])
+        if result.kind == "refused" and result.refusal.kind == "protected_files_update" then
+            update = source_update(agent, result.refusal --[[@as { kind: "protected_files_update", target: string, checkout: string }]])
             if not update then
                 log.info("Kept agent: " .. agent.path)
                 return

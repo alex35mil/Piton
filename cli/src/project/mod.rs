@@ -16,7 +16,7 @@ use std::{
 
 pub use self::worker::{
     CreateRequest, Mise, WorkerInfo, WorkerRefusal, create as create_worker, info as worker_info, list as list_workers,
-    plan_removal, remove as remove_worker, source_of,
+    path as worker_path, permissions as worker_permissions, plan_removal, remove as remove_worker, source_of,
 };
 
 /// The only path a worker shares with its source, as a symlink (the pi package's workflow artifacts).

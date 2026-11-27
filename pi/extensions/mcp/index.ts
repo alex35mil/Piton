@@ -16,6 +16,7 @@ import {
     type McpToolDecorators,
     type McpToolMetadata,
 } from "../__lib/mcp.js"
+import { LIFT_GRANTED_EVENT, type LiftGranted } from "../__lib/lift.js"
 
 export default function (pi: ExtensionAPI) {
     return registerNativeMcp(pi)
@@ -26,8 +27,11 @@ export function registerNativeMcp(pi: ExtensionAPI, options: Omit<McpExtensionOp
     const ownedServers = new Set<string>()
     let autoEnableCodemode: boolean | undefined
     const publish = () => pi.events.emit(MCP_TOOL_CATALOG_EVENT, new Map(catalog))
+    // The session's UI, for notices outside a hook (a lift granted on pi's stream).
+    let notify: ((message: string) => void) | undefined
 
     pi.on("session_start", (_event, ctx) => {
+        notify = ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined
         catalog.clear()
         publish()
         for (const name of ownedServers) pi.unregisterMcpServer(name)
@@ -44,9 +48,35 @@ export function registerNativeMcp(pi: ExtensionAPI, options: Omit<McpExtensionOp
         }
     })
 
+    // A live lift widened pi's sandbox (#408) for a block in a process pi started: a stdio server is pi's child and kept
+    // the sandbox it started with, so the servers this extension registered start again to inherit the grant. Others are
+    // named in a notice. A grant for pi's own process restarts nothing.
+    const disposeLifts = pi.events.on(LIFT_GRANTED_EVENT, (data) => {
+        if (!(data as LiftGranted).forChild) return
+        const restarted: string[] = []
+        const others: string[] = []
+        for (const server of pi.getMcpServers()) {
+            if (!isMcpRecord(server.config) || typeof server.config.command !== "string") continue
+            if (!ownedServers.has(server.name)) {
+                others.push(server.name)
+                continue
+            }
+            const config = { ...server.config, command: server.config.command }
+            pi.unregisterMcpServer(server.name)
+            pi.registerMcpServer(server.name, config)
+            restarted.push(server.name)
+        }
+        if (others.length > 0)
+            notify?.(
+                `pi's sandbox was widened. ${others.join(", ")} started before it: restart with /mcp reconnect <name> to use it.`,
+            )
+        return restarted
+    })
+
     pi.on("session_shutdown", () => {
         catalog.clear()
         publish()
+        disposeLifts()
     })
 
     const transportFor = (server: string): McpServerTransport => {

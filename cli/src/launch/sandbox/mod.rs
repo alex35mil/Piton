@@ -12,20 +12,30 @@ mod policy;
 mod resolve;
 mod rules;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+/// A `[sandbox]` path key (`/x`, `~/x`, `$VAR/x`) as the sandbox expands it, with `env` for variables.
+pub fn expand_key(key: &str, home: &Path, env: &crate::launch::Env) -> Result<PathBuf, String> {
+    resolve::expand_grant(key, home, env).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+pub use self::policy::PitonArea;
 #[cfg(test)]
 pub use self::resolve::{ClaudeCode, ProfileChoice, SilenceSource, Silent};
 #[cfg(test)]
 pub use self::rules::{Apps, Effect, Listen, Rule, ServiceGrant, Services, Target};
 pub use self::{
-    apply::{Contained, Containment, POLICY_ENV, contained, containment, exec},
+    apply::{Contained, Containment, POLICY_ENV, contained, containment, exec, inside, report_launched},
     policy::{Provenance, Source, WRITE_ROOTS, agent_dir_runtime, nono_version},
     resolve::{
         ClaudeCodeFolder, ClaudeCodeSockets, Facts, Resolution, Silenced, agent_dir, never_configuration, resolve,
         silenced,
     },
-    rules::{Access, Destination, Gate, Network, NetworkGrant, Policy, TAG_PREFIX, is_listen},
+    rules::{
+        Access, Destination, Gate, LIFT_LISTEN, LIFT_MACH, LIFT_READ, LIFT_WRITE, Lifts, Network, NetworkGrant, Policy,
+        TAG_PREFIX, is_listen,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]

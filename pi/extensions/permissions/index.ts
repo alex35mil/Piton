@@ -4,7 +4,8 @@
  * Controls tool execution via `[tools.permissions]` and `[tools.permissions.<runtime>]` of `config.toml` (and
  * `config.local.toml`) in piton's configuration chain (the global tier, parent folders, the repository's .piton/),
  * resolved by `piton config resolve`. Within a file: `[tools.permissions]`, then the runtime's table.
- * PITON_RUNTIME selects the runtime: unset = host, `sandbox` = sandboxed worker; other values are invalid.
+ * The runtime is the session's (`host`, or `sandbox` for a sandboxed session), which piton asks the daemon for; outside
+ * a session piton launched, the host.
  *
  * Schema:
  *   [tools.permissions]
@@ -45,8 +46,8 @@ import * as path from "node:path"
 import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata, validateMcpName } from "../__lib/mcp.js"
-import { requireRuntime, type Runtime } from "../__lib/runtime.js"
-import { isProtected, PROTECTED_HINT } from "../__lib/protected.js"
+import { currentRuntime, type Runtime } from "../__lib/runtime.js"
+import { isProtected, protectedHint, type DeniedChange } from "../__lib/protected.js"
 import {
     camelKeys,
     type LevelKind,
@@ -57,8 +58,12 @@ import {
 } from "../__lib/settings.js"
 import { analyzeBash, type BashAnalyzer } from "./bash.js"
 import { registerPermissionFiles } from "./files.js"
+import { PROTECTED_TOOLS, registerProtectedTools } from "./protected.js"
 import { registerReviewCodemode } from "./review.js"
 import { registerSandboxBash } from "./sandbox.js"
+import { WORKER_TOOLS } from "../workers/index.js"
+import { channel, type LiftsStream } from "../__lib/agent.js"
+import { holdLifts, LIFT_GRANTED_EVENT } from "../__lib/lift.js"
 
 export const EXTENSION = "permissions"
 const BUILT_IN_ALLOW_RULES = ["bash(true)", "bash(false)"]
@@ -118,6 +123,11 @@ interface DerivedSkillAllowState {
     sources: SkillAllowSource[]
 }
 
+/** Tools whose calls piton's daemon decides itself: the workers extension's, and the protected-file tools. */
+export function daemonDecides(toolName: string): boolean {
+    return [...WORKER_TOOLS, ...PROTECTED_TOOLS].some((tool) => tool === toolName)
+}
+
 // Runtime mode overrides (toggled by user during session, not persisted)
 const SessionModeOverrides = new Map<string, Mode>()
 const STATUS_REJECTED = "[rejected]"
@@ -125,8 +135,9 @@ const STATUS_REJECTED = "[rejected]"
 const LOCAL_SKILL_SCOPES = new Set(["user", "project", "temporary"])
 let cachedDerivedSkillAllowState: DerivedSkillAllowState | undefined
 
-export default function (pi: ExtensionAPI) {
-    registerSandboxBash(pi)
+export default async function (pi: ExtensionAPI) {
+    const runtime = await currentRuntime()
+    await registerSandboxBash(pi)
     let mcpCatalog: McpToolCatalog = new Map()
     const disposeMcpCatalogListener = pi.events.on(MCP_TOOL_CATALOG_EVENT, (data) => {
         mcpCatalog = data instanceof Map ? new Map(data as McpToolCatalog) : new Map()
@@ -178,15 +189,22 @@ export default function (pi: ExtensionAPI) {
         updateEditStatus(result, ctx)
     }
 
+    // pi's stream of live lifts (#408): grants for blocks in pi's own process, consumed with piton's addon.
+    let lifts: LiftsStream | undefined
+
     pi.on("session_start", async (_event, ctx) => {
         const result = loadResolvedPermissionSettings(pi, ctx.cwd)
         updatePermissionSettingsErrorDisplay(result, ctx)
         updateEditStatus(result, ctx)
+        lifts?.close()
+        lifts = holdLifts((granted) => pi.events.emit(LIFT_GRANTED_EVENT, granted))
     })
 
     pi.on("session_shutdown", async () => {
         disposeMcpCatalogListener()
         mcpCatalog = new Map()
+        lifts?.close()
+        lifts = undefined
     })
 
     pi.registerCommand(`${EXTENSION}-toggle-auto-accept`, {
@@ -269,8 +287,20 @@ export default function (pi: ExtensionAPI) {
         const decision = await callMode(result.settings, kind, input, ctx)
         return decision.mode === "deny" ? { mode: "deny", reason: denyReason(kind, decision.cause) } : decision
     })
+    // Deleting and renaming protected files go to piton's daemon, which asks the user; without it, nothing to ask.
+    const session = channel()
+    switch (session.kind) {
+        case "session":
+            registerProtectedTools(pi, session)
+            break
+        case "noSession":
+            break
+    }
 
     pi.on("tool_call", async (event, ctx) => {
+        // piton's daemon decides worker operations from `[workers.permissions]` and protected deletes and renames, and
+        // asks the user itself: no rule here applies, and the user is never asked twice.
+        if (daemonDecides(event.toolName)) return undefined
         const settingsResult = loadResolvedPermissionSettings(pi, ctx.cwd)
         updatePermissionSettingsErrorDisplay(settingsResult, ctx)
         if ("error" in settingsResult) {
@@ -335,33 +365,51 @@ export default function (pi: ExtensionAPI) {
             }
         }
     })
-    // The sandbox denies shell writes to protected files with a bare "Operation not permitted": say why, and what works.
+    // The sandbox denies shell changes to protected files with a bare "Operation not permitted": say why, and what
+    // works for that change.
     pi.on("tool_result", async (event, ctx) => {
-        if (event.toolName !== "bash" || process.env.PITON_RUNTIME !== "sandbox") return undefined
+        if (event.toolName !== "bash" || runtime !== "sandbox") return undefined
         const text = event.content.map((part) => (part.type === "text" ? part.text : "")).join("\n")
-        if (!deniedProtectedWrite(text, (file) => isProtected(ctx.cwd, file))) return undefined
-        return { content: [...event.content, { type: "text" as const, text: PROTECTED_HINT }] }
+        const change = deniedProtected(text, (file) => isProtected(ctx.cwd, file))
+        if (!change) return undefined
+        return { content: [...event.content, { type: "text" as const, text: protectedHint(change) }] }
     })
     return registerReviewCodemode(pi)
 }
 
 /**
- * A shell output that reports a denied write to one of this workspace's protected files. The workspace's protected
- * files are always readable, so "Operation not permitted" on one of them is a denied write; the same message about
- * another checkout's folder is a read the sandbox doesn't grant, and gets no hint. `isProtected` asks the resolver
- * (`piton config protected`, cached) about a path from the message: every absolute path (configuration outside the
- * checkout, such as `~/.config/piton/config.toml` or pi's agent directory, is protected too) and relative names that
- * could be the checkout's protected files; other words aren't asked.
+ * The change a shell output reports the sandbox denied on one of this workspace's protected files, or `undefined`. The
+ * workspace's protected files are always readable, so "Operation not permitted" on one of them is a denied change; the
+ * same message about another checkout's folder is a read the sandbox doesn't grant, and gets no hint. `isProtected`
+ * asks the resolver (`piton config protected`, cached) about a path from the message: every absolute path
+ * (configuration outside the checkout, such as `~/.config/piton/config.toml` or pi's agent directory, is protected
+ * too) and relative names that could be the checkout's protected files; other words aren't asked.
+ *
+ * The change is read from the command's own message: `rm: <path>: …` is a delete; `mv: rename <from> to <to>: …` a
+ * rename when both ends are protected, a move in or out when only one is; anything else (a redirect, `sed -i`, Git's
+ * "unable to unlink old") a write. The first line that names a protected file decides.
  */
-export function deniedProtectedWrite(output: string, isProtected: (file: string) => boolean): boolean {
+export function deniedProtected(output: string, isProtected: (file: string) => boolean): DeniedChange | undefined {
     const name = /(^|\/)(\.piton(?!\/\.local)|\.pi)(\/|$)|(^|\/)\.?fnox(\.[^/]+)?\.toml$/i
-    return output.split("\n").some((line) => {
-        if (!/Operation not permitted|unable to unlink/.test(line)) return false
+    const isProtectedPath = (file: string) => (file.startsWith("/") || name.test(file)) && isProtected(file)
+    for (const line of output.split("\n")) {
+        if (!/Operation not permitted|unable to unlink/.test(line)) continue
+        const move = /^mv: rename (.+) to (.+): Operation not permitted/.exec(line.trim())
+        if (move) {
+            const from = isProtectedPath(move[1]!)
+            const to = isProtectedPath(move[2]!)
+            if (from && to) return "rename"
+            if (to) return "moveIn"
+            if (from) return "moveOut"
+            continue
+        }
         // The paths a message names: quoted ('x'), or between `: ` separators (`rm: x: Operation not permitted`).
         const quoted = [...line.matchAll(/'([^']+)'/g)].map((match) => match[1]!)
         const fields = line.split(": ").map((field) => field.trim())
-        return [...quoted, ...fields].some((file) => (file.startsWith("/") || name.test(file)) && isProtected(file))
-    })
+        if (![...quoted, ...fields].some(isProtectedPath)) continue
+        return line.trim().startsWith("rm: ") ? "delete" : "write"
+    }
+    return undefined
 }
 
 /** One permission table that sets something, with its own rules: `[tools.permissions]` applies everywhere, `[tools.permissions.<runtime>]` only in that runtime. */
@@ -373,9 +421,13 @@ export interface PermissionSource {
     settings: PermissionSettings
 }
 
-/** The resolved permissions for `cwd` in `runtime`: the merged settings and each file that contributed. */
-export function inspectPersistentPermissions(cwd: string, runtime: Runtime = requireRuntime()) {
-    const resolved = section(resolveSettings(cwd, runtime).tools).permissions
+/**
+ * The resolved permissions for `cwd` in `runtime` (default: the current one, the session's): the merged settings, each
+ * file that contributed, and the runtime they're for.
+ */
+export function inspectPersistentPermissions(cwd: string, runtime?: Runtime) {
+    const settings = resolveSettings(cwd, runtime)
+    const resolved = section(settings.tools).permissions
     const sources: PermissionSource[] = resolved.sources.map((source) => ({
         level: source.level,
         scope: source.scope,
@@ -383,7 +435,11 @@ export function inspectPersistentPermissions(cwd: string, runtime: Runtime = req
         path: source.path,
         settings: validatePermissionSettings(camelKeys(source.settings) as PermissionSettings),
     }))
-    return { runtime, sources, settings: validatePermissionSettings(camelKeys(resolved.merged) as PermissionSettings) }
+    return {
+        runtime: settings.runtime,
+        sources,
+        settings: validatePermissionSettings(camelKeys(resolved.merged) as PermissionSettings),
+    }
 }
 
 function loadSettings(cwd: string): ResolvedPermissions {

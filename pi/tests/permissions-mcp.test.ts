@@ -10,6 +10,7 @@ import { describe, it } from "node:test"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 
 import { MCP_TOOL_CATALOG_EVENT, type McpToolCatalog, type McpToolMetadata } from "../extensions/__lib/mcp.ts"
+import { clearSettingsCache } from "../extensions/__lib/settings.ts"
 import { analyzeBash } from "../extensions/permissions/bash.ts"
 import permissionExtension, {
     inspectMcpAllowRules,
@@ -171,7 +172,7 @@ function createEventBusHarness() {
 
 type ExtensionHandler = (event: Record<string, unknown>, ctx: ExtensionContext) => unknown
 
-function createPermissionHarness(
+async function createPermissionHarness(
     eventBus = createEventBusHarness(),
     commands: ReturnType<ExtensionAPI["getCommands"]> = [],
 ) {
@@ -190,7 +191,7 @@ function createPermissionHarness(
         registerTool() {},
     } as unknown as ExtensionAPI
 
-    permissionExtension(pi)
+    await permissionExtension(pi)
     return {
         eventBus,
         handlers,
@@ -404,8 +405,8 @@ describe("MCP permission rules", () => {
 })
 
 describe("MCP permission lifecycle", () => {
-    it("registers the permissions extension commands", () => {
-        const harness = createPermissionHarness()
+    it("registers the permissions extension commands", async () => {
+        const harness = await createPermissionHarness()
         assert.deepEqual(
             [...harness.registeredCommands.keys()],
             ["permissions-toggle-auto-accept", "permissions-mode", "permissions-settings"],
@@ -425,7 +426,7 @@ describe("MCP permission lifecycle", () => {
         ] as const) {
             const project = createProjectSettings(JSON.stringify(testCase.settings))
             try {
-                const harness = createPermissionHarness()
+                const harness = await createPermissionHarness()
                 const context = createContext(project.cwd, testCase.approval)
                 harness.eventBus.bus.emit(MCP_TOOL_CATALOG_EVENT, catalog(metadata("github", "issue_write", false)))
                 const blocked = (await harness.handler("tool_call")(
@@ -444,7 +445,7 @@ describe("MCP permission lifecycle", () => {
     it("denies MCP calls without live metadata even when the ordinary default allows tools", async () => {
         const project = createProjectSettings(JSON.stringify({ defaultMode: "allow" }))
         try {
-            const harness = createPermissionHarness()
+            const harness = await createPermissionHarness()
             const context = createContext(project.cwd)
             const blocked = (await harness.handler("tool_call")(
                 { toolName: fixtureToolName("github", "issue_write"), toolCallId: "missing", input: {} },
@@ -461,7 +462,7 @@ describe("MCP permission lifecycle", () => {
     it("blocks incoming PR posting and merging without a UI when permission is ask", async () => {
         const project = createProjectSettings(JSON.stringify({ allow: ["mcp(github, *)"], ask: ["mcp(github, *)"] }))
         try {
-            const harness = createPermissionHarness()
+            const harness = await createPermissionHarness()
             const context = createContext(project.cwd)
             const ctx = { ...context.ctx, hasUI: false } as ExtensionContext
             for (const name of [
@@ -495,7 +496,7 @@ describe("MCP permission lifecycle", () => {
         const eventBus = createEventBusHarness()
 
         try {
-            const first = createPermissionHarness(eventBus)
+            const first = await createPermissionHarness(eventBus)
             assert.equal(eventBus.listenerCount(MCP_TOOL_CATALOG_EVENT), 1)
             const context = createContext(project.cwd)
             const toolName = fixtureToolName("github", "get_issue")
@@ -513,7 +514,7 @@ describe("MCP permission lifecycle", () => {
             await first.handler("session_shutdown")({}, context.ctx)
             assert.equal(eventBus.listenerCount(MCP_TOOL_CATALOG_EVENT), 0)
 
-            const reloaded = createPermissionHarness(eventBus)
+            const reloaded = await createPermissionHarness(eventBus)
             assert.equal(eventBus.listenerCount(MCP_TOOL_CATALOG_EVENT), 1)
             await reloaded.handler("session_shutdown")({}, context.ctx)
             assert.equal(eventBus.listenerCount(MCP_TOOL_CATALOG_EVENT), 0)
@@ -526,7 +527,7 @@ describe("MCP permission lifecycle", () => {
         await suppressErrors(async () => {
             const project = createProjectSettings(JSON.stringify({ allow: ["mcp__github__*"] }))
             try {
-                const harness = createPermissionHarness()
+                const harness = await createPermissionHarness()
                 const context = createContext(project.cwd)
 
                 await harness.handler("session_start")({ reason: "reload" }, context.ctx)
@@ -559,24 +560,28 @@ describe("MCP permission lifecycle", () => {
         })
     })
 
-    it("blocks tools under an invalid runtime and recovers when it is fixed", async () => {
+    it("blocks tools while the session's facts can't be read, and recovers when they can", async () => {
         await suppressErrors(async () => {
             const project = createProjectSettings(JSON.stringify({ defaultMode: "allow" }))
-            const previous = process.env.PITON_RUNTIME
+            const previous = { socket: process.env.PITON_AGENT_SOCKET, token: process.env.PITON_AGENT_TOKEN }
             try {
-                const harness = createPermissionHarness()
+                const harness = await createPermissionHarness()
                 const context = createContext(project.cwd)
-                process.env.PITON_RUNTIME = "sandboxed"
+                process.env.PITON_AGENT_SOCKET = "/nowhere/agent.sock"
+                process.env.PITON_AGENT_TOKEN = "t"
+                clearSettingsCache()
 
                 const blocked = (await harness.handler("tool_call")(
                     { toolName: "read", toolCallId: "call-1", input: { path: "README.md" } },
                     context.ctx,
                 )) as { block: boolean; reason: string }
                 assert.equal(blocked.block, true)
-                assert.match(blocked.reason, /PITON_RUNTIME/)
+                assert.match(blocked.reason, /session's facts/)
                 assert.ok(context.widgets.has("permissions:invalid-settings"))
 
-                process.env.PITON_RUNTIME = "sandbox"
+                delete process.env.PITON_AGENT_SOCKET
+                delete process.env.PITON_AGENT_TOKEN
+                clearSettingsCache()
                 assert.equal(
                     await harness.handler("tool_call")(
                         { toolName: "read", toolCallId: "call-2", input: { path: "README.md" } },
@@ -586,8 +591,9 @@ describe("MCP permission lifecycle", () => {
                 )
                 assert.equal(context.widgets.has("permissions:invalid-settings"), false)
             } finally {
-                if (previous === undefined) delete process.env.PITON_RUNTIME
-                else process.env.PITON_RUNTIME = previous
+                if (previous.socket !== undefined) process.env.PITON_AGENT_SOCKET = previous.socket
+                if (previous.token !== undefined) process.env.PITON_AGENT_TOKEN = previous.token
+                clearSettingsCache()
                 project.cleanup()
             }
         })
@@ -613,7 +619,7 @@ describe("MCP permission lifecycle", () => {
                     },
                 ]
                 try {
-                    const harness = createPermissionHarness(undefined, commands)
+                    const harness = await createPermissionHarness(undefined, commands)
                     const context = createContext(project.cwd)
                     await harness.handler("session_start")({ reason: "startup" }, context.ctx)
                     const result = (await harness.handler("tool_call")(
@@ -651,7 +657,7 @@ describe("MCP permission lifecycle", () => {
             ]
 
             try {
-                const harness = createPermissionHarness(undefined, commands)
+                const harness = await createPermissionHarness(undefined, commands)
                 const context = createContext(project.cwd)
 
                 await harness.handler("session_start")({ reason: "startup" }, context.ctx)
@@ -692,7 +698,7 @@ describe("MCP permission lifecycle", () => {
                 ]
 
                 try {
-                    const harness = createPermissionHarness(undefined, commands)
+                    const harness = await createPermissionHarness(undefined, commands)
                     const context = createContext(project.cwd)
 
                     await harness.handler("session_start")({ reason: "startup" }, context.ctx)
@@ -711,7 +717,7 @@ describe("MCP permission lifecycle", () => {
         await suppressErrors(async () => {
             const project = createProjectSettings("{")
             try {
-                const harness = createPermissionHarness()
+                const harness = await createPermissionHarness()
                 const context = createContext(project.cwd)
 
                 await harness.handler("session_start")({ reason: "reload" }, context.ctx)
@@ -749,7 +755,8 @@ describe("deny keeps the turn and names its cause", () => {
             const project = createProjectSettings(JSON.stringify(settings))
             try {
                 const context = createContext(project.cwd, approval)
-                const result = (await createPermissionHarness().handler("tool_call")(
+                const harness = await createPermissionHarness()
+                const result = (await harness.handler("tool_call")(
                     { toolName, toolCallId: "call-1", input },
                     context.ctx,
                 )) as { block: boolean; reason: string } | undefined
@@ -851,7 +858,7 @@ describe("deny causes from resolveMode", () => {
             const tool = "session_deny_probe"
             const project = createProjectSettings(JSON.stringify({ defaultMode: "allow" }))
             try {
-                const harness = createPermissionHarness()
+                const harness = await createPermissionHarness()
                 const context = createContext(project.cwd)
                 const ui = context.ctx.ui as unknown as Record<string, unknown>
                 ui.input = async () => tool

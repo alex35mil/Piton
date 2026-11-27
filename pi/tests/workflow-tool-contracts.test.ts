@@ -255,10 +255,10 @@ describe("workflow model-facing contracts", () => {
         const h = await nativeSessionFixture({
             extensions: [...codingFactories, memoryMcp("memory", ["echo"]), ...workflowFactories],
             tools: ["+codemode"],
-            setup(root) {
+            setup(_root, global) {
                 writePermissions("global", { defaultMode: "allow" })
                 fs.writeFileSync(
-                    path.join(root, "config/mcp.json"),
+                    path.join(global, "mcp.json"),
                     JSON.stringify({
                         mcpServers: { memory: { url: "https://memory.invalid/mcp", exposure: "codemode" } },
                     }),
@@ -357,15 +357,12 @@ describe("workflow model-facing contracts", () => {
         }
     })
 
-    // "directory" and "sandboxed directory" are the source checkout itself, whose .piton/.local is a real directory in
-    // either runtime. "linked" is a sandboxed worker (`<repo>--w` with agent.source) whose .piton/.local is a symlink to
-    // its source checkout's directory; "unlinked" is a sandboxed worker without it, where setup must refuse.
-    for (const layout of ["directory", "sandboxed directory", "linked", "unlinked"] as const)
+    // "directory" is the source checkout itself, whose .piton/.local is a real directory in either runtime. "linked" is a
+    // worker (`<repo>--w` with agent.source) whose .piton/.local is a symlink to its source checkout's directory;
+    // "unlinked" is a worker without it, where setup must refuse.
+    for (const layout of ["directory", "linked", "unlinked"] as const)
         it(`keeps discovery, setup, real initialization and Phase transitions working through reload and resume (${layout} local root)`, async () => {
             const worker = layout === "linked" || layout === "unlinked"
-            const previousRuntime = process.env.PITON_RUNTIME
-            if (layout === "directory") delete process.env.PITON_RUNTIME
-            else process.env.PITON_RUNTIME = "sandbox"
             const h = await nativeSessionFixture({
                 extensions: [
                     ...codingFactories,
@@ -374,11 +371,11 @@ describe("workflow model-facing contracts", () => {
                 ],
                 tools: ["+codemode"],
                 workspace: worker ? "app--w" : "app",
-                setup(fixture) {
+                setup(fixture, global) {
                     const root = path.join(fixture, "app")
                     fs.mkdirSync(root)
                     fs.writeFileSync(
-                        path.join(fixture, "config/mcp.json"),
+                        path.join(global, "mcp.json"),
                         JSON.stringify({
                             mcpServers: { github: { url: "https://github.invalid/mcp", exposure: "codemode" } },
                         }),
@@ -505,8 +502,6 @@ describe("workflow model-facing contracts", () => {
                 }
             } finally {
                 await h.cleanup()
-                if (previousRuntime === undefined) delete process.env.PITON_RUNTIME
-                else process.env.PITON_RUNTIME = previousRuntime
             }
         })
 })

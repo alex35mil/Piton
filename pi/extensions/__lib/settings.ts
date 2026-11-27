@@ -20,7 +20,7 @@ import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 
-import { requireRuntime, type Runtime } from "./runtime.js"
+import type { Runtime } from "./runtime.js"
 
 export const BIN_ENV = "PITON_BIN"
 /** The `piton config resolve` output version this client understands. */
@@ -181,16 +181,19 @@ export function pitonBinary(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
- * The resolved configuration for `cwd`, in the current runtime. Each part carries its own error (read it with
- * {@link section}); this throws only when nothing can be resolved: the binary is missing, the workspace is invalid, or
- * a level folder exists but can't be listed.
+ * The resolved configuration for `cwd`, in `runtime`, or when none is given the current one (the session's, which the
+ * binary asks the daemon for; outside a session, the host's). Each part carries its own error (read it with
+ * {@link section}); this throws only when nothing can be resolved: the binary is missing, the workspace is invalid, a
+ * level folder exists but can't be listed, or the session's facts can't be read.
  */
-export function resolveSettings(cwd: string, runtime: Runtime = requireRuntime()): ResolvedSettings {
+export function resolveSettings(cwd: string, runtime?: Runtime): ResolvedSettings {
     const workspace = path.resolve(cwd)
-    const key = `${runtime}\0${workspace}`
+    const key = `${runtime ?? "current"}\0${workspace}`
     const cached = cache.get(key)
     if (cached && fingerprint(cached.settings.watch) === cached.fingerprint) return cached.settings
-    const settings = runResolve(["config", "resolve", "--workspace", workspace, "--runtime", runtime])
+    const args = ["config", "resolve", "--workspace", workspace]
+    if (runtime) args.push("--runtime", runtime)
+    const settings = runResolve(args)
     cache.set(key, { settings, fingerprint: fingerprint(settings.watch) })
     return settings
 }

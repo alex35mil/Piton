@@ -3,9 +3,11 @@
 
 mod commands;
 mod info;
+mod lifts;
 mod network;
 mod notice;
 mod prompts;
+mod questions;
 mod replay;
 mod view;
 
@@ -35,6 +37,10 @@ pub use self::{
 };
 use self::{
     prompts::PromptQueue,
+    questions::{
+        Ended, PendingChange, PendingDelete, PendingLift, PendingRename, PendingWrite, Question, Questions, Showing,
+        Unanswered,
+    },
     replay::Replay,
     view::{Change, StateInput, View},
 };
@@ -182,13 +188,15 @@ pub enum SessionCmd {
         reason: StopReason,
         done: Option<oneshot::Sender<StopOutcome>>,
     },
-    /// A protected write the agent asked for (agent.sock): asked of the user in every client, written on approval.
-    ProtectedWrite {
-        request: crate::agent::WriteRequest,
-        reply: oneshot::Sender<crate::agent::WriteOutcome>,
+    /// A change to a protected file the agent asked for (agent.sock): asked of the user in every client, made on
+    /// approval.
+    Protected(crate::agent::ProtectedAsk),
+    /// A worker operation's question (agent.sock): it waits its turn in the session's questions.
+    WorkerQuestion {
+        asked: crate::agent::workers::Asked,
     },
-    /// The agent stopped waiting for a protected write (or got its answer): settle it if it's still pending.
-    SettleProtectedWrite,
+    /// Someone who asked a question stopped waiting (or got its answer): the session's questions drop or end it.
+    Settle,
     /// A bash call the agent asks the daemon to run (agent.sock): with a per-command grant, or after the user approves.
     RunCommand {
         request: crate::agent::RunRequest,
@@ -201,8 +209,6 @@ pub enum SessionCmd {
         last: bool,
         reply: oneshot::Sender<crate::agent::Failed>,
     },
-    /// The agent stopped waiting for a run request: settle its question if it's still pending.
-    SettleQuestion,
     /// A refusal the kernel recorded for this session's sandbox.
     Refusal(crate::daemon::Refusal),
     /// A connection the gate holds: decided by the session, asking the user when nothing else does.
@@ -222,6 +228,45 @@ pub enum SessionCmd {
     NetworkEntrySaved {
         target: crate::config::NetworkTarget,
         file: PathBuf,
+    },
+    /// Code in pi's process asks to widen its sandbox for one action (agent.sock `lift`).
+    Lift {
+        request: crate::agent::lift::LiftRequest,
+        reply: oneshot::Sender<crate::agent::lift::LiftDecision>,
+    },
+    /// pi's `lifts` stream.
+    Lifts(LiftsEvent),
+}
+
+/// What happens on pi's `lifts` stream.
+#[derive(Debug)]
+pub enum LiftsEvent {
+    /// pi opened its stream: grants go to `out`; the session answers with the stream's number. `pi` is the stream's
+    /// process, which the session token was accepted from: pi's own pid.
+    Opened {
+        out: mpsc::UnboundedSender<LiftsOut>,
+        id: oneshot::Sender<u64>,
+        pi: i32,
+    },
+    /// pi consumed grant `id`.
+    Consumed { id: u64 },
+    /// pi couldn't consume grant `id`, or the daemon couldn't issue it.
+    Failed { id: u64, message: String },
+    /// Stream `stream` closed.
+    Closed { stream: u64 },
+}
+
+/// What the session sends on pi's `lifts` stream; the socket issues each grant's token for pi's process.
+#[derive(Debug)]
+pub enum LiftsOut {
+    Grant {
+        id: u64,
+        lift: crate::launch::sandbox::grant::LiveLift,
+        /// A process pi started was blocked: its MCP servers restart to inherit the grant.
+        for_child: bool,
+    },
+    Revoke {
+        id: u64,
     },
 }
 
@@ -277,6 +322,8 @@ pub struct SessionHandle {
     pub shared: Arc<Mutex<Shared>>,
     /// The sandbox's tag, for a sandboxed session: the kernel's refusals carry it.
     pub tag: Option<String>,
+    /// The session's view, decided at launch: what `facts` answers.
+    pub facts: Arc<crate::agent::facts::Facts>,
 }
 
 impl SessionHandle {
@@ -319,9 +366,6 @@ pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Called by a session task when it ends, and when its status changes.
 pub struct Hooks {
     pub ended: Box<dyn Fn(SessionKey) + Send + Sync>,
-    /// Restarts the session from its file (a process block's entry was saved): the daemon stops it and launches it
-    /// again, its clients following.
-    pub restart: Box<dyn Fn(SessionKey) + Send + Sync>,
     pub status_changed: Arc<Notify>,
     /// Wakes view connections to re-send the session list (they skip unchanged lists).
     pub list_changed: tokio::sync::broadcast::Sender<()>,
@@ -335,11 +379,15 @@ pub struct LaunchSpec {
     pub mode: LaunchMode,
     pub session: SessionArg,
     pub env: Env,
+    /// Behind fnox: the one-time token the helper that becomes pi reports its start with, in the helper's own
+    /// environment.
+    pub launch_token: Option<String>,
     /// The sandbox, for sandboxed launches: `piton sandbox-exec` reads it from the environment and removes it before
     /// pi starts.
     pub policy: Option<launch::sandbox::Policy>,
-    /// What this session's protected files are: the checkout's and the configuration the user edits by hand.
-    pub protected: crate::agent::Protected,
+    /// The session's view (runtime, kept grants, protected files, global tier, workspace): what `facts` answers and
+    /// what a protected write is checked against.
+    pub facts: crate::agent::facts::Facts,
     /// The credential proxy pi starts behind, when fnox is used for this workspace.
     pub proxy: Option<launch::fnox::Proxy>,
     /// What commands the user approves run with, for sandboxed launches.
@@ -366,8 +414,6 @@ pub struct NetworkSpec {
     pub route: Option<crate::launch::sandbox::network::Route>,
     /// The `ssh` wrapper's folder, when the daemon made it.
     pub ssh: Option<PathBuf>,
-    /// Behind fnox: the one-time token the helper reports fnox's proxy with, in the helper's own environment.
-    pub upstream_token: Option<String>,
 }
 
 /// The gate of a session with a filtered network, deciding through the session's channel.
@@ -414,13 +460,11 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
     let (tx, rx) = mpsc::unbounded_channel();
     // A filtered network's gate, with pi's own proxy user in its policy.
     let mut extra = Env::new();
+    if let Some(token) = &spec.launch_token {
+        extra.insert(crate::agent::LAUNCH_TOKEN_ENV.into(), token.clone());
+    }
     let mut network = match spec.network.take() {
-        Some(network) => {
-            if let Some(token) = &network.upstream_token {
-                extra.insert(crate::agent::GATE_TOKEN_ENV.into(), token.clone());
-            }
-            Some(start_gate(network, &tx)?)
-        }
+        Some(network) => Some(start_gate(network, &tx)?),
         None => None,
     };
     if let (Some(network), Some(policy)) = (&mut network, &mut spec.policy) {
@@ -506,6 +550,7 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         tx,
         shared: shared.clone(),
         tag: spec.policy.as_ref().map(|p| p.tag.clone()).filter(|t| !t.is_empty()),
+        facts: Arc::new(spec.facts.clone()),
     };
 
     let stdin = child.stdin.take().expect("piped stdin");
@@ -533,14 +578,15 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         paths: config.paths.clone(),
         grants: spec.grants.clone(),
         levels: spec.levels.clone(),
+        session_grants: HashMap::new(),
     });
     let task = SessionTask {
         config,
-        protected: spec.protected,
-        protected_write: None,
+        protected: spec.facts.protected,
+        questions: Questions::default(),
+        workers_allowed: std::collections::HashSet::new(),
         commands,
         calls: commands::Calls::new(&session_tag),
-        question: None,
         process: commands::ProcessBlocks::default(),
         shared,
         hooks,
@@ -566,6 +612,10 @@ pub fn spawn(config: Arc<DaemonConfig>, mut spec: LaunchSpec, hooks: Hooks) -> R
         sent_order: VecDeque::new(),
         prompts: PromptQueue::default(),
         network,
+        lifts: lifts::Lifts::default(),
+        lifts_out: None,
+        pi_pid: None,
+        next_stream: 1,
     };
     tokio::spawn(task.run(
         child,
@@ -607,17 +657,6 @@ enum Sent {
     Accepted(Value),
 }
 
-/// A protected write the user is being asked about: the dialog's id, and where the outcome goes.
-struct PendingWrite {
-    id: String,
-    /// The folder the write starts from (the checkout, a configuration level, pi's agent directory, a linked file's
-    /// folder): it walks from here without following symlinks.
-    root: PathBuf,
-    path: PathBuf,
-    content: String,
-    reply: oneshot::Sender<crate::agent::WriteOutcome>,
-}
-
 /// How many message ids a session remembers for repeats.
 const SENT_KEPT: usize = 256;
 
@@ -632,15 +671,15 @@ enum StopPhase {
 struct SessionTask {
     config: Arc<DaemonConfig>,
     protected: crate::agent::Protected,
-    /// The protected write waiting for the user: one per session.
-    protected_write: Option<PendingWrite>,
+    /// Every question for the user: one showing, the rest waiting their turn (`questions.rs`).
+    questions: Questions,
+    /// Worker operations the user allowed for the rest of this session.
+    workers_allowed: std::collections::HashSet<crate::agent::workers::WorkerOp>,
     /// What approved commands run with: sandboxed sessions only.
     commands: Option<commands::Commands>,
     /// The bash calls pi is running, and whose sandbox each tag is.
     calls: commands::Calls,
-    /// The block question waiting for the user: one per session, sharing the slot with protected writes.
-    question: Option<commands::PendingQuestion>,
-    /// A blocked process's question (an MCP server, an extension), and the refusals offered already.
+    /// The blocked processes' refusals offered already (an MCP server, an extension).
     process: commands::ProcessBlocks,
     shared: Arc<Mutex<Shared>>,
     hooks: Hooks,
@@ -666,6 +705,13 @@ struct SessionTask {
     prompts: PromptQueue,
     /// A filtered network's gate and its questions: sandboxed sessions whose network isn't open.
     network: Option<network::Network>,
+    /// What pi's live sandbox is widened for, and its stream.
+    lifts: lifts::Lifts,
+    /// pi's open `lifts` stream: where grants go, and its number (a closed stream ends only its own grants).
+    lifts_out: Option<(u64, mpsc::UnboundedSender<LiftsOut>)>,
+    /// pi's pid, from its stream: a refusal of another pid is a process pi started (an MCP server).
+    pi_pid: Option<i32>,
+    next_stream: u64,
 }
 
 struct Watcher {
@@ -720,6 +766,21 @@ fn shared_folders(env: &launch::Env) -> Vec<std::path::PathBuf> {
 }
 
 /// Where an entry saved from the block question goes, in the sandbox's terms.
+/// A live lift's path with symlinks resolved, as Seatbelt matches: a file that doesn't exist yet keeps its name under
+/// its folder's real path.
+fn resolve_live(lift: &launch::sandbox::grant::LiveLift) -> launch::sandbox::grant::LiveLift {
+    use launch::sandbox::grant::LiveLift;
+    match lift {
+        LiveLift::Read { path } => LiveLift::Read {
+            path: crate::agent::canonical_target(path),
+        },
+        LiveLift::Write { path } => LiveLift::Write {
+            path: crate::agent::canonical_target(path),
+        },
+        LiveLift::Service { .. } | LiveLift::Listen => lift.clone(),
+    }
+}
+
 fn grant_scope(scope: crate::agent::block::PersistScope) -> launch::sandbox::grant::Scope {
     match scope {
         crate::agent::block::PersistScope::Project => launch::sandbox::grant::Scope::Project,
@@ -753,12 +814,12 @@ impl SessionTask {
         let mut end_reason = EndReason::PiExited;
         loop {
             let stop_deadline = self.stopping.as_ref().map(|(_, at)| *at);
-            let question_deadline = self.question.as_ref().and_then(|q| q.deadline);
-            let network_deadline = self
-                .network
-                .as_ref()
-                .and_then(|n| n.asking.as_ref())
-                .and_then(|a| a.deadline);
+            let question_deadline = self.questions.deadline();
+            // A question waiting behind a dialog of pi's with a timeout shows when that dialog expires.
+            let pi_dialog_expiry = match self.questions.is_waiting() {
+                true => self.replay.pi_dialog_expiry(),
+                false => None,
+            };
             tokio::select! {
                 line = stdout.next_line(), if stdout_open => match line {
                     Ok(Some(line)) => self.on_pi_line(line),
@@ -792,10 +853,13 @@ impl SessionTask {
                     self.advance_stop();
                 }
                 _ = sleep_until(question_deadline.unwrap_or_else(Instant::now)), if question_deadline.is_some() => {
-                    self.expire_question();
+                    let ended = self.questions.expire(Instant::now());
+                    self.after_ended(ended);
                 }
-                _ = sleep_until(network_deadline.unwrap_or_else(Instant::now)), if network_deadline.is_some() => {
-                    self.expire_network_question();
+                _ = sleep_until(pi_dialog_expiry.unwrap_or_else(Instant::now)), if pi_dialog_expiry.is_some() => {
+                    self.ask_next();
+                    self.sync_shared();
+                    self.publish_view_state();
                 }
                 _ = sleep_until(self.empty_deadline.unwrap_or_else(Instant::now)), if self.empty_deadline.is_some() => {
                     self.empty_deadline = None;
@@ -921,78 +985,172 @@ impl SessionTask {
                 command,
                 reply,
             } => self.view_command(watcher, command, reply),
-            SessionCmd::ProtectedWrite { request, reply } => self.protected_write(request, reply),
-            SessionCmd::SettleProtectedWrite => {
-                self.settle_protected_write();
-                self.ask_next_process();
-                self.publish_view_state();
-            }
+            SessionCmd::Protected(ask) => self.protected(ask),
+            SessionCmd::WorkerQuestion { asked } => self.worker_question(asked),
+            SessionCmd::Settle => self.settle(),
             SessionCmd::RunCommand { request, reply } => self.run_command(request, reply),
             SessionCmd::RunFailed { request, last, reply } => self.run_failed(request, last, reply),
-            SessionCmd::SettleQuestion => {
-                self.settle_question();
-                self.ask_next_process();
-                self.publish_view_state();
-            }
             SessionCmd::Refusal(refusal) => self.on_refusal(refusal),
             SessionCmd::NetworkAsk { user, to, reply } => self.network_ask(user, to, reply),
             SessionCmd::GateRefused(refused) => self.gate_refused(refused),
             SessionCmd::GateUpstream { url } => self.gate_upstream(&url),
             SessionCmd::NetworkEntrySaved { target, file } => self.network_entry_saved(target, file),
+            SessionCmd::Lift { request, reply } => self.lift(request, reply),
+            SessionCmd::Lifts(event) => self.lifts_event(event),
             SessionCmd::Stop { .. } => unreachable!("handled in run"),
         }
     }
 
-    /// A protected write the agent asked for: refused unless the path is one of this session's protected files and no
-    /// other is pending; otherwise asked of the user with a dialog every client shows. Every protected write asks.
+    /// A change to a protected file the agent asked for: refused unless the paths are this session's protected files
+    /// (and, for a delete or rename, the entries are as it needs); otherwise asked of the user with a dialog every client
+    /// shows. Every change asks.
+    fn protected(&mut self, ask: crate::agent::ProtectedAsk) {
+        use crate::agent::{ChangeOutcome, ProtectedAsk};
+        match ask {
+            ProtectedAsk::Write { request, reply } => self.protected_write(request, reply),
+            ProtectedAsk::Delete { request, reply } => match crate::agent::check_delete(&self.protected, &request.path)
+            {
+                Ok(entry) => self.enqueue(Question::Protected(PendingChange::Delete(PendingDelete {
+                    root: entry.root,
+                    path: entry.path,
+                    controls: entry.controls,
+                    reply,
+                }))),
+                Err(reason) => {
+                    let _ = reply.send(ChangeOutcome::Refused { reason });
+                }
+            },
+            ProtectedAsk::Rename { request, reply } => {
+                match crate::agent::check_rename(&self.protected, &request.from, &request.to) {
+                    Ok((from, to)) => self.enqueue(Question::Protected(PendingChange::Rename(PendingRename {
+                        from_root: from.root,
+                        from: from.path,
+                        from_controls: from.controls,
+                        to_root: to.root,
+                        to: to.path,
+                        to_controls: to.controls,
+                        reply,
+                    }))),
+                    Err(reason) => {
+                        let _ = reply.send(ChangeOutcome::Refused { reason });
+                    }
+                }
+            }
+        }
+    }
+
     fn protected_write(
         &mut self,
         request: crate::agent::WriteRequest,
         reply: oneshot::Sender<crate::agent::WriteOutcome>,
     ) {
-        use crate::agent::{WriteOutcome, write_dialog};
-        let refuse = |reason: String| WriteOutcome::Refused { reason };
+        use crate::agent::WriteOutcome;
         // The path as the file system will resolve it: the existing parent's canonical path and the name.
         let path = crate::agent::canonical_target(&request.path);
         let Some(file) = self.protected.check(&path) else {
-            let _ = reply.send(refuse(format!(
-                "{} isn't a protected file of this session; write it with the write or edit tool",
-                request.path.display()
-            )));
+            let _ = reply.send(WriteOutcome::Refused {
+                reason: format!(
+                    "{} isn't a protected file of this session; write it with the write or edit tool",
+                    request.path.display()
+                ),
+            });
             return;
         };
-        if self.asking() {
-            let _ = reply.send(refuse(
-                "another question is waiting for the user; try again after it's answered".into(),
-            ));
-            return;
-        }
-        let before = std::fs::read_to_string(&path).ok();
-        let key = lock(&self.shared).key;
-        self.next_internal += 1;
-        let id = format!("piton:write:{}", self.next_internal);
-        crate::log!("session {key}: asking about a protected write to {}", path.display());
-        let record = write_dialog(&id, &path, file.controls, before.as_deref(), &request.content);
-        self.protected_write = Some(PendingWrite {
-            id,
+        self.enqueue(Question::Protected(PendingChange::Write(PendingWrite {
             root: file.root,
             path,
+            controls: file.controls,
             content: request.content,
             reply,
-        });
-        // To every client like a dialog of pi's, and kept for replay until it's answered.
-        self.on_pi_line(record.to_string());
+        })));
     }
 
-    /// A client's answer to the pending protected write's dialog: write or not, and tell the agent.
-    fn answer_protected_write(&mut self, answer: &Map<String, Value>) {
-        use crate::agent::{WriteDecision, WriteOutcome, write_approved};
-        let Some(pending) = self.protected_write.take() else {
-            return;
+    /// A client's answer to a protected change's dialog.
+    fn answer_protected(&mut self, change: PendingChange, deadline: Option<Instant>, answer: &Map<String, Value>) {
+        match change {
+            PendingChange::Write(write) => self.answer_protected_write(write, answer),
+            PendingChange::Delete(delete) => self.answer_protected_delete(delete, deadline, answer),
+            PendingChange::Rename(rename) => self.answer_protected_rename(rename, deadline, answer),
+        }
+    }
+
+    /// Delete or not, and tell the agent; the first option asks again.
+    fn answer_protected_delete(
+        &mut self,
+        pending: PendingDelete,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
+        use crate::agent::{
+            ChangeAnswer, ChangeOutcome, Removable, Removed, answer::Once, read_change_answer, remove_entry,
         };
         let key = lock(&self.shared).key;
-        let outcome = match WriteDecision::from_answer(answer) {
-            WriteDecision::Approve { content, notes } => {
+        let outcome = match read_change_answer(answer) {
+            None => return self.show(Question::Protected(PendingChange::Delete(pending)), deadline),
+            Some(ChangeAnswer::Narrowest(Once(()))) => {
+                match remove_entry(&pending.root, &pending.path, Removable::FileOrLink) {
+                    Ok(Removed::Removed) => {
+                        crate::log!("session {key}: protected delete of {} approved", pending.path.display());
+                        ChangeOutcome::Done
+                    }
+                    Ok(Removed::Missing) => ChangeOutcome::Refused {
+                        reason: format!("approved, but {} no longer exists", pending.path.display()),
+                    },
+                    Err(e) => ChangeOutcome::Refused {
+                        reason: format!("approved, but can't delete {}: {e}", pending.path.display()),
+                    },
+                }
+            }
+            Some(ChangeAnswer::Deny(())) => {
+                crate::log!("session {key}: protected delete of {} denied", pending.path.display());
+                ChangeOutcome::Denied
+            }
+            Some(ChangeAnswer::Session(never) | ChangeAnswer::Always(never)) => match never {},
+        };
+        let _ = pending.reply.send(outcome);
+    }
+
+    /// Rename or not, and tell the agent; the first option asks again.
+    fn answer_protected_rename(
+        &mut self,
+        pending: PendingRename,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
+        use crate::agent::{ChangeAnswer, ChangeOutcome, answer::Once, read_change_answer, rename_entry};
+        let key = lock(&self.shared).key;
+        let outcome = match read_change_answer(answer) {
+            None => return self.show(Question::Protected(PendingChange::Rename(pending)), deadline),
+            Some(ChangeAnswer::Narrowest(Once(()))) => {
+                match rename_entry(&pending.from_root, &pending.from, &pending.to_root, &pending.to) {
+                    Ok(()) => {
+                        crate::log!(
+                            "session {key}: protected rename of {} to {} approved",
+                            pending.from.display(),
+                            pending.to.display()
+                        );
+                        ChangeOutcome::Done
+                    }
+                    Err(e) => ChangeOutcome::Refused {
+                        reason: format!("approved, but can't rename {}: {e}", pending.from.display()),
+                    },
+                }
+            }
+            Some(ChangeAnswer::Deny(())) => {
+                crate::log!("session {key}: protected rename of {} denied", pending.from.display());
+                ChangeOutcome::Denied
+            }
+            Some(ChangeAnswer::Session(never) | ChangeAnswer::Always(never)) => match never {},
+        };
+        let _ = pending.reply.send(outcome);
+    }
+
+    /// A client's answer to a protected write's dialog: write or not, and tell the agent.
+    fn answer_protected_write(&mut self, pending: PendingWrite, answer: &Map<String, Value>) {
+        use crate::agent::{WriteAnswer, WriteApproval, WriteOutcome, answer::Once, read_write_answer, write_approved};
+        let key = lock(&self.shared).key;
+        let outcome = match read_write_answer(answer) {
+            WriteAnswer::Narrowest(Once(WriteApproval { content, notes })) => {
                 let modified = content.as_ref().is_some_and(|c| *c != pending.content);
                 let content = content.unwrap_or(pending.content);
                 match write_approved(&pending.root, &pending.path, &content) {
@@ -1009,13 +1167,13 @@ impl SessionTask {
                     },
                 }
             }
-            WriteDecision::Reject { notes } => {
+            WriteAnswer::Deny(notes) => {
                 crate::log!("session {key}: protected write to {} rejected", pending.path.display());
                 WriteOutcome::Rejected { notes }
             }
+            WriteAnswer::Session(never) | WriteAnswer::Always(never) => match never {},
         };
         let _ = pending.reply.send(outcome);
-        self.ask_next_process();
     }
 
     fn watch(&mut self, watcher: ClientId, tx: WatchTx, from: WatchFrom) {
@@ -1085,14 +1243,15 @@ impl SessionTask {
 
     fn publish_view_state(&mut self) {
         // The block question goes to `view` clients typed; its `rpc` rendering is for `piton attach` only.
-        let rpc_only = self.question.as_ref().map(|q| q.dialog_id.as_str());
+        let block = self.questions.showing_block();
+        let rpc_only = block.map(|(_, dialog)| dialog);
         let dialogs: Vec<Value> = self
             .replay
             .pending_dialogs()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .filter(|d| d.get("id").and_then(Value::as_str) != rpc_only || rpc_only.is_none())
             .collect();
-        let questions: Vec<Value> = self.question.iter().map(|q| q.question.view()).collect();
+        let questions: Vec<Value> = block.iter().map(|(q, _)| q.question.view()).collect();
         let input = {
             let shared = lock(&self.shared);
             StateInput {
@@ -1219,40 +1378,21 @@ impl SessionTask {
                     // Already answered by another client, expired, or unknown: pi would ignore it.
                     return;
                 }
-                // The daemon's own dialogs: answered here, never sent to pi (which didn't ask).
-                if self.protected_write.as_ref().is_some_and(|w| w.id == id) {
-                    self.answer_protected_write(&command);
+                // The session's own questions: answered here, never sent to pi (which didn't ask).
+                if let Some(showing) = self.questions.take_answered(&id) {
+                    self.answer(showing, &command);
+                    self.ask_next();
                     // The status first, then the state with it: the dialog closes in every client.
                     self.sync_shared();
                     self.publish_view_state();
                     return;
                 }
-                if self.question.as_ref().is_some_and(|q| q.dialog_id == id) {
-                    self.answer_question(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
-                if self.process.asking(&id) {
-                    self.answer_process(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
-                if self
-                    .network
-                    .as_ref()
-                    .and_then(|n| n.asking.as_ref())
-                    .is_some_and(|a| a.dialog_id == id)
-                {
-                    self.answer_network(&command);
-                    self.sync_shared();
-                    self.publish_view_state();
-                    return;
-                }
                 self.writer = Some(client);
-                self.sync_shared();
                 self.send_to_pi(&Value::Object(command));
+                // pi's dialog closed: a question waiting for it may show now.
+                self.ask_next();
+                self.sync_shared();
+                self.publish_view_state();
                 return;
             }
             "prompt" | "steer" | "follow_up" | "abort" | "bash" => self.writer = Some(client),
@@ -1384,14 +1524,161 @@ impl SessionTask {
             // The conversation was rewritten: rebuild the view from entries.
             self.internal(Internal::GetEntries);
         }
-        // A question whose dialog left with the run frees the slot; a waiting process question is shown then. (The
-        // dialog it adds comes back through here, and finds the slot taken.)
-        self.ask_next_process();
+        // A question whose dialog left with the run, or a dialog of pi's that closed, frees the slot.
+        self.settle();
+    }
+
+    /// One of the session's questions as a dialog: to every client like a dialog of pi's, and kept for replay until
+    /// it's answered, as the session's own (it never holds the slot against itself).
+    fn show_dialog(&mut self, record: Value) {
+        let Value::Object(map) = record else { return };
+        let line: Arc<str> = Value::Object(map.clone()).to_string().into();
+        self.replay
+            .track_as("extension_ui_request", &map, &line, replay::Owner::Piton);
+        for tx in self.clients.values() {
+            let _ = tx.send(Frame::Record(line.clone()));
+        }
+    }
+
+    /// A question waits its turn, and shows at once when the slot is free.
+    fn enqueue(&mut self, question: Question) {
+        crate::log!(
+            "session {}: asking a {} question",
+            lock(&self.shared).key,
+            question.kind()
+        );
+        self.questions.enqueue(question);
+        self.ask_next();
+        self.sync_shared();
         self.publish_view_state();
     }
 
-    /// A bash call the agent asks the daemon to run: refused unless it's a sandboxed session's running call; run with a
-    /// per-command grant that matches it; otherwise, for a rerun, asked of the user.
+    /// Shows the next question when the slot is free: nothing showing, and no dialog of pi's pending. Called after
+    /// everything that can free it.
+    fn ask_next(&mut self) {
+        let pi_dialog = self.replay.pi_dialog_pending();
+        while let Some((question, deadline)) =
+            self.questions
+                .next(pi_dialog, Instant::now(), self.config.approval_timeout)
+        {
+            let question = match question {
+                // The user allowed this operation for the session while it waited: answered without asking.
+                Question::Worker(asked) => match asked.operation() {
+                    Some(op) if self.workers_allowed.contains(&op) => {
+                        asked.approve_for_session();
+                        continue;
+                    }
+                    Some(_) | None => Question::Worker(asked),
+                },
+                // The stream may have opened or closed since it was queued: decide liftability now.
+                Question::Process(process) => Question::Process(self.refresh_live(process)),
+                question @ (Question::Protected(_) | Question::Block(_) | Question::Network(_) | Question::Lift(_)) => {
+                    question
+                }
+            };
+            self.show(question, deadline);
+            return;
+        }
+    }
+
+    /// Shows `question` under a fresh dialog: from the queue, or again after an answer that decided nothing yet (its
+    /// next stage, "Choose an answer below"), keeping the deadline it had.
+    fn show(&mut self, question: Question, deadline: Option<Instant>) {
+        self.next_internal += 1;
+        let id = format!("piton:{}:{}", question.kind(), self.next_internal);
+        let record = match &question {
+            Question::Protected(PendingChange::Write(write)) => {
+                // The file as it is now, so the diff is against what the write replaces.
+                let before = std::fs::read_to_string(&write.path).ok();
+                crate::agent::write_dialog(&id, &write.path, write.controls, before.as_deref(), &write.content)
+            }
+            Question::Protected(PendingChange::Delete(delete)) => crate::agent::delete_dialog(
+                &id,
+                &delete.path,
+                delete.controls,
+                crate::agent::Entry::at(&delete.path).as_ref(),
+            ),
+            Question::Protected(PendingChange::Rename(rename)) => {
+                crate::agent::rename_dialog(&id, &rename.from, rename.from_controls, &rename.to, rename.to_controls)
+            }
+            Question::Block(block) => match block.stage {
+                commands::Stage::Choice => crate::agent::question::rpc_dialog(&id, &block.question),
+                commands::Stage::Pattern(target, scope) => {
+                    crate::agent::question::rpc_pattern_dialog(&id, &block.question.command, target, scope)
+                }
+            },
+            Question::Process(process) => crate::agent::block::process_dialog(
+                &id,
+                &process.process,
+                &process.refusal,
+                &process.live,
+                process.offer.as_ref(),
+            ),
+            Question::Network(network) => {
+                let who = match network.waiting.first() {
+                    Some(first) => self.who(&first.user),
+                    None => "A connection".to_string(),
+                };
+                crate::agent::block::network_dialog(&id, &who, &network.to.to_string())
+            }
+            Question::Worker(asked) => asked.dialog(&id),
+            Question::Lift(lift) => crate::agent::lift::dialog(
+                &id,
+                &crate::agent::lift::LiftRequest {
+                    targets: lift.targets.clone(),
+                    reason: lift.reason.clone(),
+                },
+            ),
+        };
+        self.questions.show(question, id, deadline);
+        self.show_dialog(record);
+    }
+
+    /// A client answered the showing question's dialog: its kind reads the answer.
+    fn answer(&mut self, showing: Showing, answer: &Map<String, Value>) {
+        let Showing { question, deadline, .. } = showing;
+        match question {
+            Question::Protected(change) => self.answer_protected(change, deadline, answer),
+            Question::Block(block) => self.answer_question(block, deadline, answer),
+            Question::Process(process) => self.answer_process(process, answer),
+            Question::Network(network) => self.answer_network(network, deadline, answer),
+            Question::Worker(asked) => self.answer_worker_question(asked, deadline, answer),
+            Question::Lift(lift) => self.answer_lift(lift, deadline, answer),
+        }
+    }
+
+    /// Drops questions whose asker stopped waiting, and ends the showing one when it can't be answered any more; then
+    /// the next shows.
+    fn settle(&mut self) {
+        let replay = &self.replay;
+        let ended = self.questions.settle(|dialog| replay.has_dialog(dialog));
+        self.after_ended(ended);
+    }
+
+    /// A question ended unanswered (its kind told its asker): its dialog closes in every client, and the next shows.
+    fn after_ended(&mut self, ended: Option<Ended>) {
+        if let Some(Ended { dialog, kind, why }) = ended {
+            let key = lock(&self.shared).key;
+            match why {
+                Unanswered::RunEnded => crate::log!("session {key}: a {kind} question ended with the run"),
+                Unanswered::TimedOut => {
+                    crate::log!("session {key}: a {kind} question timed out");
+                    self.replay.answer_dialog(&dialog);
+                }
+                Unanswered::AskerLeft => {
+                    crate::log!("session {key}: a {kind} question was withdrawn");
+                    self.replay.answer_dialog(&dialog);
+                }
+            }
+        }
+        self.ask_next();
+        self.sync_shared();
+        self.publish_view_state();
+    }
+
+    /// A run the agent or pi's process asks the daemon for: a bash call is refused unless it's a sandboxed session's
+    /// running call; anything a per-command grant matches runs with it; a rerun, or a widened or host run from pi's
+    /// process, is asked of the user.
     fn run_command(&mut self, request: crate::agent::RunRequest, reply: oneshot::Sender<crate::agent::RunDecision>) {
         use crate::agent::RunDecision;
         let key = lock(&self.shared).key;
@@ -1419,52 +1706,52 @@ impl SessionTask {
                 let decision = self.with_gate_user(decision);
                 let _ = reply.send(decision);
             }
-            commands::First::Ask { refusals, tag, note } => {
-                let asker = crate::agent::question::Asker::Agent {
-                    reason: request.reason.clone(),
+            commands::First::Ask {
+                refusals,
+                tag,
+                note,
+                widen,
+            } => {
+                let reason = request.reason.clone();
+                let asker = match &request.origin {
+                    crate::agent::run::Origin::Pi { .. } => crate::agent::question::Asker::Pi { reason },
+                    crate::agent::run::Origin::BashCall { .. } | crate::agent::run::Origin::Typed { .. } => {
+                        crate::agent::question::Asker::Agent { reason }
+                    }
                 };
+                self.next_internal += 1;
                 let question = commands.question(
-                    format!("piton:question:{}", self.next_internal + 1),
+                    format!("piton:question:{}", self.next_internal),
                     &request,
                     asker,
                     refusals,
                     note,
+                    &widen,
                 );
-                if self.asking() {
-                    let _ = reply.send(RunDecision::NotRun {
-                        reason: "another question is waiting for the user; try again after it's answered".into(),
-                    });
-                    return;
-                }
                 crate::log!("session {key}: asking to run a command outside the sandbox");
-                self.ask_question(question, request, tag, reply);
+                self.ask_question(question, request, tag, widen, reply);
             }
         }
     }
 
-    /// Shows the block question: to `rpc` clients as pi's dialog, kept for replay until answered; `view` clients get the
-    /// typed question in the state instead.
+    /// The block question waits its turn: `rpc` clients get it as pi's dialog, kept for replay until answered; `view`
+    /// clients get the typed question in the state instead.
     fn ask_question(
         &mut self,
         question: crate::agent::question::Question,
         request: crate::agent::RunRequest,
         tag: String,
+        widen: commands::Widen,
         reply: oneshot::Sender<crate::agent::RunDecision>,
     ) {
-        self.next_internal += 1;
-        let dialog_id = self.next_dialog_id();
-        let record = crate::agent::question::rpc_dialog(&dialog_id, &question);
-        self.question = Some(commands::PendingQuestion {
+        self.enqueue(Question::Block(Box::new(commands::PendingQuestion {
             question,
-            dialog_id,
             stage: commands::Stage::Choice,
             request,
             tag,
+            widen,
             reply,
-            deadline: self.config.approval_timeout.deadline(Instant::now()),
-        });
-        self.on_pi_line(record.to_string());
-        self.publish_view_state();
+        })));
     }
 
     /// A call that failed in the session's own sandbox: asked about when a block recorded for it is one an approved
@@ -1477,7 +1764,6 @@ impl SessionTask {
     ) {
         use crate::agent::Failed;
         let key = lock(&self.shared).key;
-        let slot_taken = self.asking();
         let Some(commands) = &self.commands else {
             let _ = reply.send(Failed::Report {
                 blocks: Vec::new(),
@@ -1485,7 +1771,7 @@ impl SessionTask {
             });
             return;
         };
-        match commands.after_failure(&mut self.calls, &request, last, slot_taken) {
+        match commands.after_failure(&mut self.calls, &request, last) {
             commands::AfterFailure::Wait => {
                 let _ = reply.send(Failed::Wait);
             }
@@ -1504,83 +1790,61 @@ impl SessionTask {
                 tag,
                 note,
             } => {
+                self.next_internal += 1;
                 let question = commands.question(
-                    format!("piton:question:{}", self.next_internal + 1),
+                    format!("piton:question:{}", self.next_internal),
                     &request,
                     crate::agent::question::Asker::Piton,
                     refusals,
                     note,
+                    &commands::Widen::All,
                 );
                 crate::log!(
                     "session {key}: a command failed on a block; asking to run it again: {}",
                     blocks.join("; ")
                 );
                 let (decided, decision) = oneshot::channel();
-                self.ask_question(question, request, tag, decided);
+                self.ask_question(question, request, tag, commands::Widen::All, decided);
                 let _ = reply.send(Failed::Asked { blocks, decision });
             }
         }
     }
 
-    /// A fresh id for the block question's `rpc` dialog.
-    fn next_dialog_id(&mut self) -> String {
-        self.next_internal += 1;
-        format!("piton:block:{}", self.next_internal)
-    }
-
     /// An `rpc` client's answer to the block question's dialog: show it again, switch the runtime, ask for the
     /// pattern, or decide.
-    fn answer_question(&mut self, answer: &Map<String, Value>) {
-        let Some(pending) = self.question.take() else { return };
+    fn answer_question(
+        &mut self,
+        pending: Box<commands::PendingQuestion>,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
         let next = commands::rpc_answer(pending.stage, &pending.question, answer);
-        let (question, stage, record) = match next {
-            commands::Next::Decided(answer) => return self.decide_question(pending, answer),
-            commands::Next::AskAgain => {
-                let id = self.next_dialog_id();
-                let record = crate::agent::question::rpc_dialog(&id, &pending.question);
-                (pending.question.clone(), commands::Stage::Choice, (id, record))
-            }
+        let mut pending = pending;
+        match next {
+            commands::Next::Decided(answer) => return self.decide_question(*pending, answer),
+            commands::Next::AskAgain => pending.stage = commands::Stage::Choice,
             commands::Next::Switch => {
-                let question = pending.question.switched();
-                let id = self.next_dialog_id();
-                let record = crate::agent::question::rpc_dialog(&id, &question);
-                (question, commands::Stage::Choice, (id, record))
+                pending.question = pending.question.switched();
+                pending.stage = commands::Stage::Choice;
             }
-            commands::Next::AskPattern(target, scope) => {
-                let id = self.next_dialog_id();
-                let record = crate::agent::question::rpc_pattern_dialog(&id, &pending.request.command, target, scope);
-                (
-                    pending.question.clone(),
-                    commands::Stage::Pattern(target, scope),
-                    (id, record),
-                )
-            }
-        };
-        let (dialog_id, record) = record;
-        self.question = Some(commands::PendingQuestion {
-            question,
-            dialog_id,
-            stage,
-            ..pending
-        });
-        self.on_pi_line(record.to_string());
+            commands::Next::AskPattern(target, scope) => pending.stage = commands::Stage::Pattern(target, scope),
+        }
+        self.show(Question::Block(pending), deadline);
     }
 
     /// A `view` client's typed answer to the block question (`session.decide`).
     fn decide(&mut self, question: &str, answer: &Value) -> Result<(), String> {
-        let Some(pending) = &self.question else {
-            return Err("that question was already answered or expired".into());
-        };
-        if pending.question.id != question {
-            return Err("that question was already answered or expired".into());
+        let gone = || "that question was already answered or expired".to_string();
+        match self.questions.showing_block() {
+            Some((block, _)) if block.question.id == question => {}
+            Some(_) | None => return Err(gone()),
         }
         let answer = crate::agent::question::parse_decision(answer)?;
-        let Some(pending) = self.question.take() else {
-            return Ok(());
-        };
+        let (pending, dialog) = self.questions.take_decided(question).ok_or_else(gone)?;
         // The `rpc` rendering's dialog closes in every attached client.
-        self.replay.answer_dialog(&pending.dialog_id);
-        self.decide_question(pending, answer);
+        self.replay.answer_dialog(&dialog);
+        self.decide_question(*pending, answer);
+        self.ask_next();
         Ok(())
     }
 
@@ -1596,32 +1860,55 @@ impl SessionTask {
             Target::Host => "on the host",
         };
         let decision = match answer {
-            Answer::Deny => {
+            Answer::Deny(()) => {
                 crate::log!("session {key}: the user denied running a command outside the sandbox");
                 // The agent mustn't ask again in this run for what the user just declined.
-                self.calls.decline(&pending.request.call_id);
+                match &pending.request.origin {
+                    crate::agent::run::Origin::BashCall { call_id, .. } => self.calls.decline(call_id),
+                    crate::agent::run::Origin::Typed { .. } | crate::agent::run::Origin::Pi { .. } => {}
+                }
                 RunDecision::NotRun {
                     reason: "the user declined to run it outside the sandbox; don't ask again for this command".into(),
                 }
             }
-            Answer::Once(target) => match &self.commands {
+            Answer::Narrowest(crate::agent::answer::Once(target)) => match &self.commands {
                 Some(commands) => {
                     crate::log!("session {key}: the user approved running a command {}", where_(target));
                     RunDecision::Run(Box::new(commands.approved_rerun(
                         &pending.request,
                         &pending.tag,
                         target,
+                        &pending.widen,
                     )))
                 }
                 None => return,
             },
-            Answer::Always { target, scope, pattern } => match &self.commands {
+            Answer::Session(target) => match &mut self.commands {
                 Some(commands) => {
-                    let shown = pattern.pattern().to_string();
-                    let note = match commands.persist(scope, pattern, target) {
+                    crate::log!(
+                        "session {key}: the user approved running a command {} for this session",
+                        where_(target)
+                    );
+                    commands.allow_for_session(&pending.question.command, &pending.widen, target);
+                    RunDecision::Run(Box::new(commands.approved_rerun(
+                        &pending.request,
+                        &pending.tag,
+                        target,
+                        &pending.widen,
+                    )))
+                }
+                None => return,
+            },
+            Answer::Always(always) => match &mut self.commands {
+                Some(commands) => {
+                    let target = always.target;
+                    let shown = always.pattern.pattern().to_string();
+                    let note = match commands.persist(always, &pending.widen) {
                         Ok(path) => format!(" (saved `bash({shown})` in {}; new sessions use it)", path.display()),
                         Err(e) => format!(" (couldn't save the entry for `{shown}`: {e})"),
                     };
+                    // The session read its saved entries at launch: the exact command stays approved until it ends.
+                    commands.allow_for_session(&pending.question.command, &pending.widen, target);
                     crate::log!(
                         "session {key}: the user approved running a command {}{note}",
                         where_(target)
@@ -1630,6 +1917,7 @@ impl SessionTask {
                         &pending.request,
                         &pending.tag,
                         target,
+                        &pending.widen,
                     )))
                 }
                 None => return,
@@ -1637,7 +1925,6 @@ impl SessionTask {
         };
         let decision = self.with_gate_user(decision);
         let _ = pending.reply.send(decision);
-        self.ask_next_process();
     }
 
     /// A command run in a sandbox with a filtered network gets the gate as its own proxy user, named by its tag, so the
@@ -1662,36 +1949,9 @@ impl SessionTask {
         }
     }
 
-    /// Ends the block question when it can't be answered any more: its dialog left (the run ended) or the agent
-    /// stopped waiting.
-    fn settle_question(&mut self) {
-        let Some(pending) = &self.question else { return };
-        let gone = !self.replay.has_dialog(&pending.dialog_id);
-        if !gone && !pending.reply.is_closed() {
-            return;
-        }
-        let Some(pending) = self.question.take() else { return };
-        crate::log!(
-            "session {}: a command question ended unanswered",
-            lock(&self.shared).key
-        );
-        match gone {
-            true => {
-                let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
-                    reason: "the run ended before the user answered".into(),
-                });
-            }
-            false => {
-                self.replay.answer_dialog(&pending.dialog_id);
-                self.sync_shared();
-            }
-        }
-        self.publish_view_state();
-    }
-
     /// A connection the gate holds: allowed or refused at once when the sandbox's entries, pi's hosts, or the session's
-    /// answers decide it; otherwise it waits for the user, joining the question about the same
-    /// destination when one is showing.
+    /// answers decide it; otherwise it waits for the user, joining the question about the same destination when one is
+    /// showing or waiting.
     fn network_ask(
         &mut self,
         user: crate::launch::sandbox::network::User,
@@ -1705,13 +1965,7 @@ impl SessionTask {
         let Some(waiting) = network.decide(user, to, reply) else {
             return;
         };
-        match &mut network.asking {
-            Some(asking) if asking.to == waiting.to => asking.waiting.push(waiting),
-            Some(_) | None => {
-                network.queued.push_back(waiting);
-                self.ask_next_network();
-            }
-        }
+        self.enqueue(Question::Network(network::NetworkQuestion::new(waiting)));
     }
 
     /// Who a proxy user is, as the network question names it: pi, or the call's command.
@@ -1721,6 +1975,7 @@ impl SessionTask {
                 .calls
                 .command_of(&id)
                 .map_or_else(|| "A command".to_string(), |c| format!("`{c}`")),
+            commands::TagOwner::PiRun => "A run from pi's process (an extension or a workflow tool)".to_string(),
             commands::TagOwner::Session
             | commands::TagOwner::GoneCall
             | commands::TagOwner::Typed
@@ -1728,61 +1983,24 @@ impl SessionTask {
         }
     }
 
-    /// Shows the next network question when the session's question slot is free.
-    fn ask_next_network(&mut self) {
-        if self.asking() {
-            return;
-        }
-        let Some(network) = &mut self.network else { return };
-        if network.asking.is_some() {
-            return;
-        }
-        let Some(first) = network.queued.pop_front() else {
-            return;
-        };
-        // Every connection waiting on the same destination joins this question.
-        let (same, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut network.queued)
-            .into_iter()
-            .partition(|w| w.to == first.to);
-        network.queued = rest.into();
-        let to = first.to.clone();
-        let who = self.who(&first.user);
-        let mut waiting = vec![first];
-        waiting.extend(same);
-        self.next_internal += 1;
-        let dialog_id = format!("piton:network:{}", self.next_internal);
-        let deadline = self.config.approval_timeout.deadline(Instant::now());
-        let record = crate::agent::block::network_dialog(&dialog_id, &who, &to.to_string());
-        if let Some(network) = &mut self.network {
-            network.asking = Some(network::Asking {
-                dialog_id,
-                to,
-                waiting,
-                deadline,
-            });
-        }
-        self.on_pi_line(record.to_string());
-    }
-
     /// The user's answer to a network question.
-    fn answer_network(&mut self, answer: &Map<String, Value>) {
+    fn answer_network(
+        &mut self,
+        question: network::NetworkQuestion,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
         use crate::agent::block::NetworkAnswer;
         let key = lock(&self.shared).key;
-        let Some(network) = &mut self.network else { return };
-        let Some(to) = network.asking.as_ref().map(|a| a.to.clone()) else {
+        let to = question.to.clone();
+        let Some(network) = &mut self.network else {
+            question.settle(&network::refused(&to, "this session has no gate"));
             return;
         };
         let verdict = match crate::agent::block::read_network_answer(answer) {
             NetworkAnswer::AskAgain => {
                 // Shown again: the connections keep waiting under a new dialog.
-                if let Some(asking) = network.asking.take() {
-                    let mut waiting = asking.waiting.into_iter();
-                    if let Some(first) = waiting.next() {
-                        network.queued.push_front(first);
-                    }
-                    network.queued.extend(waiting);
-                }
-                self.ask_next_network();
+                self.show(Question::Network(question), deadline);
                 return;
             }
             NetworkAnswer::Session => {
@@ -1825,23 +2043,7 @@ impl SessionTask {
             }
             NetworkAnswer::NotNow => network::refused(&to, "the user didn't allow it"),
         };
-        if let Some(network) = &mut self.network {
-            network.settle(&verdict);
-        }
-        self.ask_next_process();
-    }
-
-    /// No answer in time: the connections are refused, and the dialog closes everywhere.
-    fn expire_network_question(&mut self) {
-        let Some(network) = &mut self.network else { return };
-        let Some(asking) = &network.asking else { return };
-        let (id, to) = (asking.dialog_id.clone(), asking.to.clone());
-        network.settle(&network::refused(&to, "the user didn't answer in time"));
-        self.replay.answer_dialog(&id);
-        crate::log!("session {}: a network question timed out", lock(&self.shared).key);
-        self.ask_next_process();
-        self.sync_shared();
-        self.publish_view_state();
+        question.settle(&verdict);
     }
 
     /// A connection the gate refused: recorded for the call that made it (its block list shows it), else logged.
@@ -1891,20 +2093,26 @@ impl SessionTask {
     }
 
     /// A refusal the kernel recorded for this session: kept for the bash call it belongs to, or, for a process that
-    /// isn't one, offered to the user as the entry that lifts it, or reported when no entry the question saves would.
+    /// isn't one, asked about: lifted in pi's running sandbox, or saved as the entry that lifts it, or reported when
+    /// neither can.
     fn on_refusal(&mut self, refusal: crate::daemon::Refusal) {
-        use crate::launch::sandbox::grant::{self, Refused, Scope};
+        use crate::{
+            agent::block::{Live, NoLive},
+            launch::sandbox::grant::{self, Refused, Scope},
+        };
         let summary = refusal.summary();
         // A call's sandbox: kept for that call, shown when it's asked to run again. A typed command: the user saw it fail
-        // and it's never rerun. pi's own sandbox, or a call's background job outliving it: a blocked process, asked about.
-        match self.calls.owner(&refusal.tag) {
+        // and it's never rerun. A run from pi's process: its caller reads the exit and output. pi's own sandbox: lifted
+        // live. A call's background job outliving it: it can't take pi's token, so only an entry.
+        let own = match self.calls.owner(&refusal.tag) {
             commands::TagOwner::Call(id) => {
                 self.calls.note(&id, commands::CallRefusal::from(&refusal));
                 return;
             }
-            commands::TagOwner::Typed | commands::TagOwner::Other => return,
-            commands::TagOwner::Session | commands::TagOwner::GoneCall => {}
-        }
+            commands::TagOwner::Typed | commands::TagOwner::PiRun | commands::TagOwner::Other => return,
+            commands::TagOwner::Session => true,
+            commands::TagOwner::GoneCall => false,
+        };
         let Some(commands) = &self.commands else { return };
         let key = lock(&self.shared).key;
         if !self
@@ -1955,26 +2163,62 @@ impl SessionTask {
             credentials: commands.policies.credentials,
         };
         let decided = grant::lift_for(&commands.policies.launch, refused, &bounds, widened);
+        // What a token opens in pi's own sandbox, checked against every covering deny.
+        let live = match (own, self.lifts.stream()) {
+            (false, _) => Live::No(NoLive::OtherProcess),
+            (true, lifts::Stream::Closed) => Live::No(NoLive::NoStream),
+            (true, lifts::Stream::Open) => match grant::live_lift(&commands.policies.launch, refused, &bounds) {
+                Ok(lift) => Live::Lift(lift),
+                Err(why) => Live::No(NoLive::Refused(why.to_string())),
+            },
+        };
         let process = &refusal.process;
-        let notice = match decided {
+        let question = |offer: Option<grant::Offer>, live: Live| commands::ProcessQuestion {
+            process: process.clone(),
+            operation: refusal.operation.clone(),
+            target: refusal.target.clone(),
+            pid: refusal.pid,
+            refusal: summary.clone(),
+            live,
+            offer,
+        };
+        let notice = match (decided, live) {
             // An entry the user wrote decides it: only logged.
-            Err(grant::NoLift::Decided(grant::DeniedBy::UserDeny)) => {
+            (Err(grant::NoLift::Decided(grant::DeniedBy::UserDeny)), _) => {
                 crate::log!("session {key}: {process} was blocked: {summary} (your own [sandbox] entry)");
                 return;
             }
-            Ok(offer) => {
+            // A credential read is a probe programs recover from: a notice, as for bash calls, never a question.
+            (
+                Err(why @ grant::NoLift::Decided(grant::DeniedBy::Credential(crate::launch::sandbox::Access::Read))),
+                _,
+            ) => notice::notice(
+                &notice::Blocked {
+                    process,
+                    operation: &refusal.operation,
+                    target: &refusal.target,
+                    summary: &summary,
+                },
+                &why,
+                &notice::Context {
+                    home: &commands.paths.home,
+                    claude: notice::ClaudeSignIn::of(commands.policies.claude_login),
+                },
+            ),
+            (Ok(offer), live) => {
                 crate::log!("session {key}: {process} was blocked: {summary}");
-                self.next_internal += 1;
-                self.process.queue(commands::ProcessQuestion {
-                    id: format!("piton:process:{}", self.next_internal),
-                    process: process.clone(),
-                    refusal: summary,
-                    offer,
-                });
-                self.ask_next_process();
+                let question = question(Some(offer), live);
+                self.enqueue(Question::Process(question));
                 return;
             }
-            Err(why) => notice::notice(
+            // No saved form (Git's control files, the keychain with fnox off), but pi's sandbox can be widened now.
+            (Err(_), live @ Live::Lift(_)) => {
+                crate::log!("session {key}: {process} was blocked: {summary} (liftable while it runs)");
+                let question = question(None, live);
+                self.enqueue(Question::Process(question));
+                return;
+            }
+            (Err(why), Live::No(_)) => notice::notice(
                 &notice::Blocked {
                     process,
                     operation: &refusal.operation,
@@ -2011,140 +2255,288 @@ impl SessionTask {
         }
     }
 
-    /// Whether the session's one question slot is taken: a protected write, a block question, or a process question.
-    /// Settles the ones that can't be answered any more first.
-    fn asking(&mut self) -> bool {
-        self.settle_protected_write();
-        self.settle_question();
-        self.settle_process();
-        self.settle_network();
-        self.protected_write.is_some()
-            || self.question.is_some()
-            || self.process.asking.is_some()
-            || self.network.as_ref().is_some_and(|n| n.asking.is_some())
-    }
-
-    /// A network question whose dialog left unanswered (the run it showed in ended) is asked again under a new dialog;
-    /// its connections keep waiting.
-    fn settle_network(&mut self) {
-        let Some(network) = &mut self.network else { return };
-        let Some(asking) = &network.asking else { return };
-        if self.replay.has_dialog(&asking.dialog_id) {
-            return;
-        }
-        if let Some(asking) = network.asking.take() {
-            for waiting in asking.waiting.into_iter().rev() {
-                network.queued.push_front(waiting);
+    /// A queued question's live answer, as of now: a question queued without a stream gets one once pi's opened, and
+    /// loses it when it closed.
+    fn refresh_live(&self, mut question: commands::ProcessQuestion) -> commands::ProcessQuestion {
+        use crate::agent::block::{Live, NoLive};
+        question.live = match (&question.live, self.lifts.stream()) {
+            (Live::No(NoLive::OtherProcess | NoLive::Refused(_)), _) => question.live,
+            (Live::Lift(_), lifts::Stream::Closed) => Live::No(NoLive::NoStream),
+            (Live::Lift(_), lifts::Stream::Open) | (Live::No(NoLive::NoStream), lifts::Stream::Closed) => question.live,
+            (Live::No(NoLive::NoStream), lifts::Stream::Open) => {
+                let Some(commands) = &self.commands else {
+                    return question;
+                };
+                let projects = [commands.source.as_path(), commands.checkout.as_path()];
+                let shared = shared_folders(&commands.env);
+                let bounds = crate::launch::sandbox::grant::Bounds {
+                    projects: &projects,
+                    home: &commands.paths.home,
+                    shared: &shared,
+                    credentials: commands.policies.credentials,
+                };
+                let refused = crate::launch::sandbox::grant::Refused {
+                    operation: &question.operation,
+                    target: &question.target,
+                    pid: question.pid,
+                };
+                match crate::launch::sandbox::grant::live_lift(&commands.policies.launch, refused, &bounds) {
+                    Ok(lift) => Live::Lift(lift),
+                    Err(why) => Live::No(NoLive::Refused(why.to_string())),
+                }
             }
-        }
-    }
-
-    /// A process question whose dialog left unanswered (the run it showed in ended) is asked again.
-    fn settle_process(&mut self) {
-        let Some(question) = &self.process.asking else { return };
-        if self.replay.has_dialog(&question.id) {
-            return;
-        }
-        self.process.requeue_unanswered();
-    }
-
-    /// Shows the next process question when nothing else is being asked. Called whenever the slot may have freed.
-    fn ask_next_process(&mut self) {
-        // A held connection is waiting for an answer: its question goes first.
-        self.ask_next_network();
-        if self.asking() {
-            return;
-        }
-        let Some(next) = self.process.next().cloned() else {
-            return;
         };
-        // A fresh id, so a re-asked question is a new dialog every client shows.
-        self.next_internal += 1;
-        let id = format!("piton:process:{}", self.next_internal);
-        if let Some(asking) = &mut self.process.asking {
-            asking.id = id.clone();
-        }
-        let record = crate::agent::block::process_dialog(&id, &next.process, &next.refusal, &next.offer);
-        self.on_pi_line(record.to_string());
+        question
     }
 
-    /// The user's answer to a process question: save the entry and restart, or leave it.
-    fn answer_process(&mut self, answer: &Map<String, Value>) {
-        use crate::agent::block::ProcessAnswer;
-        let Some(question) = self.process.asking.take() else {
-            return;
+    /// The user's answer to a process question: lift it in pi's running sandbox until the run settles or for the
+    /// session, save the entry (and lift it now), or leave it.
+    fn answer_process(&mut self, question: commands::ProcessQuestion, answer: &Map<String, Value>) {
+        use crate::agent::{
+            answer::{Answer, UntilSettled},
+            block::Live,
         };
         let key = lock(&self.shared).key;
-        match crate::agent::block::read_process_answer(answer) {
-            ProcessAnswer::AskAgain => {
-                self.process.asking = Some(question);
-                self.process.requeue_unanswered();
-                self.ask_next_process();
-            }
-            ProcessAnswer::NotNow => {
+        // pi's own process takes the grant at once; another (an MCP server pi started) once it's started again.
+        let who = match self.pi_pid {
+            Some(pi) if pi == question.pid => lifts::Who::Pi,
+            Some(_) | None => lifts::Who::Child,
+        };
+        let block = || lifts::Block {
+            process: question.process.clone(),
+            operation: question.operation.clone(),
+            target: question.target.clone(),
+            who,
+        };
+        let answer = crate::agent::block::read_process_answer(answer, &question.live, question.offer.is_some());
+        let live = match &question.live {
+            Live::Lift(lift) => Some(lift.clone()),
+            Live::No(_) => None,
+        };
+        match answer {
+            // Shown again, under a new dialog.
+            None => self.show(Question::Process(question), None),
+            Some(Answer::Deny(())) => {
                 crate::log!("session {key}: the user left {} blocked for now", question.process);
-                self.ask_next_process();
             }
-            ProcessAnswer::Persist(scope) => {
-                let Some(commands) = &self.commands else { return };
-                let lift = question.offer.at(grant_scope(scope));
-                match commands.persist_lift(scope, lift) {
+            Some(Answer::Narrowest(UntilSettled(()))) => {
+                if let Some(lift) = live {
+                    crate::log!("session {key}: {} lifted until the run settles", lift.describe());
+                    self.grant_live(lift, lifts::Scope::UntilSettled, Some(block()));
+                }
+            }
+            Some(Answer::Session(())) => {
+                if let Some(lift) = live {
+                    crate::log!("session {key}: {} lifted for the session", lift.describe());
+                    self.grant_live(lift, lifts::Scope::Session, Some(block()));
+                }
+            }
+            Some(Answer::Always(scope)) => {
+                let Some(offer) = &question.offer else { return };
+                let Some(commands) = &mut self.commands else { return };
+                let entry = offer.at(grant_scope(scope)).clone();
+                match commands.persist_lift(scope, &entry) {
                     Ok(path) => {
-                        crate::log!(
-                            "session {key}: saved `{}` in {}; restarting",
-                            lift.entry(),
-                            path.display()
-                        );
-                        (self.hooks.restart)(key);
+                        crate::log!("session {key}: saved `{}` in {}", entry.entry(), path.display());
+                        // Later bash calls get it now, as after a restart.
+                        if let Err(e) = commands.add_saved_entry(&entry, &path) {
+                            crate::log!("session {key}: the saved entry doesn't resolve for commands: {e}");
+                        }
+                        // pi's own sandbox gets it now, for the session; new sessions read the entry. The block isn't
+                        // asked about again: the entry covers it from now on.
+                        if let Some(lift) = live {
+                            let effects = self.lifts.grant(lift, lifts::Scope::Session, Some(block()));
+                            self.apply_lifts(effects);
+                        }
                     }
                     Err(e) => {
                         crate::log!("session {key}: couldn't save the entry: {e}");
                         self.show_notice(format!("Couldn't save the sandbox entry: {e}"));
-                        self.ask_next_process();
                     }
                 }
             }
         }
     }
 
-    /// No answer in time: the command doesn't run, and the dialog closes everywhere.
-    fn expire_question(&mut self) {
-        let Some(pending) = self.question.take() else { return };
-        crate::log!("session {}: a command question timed out", lock(&self.shared).key);
-        self.replay.answer_dialog(&pending.dialog_id);
-        let _ = pending.reply.send(crate::agent::RunDecision::NotRun {
-            reason: "the user didn't answer in time; it didn't run".into(),
-        });
-        self.ask_next_process();
-        self.sync_shared();
-        self.publish_view_state();
+    /// Grants `lift` on pi's stream and applies what that did.
+    fn grant_live(
+        &mut self,
+        lift: crate::launch::sandbox::grant::LiveLift,
+        scope: lifts::Scope,
+        block: Option<lifts::Block>,
+    ) {
+        let effects = self.lifts.grant(lift, scope, block);
+        self.apply_lifts(effects);
     }
 
-    /// Ends a pending protected write that can no longer be answered: its dialog left (the run it belonged to ended,
-    /// so pi.nvim and the apps no longer show it) or the agent stopped waiting. The agent, if still there, hears that it
-    /// wasn't written; the next request isn't refused as "another is waiting".
-    fn settle_protected_write(&mut self) {
-        let Some(pending) = &self.protected_write else { return };
-        let gone = !self.replay.has_dialog(&pending.id);
-        if !gone && !pending.reply.is_closed() {
-            return;
+    /// Sends what the lifts state machine decided, asks about ended grants' blocks again, and reports failures.
+    fn apply_lifts(&mut self, effects: lifts::Effects) {
+        let lifts::Effects { send, forget, failed } = effects;
+        if let Some((_, out)) = &self.lifts_out {
+            for line in send {
+                let _ = out.send(match line {
+                    lifts::Out::Grant { id, lift, for_child } => LiftsOut::Grant { id, lift, for_child },
+                    lifts::Out::Revoke { id } => LiftsOut::Revoke { id },
+                });
+            }
         }
-        let Some(pending) = self.protected_write.take() else {
+        for block in forget {
+            self.process.forget(&block.process, &block.operation, &block.target);
+        }
+        for (lift, why) in failed {
+            let key = lock(&self.shared).key;
+            crate::log!(
+                "session {key}: couldn't widen pi's sandbox for {}: {why}",
+                lift.describe()
+            );
+            self.show_notice(format!("Couldn't widen pi's sandbox for {}: {why}", lift.describe()));
+        }
+    }
+
+    /// pi's `lifts` stream.
+    fn lifts_event(&mut self, event: LiftsEvent) {
+        let key = lock(&self.shared).key;
+        match event {
+            LiftsEvent::Opened { out, id, pi } => {
+                self.pi_pid = Some(pi);
+                let stream = self.next_stream;
+                self.next_stream += 1;
+                let effects = self.lifts.opened();
+                self.apply_lifts(effects);
+                self.lifts_out = Some((stream, out));
+                let _ = id.send(stream);
+                crate::log!("session {key}: pi's sandbox can be widened while it runs");
+            }
+            LiftsEvent::Consumed { id } => {
+                let effects = self.lifts.reply(id, lifts::Reply::Consumed);
+                self.apply_lifts(effects);
+            }
+            LiftsEvent::Failed { id, message } => {
+                let effects = self.lifts.reply(id, lifts::Reply::Failed(message));
+                self.apply_lifts(effects);
+            }
+            LiftsEvent::Closed { stream } => {
+                // Only the open stream's closing ends the grants: a replaced one's already did.
+                if self.lifts_out.as_ref().is_some_and(|(open, _)| *open == stream) {
+                    self.lifts_out = None;
+                    let effects = self.lifts.closed();
+                    self.apply_lifts(effects);
+                    crate::log!("session {key}: pi's lift stream closed");
+                }
+            }
+        }
+    }
+
+    /// pi's run settled: every "until the run settles" grant ends.
+    fn lifts_settled(&mut self) {
+        let effects = self.lifts.settled();
+        self.apply_lifts(effects);
+    }
+
+    /// An explicit lift from code in pi's process: answered from a session approval when one covers every target,
+    /// refused when a target is floor, otherwise asked in its turn.
+    fn lift(
+        &mut self,
+        request: crate::agent::lift::LiftRequest,
+        reply: oneshot::Sender<crate::agent::lift::LiftDecision>,
+    ) {
+        use crate::agent::lift::LiftDecision;
+        let key = lock(&self.shared).key;
+        let Some(commands) = &self.commands else {
+            let _ = reply.send(LiftDecision::Refused {
+                reason: "only a sandboxed session has a sandbox to widen".into(),
+            });
             return;
         };
-        let key = lock(&self.shared).key;
-        crate::log!(
-            "session {key}: protected write to {} ended unanswered",
-            pending.path.display()
-        );
-        if gone {
-            let _ = pending.reply.send(crate::agent::WriteOutcome::Refused {
-                reason: "the run ended before the user answered; ask again if it's still needed".into(),
+        if request.targets.is_empty() {
+            let _ = reply.send(LiftDecision::Refused {
+                reason: "nothing to lift".into(),
             });
-        } else {
-            // The agent left (its tool call was aborted): close the dialog in every client.
-            self.replay.answer_dialog(&pending.id);
-            self.sync_shared();
+            return;
+        }
+        let mut targets = Vec::with_capacity(request.targets.len());
+        for target in &request.targets {
+            let resolved = resolve_live(target);
+            if let Err(why) = crate::launch::sandbox::grant::check_live(
+                &commands.policies.launch,
+                &resolved,
+                commands.policies.credentials,
+            ) {
+                crate::log!("session {key}: lift of {} refused: {why}", resolved.describe());
+                let _ = reply.send(LiftDecision::Refused {
+                    reason: format!("{}: {why}", resolved.describe()),
+                });
+                return;
+            }
+            targets.push(resolved);
+        }
+        if targets.iter().all(|t| self.lifts.covers(t)) {
+            let _ = reply.send(LiftDecision::Granted(targets));
+            return;
+        }
+        crate::log!("session {key}: asking about a lift: {}", request.reason);
+        self.enqueue(Question::Lift(PendingLift {
+            targets,
+            reason: request.reason,
+            reply,
+        }));
+    }
+
+    /// The user's answer to an explicit lift.
+    fn answer_lift(&mut self, pending: PendingLift, deadline: Option<Instant>, answer: &Map<String, Value>) {
+        use crate::agent::{
+            answer::{Answer, Once},
+            lift::LiftDecision,
+        };
+        let key = lock(&self.shared).key;
+        match crate::agent::lift::read_answer(answer) {
+            // Asks again, under a new dialog.
+            None => self.show(Question::Lift(pending), deadline),
+            Some(Answer::Narrowest(Once(()))) => {
+                crate::log!("session {key}: lift approved once");
+                let _ = pending.reply.send(LiftDecision::Granted(pending.targets));
+            }
+            Some(Answer::Session(())) => {
+                crate::log!("session {key}: lift approved for the session");
+                // Later requests and blocks for these are answered without asking; pi's sandbox is widened for them.
+                for target in &pending.targets {
+                    self.grant_live(target.clone(), lifts::Scope::Session, None);
+                }
+                let _ = pending.reply.send(LiftDecision::Granted(pending.targets));
+            }
+            Some(Answer::Always(never)) => match never {},
+            Some(Answer::Deny(())) => {
+                crate::log!("session {key}: lift denied");
+                let _ = pending.reply.send(LiftDecision::Denied);
+            }
+        }
+    }
+
+    /// A worker operation's question: answered "for this session" at once when the user allowed the operation earlier
+    /// in this session; otherwise asked in its turn, with a dialog every client shows.
+    fn worker_question(&mut self, asked: crate::agent::workers::Asked) {
+        if asked.operation().is_some_and(|op| self.workers_allowed.contains(&op)) {
+            asked.approve_for_session();
+            return;
+        }
+        self.enqueue(Question::Worker(asked));
+    }
+
+    /// A client's answer to a worker question: answered, or shown again.
+    fn answer_worker_question(
+        &mut self,
+        asked: crate::agent::workers::Asked,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
+        use crate::agent::workers::Answered;
+        match asked.answer(answer) {
+            Answered::AskAgain(asked) => self.show(Question::Worker(asked), deadline),
+            Answered::Done { for_session } => {
+                if let Some(op) = for_session {
+                    self.workers_allowed.insert(op);
+                }
+            }
         }
     }
 
@@ -2269,6 +2661,10 @@ impl SessionTask {
 
     fn track(&mut self, kind: &str, record: &Map<String, Value>, line: &Arc<str>) {
         self.replay.track(kind, record, line);
+        // Not `agent_end`: retries, compaction, steering, and follow-ups continue after it.
+        if kind == "agent_settled" {
+            self.lifts_settled();
+        }
         if kind == "message_end" {
             let role = record
                 .get("message")

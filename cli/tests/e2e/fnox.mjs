@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import net from "node:net";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
@@ -30,7 +30,7 @@ function setup({ fnox = { enabled: true, command: [fakeFnox] }, files = {}, proj
     // The daemon's state folder is its socket's: apart from pi's agent directory, which a sandbox may write.
     mkdirSync(join(dir, "state"));
     const socket = join(dir, "state", "piton.sock");
-    const config = writeConfig(dir, {
+    writeConfig(dir, {
         daemon: {
             socket,
             log: join(dir, "piton.log"),
@@ -43,20 +43,18 @@ function setup({ fnox = { enabled: true, command: [fakeFnox] }, files = {}, proj
         project,
     });
     // The daemon's own FNOX_PROFILE reaches pi; a workspace's would not (mise is off here, so only the base sets it).
-    const env = {
-        ...process.env,
-        PITON_CONFIG_HOME: config,
+    const env = testEnv({
         PI_CODING_AGENT_DIR: agent,
         PITON_FAUX_TPS: "200",
         FNOX_PROFILE: "agent",
         MISE_TRUSTED_CONFIG_PATHS: dir,
-    };
+    });
     delete env.PITON_WORKSPACE_MARKER;
     return { dir, ws, socket, env };
 }
 
 async function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(piton, pitonArgs(ctx.dir, ["daemon"]), { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     for (let i = 0; i < 100 && !err.includes("listening"); i++) await sleep(50);
@@ -119,7 +117,7 @@ function viewClient(ctx, name) {
 
 /// `piton attach` (pi.nvim's way in): pi's records, and the ones the daemon adds.
 function attach(ctx) {
-    const child = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(piton, pitonArgs(ctx.dir, ["attach"]), { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
     const a = { records: [], waiters: [], stderr: "", n: 0 };
     let buf = "";
     child.stdout.on("data", (chunk) => {
@@ -156,6 +154,18 @@ function attach(ctx) {
     return a;
 }
 
+/// One request on `socket` with `token`; resolves with the answer line.
+function agentLine(socket, token, request) {
+    return new Promise((resolve, reject) => {
+        const sock = net.connect(socket);
+        let buf = "";
+        sock.on("data", (chunk) => (buf += chunk));
+        sock.on("end", () => resolve(JSON.parse(buf)));
+        sock.on("error", reject);
+        sock.write(JSON.stringify({ token, request }) + "\n");
+    });
+}
+
 /// Runs the faux `env` tool in `session` and returns what pi's environment held.
 async function piEnv(c, session) {
     await c.req("session.send", { session, message_id: "env", text: "env" });
@@ -177,6 +187,11 @@ const tests = {
         assert.equal(env.fnoxProfile, "agent");
         const args = readFileSync(join(ctx.ws, "fake-fnox-args"), "utf8").split("\n");
         assert.deepEqual(args.slice(0, 2), ["--no-sandbox", "--"]);
+        // pi is fnox's child, not the process the daemon started: the helper reported pi's process before becoming pi,
+        // so pi's token works from pi (a request reaches its handler) and the launch token is spent.
+        const answer = await agentLine(env.relay, env.token, { type: "write", path: join(ctx.ws, "x"), content: "" });
+        assert.equal(answer.type, "write", JSON.stringify(answer));
+        assert.equal(answer.outcome, "refused", "not a protected file");
         assert.ok(!c.items(session.key).some((i) => i.type === "notice"), "no warning when every secret resolves");
         c.close();
     },
@@ -259,7 +274,7 @@ const keychainExposed = {
         execFileSync("git", ["-C", ctx.ws, "init", "-q", "-b", "main"]);
         execFileSync("git", ["-C", ctx.ws, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
         const created = await new Promise((res) => {
-            const p = spawn(piton, ["worker", "create", "x", "--json"], { env: ctx.env, cwd: ctx.ws, stdio: ["ignore", "pipe", "pipe"] });
+            const p = spawn(piton, pitonArgs(ctx.dir, ["worker", "create", "x", "--json"]), { env: ctx.env, cwd: ctx.ws, stdio: ["ignore", "pipe", "pipe"] });
             let out = "";
             p.stdout.on("data", (d) => (out += d));
             p.on("exit", (code) => res({ code, out }));

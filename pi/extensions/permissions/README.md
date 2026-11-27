@@ -8,7 +8,7 @@ Settings: `[tools.permissions]` and `[tools.permissions.<runtime>]` of `config.t
 
 ### Runtime
 
-`PITON_RUNTIME` says where Pi runs: unset (or empty) means `host`, `sandbox` means a sandboxed worker, such as a nono worker launched by piton. Any other value is invalid: tools are blocked until it's fixed, like invalid settings.
+The runtime says where Pi runs: `host`, or `sandbox` in a sandboxed session Piton's daemon launched. It's a fact of the session, which `piton config resolve` and the extension ask the daemon for; outside a session Piton launched, it's `host`. While the daemon can't be asked, tools are blocked, like invalid settings.
 
 Only the current runtime's table loads. Each file contributes `[tools.permissions]`, then its runtime table; `config.local.toml` comes after `config.toml`, and nearer levels later. `allow`, `ask`, and `deny` lists from every loaded table are combined, and deny or ask beats allow wherever it comes from. `default_mode` and `skill_grants` come from the nearest table that sets them.
 
@@ -65,6 +65,10 @@ Session modes (`/permissions-mode` and auto-accept) never weaken explicit `deny`
 
 Exact literal `true` and `false` Bash commands are built-in allow rules. Session modes and explicit deny or ask rules still take precedence.
 
+The [workers](../workers/) extension's tools (`create_worker`, `list_workers`, `delete_worker`) are left to piton's daemon, which decides them from `[workers.permissions]` and asks the user itself: no rule or session mode here applies to them.
+
+The same goes for `delete_protected_file` and `rename_protected_file`, which this extension registers in a session piton's daemon launched: they delete or rename a protected file (`.piton/`, `.pi/`, fnox's files, Piton's configuration levels, pi's agent directory), which the sandbox denies to shell commands, and the daemon asks the user before it acts. Any other path is refused; bash changes those. When a sandboxed `rm` or `mv` is denied on a protected file, the bash result names the tool to use instead.
+
 **What a block does:**
 
 - A `deny` blocks only that call and returns the cause to the model without ending the turn, so the model can recover. The reason names the matched rule, plus the command node for Bash, or the session mode, `default_mode`, an unparseable command, or missing MCP metadata.
@@ -93,9 +97,10 @@ Setup's `configure_permissions` merges approved MCP `allow` and `ask` lists into
 
 ## Bash in a sandboxed session under Piton
 
-In a sandboxed session Piton's daemon launched (`PITON_RUNTIME=sandbox` with `PITON_AGENT_SOCKET` and
-`PITON_SESSION_TOKEN`), the extension registers pi's own `bash` tool definition with operations that send each call to
-the daemon, and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
+In a sandboxed session Piton's daemon launched (`PITON_AGENT_SOCKET` and `PITON_AGENT_TOKEN` set, and the session's
+runtime `sandbox`), the extension registers pi's own `bash` tool definition with operations that send each call to
+the daemon through the channel (`__lib/agent.ts`, `run` with a `bash_call` origin, or `typed` for `!`), without pi's token in the call's environment (the daemon gives each
+call a token of its own), and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
 sandbox, so the daemon runs each in its own, tagged with the call (`sandbox.ts`). pi's rendering, truncation,
 `shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `rerun`
 (`{ runtime: "sandbox" | "host" }`: after the sandbox blocked this exact command, run it again; the user is asked,
@@ -109,8 +114,27 @@ first run's exit. The tool adds a system-prompt guideline: a failure like "Opera
 -54 is likely a block even when none is listed, so ask with `rerun`, unless the user already declined. Permission
 rules still decide first. Elsewhere pi's own bash stays. See "Asking when the sandbox blocks" in `docs/design.md`.
 
+Code in pi's process that needs to run a program outside the session's sandbox uses `__lib/run.ts` (`runProgram`):
+the same `run` request with a `pi` origin, its sandbox widened by named `[sandbox]` entries or on the host, decided and
+asked by the daemon. See "Runs from pi's process" in `docs/design.md`.
+
 The daemon matches `[[sandbox.commands]]` grants with a Rust port of this extension's Bash analysis and glob; both
 run the cases in `pi/tests/fixtures/bash-matching.json`.
+
+## Live lifts of pi's sandbox
+
+On macOS, in a session Piton's daemon launched, the extension holds the daemon's `lifts` stream from `session_start`
+(`__lib/lift.ts`, `holdLifts`): when the user answers a block in pi's own process with "until the end of this turn", "for
+this session", or "always", the daemon sends a token bound to pi's process, and the extension consumes it with
+Piton's addon (`<state>/native/lift.node`, next to `PITON_AGENT_SOCKET`), releases it when the daemon revokes it,
+and releases everything at shutdown. Each consumed grant is emitted as `piton:lift-granted {lift, forChild}` on pi's
+event bus; `forChild` says a process pi started was blocked, so the MCP extension restarts its stdio servers. Without
+the addon, nothing is held and those blocks offer only "always" (for new sessions) and "not now".
+
+Other extensions and workflow tools widen pi's sandbox for one action with `lift(targets, reason, action)`: the user
+is asked, the tokens are consumed, the action runs, and they're released whatever happens. It returns `done`,
+`denied`, `refused` (a floor path, no answer in time, or the run ended), `unsupported` (not macOS), or `unavailable` (no addon);
+outside a session, the action just runs. See "Lifts for pi's live sandbox" in `docs/design.md`.
 
 ## Safety Features
 

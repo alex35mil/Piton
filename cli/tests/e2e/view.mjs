@@ -1,13 +1,13 @@
 // End-to-end tests of the `view` protocol (native clients) against real pi with the faux extension.
 // Usage (in cli/): cargo build && node tests/e2e/view.mjs, or `mise run cli:test`.
 import { execFileSync, spawn } from "node:child_process";
-import { lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import net from "node:net";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const piton = join(root, "target/debug/piton");
@@ -36,11 +36,11 @@ function setup(options = {}) {
         },
         host: { default_attach_mode: "host", stop_empty_session_after: "60s", ...(options.roots === false ? {} : { roots: [root] }) },
     });
-    return { dir, root, ws, socket, config, env: { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" } };
+    return { dir, root, ws, socket, config, env: testEnv({ PI_CODING_AGENT_DIR: agent, PITON_FAUX_TPS: "40" }) };
 }
 
 async function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(piton, pitonArgs(ctx.dir, ["daemon"]), { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     for (let i = 0; i < 100 && !err.includes("listening"); i++) await sleep(50);
@@ -119,8 +119,8 @@ function viewClient(ctx, name, device = "mac") {
     return c;
 }
 
-/// One request on the daemon's agent socket, as a pi in the session would send it.
-function agentRequest(socket, request) {
+/// One request on the daemon's agent socket (or the faux extension's relay to it, which sends from pi's process).
+function agentRequest(socket, token, request) {
     return new Promise((resolve, reject) => {
         const sock = net.connect(socket);
         let buf = "";
@@ -133,7 +133,7 @@ function agentRequest(socket, request) {
             }
         });
         sock.on("error", reject);
-        sock.write(JSON.stringify(request) + "\n");
+        sock.write(JSON.stringify({ token, request }) + "\n");
     });
 }
 
@@ -147,18 +147,40 @@ const tests = {
         await c.req("session.send", { session: key, message_id: "e", text: "env" });
         await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && c.model(key).items.some((i) => i.type === "tool" && i.status === "done"), 20000);
         const tool = c.model(key).items.find((i) => i.type === "tool");
-        const { token, socket } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
+        const { token, socket, relay, childRelay, factVariables } = JSON.parse((await c.req("session.tool_output", { session: key, call_id: tool.call_id })).content[0].text);
         assert.equal(socket, join(ctx.dir, "agent.sock"));
         assert.match(token, /^[0-9a-f]{64}$/);
+        assert.deepEqual(factVariables, [], "facts are asked, not inherited");
+
+        // Facts: pi asks, and so does a process pi started, with pi's token; that process may ask nothing else.
+        const facts = await agentRequest(relay, token, { type: "facts" });
+        assert.equal(facts.type, "facts");
+        assert.equal(facts.runtime, "host");
+        assert.equal(facts.global, ctx.config);
+        assert.equal(facts.workspace.path, realpathSync(ctx.ws));
+        assert.deepEqual(facts.workspace.relation, { kind: "source" });
+        assert.deepEqual(await agentRequest(childRelay, token, { type: "facts" }), facts);
+        const childWrite = await agentRequest(childRelay, token, { type: "write", path: join(ctx.ws, ".piton/config.toml"), content: "{}" });
+        assert.deepEqual([childWrite.type, childWrite.why, childWrite.caller], ["refused", "not_allowed", "pi_child"]);
+        assert.equal((await agentRequest(socket, token, { type: "facts" })).reason, "wrong_process", "not pi's, nor started by it");
+        const write = (path, content, as = token) => agentRequest(relay, as, { type: "write", path, content });
 
         const target = join(ctx.ws, ".piton", "config.toml");
-        // Not this session's, or not protected, or not a session at all: refused without asking.
-        assert.equal((await agentRequest(socket, { type: "protected_write", token: "guess", path: target, content: "{}" })).type, "error");
-        const plain = await agentRequest(socket, { type: "protected_write", token, path: join(ctx.ws, "src.rs"), content: "x" });
+        // pi's token from another process (this test's): refused, whatever it asks.
+        const stolen = await agentRequest(socket, token, { type: "write", path: target, content: "{}" });
+        assert.deepEqual([stolen.type, stolen.why, stolen.reason], ["refused", "token", "wrong_process"]);
+        // A request only the launch helper may send: refused for pi.
+        const launched = await agentRequest(relay, token, { type: "launched" });
+        assert.deepEqual([launched.type, launched.why, launched.caller], ["refused", "not_allowed", "pi"]);
+        // Not this session's, or not protected, or not a request at all: refused without asking.
+        const guessed = await write(target, "{}", "guess");
+        assert.deepEqual([guessed.type, guessed.reason], ["refused", "unknown_token"]);
+        assert.equal((await agentRequest(relay, token, { type: "write", path: target })).why, "invalid");
+        const plain = await write(join(ctx.ws, "src.rs"), "x");
         assert.equal(plain.outcome, "refused");
 
         // A protected write waits for the user: a dialog in the shape pi.nvim's diff view opens.
-        const pending = agentRequest(socket, { type: "protected_write", token, path: target, content: '{"allow":["read"]}\n' });
+        const pending = write(target, '{"allow":["read"]}\n');
         const st = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         assert.equal(st.change.state.status, "needs_input");
         const dialog = st.change.state.dialogs[0];
@@ -168,24 +190,47 @@ const tests = {
         assert.equal(title.toolInput.path, realpathSync(ctx.ws) + "/.piton/config.toml");
         // The current content, so a client that can't read the file shows a diff (null: the file is new).
         assert.equal(title.current, null);
-        // One at a time.
-        const second = await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" });
-        assert.equal(second.outcome, "refused");
-        // The user approves with their own version and a note; the daemon writes it, and never tells pi. The dialog
-        // closes in every client (waited for from before the answer, so the change can't slip past).
-        const closed = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        // One at a time: a second write waits its turn instead of being refused, and shows once the first is answered.
+        const second = write(target, "{}");
+        await sleep(300);
+        assert.deepEqual(c.model(key).state.dialogs.map((d) => d.id), [dialog.id], "the second waits");
+        // The user approves with their own version and a note; the daemon writes it, and never tells pi. The second
+        // write's dialog follows (waited for from before the answer, so the change can't slip past).
+        const shown = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1 && m.change.state.dialogs[0].id !== dialog.id);
         await c.req("session.answer", {
             session: key,
             request_id: dialog.id,
             answer: { value: JSON.stringify({ result: "AcceptModified", content: '{"allow":[]}\n', notes: [{ note: "n" }] }) },
         });
         const outcome = await pending;
-        assert.deepEqual(outcome, { type: "protected_write", outcome: "approved", modified: true, content: '{"allow":[]}\n', notes: [{ note: "n" }] });
+        assert.deepEqual(outcome, { type: "write", outcome: "approved", modified: true, content: '{"allow":[]}\n', notes: [{ note: "n" }] });
         assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
+        const secondDialog = (await shown).change.state.dialogs[0];
+        assert.match(secondDialog.id, /^piton:write:/);
+        // Its diff is against the file as it is when it's shown: the first write's content.
+        assert.equal(JSON.parse(secondDialog.title).current, '{"allow":[]}\n');
+        const closed = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
+        await c.req("session.answer", { session: key, request_id: secondDialog.id, answer: { value: "Reject" } });
+        assert.equal((await second).outcome, "rejected");
         assert.equal((await closed).change.state.status, "idle");
 
+        // A dialog of pi's own holds the slot: a write asked while it's open shows only once it's answered.
+        await c.req("session.send", { session: key, message_id: "a", text: "ask" });
+        const asked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        const piDialog = asked.change.state.dialogs[0];
+        assert.doesNotMatch(piDialog.id, /^piton:/);
+        const behind = write(target, "behind");
+        await sleep(300);
+        assert.deepEqual(c.model(key).state.dialogs.map((d) => d.id), [piDialog.id], "the write waits for pi's dialog");
+        const after = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.some((d) => d.id.startsWith("piton:write:")));
+        await c.req("session.answer", { session: key, request_id: piDialog.id, answer: { value: "alpha" } });
+        const writeDialog = (await after).change.state.dialogs.find((d) => d.id.startsWith("piton:write:"));
+        await c.req("session.answer", { session: key, request_id: writeDialog.id, answer: { value: "Reject" } });
+        assert.equal((await behind).outcome, "rejected");
+        await c.wait((m) => m.type === "change" && m.change.op === "state" && m.change.state.status === "idle" && m.change.state.dialogs.length === 0, 20000);
+
         // Rejected: nothing written.
-        const rejected = agentRequest(socket, { type: "protected_write", token, path: target, content: "bad" });
+        const rejected = write(target, "bad");
         const again = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         await c.req("session.answer", { session: key, request_id: again.change.state.dialogs[0].id, answer: { value: "Reject" } });
         assert.equal((await rejected).outcome, "rejected");
@@ -193,28 +238,63 @@ const tests = {
 
         // A skill isn't protected: the agent writes it itself, and a request for it is refused without asking.
         const skill = join(ctx.ws, ".agents", "skills", "s", "SKILL.md");
-        const skillWrite = await agentRequest(socket, { type: "protected_write", token, path: skill, content: "x" });
+        const skillWrite = await write(skill, "x");
         assert.equal(skillWrite.outcome, "refused");
         assert.match(skillWrite.reason, /isn't a protected file/);
 
         // The agent stops waiting (its tool call was aborted): the dialog closes, and the next request is asked again
         // instead of being refused as "another is waiting".
-        const abandoned = net.connect(socket);
-        abandoned.write(JSON.stringify({ type: "protected_write", token, path: target, content: "left" }) + "\n");
+        const abandoned = net.connect(relay);
+        abandoned.write(JSON.stringify({ token, request: { type: "write", path: target, content: "left" } }) + "\n");
         await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         const closing = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
         abandoned.destroy();
         await closing;
-        const next = agentRequest(socket, { type: "protected_write", token, path: target, content: "again" });
+        const next = write(target, "again");
         const reasked = await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         await c.req("session.answer", { session: key, request_id: reasked.change.state.dialogs[0].id, answer: { value: "Reject" } });
         assert.equal((await next).outcome, "rejected");
         assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
 
+        // Deletes and renames: asked like a write, with a dialog that says what happens; only protected files.
+        const change = (request) => agentRequest(relay, token, request);
+        const shownChange = () => c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        const answerChange = async (pending, value) => {
+            const dialog = (await shownChange()).change.state.dialogs[0];
+            await c.req("session.answer", { session: key, request_id: dialog.id, answer: { value } });
+            return [dialog, await pending];
+        };
+        const old = join(ctx.ws, ".pi", "old.json");
+        mkdirSync(join(ctx.ws, ".pi"), { recursive: true });
+        writeFileSync(old, "{}");
+        const [renameDialog, renamed] = await answerChange(
+            change({ type: "rename", from: old, to: join(ctx.ws, ".pi", "extensions", "new.json") }),
+            "Rename",
+        );
+        assert.match(renameDialog.id, /^piton:rename:/);
+        assert.match(renameDialog.title, /^rename \(protected\): .*old\.json → .*new\.json \(runs code in every session\)$/);
+        assert.deepEqual(renamed, { type: "rename", outcome: "done" });
+        const moved = join(ctx.ws, ".pi", "extensions", "new.json");
+        assert.ok(existsSync(moved) && !existsSync(old));
+        const [, kept] = await answerChange(change({ type: "delete", path: moved }), "Deny");
+        assert.deepEqual(kept, { type: "delete", outcome: "denied" });
+        assert.ok(existsSync(moved), "denied: nothing deleted");
+        const [deleteDialog, deleted] = await answerChange(change({ type: "delete", path: moved }), "Delete");
+        assert.match(deleteDialog.id, /^piton:delete:/);
+        assert.match(deleteDialog.title, /\na file of 2 bytes$/);
+        assert.deepEqual(deleted, { type: "delete", outcome: "done" });
+        assert.ok(!existsSync(moved) && !existsSync(join(ctx.ws, ".pi", "extensions")), "the emptied folder went too");
+        const plainDelete = await change({ type: "delete", path: join(ctx.ws, "src.rs") });
+        assert.equal(plainDelete.outcome, "refused");
+        assert.match(plainDelete.reason, /with bash/);
+        assert.equal((await agentRequest(childRelay, token, { type: "delete", path: target })).why, "not_allowed");
+        assert.equal(c.model(key).state.dialogs.length, 0, "refusals ask nothing");
+
         // The session ends: its token stops working.
         await c.req("session.stop", { session: key });
         await sleep(300);
-        assert.equal((await agentRequest(socket, { type: "protected_write", token, path: target, content: "{}" })).type, "error");
+        const ended = await agentRequest(socket, token, { type: "write", path: target, content: "{}" });
+        assert.deepEqual([ended.type, ended.reason], ["refused", "unknown_token"]);
         c.close();
     },
 
@@ -323,7 +403,7 @@ const tests = {
 
     async "nvim and phone on one session: same conversation both ways"(ctx) {
         // pi.nvim through piton attach.
-        const nvim = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
+        const nvim = spawn(piton, pitonArgs(ctx.dir, ["attach"]), { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
         const nrecs = [];
         let nbuf = "";
         nvim.stdout.on("data", (d) => {

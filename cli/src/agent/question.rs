@@ -11,7 +11,10 @@
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use super::block::{CHOOSE_BELOW, PersistScope};
+use super::{
+    answer::Once,
+    block::{CHOOSE_BELOW, PersistScope},
+};
 use crate::{config::CommandPattern, launch::env::WritableVars};
 
 /// Where an approved rerun runs.
@@ -33,17 +36,45 @@ impl Target {
     }
 }
 
-/// What running there means, shown in both renderings.
-pub fn wording(target: Target) -> &'static str {
-    match target {
-        Target::Sandbox => {
-            "It runs again in the sandbox with everything open except protected files, configuration, and the \
-             daemon's state."
-        }
-        Target::Host => {
-            "It runs again on your Mac with no sandbox, as you, including whatever the agent wrote into the files it \
-             runs and the environment variables those files set."
-        }
+/// What the sandbox side opens: everything but the floor (a bash call's rerun), or the `[sandbox]` entries a run from
+/// pi's process named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Widening {
+    All,
+    Grants(Box<crate::config::GrantEntries>),
+}
+
+/// What running there means, shown in both renderings. `again` for a rerun; a run from pi's process runs once.
+pub fn wording(target: Target, widening: &Widening, again: bool) -> String {
+    let runs = match again {
+        true => "It runs again",
+        false => "It runs",
+    };
+    match (target, widening) {
+        (Target::Sandbox, Widening::All) => format!(
+            "{runs} in the sandbox with everything open except protected files, configuration, and the daemon's state."
+        ),
+        (Target::Sandbox, Widening::Grants(grants)) => format!(
+            "{runs} in the sandbox with these entries added: {}. Protected files, configuration, the daemon's state, and \
+             what your own entries close stay closed.",
+            describe_grants(grants)
+        ),
+        (Target::Host, Widening::All | Widening::Grants(_)) => format!(
+            "{runs} on your Mac with no sandbox, as you, including whatever the agent wrote into the files it runs and \
+             the environment variables those files set."
+        ),
+    }
+}
+
+/// A widening's entries as one line of TOML, `allow_git_control_files = true, filesystem = { "/x" = "write" }`.
+fn describe_grants(grants: &crate::config::GrantEntries) -> String {
+    let Ok(toml::Value::Table(table)) = toml::Value::try_from(grants) else {
+        return "(none)".into();
+    };
+    let parts: Vec<String> = table.iter().map(|(key, value)| format!("{key} = {value}")).collect();
+    match parts.is_empty() {
+        true => "(none)".into(),
+        false => parts.join(", "),
     }
 }
 
@@ -63,6 +94,8 @@ pub struct Question {
     pub writable_vars: Vec<WritableVars>,
     /// The runtime the `rpc` rendering shows; a `view` client keeps its own switch.
     pub runtime: Target,
+    /// What the sandbox side opens.
+    pub widening: Widening,
 }
 
 /// Who brought the question.
@@ -72,28 +105,57 @@ pub enum Asker {
     Agent { reason: Option<String> },
     /// The command failed and the daemon recorded a block an approved rerun lifts.
     Piton,
+    /// Code in pi's process (an extension, a workflow tool) asks to run it outside the session's sandbox, with why.
+    Pi { reason: Option<String> },
 }
 
 impl Asker {
     fn reason(&self) -> Option<&str> {
         match self {
-            Asker::Agent { reason } => reason.as_deref().map(str::trim).filter(|r| !r.is_empty()),
+            Asker::Agent { reason } | Asker::Pi { reason } => {
+                reason.as_deref().map(str::trim).filter(|r| !r.is_empty())
+            }
             Asker::Piton => None,
+        }
+    }
+
+    /// As the view names it.
+    fn kind(&self) -> &'static str {
+        match self {
+            Asker::Agent { .. } => "agent",
+            Asker::Piton => "piton",
+            Asker::Pi { .. } => "pi",
+        }
+    }
+
+    /// Whether it asks to run a command again (a bash call that already ran) or for the first time.
+    fn again(&self) -> bool {
+        match self {
+            Asker::Agent { .. } | Asker::Piton => true,
+            Asker::Pi { .. } => false,
         }
     }
 }
 
-/// The user's answer, from either rendering.
+/// The user's answer, from either rendering: run it once where chosen (a rerun is one run the daemon bounds), run this
+/// exact command there without asking for the rest of the session, save a `[[sandbox.commands]]` entry and run it, or
+/// deny.
+pub type Answer = super::answer::Answer<Once<Target>, Target, Always, ()>;
+
+impl super::answer::Offer for Target {
+    const OFFERED: bool = true;
+}
+
+impl super::answer::Offer for Always {
+    const OFFERED: bool = true;
+}
+
+/// An "always" answer: run it, and save a `[[sandbox.commands]]` entry for `pattern` in `scope`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    Once(Target),
-    Deny,
-    /// Run it, and save a `[[sandbox.commands]]` entry for `pattern`.
-    Always {
-        target: Target,
-        scope: PersistScope,
-        pattern: CommandPattern,
-    },
+pub struct Always {
+    pub target: Target,
+    pub scope: PersistScope,
+    pub pattern: CommandPattern,
 }
 
 impl Question {
@@ -102,44 +164,50 @@ impl Question {
         json!({
             "id": self.id,
             "kind": "command",
+            "asker": self.asker.kind(),
             "command": self.command,
             "reason": self.asker.reason(),
             "refusals": self.refusals,
             "note": self.note,
             "runtime": self.runtime,
-            "wording": { "sandbox": wording(Target::Sandbox), "host": wording(Target::Host) },
+            "wording": {
+                "sandbox": wording(Target::Sandbox, &self.widening, self.asker.again()),
+                "host": wording(Target::Host, &self.widening, self.asker.again()),
+            },
             "suggested_pattern": suggested_pattern(&self.command),
             "writable_vars": self.writable_vars,
         })
     }
 }
 
-/// A `session.decide` answer: `{"once": "sandbox" | "host"}`, `"deny"`, or
+/// A `session.decide` answer: `{"once": "sandbox" | "host"}`, `{"session": "sandbox" | "host"}`, `"deny"`, or
 /// `{"always": {"runtime", "scope": "project" | "global", "pattern"}}`.
 pub fn parse_decision(value: &Value) -> Result<Answer, String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "snake_case", deny_unknown_fields)]
     enum Wire {
         Once(Target),
+        Session(Target),
         Deny,
-        Always(Always),
+        Always(WireAlways),
     }
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct Always {
+    struct WireAlways {
         runtime: Target,
         scope: PersistScope,
         pattern: String,
     }
     let wire: Wire = serde_json::from_value(value.clone()).map_err(|e| format!("invalid answer: {e}"))?;
     Ok(match wire {
-        Wire::Once(target) => Answer::Once(target),
-        Wire::Deny => Answer::Deny,
-        Wire::Always(always) => Answer::Always {
+        Wire::Once(target) => Answer::Narrowest(Once(target)),
+        Wire::Session(target) => Answer::Session(target),
+        Wire::Deny => Answer::Deny(()),
+        Wire::Always(always) => Answer::Always(Always {
             target: always.runtime,
             scope: always.scope,
             pattern: CommandPattern::new(&always.pattern).map_err(|why| format!("pattern: {why}"))?,
-        },
+        }),
     })
 }
 
@@ -151,6 +219,8 @@ pub enum RpcChoice {
     /// Show the question again in the other runtime.
     Switch,
     Once,
+    /// Run this exact command there without asking for the rest of the session.
+    Session,
     Deny,
     /// Save the exact command.
     Command(PersistScope),
@@ -158,7 +228,7 @@ pub enum RpcChoice {
     Pattern(PersistScope),
 }
 
-fn rpc_options(target: Target) -> [(String, RpcChoice); 8] {
+fn rpc_options(target: Target) -> [(String, RpcChoice); 9] {
     use PersistScope::{Global, Project};
     let (once, prefix, switch) = match target {
         Target::Sandbox => (
@@ -175,6 +245,10 @@ fn rpc_options(target: Target) -> [(String, RpcChoice); 8] {
     [
         (CHOOSE_BELOW.to_string(), RpcChoice::AskAgain),
         (once.to_string(), RpcChoice::Once),
+        (
+            format!("{prefix}Allow this command for this session"),
+            RpcChoice::Session,
+        ),
         ("Deny".to_string(), RpcChoice::Deny),
         (
             format!("{prefix}Allow this command {}", Project.label()),
@@ -217,8 +291,13 @@ pub fn rpc_dialog(dialog_id: &str, question: &Question) -> Value {
     let lead = match question.asker {
         Asker::Agent { .. } => format!("The agent asks to run this again {where_}"),
         Asker::Piton => format!("The sandbox blocked this command; run it again {where_}?"),
+        Asker::Pi { .. } => format!("An extension asks to run this {where_}"),
     };
-    let mut message = format!("{lead}:\n\n{}\n\n{}", question.command, wording(question.runtime));
+    let mut message = format!(
+        "{lead}:\n\n{}\n\n{}",
+        question.command,
+        wording(question.runtime, &question.widening, question.asker.again())
+    );
     if let Some(note) = &question.note {
         message.push_str(&format!("\n\nIt {note}."));
     }
@@ -241,9 +320,10 @@ pub fn rpc_dialog(dialog_id: &str, question: &Question) -> Value {
             }
         }
     }
-    let title = match question.runtime {
-        Target::Sandbox => "Run again in the sandbox?",
-        Target::Host => "Run on the host, with no sandbox?",
+    let title = match (question.runtime, question.asker.again()) {
+        (Target::Sandbox, true) => "Run again in the sandbox?",
+        (Target::Sandbox, false) => "Run in a wider sandbox?",
+        (Target::Host, _) => "Run on the host, with no sandbox?",
     };
     json!({
         "type": "extension_ui_request",
@@ -337,7 +417,42 @@ mod tests {
                 },
             ],
             runtime,
+            widening: Widening::All,
         }
+    }
+
+    /// A run from pi's process: its own lead and title, no "again", and its sandbox side names the entries it adds.
+    #[test]
+    fn a_run_from_pi_s_process_names_its_widening() {
+        let grants: crate::config::GrantEntries = toml::from_str("allow_git_control_files = true\n").unwrap();
+        let pi = Question {
+            command: "git branch -D x".into(),
+            asker: Asker::Pi {
+                reason: Some("delete the shipped branch".into()),
+            },
+            refusals: Vec::new(),
+            note: None,
+            widening: Widening::Grants(Box::new(grants)),
+            ..question(Target::Sandbox)
+        };
+        let title = rpc_dialog("d", &pi)["title"].as_str().unwrap().to_string();
+        assert!(title.starts_with("Run in a wider sandbox?"), "{title}");
+        assert!(
+            title.contains("An extension asks to run this in the sandbox"),
+            "{title}"
+        );
+        assert!(title.contains("allow_git_control_files = true"), "{title}");
+        assert!(title.contains("Why: delete the shipped branch"), "{title}");
+        assert!(!title.contains("runs again"), "{title}");
+        let view = pi.view();
+        assert_eq!(view["asker"], "pi");
+        assert!(
+            view["wording"]["sandbox"]
+                .as_str()
+                .unwrap()
+                .contains("allow_git_control_files")
+        );
+        assert_eq!(question(Target::Sandbox).view()["asker"], "agent");
     }
 
     #[test]
@@ -373,6 +488,7 @@ mod tests {
                 [
                     RpcChoice::AskAgain,
                     RpcChoice::Once,
+                    RpcChoice::Session,
                     RpcChoice::Deny,
                     RpcChoice::Command(Project),
                     RpcChoice::Command(Global),
@@ -460,22 +576,30 @@ mod tests {
 
     #[test]
     fn decisions_parse_strictly() {
-        assert_eq!(parse_decision(&json!({"once": "host"})), Ok(Answer::Once(Target::Host)));
+        assert_eq!(
+            parse_decision(&json!({"once": "host"})),
+            Ok(Answer::Narrowest(Once(Target::Host)))
+        );
         assert_eq!(
             parse_decision(&json!({"once": "sandbox"})),
-            Ok(Answer::Once(Target::Sandbox))
+            Ok(Answer::Narrowest(Once(Target::Sandbox)))
         );
-        assert_eq!(parse_decision(&json!("deny")), Ok(Answer::Deny));
+        assert_eq!(
+            parse_decision(&json!({"session": "sandbox"})),
+            Ok(Answer::Session(Target::Sandbox))
+        );
+        assert_eq!(parse_decision(&json!("deny")), Ok(Answer::Deny(())));
         assert_eq!(
             parse_decision(&json!({"always": {"runtime": "host", "scope": "project", "pattern": "log show *"}})),
-            Ok(Answer::Always {
+            Ok(Answer::Always(Always {
                 target: Target::Host,
                 scope: PersistScope::Project,
                 pattern: CommandPattern::new("log show *").unwrap(),
-            })
+            }))
         );
         for bad in [
             json!({"once": "vm"}),
+            json!({"session": "galaxy"}),
             json!("allow"),
             json!({"always": {"runtime": "host", "scope": "project", "pattern": "  "}}),
             json!({"always": {"runtime": "host", "scope": "galaxy", "pattern": "x"}}),

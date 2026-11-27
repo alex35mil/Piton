@@ -21,7 +21,7 @@ pub use self::{
     branches::BranchesTable,
     forge::ForgeTable,
     integration::RoleTable,
-    permissions::PermissionSettings,
+    permissions::{PermissionMode, PermissionSettings},
     sandbox::{
         AllGrant, ClaudeCodeOptions, ClaudeLogin, CommandGrant, CommandPattern, CommandRuntime, Effect, FileAccess,
         Grant, GrantEntries, Listed, NetworkTarget, Origin, PathKey, Preset, Profile, SandboxSettings, SandboxTable,
@@ -31,7 +31,7 @@ pub use self::{
     tracker::TrackerTable,
     trust::{Reconfirm, TrustTable},
     web_search::WebSearchTable,
-    workers::WorkersTable,
+    workers::{WorkerPermission, WorkerPermissions, WorkersTable},
 };
 use crate::config::model::key::Issue;
 

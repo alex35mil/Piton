@@ -34,7 +34,7 @@ export default function (pi: ExtensionAPI): void {
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
             const input = parse(DeliveryCleanupInputValidator, params)
             const merge = githubMergeProof(ctx.cwd, input, catalog)
-            const result = runDeliveryCleanup({ entityDir: input.entityDir, merge }, { cwd: ctx.cwd })
+            const result = await runDeliveryCleanup({ entityDir: input.entityDir, merge }, { cwd: ctx.cwd })
             return {
                 content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
                 details: result,

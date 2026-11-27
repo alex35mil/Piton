@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    policy::{self, Source},
+    policy::{self, PitonArea, Source},
     rules::{Access, Apps, Effect, Listen, Network, Policy, Rule, ServiceGrant, Services, Target, is_listen},
 };
 use crate::config::{
@@ -48,7 +48,7 @@ pub struct CommandPolicies {
 #[derive(Clone)]
 pub struct Resolver {
     pub config: LaunchConfig,
-    resolve: std::sync::Arc<ResolveFn>,
+    pub(crate) resolve: std::sync::Arc<ResolveFn>,
 }
 
 /// How a [`Resolver`] resolves a configuration.
@@ -159,7 +159,8 @@ pub fn command_policies(
 }
 
 /// Whether the credential denies are part of the floor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Credentials {
     /// fnox is off for the launch: an approved command may read credentials (Git's keychain sign-in).
     Liftable,
@@ -243,6 +244,8 @@ fn all_below(policy: &Policy, credentials: Credentials, roots: &[PathBuf]) -> Po
             Listen::Closed | Listen::Open { .. } => Listen::Open { source: source() },
         },
         tag: policy.tag.clone(),
+        // An approved command's sandbox is never given a token.
+        lifts: super::rules::Lifts::Off,
     }
 }
 
@@ -267,28 +270,82 @@ fn root_entries() -> Vec<PathBuf> {
 fn kept(rule: &Rule, credentials: Credentials) -> bool {
     match rule.effect {
         Effect::Allow => true,
-        Effect::Deny => floor(rule, credentials),
+        Effect::Deny => match liftability(rule, credentials) {
+            Liftability::Floor(_) => true,
+            Liftability::Liftable(_) => false,
+        },
     }
 }
 
-/// Whether a deny is part of the floor.
-pub fn floor(rule: &Rule, credentials: Credentials) -> bool {
+/// Whether the user's approval can lift a deny: the one classification every widening and every block report reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liftability {
+    /// No approval lifts it; only the user's own edit, or for some items a host run, gets past it.
+    Floor(FloorItem),
+    /// An approval lifts it.
+    Liftable(LiftableDeny),
+}
+
+/// The floor: what no approval lifts from a sandbox, each for its reason (docs/design.md, "The floor").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorItem {
+    /// The daemon's control socket: a sandbox that reached it could approve its own requests and start host sessions.
+    ControlSocket,
+    /// The daemon's state folder: it holds trust decisions and the agent socket.
+    StateFolder,
+    /// Configuration levels, pi's agent directories, protected files, and the folders on their way: they decide what
+    /// later sessions may do.
+    Configuration,
+    /// A file fnox loads, or a folder on its path: one edit could send secrets anywhere.
+    FnoxFiles,
+    /// A socket an entry allows, or a folder on its way: kept in place so no other socket is moved there.
+    AllowedSocket,
+    /// The user's own `"deny"`, `"read"`, or `false`.
+    UserSwitch,
+    /// A credential while fnox is on: the sandbox could run `fnox get`.
+    Credential,
+    /// A deny no classification covers yet: kept closed until it's classified here.
+    Unclassified,
+}
+
+/// A deny an approval lifts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiftableDeny {
+    /// Git's hooks and configuration.
+    GitControl,
+    /// A credential while fnox is off.
+    Credential,
+}
+
+/// The liftability of a deny `rule`, under the launch's `credentials`.
+pub fn liftability(rule: &Rule, credentials: Credentials) -> Liftability {
+    use Liftability::{Floor, Liftable};
     match &rule.target {
-        Target::Protected { .. } => true,
-        Target::GitControl { .. } => false,
+        Target::Protected { .. } => Floor(FloorItem::Configuration),
+        Target::GitControl { .. } => Liftable(LiftableDeny::GitControl),
         Target::Subpath { .. } | Target::Literal { .. } | Target::Prefix { .. } => match &rule.source {
             Source::NonoGroup { .. } => match credentials {
-                Credentials::Liftable => false,
-                Credentials::Floor => true,
+                Credentials::Liftable => Liftable(LiftableDeny::Credential),
+                Credentials::Floor => Floor(FloorItem::Credential),
             },
-            // Configuration levels, pi's agent directories, the daemon's state and control socket.
-            Source::Piton { .. } => true,
-            // What fnox loads: one edit could send secrets anywhere.
-            Source::FnoxConfig => true,
-            // The user's own `"deny"`.
-            Source::Config { .. } => true,
-            // No such deny exists; kept, so a new one is closed until it's classified here.
-            Source::Workspace | Source::BuiltIn { .. } | Source::AgentDir | Source::Preset { .. } => true,
+            Source::Piton { area } => match area {
+                PitonArea::ConfigLevel | PitonArea::AgentDir | PitonArea::FixedFolder | PitonArea::ProtectedFile => {
+                    Floor(FloorItem::Configuration)
+                }
+                PitonArea::SocketPath => Floor(FloorItem::AllowedSocket),
+                PitonArea::GitControl => Liftable(LiftableDeny::GitControl),
+                PitonArea::StateFolder => Floor(FloorItem::StateFolder),
+                PitonArea::ControlSocket => Floor(FloorItem::ControlSocket),
+                // Allows only; a deny of them would be new.
+                PitonArea::Logs | PitonArea::SshWrapper | PitonArea::Native | PitonArea::AgentSocket => {
+                    Floor(FloorItem::Unclassified)
+                }
+            },
+            Source::FnoxConfig => Floor(FloorItem::FnoxFiles),
+            Source::Config { .. } => Floor(FloorItem::UserSwitch),
+            Source::Workspace | Source::BuiltIn { .. } | Source::AgentDir | Source::Preset { .. } => {
+                Floor(FloorItem::Unclassified)
+            }
         },
     }
 }
@@ -488,19 +545,22 @@ fn denied_by(policy: &Policy, path: &Path, access: Access) -> Option<DeniedBy> {
         .find(|r| r.access.contains(&access) && r.target.covers(path))?;
     match rule.effect {
         Effect::Allow => None,
-        Effect::Deny => Some(match &rule.target {
-            Target::GitControl { .. } => DeniedBy::GitControl,
-            Target::Protected { .. } => DeniedBy::Floor,
-            Target::Subpath { .. } | Target::Literal { .. } | Target::Prefix { .. } => match &rule.source {
-                Source::NonoGroup { .. } => DeniedBy::Credential(access),
-                Source::Config { .. } => DeniedBy::UserDeny,
-                Source::FnoxConfig => DeniedBy::FnoxConfig,
-                Source::Piton { .. }
-                | Source::Workspace
-                | Source::BuiltIn { .. }
-                | Source::AgentDir
-                | Source::Preset { .. } => DeniedBy::Floor,
-            },
+        // Credentials are reported alike whether fnox is on or not: the keychain, the one that differs, is decided
+        // before this.
+        Effect::Deny => Some(match liftability(rule, Credentials::Liftable) {
+            Liftability::Liftable(LiftableDeny::GitControl) => DeniedBy::GitControl,
+            Liftability::Liftable(LiftableDeny::Credential) | Liftability::Floor(FloorItem::Credential) => {
+                DeniedBy::Credential(access)
+            }
+            Liftability::Floor(FloorItem::UserSwitch) => DeniedBy::UserDeny,
+            Liftability::Floor(FloorItem::FnoxFiles) => DeniedBy::FnoxConfig,
+            Liftability::Floor(
+                FloorItem::ControlSocket
+                | FloorItem::StateFolder
+                | FloorItem::Configuration
+                | FloorItem::AllowedSocket
+                | FloorItem::Unclassified,
+            ) => DeniedBy::Floor,
         }),
     }
 }
@@ -690,6 +750,330 @@ pub fn lift_for(
     Ok(Offer { project, everywhere })
 }
 
+/// What a token opens in pi's live sandbox (#408): one resolved path, one Mach service, or TCP listening. A token's
+/// class is its kind's (`rules::LIFT_*`); the companion rules decide what it can reopen.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LiveLift {
+    /// Read a file's contents (a credential while fnox is off).
+    Read { path: PathBuf },
+    /// Write a file or what's in a folder, connect to a socket there, or create one.
+    Write { path: PathBuf },
+    /// Look up one Mach service.
+    Service { name: String },
+    /// Listen on TCP.
+    Listen,
+}
+
+impl LiveLift {
+    /// As a question names it.
+    pub fn describe(&self) -> String {
+        match self {
+            LiveLift::Read { path } => format!("reading {}", path.display()),
+            LiveLift::Write { path } => format!("writing {}", path.display()),
+            LiveLift::Service { name } => format!("the Mach service {name}"),
+            LiveLift::Listen => "listening on TCP".into(),
+        }
+    }
+}
+
+/// Why a live lift is refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LiveRefusal {
+    /// A floor deny or the user's own covers it (or something below a folder): no approval lifts it.
+    #[error("{0}")]
+    Floor(String),
+    /// Nothing a token can reopen: an operation or target the model doesn't lift live.
+    #[error("{0}")]
+    Unsupported(String),
+    /// Not blocked: nothing to lift.
+    #[error("it isn't blocked")]
+    NotBlocked,
+}
+
+/// The live lift for a refusal of pi's own process, or why there's none: what the block question's "until the run
+/// settles" and "for this session" grant. A per-process path lifts its folder when that's safe, as [`lift_for`]'s does.
+/// A credential read stays a notice (probes), so it's [`LiveRefusal::Unsupported`] here.
+pub fn live_lift(policy: &Policy, refused: Refused, bounds: &Bounds) -> Result<LiveLift, LiveRefusal> {
+    let target = Path::new(refused.target);
+    let unsupported = || LiveRefusal::Unsupported(format!("{} {}", refused.operation, refused.target));
+    let lift = match refused.operation {
+        op if is_listen(op, refused.target) => LiveLift::Listen,
+        "mach-lookup" => LiveLift::Service {
+            name: refused.target.to_string(),
+        },
+        op if (op.starts_with("file-write") || op == "network-outbound" || op == "network-bind")
+            && target.is_absolute() =>
+        {
+            let path = match per_process(target, refused.pid) {
+                Some(own) => {
+                    let folder = own.parent().unwrap_or(own).to_path_buf();
+                    if !safe_folder(&folder, bounds) {
+                        return Err(unsupported());
+                    }
+                    folder
+                }
+                None => target.to_path_buf(),
+            };
+            LiveLift::Write { path }
+        }
+        _ => return Err(unsupported()),
+    };
+    check_live(policy, &lift, bounds.credentials)?;
+    Ok(lift)
+}
+
+/// Whether `lift` may be granted under the launch's `policy`: refused when any deny that covers it is floor or the
+/// user's own, not only the deciding one (a companion would reopen an earlier one: Seatbelt's last match), and for a
+/// folder when such a deny covers anything below it. The daemon's check, independent of the profile's `require-not`.
+pub fn check_live(policy: &Policy, lift: &LiveLift, credentials: Credentials) -> Result<(), LiveRefusal> {
+    match lift {
+        LiveLift::Listen => match &policy.listen {
+            Listen::Denied { source } => Err(LiveRefusal::Floor(format!("listening is closed by {source:?}"))),
+            Listen::Closed => Ok(()),
+            Listen::Open { .. } => Err(LiveRefusal::NotBlocked),
+        },
+        LiveLift::Service { name } => {
+            if policy::KEYCHAIN_TARGETS.contains(&name.as_str()) {
+                return match (credentials, policy.keychain) {
+                    (_, true) => Err(LiveRefusal::NotBlocked),
+                    (Credentials::Liftable, false) => Ok(()),
+                    (Credentials::Floor, false) => {
+                        Err(LiveRefusal::Floor("the keychain stays closed while fnox is on".into()))
+                    }
+                };
+            }
+            if ServiceName::parse(name).is_err() {
+                return Err(LiveRefusal::Unsupported(format!("{name} isn't a service name")));
+            }
+            let decision = policy.decide_service(name);
+            match (decision.allowed, &decision.source) {
+                (true, _) => Err(LiveRefusal::NotBlocked),
+                (false, Source::Config { .. }) => {
+                    Err(LiveRefusal::Floor(format!("{name} is closed by your own entry")))
+                }
+                (false, _) => Ok(()),
+            }
+        }
+        LiveLift::Read { path } | LiveLift::Write { path } => {
+            // Every access the token's class reopens: a write token's companions also cover socket connects and binds.
+            let accesses: &[Access] = match lift {
+                LiveLift::Read { .. } => &[Access::Read],
+                LiveLift::Write { .. } | LiveLift::Service { .. } | LiveLift::Listen => {
+                    &[Access::Write, Access::Connect, Access::Bind]
+                }
+            };
+            if !path.is_absolute() {
+                return Err(LiveRefusal::Unsupported(format!("{} isn't absolute", path.display())));
+            }
+            // Any deny of those accesses covering the path, or below it (a folder token opens what's inside).
+            let below = |rule: &Rule| match &rule.target {
+                Target::Subpath { path: p } | Target::Literal { path: p } | Target::Prefix { path: p } => {
+                    p.starts_with(path)
+                }
+                // Their regexes reach any depth of a checkout: a folder above or at one covers them.
+                Target::Protected { source, checkout } => source.starts_with(path) || checkout.starts_with(path),
+                Target::GitControl { control } => control.checkouts.iter().any(|c| c.starts_with(path)),
+            };
+            for rule in &policy.rules {
+                if rule.effect != Effect::Deny || !rule.access.iter().any(|a| accesses.contains(a)) {
+                    continue;
+                }
+                if !(rule.target.covers(path) || below(rule)) {
+                    continue;
+                }
+                match liftability(rule, credentials) {
+                    Liftability::Liftable(_) => {}
+                    Liftability::Floor(item) => {
+                        return Err(LiveRefusal::Floor(format!(
+                            "{} is closed by {} ({item:?})",
+                            path.display(),
+                            describe_source(&rule.source)
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// What a widening asked by code in pi's process (#407) would reopen that an entry of the launch's own configuration
+/// closes. The user closed it, so no approval reopens it (the floor's "user's own `\"deny\"`, `\"read\"`, and `false`").
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WideningRefusal {
+    /// A switch the chain sets to `false`.
+    #[error("`{key} = false` in {} closes it", file.display())]
+    Switch { key: &'static str, file: PathBuf },
+    /// A path at or inside one the chain sets to `"deny"`, or to `"read"` when the request writes.
+    #[error("{asked} is inside `{table}.\"{closed}\" = \"{value}\"` in {}", file.display())]
+    Path {
+        asked: String,
+        table: &'static str,
+        closed: PathKey,
+        value: &'static str,
+        file: PathBuf,
+    },
+    /// A connection or service entry the chain sets to `"deny"`.
+    #[error("`{table}.\"{key}\" = \"deny\"` in {} closes it", file.display())]
+    Entry {
+        table: &'static str,
+        key: String,
+        file: PathBuf,
+    },
+    /// A path key that can't be expanded (an unset `$VAR`).
+    #[error("{0}")]
+    Unexpanded(String),
+}
+
+/// Checks `asked` against the launch's own `[sandbox]` chain: every key it would open that an entry there closes is
+/// refused, whichever file closes it. A request is resolved as the nearest file ([`Resolver::with`]), which would
+/// replace those values, and the policy takes the most specific path entry, so a path inside a closed folder is checked
+/// by containment, as the resolver checks a committed file's. `expand` turns a key into the absolute path the sandbox
+/// would use.
+pub fn check_widening(
+    config: &LaunchConfig,
+    asked: &GrantEntries,
+    expand: impl Fn(&PathKey) -> Result<PathBuf, String>,
+) -> Result<(), WideningRefusal> {
+    let settings = &config.sandbox;
+    let switches = [
+        (
+            "allow_tcp_listening",
+            asked.allow_tcp_listening,
+            &settings.allow_tcp_listening,
+        ),
+        (
+            "allow_git_control_files",
+            asked.allow_git_control_files,
+            &settings.allow_git_control_files,
+        ),
+        (
+            "allow_launching_apps",
+            asked.allow_launching_apps,
+            &settings.allow_launching_apps,
+        ),
+    ];
+    for (key, asked, set) in switches {
+        if let (Some(true), Some(Listed { value: false, file })) = (asked, set) {
+            return Err(WideningRefusal::Switch {
+                key,
+                file: file.clone(),
+            });
+        }
+    }
+    let expanded = |key: &PathKey| expand(key).map_err(WideningRefusal::Unexpanded);
+    // A path asked for `write` (or a socket `allow`) is closed by a `deny`, and a write also by the user's `read`.
+    let closed_by = |asked: &PathKey, writes: bool| -> Result<(), WideningRefusal> {
+        let path = expanded(asked)?;
+        for (key, entry) in &settings.filesystem {
+            let closes = match entry.value {
+                FileAccess::Deny => true,
+                FileAccess::Read => writes,
+                FileAccess::Write => false,
+            };
+            if closes && path.starts_with(expanded(key)?) {
+                return Err(WideningRefusal::Path {
+                    asked: asked.to_string(),
+                    table: "filesystem",
+                    closed: key.clone(),
+                    value: entry.value.name(),
+                    file: entry.file.clone(),
+                });
+            }
+        }
+        Ok(())
+    };
+    for (key, access) in &asked.filesystem {
+        match access {
+            FileAccess::Read => closed_by(key, false)?,
+            FileAccess::Write => closed_by(key, true)?,
+            // A deny only closes.
+            FileAccess::Deny => {}
+        }
+    }
+    let sockets = [
+        (
+            "network.unix_socket_connections",
+            &asked.network.unix_socket_connections,
+            &settings.unix_socket_connections,
+        ),
+        (
+            "network.unix_socket_bindings",
+            &asked.network.unix_socket_bindings,
+            &settings.unix_socket_bindings,
+        ),
+    ];
+    for (table, asked, set) in sockets {
+        for (key, effect) in asked {
+            match effect {
+                crate::config::Effect::Deny => continue,
+                crate::config::Effect::Allow => {}
+            }
+            // A socket under a folder the user denies is closed by that folder too.
+            closed_by(key, false)?;
+            let path = expanded(key)?;
+            for (closed, entry) in set {
+                match entry.value {
+                    crate::config::Effect::Allow => continue,
+                    crate::config::Effect::Deny => {}
+                }
+                if path.starts_with(expanded(closed)?) {
+                    return Err(WideningRefusal::Path {
+                        asked: key.to_string(),
+                        table,
+                        closed: closed.clone(),
+                        value: "deny",
+                        file: entry.file.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for (target, effect) in &asked.network.connections {
+        match effect {
+            crate::config::Effect::Deny => continue,
+            crate::config::Effect::Allow => {}
+        }
+        if let Some(entry) = settings.connections.get(target)
+            && entry.value == crate::config::Effect::Deny
+        {
+            return Err(WideningRefusal::Entry {
+                table: "network.connections",
+                key: target.to_string(),
+                file: entry.file.clone(),
+            });
+        }
+    }
+    for (key, effect) in &asked.macos.services {
+        match effect {
+            crate::config::Effect::Deny => continue,
+            crate::config::Effect::Allow => {}
+        }
+        if let Some(entry) = settings.services.get(key)
+            && entry.value == crate::config::Effect::Deny
+        {
+            return Err(WideningRefusal::Entry {
+                table: "macos.services",
+                key: key.to_string(),
+                file: entry.file.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A rule's source, as a refusal names it.
+fn describe_source(source: &Source) -> String {
+    match source {
+        Source::Config { key, from } => format!("your entry `{key}` ({from})"),
+        Source::Piton { area } => area.describe().to_string(),
+        Source::NonoGroup { group } => format!("the credential group {group}"),
+        Source::FnoxConfig => "fnox's configuration".into(),
+        Source::Workspace | Source::BuiltIn { .. } | Source::AgentDir | Source::Preset { .. } => "the sandbox".into(),
+    }
+}
+
 /// What a block in a bash call's own sandbox is, for asking about it without the agent: whether an approved rerun in
 /// the sandbox (`all`) would lift it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -824,8 +1208,8 @@ mod tests {
         }
     }
 
-    fn piton(what: &str) -> Source {
-        Source::Piton { what: what.into() }
+    fn piton(area: PitonArea) -> Source {
+        Source::Piton { area }
     }
 
     /// A launch policy with one rule of each kind the floor decides about.
@@ -847,7 +1231,7 @@ mod tests {
                         group: "keychain".into(),
                     },
                 ),
-                deny(&[Access::Write], "/h/.pi/agent", piton("pi's agent directory")),
+                deny(&[Access::Write], "/h/.pi/agent", piton(PitonArea::AgentDir)),
                 deny(
                     &all,
                     "/h/secret",
@@ -858,7 +1242,7 @@ mod tests {
                         },
                     },
                 ),
-                deny(&[Access::Write], "/h/.config/piton", piton("a configuration level")),
+                deny(&[Access::Write], "/h/.config/piton", piton(PitonArea::ConfigLevel)),
                 Rule {
                     effect: Effect::Deny,
                     access: vec![Access::Write],
@@ -866,7 +1250,7 @@ mod tests {
                         source: "/w".into(),
                         checkout: "/w".into(),
                     },
-                    source: piton("a protected file"),
+                    source: piton(PitonArea::ProtectedFile),
                 },
                 Rule {
                     effect: Effect::Deny,
@@ -874,16 +1258,16 @@ mod tests {
                     target: Target::GitControl {
                         control: GitControl::of(&[Path::new("/w")]),
                     },
-                    source: piton("Git's hooks and configuration"),
+                    source: piton(PitonArea::GitControl),
                 },
-                deny(&all, "/h/.local/state/piton", piton("the daemon's state folder")),
+                deny(&all, "/h/.local/state/piton", piton(PitonArea::StateFolder)),
                 Rule {
                     effect: Effect::Allow,
                     access: vec![Access::Connect],
                     target: Target::Literal {
                         path: "/h/.local/state/piton/agent.sock".into(),
                     },
-                    source: piton("the agent socket"),
+                    source: piton(PitonArea::AgentSocket),
                 },
             ],
             keychain: false,
@@ -894,7 +1278,43 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         }
+    }
+
+    /// Each deny of the launch classifies as the floor table says; credentials follow fnox.
+    #[test]
+    fn every_deny_classifies() {
+        use FloorItem as F;
+        use Liftability::{Floor, Liftable};
+        let denies: Vec<Rule> = launch()
+            .rules
+            .into_iter()
+            .filter(|r| r.effect == Effect::Deny)
+            .collect();
+        let classes =
+            |credentials| -> Vec<Liftability> { denies.iter().map(|r| liftability(r, credentials)).collect() };
+        let credential = |item| {
+            [
+                item,
+                item,
+                Floor(F::Configuration),
+                Floor(F::UserSwitch),
+                Floor(F::Configuration),
+                Floor(F::Configuration),
+                Liftable(LiftableDeny::GitControl),
+                Floor(F::StateFolder),
+            ]
+        };
+        assert_eq!(
+            classes(Credentials::Liftable),
+            credential(Liftable(LiftableDeny::Credential))
+        );
+        assert_eq!(classes(Credentials::Floor), credential(Floor(F::Credential)));
+        let control = deny(&[Access::Connect], "/s/piton.sock", piton(PitonArea::ControlSocket));
+        assert_eq!(liftability(&control, Credentials::Liftable), Floor(F::ControlSocket));
+        let fnox = deny(&[Access::Write], "/h/.config/fnox", Source::FnoxConfig);
+        assert_eq!(liftability(&fnox, Credentials::Liftable), Floor(F::FnoxFiles));
     }
 
     /// `all` opens everything the launch closes except the floor, which still decides wherever it applies.
@@ -1085,6 +1505,308 @@ mod tests {
             Containment::Apply => {}
         }
         let caps = capabilities(&all(&launch(), Credentials::Liftable)).unwrap();
+        // SAFETY: the child only applies the sandbox and exits; the parent waits for it.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork");
+        if pid == 0 {
+            let code = match nono::Sandbox::apply_auto(&caps) {
+                Ok(_) => 0,
+                Err(_) => 1,
+            };
+            // SAFETY: leave the forked test process without running the parent's test harness.
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child forked above.
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "applying failed: {status}"
+        );
+    }
+
+    /// pi's sandbox: every liftable deny is followed by its companion in Piton's class, which excludes every floor deny
+    /// of the same operation; floor denies get none. A bash call's sandbox carries none.
+    #[test]
+    fn liftable_denies_get_companions_that_exclude_the_floor() {
+        use super::super::rules::{LIFT_MACH, LIFT_READ, LIFT_WRITE, Lifts};
+        let mut pi = launch();
+        pi.tag = "t".into();
+        pi.lifts = Lifts::Pi {
+            credentials: Credentials::Liftable,
+        };
+        let rules = pi.seatbelt().unwrap();
+        let companions: Vec<&String> = rules
+            .iter()
+            .filter(|r| r.contains("(extension \"com.piton.lift"))
+            .collect();
+        let after = |deny: &str| -> Option<&String> {
+            let i = rules.iter().position(|r| r.starts_with(deny))?;
+            rules.get(i + 1).filter(|r| r.contains("(extension "))
+        };
+        // Writes outside every grant: the leading tagged deny's companion.
+        let base = after("(deny file-write* (with message").expect("the base write deny has a companion");
+        assert!(base.contains(LIFT_WRITE), "{base}");
+        // Credentials while fnox is off: a read companion.
+        let ssh = after("(deny file-read-data (subpath \"/h/.ssh\")").expect("credential read companion");
+        assert!(ssh.contains(LIFT_READ), "{ssh}");
+        // Git's control files: one companion per regex deny.
+        let git = after("(deny file-write* (regex #\"^/w/\\.").expect("Git control companion");
+        assert!(git.contains(LIFT_WRITE), "{git}");
+        // Every write companion excludes every floor write deny: pi's agent dir, the configuration, the user's deny,
+        // the state folder, the protected files.
+        for floor in [
+            "(require-not (subpath \"/h/.pi/agent\"))",
+            "(require-not (subpath \"/h/.config/piton\"))",
+            "(require-not (subpath \"/h/secret\"))",
+            "(require-not (subpath \"/h/.local/state/piton\"))",
+            "(require-not (regex #\"^/w/",
+        ] {
+            assert!(git.contains(floor), "{floor} in {git}");
+            assert!(base.contains(floor), "{floor} in {base}");
+        }
+        // Floor denies get none.
+        for floor in [
+            "(deny file-write* (subpath \"/h/.pi/agent\")",
+            "(deny file-write* (subpath \"/h/secret\")",
+            "(deny file-write* (subpath \"/h/.local/state/piton\")",
+        ] {
+            assert_eq!(after(floor), None, "{floor}");
+        }
+        // The closed Mach list and the keychain (fnox off) lift with a Mach token; listening with a listen token.
+        assert!(after("(deny mach-lookup (with").is_some_and(|c| c.contains(LIFT_MACH)));
+        assert!(after("(deny mach-lookup (global-name \"com.apple.SecurityServer\")").is_some());
+        assert!(after("(deny network-inbound").is_some());
+        // The control socket is floor: the socket base's connect companion excludes it.
+        let connect = after("(deny network-outbound (subpath \"/\")").expect("socket base companion");
+        assert!(
+            connect.contains("(require-not (path \"/h/.local/state/piton\"))")
+                || connect.contains("(require-not (subpath \"/h/.local/state/piton\"))"),
+            "{connect}"
+        );
+        // Companions only in pi's sandbox.
+        assert!(!companions.is_empty());
+        let mut call = launch();
+        call.tag = "t".into();
+        assert!(!call.seatbelt().unwrap().iter().any(|r| r.contains("(extension ")));
+        // Behind fnox, credentials and the keychain are floor: no companions, and they're excluded.
+        pi.lifts = Lifts::Pi {
+            credentials: Credentials::Floor,
+        };
+        let rules = pi.seatbelt().unwrap();
+        let i = rules
+            .iter()
+            .position(|r| r.starts_with("(deny file-read-data (subpath \"/h/.ssh\")"))
+            .unwrap();
+        assert!(!rules[i + 1].contains("(extension "), "{}", rules[i + 1]);
+        let i = rules
+            .iter()
+            .position(|r| r.starts_with("(deny mach-lookup (global-name \"com.apple.SecurityServer\")"))
+            .unwrap();
+        assert!(!rules[i + 1].contains("(extension "), "{}", rules[i + 1]);
+        // nono accepts every companion.
+        super::super::apply::capabilities(&pi).expect("nono accepts the companions");
+    }
+
+    fn live_bounds<'a>(credentials: Credentials, shared: &'a [PathBuf]) -> Bounds<'a> {
+        Bounds {
+            projects: &[],
+            home: Path::new("/h"),
+            shared,
+            credentials,
+        }
+    }
+
+    fn refused<'a>(operation: &'a str, target: &'a str) -> Refused<'a> {
+        Refused {
+            operation,
+            target,
+            pid: 1,
+        }
+    }
+
+    /// What a block of pi's process lifts live, and what the floor refuses.
+    #[test]
+    fn live_lifts_for_refusals() {
+        let p = launch();
+        let shared = Vec::new();
+        let b = live_bounds(Credentials::Liftable, &shared);
+        let write = |path: &str| LiveLift::Write { path: path.into() };
+        // Outside every grant; Git's control files: liftable.
+        assert_eq!(
+            live_lift(&p, refused("file-write-create", "/h/notes.txt"), &b),
+            Ok(write("/h/notes.txt"))
+        );
+        assert_eq!(
+            live_lift(&p, refused("file-write-data", "/w/.git/config"), &b),
+            Ok(write("/w/.git/config"))
+        );
+        assert_eq!(
+            live_lift(&p, refused("network-outbound", "/h/x.sock"), &b),
+            Ok(write("/h/x.sock"))
+        );
+        assert_eq!(
+            live_lift(&p, refused("mach-lookup", "com.example.agent"), &b),
+            Ok(LiveLift::Service {
+                name: "com.example.agent".into()
+            })
+        );
+        assert_eq!(
+            live_lift(&p, refused("network-inbound", "local:*:5000"), &b),
+            Ok(LiveLift::Listen)
+        );
+        // The floor and the user's own: refused.
+        for (op, target) in [
+            ("file-write-data", "/h/.pi/agent/settings.json"),
+            ("file-write-data", "/h/.config/piton/config.toml"),
+            ("file-write-data", "/h/secret/x"),
+            ("file-write-data", "/w/.piton/config.toml"),
+            ("file-write-data", "/h/.local/state/piton/trust.json"),
+        ] {
+            assert!(
+                matches!(live_lift(&p, refused(op, target), &b), Err(LiveRefusal::Floor(_))),
+                "{target}"
+            );
+        }
+        // Reads, signals: nothing a token reopens from a block.
+        assert!(matches!(
+            live_lift(&p, refused("file-read-data", "/h/.ssh/id"), &b),
+            Err(LiveRefusal::Unsupported(_))
+        ));
+        assert!(matches!(
+            live_lift(&p, refused("signal", "x"), &b),
+            Err(LiveRefusal::Unsupported(_))
+        ));
+        // A folder over the floor: refused, for what's below it.
+        assert!(matches!(
+            check_live(&p, &write("/h"), Credentials::Liftable),
+            Err(LiveRefusal::Floor(_))
+        ));
+        assert!(matches!(
+            check_live(&p, &write("/w"), Credentials::Liftable),
+            Err(LiveRefusal::Floor(_)),
+        ));
+        // The keychain: liftable with fnox off, floor with it on.
+        let keychain = LiveLift::Service {
+            name: "com.apple.SecurityServer".into(),
+        };
+        assert_eq!(check_live(&p, &keychain, Credentials::Liftable), Ok(()));
+        assert!(matches!(
+            check_live(&p, &keychain, Credentials::Floor),
+            Err(LiveRefusal::Floor(_))
+        ));
+        let read = LiveLift::Read {
+            path: "/h/.ssh/id".into(),
+        };
+        assert_eq!(check_live(&p, &read, Credentials::Liftable), Ok(()));
+        assert!(matches!(
+            check_live(&p, &read, Credentials::Floor),
+            Err(LiveRefusal::Floor(_))
+        ));
+    }
+
+    /// A write token's class also reopens socket connects and binds: a floor or user deny of either refuses it.
+    #[test]
+    fn socket_denies_refuse_a_write_lift() {
+        let mut p = launch();
+        p.rules.push(Rule {
+            effect: Effect::Deny,
+            access: vec![Access::Connect],
+            target: Target::Literal {
+                path: "/h/x.sock".into(),
+            },
+            source: Source::Config {
+                key: "sandbox.network.unix_socket_connections.\"/h/x.sock\"".into(),
+                from: Provenance::File {
+                    path: "/g/config.toml".into(),
+                },
+            },
+        });
+        p.rules.push(Rule {
+            effect: Effect::Deny,
+            access: vec![Access::Bind],
+            target: Target::Literal {
+                path: "/h/run/kept.sock".into(),
+            },
+            source: piton(PitonArea::SocketPath),
+        });
+        let write = |path: &str| LiveLift::Write { path: path.into() };
+        for path in ["/h/x.sock", "/h/run/kept.sock", "/h/run"] {
+            assert!(
+                matches!(
+                    check_live(&p, &write(path), Credentials::Liftable),
+                    Err(LiveRefusal::Floor(_))
+                ),
+                "{path}"
+            );
+        }
+        assert_eq!(check_live(&p, &write("/h/other.sock"), Credentials::Liftable), Ok(()));
+    }
+
+    /// A floor deny placed before the liftable one that decides (the user's `"read"` on a checkout, then Git's
+    /// control-file deny) refuses the lift: a companion would reopen it (Seatbelt's last match).
+    #[test]
+    fn an_earlier_floor_deny_refuses_a_live_lift() {
+        let mut p = launch();
+        let read_only = Rule {
+            effect: Effect::Deny,
+            access: vec![Access::Write],
+            target: Target::Subpath { path: "/src".into() },
+            source: Source::Config {
+                key: "sandbox.filesystem.\"/src\"".into(),
+                from: Provenance::File {
+                    path: "/g/config.toml".into(),
+                },
+            },
+        };
+        let git = Rule {
+            effect: Effect::Deny,
+            access: vec![Access::Write],
+            target: Target::GitControl {
+                control: GitControl::of(&[Path::new("/src")]),
+            },
+            source: piton(PitonArea::GitControl),
+        };
+        p.rules.insert(1, read_only);
+        p.rules.push(git);
+        let shared = Vec::new();
+        let b = live_bounds(Credentials::Liftable, &shared);
+        assert!(matches!(
+            live_lift(&p, refused("file-write-data", "/src/.git/config"), &b),
+            Err(LiveRefusal::Floor(_))
+        ));
+        // And the profile excludes it from the Git companion too.
+        p.tag = "t".into();
+        p.lifts = super::super::rules::Lifts::Pi {
+            credentials: Credentials::Liftable,
+        };
+        let rules = p.seatbelt().unwrap();
+        let i = rules
+            .iter()
+            .position(|r| r.starts_with("(deny file-write* (regex #\"^/src/\\."))
+            .unwrap();
+        assert!(
+            rules[i + 1].contains("(require-not (subpath \"/src\"))"),
+            "{}",
+            rules[i + 1]
+        );
+    }
+
+    /// pi's sandbox with companions applies: a forked child sandboxes itself with it. Skipped inside a sandbox.
+    #[test]
+    #[allow(unsafe_code)]
+    fn the_lifting_policy_applies() {
+        use super::super::apply::{Containment, capabilities, containment};
+        match containment() {
+            Containment::Inherited => return,
+            Containment::Apply => {}
+        }
+        let mut pi = launch();
+        pi.tag = "t".into();
+        pi.lifts = super::super::rules::Lifts::Pi {
+            credentials: Credentials::Liftable,
+        };
+        let caps = capabilities(&pi).unwrap();
         // SAFETY: the child only applies the sandbox and exits; the parent waits for it.
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork");

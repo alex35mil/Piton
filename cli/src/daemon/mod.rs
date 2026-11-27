@@ -13,6 +13,7 @@ mod refusals;
 mod rpc;
 mod socket;
 mod watch;
+mod workers;
 
 use std::{
     collections::BTreeMap,
@@ -30,9 +31,11 @@ use tokio::{
 
 pub use self::{
     protocol::{
-        AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello, PROTOCOL_VERSION,
+        AttachControl, ControlRequest, ControlResponse, EndReason, FRAME_CONTROL, FRAME_RECORD, Hello,
+        PROTOCOL_VERSION, WorkerEntry,
     },
     refusals::Refusal,
+    workers::Deleted,
 };
 use crate::{
     config::DaemonConfig,
@@ -63,8 +66,10 @@ pub struct Daemon {
     state: Mutex<crate::state::State>,
     /// Fires when host logging changes, so the expiry task re-arms.
     logging_changed: Arc<Notify>,
-    /// Session tokens for `agent.sock`.
-    agent_tokens: crate::agent::Tokens,
+    /// Every live token for `agent.sock`: sessions', calls', and launch helpers'.
+    agent_tokens: Arc<crate::agent::Tokens>,
+    /// One lock per source checkout: worker operations there run one at a time, whoever asks.
+    worker_locks: workers::SourceLocks,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,7 +87,7 @@ pub enum DaemonError {
 pub enum TrustCheck {
     /// Refuse with [`LaunchError::TrustNeeded`], so the client asks: every launch a person started.
     Ask,
-    /// Launch with what was decided (a restart the daemon starts on its own).
+    /// Launch with what was decided (a launch the daemon starts on its own).
     KeepDecided,
 }
 
@@ -164,6 +169,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
 
     // Socket folders of sessions that ended without their hook running (a crash, a kill).
     launch::claude_sockets::sweep(base_env.get("TMPDIR").map(Path::new), &config.state_dir());
+    // The addon pi consumes lift tokens with, matching this build; a session without it offers no live lifts.
+    match crate::agent::lift::install(&config.state_dir()) {
+        Ok(Some(path)) => crate::log!("lifts: addon at {}", path.display()),
+        Ok(None) => crate::log!("lifts: not on this platform"),
+        Err(e) => crate::log!("lifts: can't write the addon: {e}; pi's sandbox can't be widened live"),
+    }
     let state = crate::state::State::open(&config.state_db())?;
     let host_id = state.host_id()?;
     crate::log!("state: {} (host {host_id})", config.state_db().display());
@@ -181,7 +192,8 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
         host_id,
         state: Mutex::new(state),
         logging_changed: Arc::new(Notify::new()),
-        agent_tokens: crate::agent::Tokens::default(),
+        agent_tokens: Arc::new(crate::agent::Tokens::default()),
+        worker_locks: workers::SourceLocks::default(),
     });
     tokio::spawn(crate::daemon::awake::run(daemon.clone()));
     tokio::spawn(logging_expiry(daemon.clone()));
@@ -340,8 +352,8 @@ impl Daemon {
         &self.list_changed
     }
 
-    /// Who may ask over `agent.sock`: one token per live session.
-    pub fn agent_tokens(&self) -> &crate::agent::Tokens {
+    /// Who may ask over `agent.sock`: every live caller's token.
+    pub fn agent_tokens(&self) -> &Arc<crate::agent::Tokens> {
         &self.agent_tokens
     }
 
@@ -517,19 +529,23 @@ impl Daemon {
         if let Some(commands) = &mut commands {
             commands.set_tag(&tag);
         }
-        // How this pi reaches the daemon for protected writes; set after the workspace's environment, so a
-        // repository can't change it.
-        let token = self.agent_tokens.issue(key).map_err(|source| LaunchError::Spawn {
-            program: "session token".into(),
-            source,
-        })?;
-        env.insert(crate::agent::TOKEN_ENV.into(), token);
+        // How this pi reaches the daemon (`agent.sock`); set after the workspace's environment, so a repository can't
+        // change it. Behind fnox, pi is fnox's child: the helper that becomes pi reports its process with a one-time
+        // launch token (and fnox's proxy, for a filtered network's gate).
+        let tokens = self
+            .agent_tokens
+            .issue_session(key, proxy.is_some())
+            .map_err(|source| LaunchError::Spawn {
+                program: "session token".into(),
+                source,
+            })?;
+        env.insert(crate::agent::TOKEN_ENV.into(), tokens.session);
         env.insert(
             crate::agent::SOCKET_ENV.into(),
             config.agent_socket().to_string_lossy().into_owned(),
         );
-        // What this session's protected files are, the one definition the daemon checks a write against; pi asks
-        // `piton config protected`, which answers from it. Set after the workspace's environment too.
+        // What this session's protected files are, the one definition the daemon checks a write against; `piton config
+        // protected` inside the session answers from it (`facts`).
         let fnox_files: &[std::path::PathBuf] = proxy.as_ref().map_or(&[], |p| p.files.as_slice());
         let mut excluded = launch::sandbox::never_configuration(&launch_config, &config.paths.home, &self.base_env);
         excluded.push(config.state_dir());
@@ -543,21 +559,16 @@ impl Daemon {
             home: &config.paths.home,
             excluded: &excluded,
         });
-        match serde_json::to_string(&protected) {
-            Ok(json) => {
-                env.insert(crate::agent::PROTECTED_ENV.into(), json);
-            }
-            Err(e) => crate::log!("session {key}: can't describe its protected files to pi: {e}"),
-        }
-        // Which of the repository's grants this session keeps, for `piton config resolve` inside it: a commit made
-        // during the session can't widen them. Set after the workspace's environment too. A filter that can't be
-        // described keeps nothing.
-        env.insert(
-            crate::trust::FILTER_ENV.into(),
-            serde_json::to_string(&trust.filter()).unwrap_or_else(|_| "{\"kind\":\"none\"}".into()),
-        );
+        // The session's view, which `piton` inside it asks for (`facts`). The grants it keeps are the launch's: a commit
+        // or trust decision made during the session doesn't widen them.
+        let facts = crate::agent::facts::Facts {
+            runtime: crate::agent::facts::FactRuntime::of(mode),
+            grants: trust.filter(),
+            protected,
+            global: config.paths.global.clone(),
+            workspace: crate::agent::facts::FactWorkspace::of(&workspace),
+        };
         let weak = Arc::downgrade(self);
-        let restarting = Arc::downgrade(self);
         let hooks = Hooks {
             ended: Box::new(move |key| {
                 if let Some(folder) = &sockets {
@@ -567,11 +578,6 @@ impl Daemon {
                     daemon.agent_tokens.forget(key);
                     lock(&daemon.sessions).remove(&key);
                     let _ = daemon.list_changed.send(());
-                }
-            }),
-            restart: Box::new(move |key| {
-                if let Some(daemon) = restarting.upgrade() {
-                    tokio::spawn(async move { daemon.restart_session(key).await });
                 }
             }),
             status_changed: self.status_changed.clone(),
@@ -612,22 +618,15 @@ impl Daemon {
                 if ssh.is_none() {
                     crate::log!("session {key}: can't make the ssh wrapper: SSH won't go through the gate");
                 }
-                // Behind fnox, the helper reports fnox's proxy with a one-time token; the gate waits for it.
-                let (route, upstream_token) = match &proxy {
-                    Some(_) => {
-                        let token = self.agent_tokens.issue_gate(key).map_err(|source| LaunchError::Spawn {
-                            program: "gate token".into(),
-                            source,
-                        })?;
-                        (None, Some(token))
-                    }
-                    None => (Some(crate::launch::sandbox::network::Route::Direct), None),
+                // Behind fnox, the helper reports fnox's proxy with its launch token; the gate waits for it.
+                let route = match &proxy {
+                    Some(_) => None,
+                    None => Some(crate::launch::sandbox::network::Route::Direct),
                 };
                 Some(session::NetworkSpec {
                     ssh,
                     catalog: crate::pi::catalog::Catalog::new(builtin, files),
                     route,
-                    upstream_token,
                 })
             }
             Some(launch::sandbox::Network::Open { .. } | launch::sandbox::Network::Direct { .. }) | None => None,
@@ -638,8 +637,9 @@ impl Daemon {
             mode,
             session,
             env,
+            launch_token: tokens.launch,
             policy,
-            protected,
+            facts,
             proxy,
             commands,
             source: launch_config.source.clone(),
@@ -655,13 +655,19 @@ impl Daemon {
             SessionArg::Resume(file) => format!("resume {}", file.display()),
         };
         let workspace_text = format!("{}{relation}", spec.workspace.path.display());
+        let reported = spec.launch_token.is_some();
         let handle = match session::spawn(self.config(), spec, hooks) {
             Ok(handle) => handle,
             Err(e) => {
+                self.agent_tokens.forget(key);
                 crate::log!("launch failed in {workspace_text} ({mode:?}, {resume}): {e}");
                 return Err(e);
             }
         };
+        // pi's process is the one started, unless the helper reports it (behind fnox, pi is fnox's child).
+        if let (false, Some(pid)) = (reported, handle.snapshot().pid) {
+            self.agent_tokens.pi_started(key, pid as i32);
+        }
         crate::log!(
             "session {key}: launched pid {} in {workspace_text} ({mode:?}, {resume})",
             handle.snapshot().pid.map_or_else(|| "?".into(), |p| p.to_string())
@@ -766,31 +772,6 @@ impl Daemon {
             crate::log!("trust: {} reset", inputs.source.display());
         }
         Ok(crate::trust::TrustState::decide(&inputs, None))
-    }
-
-    /// Stops a session and launches it again from its file, in the same workspace and mode, with the configuration as
-    /// it is now (a sandbox entry the user just saved).
-    async fn restart_session(self: &Arc<Self>, key: SessionKey) {
-        let Some(handle) = self.session(key) else { return };
-        let shared = handle.snapshot();
-        let Some(file) = shared.file.clone() else {
-            crate::log!("session {key}: not restarted: it has no session file yet");
-            return;
-        };
-        handle.stop(StopReason::Requested).await;
-        // A restart nobody asked for never asks: it keeps what was decided.
-        match self
-            .launch_in(
-                &shared.workspace,
-                shared.mode,
-                SessionArg::Resume(file.into()),
-                TrustCheck::KeepDecided,
-            )
-            .await
-        {
-            Ok(new) => crate::log!("session {key}: restarted as session {}", new.key),
-            Err(e) => crate::log!("session {key}: restart failed: {e}"),
-        }
     }
 
     /// The live session that has `file` open, other than `except`.

@@ -1,21 +1,23 @@
 // Host logging lives in the daemon: `[debugging] log_level` in config.host.toml is the default, `piton logging` and the apps switch
 // it until it expires or the daemon restarts, and nothing is persisted elsewhere. All state is temporary.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import net from "node:net";
 import assert from "node:assert/strict";
 
-import { writeConfig as writeConfigFiles } from "./config.mjs";
+import { insideSandbox, pitonArgs, testEnv, writeConfig as writeConfigFiles } from "./config.mjs";
 
 const binary = resolve(import.meta.dirname, "../../target/debug/piton");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "piton-logging-")));
 const logs = join(dir, "logs");
-const socket = join(dir, "piton.sock");
-const config = join(dir, "config");
-const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: join(dir, "agent"), PITON_LOGS_DIR: logs, PITON_RUNTIME: "sandbox" };
+// The daemon's state folder (the socket's) holds only its state: pi's agent directory beside it, as a sandboxed launch
+// requires.
+mkdirSync(join(dir, "state"));
+const socket = join(dir, "state", "piton.sock");
+const env = testEnv({ PI_CODING_AGENT_DIR: join(dir, "agent"), PITON_LOGS_DIR: logs });
 
 function writeConfig(mode) {
     writeConfigFiles(dir, {
@@ -30,7 +32,7 @@ function writeConfig(mode) {
 }
 
 async function startDaemon() {
-    const d = spawn(binary, ["daemon"], { env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(binary, pitonArgs(dir, ["daemon"]), { env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     for (let i = 0; i < 100 && !err.includes("listening on"); i++) await sleep(50);
@@ -45,7 +47,7 @@ async function stop(d) {
 }
 
 function cli(...args) {
-    const result = spawnSync(binary, ["logging", ...args], { env, encoding: "utf8" });
+    const result = spawnSync(binary, pitonArgs(dir, ["logging", ...args]), { env, encoding: "utf8" });
     return { code: result.status, out: result.stdout, err: result.stderr };
 }
 
@@ -139,10 +141,21 @@ try {
 
     assert.ok(!existsSync(join(logs, "settings.json")), "no host settings file");
 
+    // Device tooling is host-only: refused inside a sandbox, as the kernel says (a sandbox this test applies, or the one
+    // it already runs in).
+    const nested = insideSandbox(binary);
+    const policy = spawnSync(binary, pitonArgs(dir, ["sandbox", "show", "--workspace", dir]), { env, encoding: "utf8" });
+    assert.equal(policy.status, 0, policy.stderr);
     for (const args of [["collect", "--device", "fake"], ["install", "--device", "fake"], ["uninstall"]]) {
-        const result = cli(...args);
-        assert.equal(result.code, 1);
-        assert.match(result.err, /host-only/);
+        const result = nested
+            ? cli(...args)
+            : spawnSync(binary, ["sandbox-exec", "--", binary, ...pitonArgs(dir, ["logging", ...args])], {
+                  env: { ...env, PITON_SANDBOX_POLICY: JSON.stringify(JSON.parse(policy.stdout).policy) },
+                  encoding: "utf8",
+              });
+        const err = result.err ?? result.stderr;
+        assert.equal(result.code ?? result.status, 1, err);
+        assert.match(err, /host-only/);
     }
     console.log("ok   logging: config default, runtime switches, pushed expiry, restart resets, host-only device tooling");
 } finally {

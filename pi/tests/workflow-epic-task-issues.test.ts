@@ -44,7 +44,7 @@ function git(cwd: string, ...args: string[]) {
     return cp.execFileSync("git", args, { cwd, encoding: "utf-8" }).trim()
 }
 
-function repo(tracker: "github" | "linear", labels?: unknown) {
+async function repo(tracker: "github" | "linear", labels?: unknown) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "epic-task-issues-"))
     git(root, "init", "-qb", "main")
     git(root, "config", "user.email", "test@example.com")
@@ -80,7 +80,7 @@ function repo(tracker: "github" | "linear", labels?: unknown) {
         forge: { provider: "github", mcpServer: "github", repository },
     })
     prepareArtifactPersistence(root)
-    const epic = initializeEntity(
+    const epic = await initializeEntity(
         {
             entity: "epic",
             title: "Rollout",
@@ -137,7 +137,7 @@ const github = (...issues: GitHubEpicChild[]) => ({ provider: "github" as const,
 const linear = (...issues: LinearEpicChild[]) => ({ provider: "linear" as const, issues })
 
 describe("Epic Task format", () => {
-    it("parses a tagged Task's summary and an untagged Task's multi-paragraph design as one Task each", () => {
+    it("parses a tagged Task's summary and an untagged Task's multi-paragraph design as one Task each", async () => {
         const tasks = parseEpicTasks(
             [
                 "# Epic",
@@ -192,7 +192,7 @@ describe("Epic Task format", () => {
         )
     })
 
-    it("rejects malformed Tasks", () => {
+    it("rejects malformed Tasks", async () => {
         assert.throws(() => parseEpicTasks(plan("### A\n\nNo kind.\n")), /first body line must be ``\*\*Kind/)
         assert.throws(
             () => parseEpicTasks(plan("### A\n\n**Kind:** `epic`\n**Summary:** A.\n\nText.\n")),
@@ -245,8 +245,8 @@ describe("Epic Task format", () => {
 })
 
 describe("Epic Task issue processing", () => {
-    it("creates untagged Tasks, tags them, and finishes on a rerun", () => {
-        const { root, directory, epicPath, write } = repo("github")
+    it("creates untagged Tasks, tags them, and finishes on a rerun", async () => {
+        const { root, directory, epicPath, write } = await repo("github")
         try {
             write(plan(section("Parser"), section("CLI")))
             const first = planEpicTaskIssues(
@@ -328,8 +328,8 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("skips children already tagged in the plan and stops on ambiguous titles", () => {
-        const { root, directory, write } = repo("github")
+    it("skips children already tagged in the plan and stops on ambiguous titles", async () => {
+        const { root, directory, write } = await repo("github")
         try {
             // #11 was renamed in the plan but kept its original issue title.
             write(plan(section("Parser core", "#11"), section("Parser")))
@@ -355,8 +355,8 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("repairs partial board setup and checks the lifecycle of a title match", () => {
-        const { root, directory, write } = repo("github")
+    it("repairs partial board setup and checks the lifecycle of a title match", async () => {
+        const { root, directory, write } = await repo("github")
         try {
             write(plan(section("Parser", "#11"), section("CLI")))
             const repair = planEpicTaskIssues(
@@ -445,8 +445,8 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("cancels queued and started Tasks, never a Done one, and finishes an interrupted cancel", () => {
-        const { root, directory, write } = repo("github")
+    it("cancels queued and started Tasks, never a Done one, and finishes an interrupted cancel", async () => {
+        const { root, directory, write } = await repo("github")
         try {
             write(plan(section("Dropped", "#14", "**Status:** `canceled`\n")))
             const run = (facts: Partial<GitHubEpicChild>) =>
@@ -480,8 +480,8 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("moves a Linear queued Task from Backlog to Todo and fills a missing Priority", () => {
-        const { root, directory, write } = repo("linear")
+    it("moves a Linear queued Task from Backlog to Todo and fills a missing Priority", async () => {
+        const { root, directory, write } = await repo("linear")
         try {
             write(plan(section("Parser", "ENG-4")))
             const run = (facts: Partial<LinearEpicChild>) =>
@@ -511,7 +511,7 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("creates Task issues with the kind label and the Task's Labels selection on both trackers", () => {
+    it("creates Task issues with the kind label and the Task's Labels selection on both trackers", async () => {
         const area = {
             appliesTo: ["deliverable"],
             cardinality: "oneOrMore",
@@ -522,7 +522,7 @@ describe("Epic Task issue processing", () => {
                 kind: provider === "linear" ? linearKindGroup() : kindLabels().groups.kind,
                 area: { ...area, ...(provider === "linear" ? { scope: "workspace" } : {}) },
             }
-            const { root, directory, write } = repo(provider, { groups })
+            const { root, directory, write } = await repo(provider, { groups })
             try {
                 write(plan(section("Parser", undefined, "**Labels:** `area=fe`\n")))
                 const children = provider === "github" ? github() : linear()
@@ -545,8 +545,8 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("creates Linear issues in the Epic's Project with Todo and Priority", () => {
-        const { root, directory, epicPath, write } = repo("linear")
+    it("creates Linear issues in the Epic's Project with Todo and Priority", async () => {
+        const { root, directory, epicPath, write } = await repo("linear")
         try {
             write(plan(section("Parser"), section("Dropped", "ENG-3", "**Status:** `canceled`\n")))
             const result = planEpicTaskIssues(
@@ -588,8 +588,8 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("orders GitHub sub-issues to match the plan once every Task is settled", () => {
-        const { root, directory, write } = repo("github")
+    it("orders GitHub sub-issues to match the plan once every Task is settled", async () => {
+        const { root, directory, write } = await repo("github")
         // Applies reorder steps to a sub-issue list as GitHub's reprioritize does.
         const apply = (issues: GitHubEpicChild[], steps: readonly EpicTaskIssueStep[]) => {
             const order = [...issues]
@@ -650,7 +650,7 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("puts canceled Tasks and children outside the plan after the plan's Tasks, in their current order", () => {
+    it("puts canceled Tasks and children outside the plan after the plan's Tasks, in their current order", async () => {
         assert.deepEqual(
             planChildOrder(
                 parseEpicTasks(
@@ -665,8 +665,8 @@ describe("Epic Task issue processing", () => {
         assert.deepEqual(childMoves(["#1", "#3", "#2"], ["#1", "#2", "#3"]), [{ marker: "#2", after: "#1" }])
     })
 
-    it("returns no Linear reorder steps, and rejects children from the other tracker", () => {
-        const { root, directory, write } = repo("linear")
+    it("returns no Linear reorder steps, and rejects children from the other tracker", async () => {
+        const { root, directory, write } = await repo("linear")
         try {
             write(plan(section("A", "ENG-2"), section("B", "ENG-1")))
             const run = (children: ReturnType<typeof linear> | ReturnType<typeof github>) =>
@@ -679,7 +679,7 @@ describe("Epic Task issue processing", () => {
     })
 
     it("orders a Linear Epic's Project issues through sortOrder with the registered server's credential", async () => {
-        const { root, directory, write } = repo("linear")
+        const { root, directory, write } = await repo("linear")
         fs.writeFileSync(
             path.join(root, ".piton/mcp.json"),
             JSON.stringify({
@@ -757,7 +757,7 @@ describe("Epic Task issue processing", () => {
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
         }
-        const other = repo("github")
+        const other = await repo("github")
         try {
             other.write(plan(section("A", "#1")))
             await assert.rejects(
@@ -769,8 +769,8 @@ describe("Epic Task issue processing", () => {
         }
     })
 
-    it("accepts only a reviewed Task list, and processes issues only for the accepted one", () => {
-        const { root, directory, epicPath } = repo("github")
+    it("accepts only a reviewed Task list, and processes issues only for the accepted one", async () => {
+        const { root, directory, epicPath } = await repo("github")
         const epicDir = path.join(root, directory)
         const reviewed = plan(section("Parser"), section("CLI"))
         // A saved plan round as review_epic leaves it, with the text it reviewed.
@@ -873,7 +873,7 @@ const accepted = (branch: string) =>
     ].join("\n")
 
 describe("Epic routing and restore", () => {
-    it("parses routing lines and rejects missing or invalid ones", () => {
+    it("parses routing lines and rejects missing or invalid ones", async () => {
         assert.deepEqual(parseEpicRouting(accepted("10-rollout")), { taskTarget: "default", epicBranch: "10-rollout" })
         assert.throws(() => parseEpicRouting("# E\n\n## Tasks\n"), /no `## Task delivery strategy`/)
         assert.throws(
@@ -894,7 +894,7 @@ describe("Epic routing and restore", () => {
         )
     })
 
-    it("round-trips accepted epic.md through GitHub and Linear plan rendering", () => {
+    it("round-trips accepted epic.md through GitHub and Linear plan rendering", async () => {
         const source = accepted("10-rollout")
         for (const kind of ["github-plan-comment", "linear-plan-document"] as const) {
             const footer =
@@ -916,8 +916,8 @@ describe("Epic routing and restore", () => {
         )
     })
 
-    it("restores a GitHub Epic in a clone without its local files", () => {
-        const { root, directory, branch } = repo("github")
+    it("restores a GitHub Epic in a clone without its local files", async () => {
+        const { root, directory, branch } = await repo("github")
         try {
             const source = accepted(branch)
             const body = `${renderProviderBody(source, { kind: "github-plan-comment" })}\n\n<!-- plan-publication:${token} -->`
@@ -1018,8 +1018,8 @@ describe("Epic routing and restore", () => {
 })
 
 describe("Linear Epic restore", () => {
-    it("restores a Linear Epic from its Project read and attached plan document", () => {
-        const { root, directory, branch } = repo("linear")
+    it("restores a Linear Epic from its Project read and attached plan document", async () => {
+        const { root, directory, branch } = await repo("linear")
         try {
             const source = accepted(branch).replace("[#11]", "[ENG-11]")
             const body = `${renderProviderBody(source, { kind: "linear-plan-document" })}\n\n*Sent via Pi. Model: a/b.*`
@@ -1112,15 +1112,15 @@ describe("Linear Epic restore", () => {
 })
 
 describe("Task design", () => {
-    it("detects a changed issue body against the design a started Task last synced from", () => {
+    it("detects a changed issue body against the design a started Task last synced from", async () => {
         for (const provider of ["github", "linear"] as const) {
-            const { root, directory, branch, write } = repo(provider)
+            const { root, directory, branch, write } = await repo(provider)
             try {
                 const marker = provider === "github" ? "#11" : "ENG-11"
                 write(
                     `# Epic\n\n## Task delivery strategy\n\n**Task target:** \`default\`\n**Epic branch:** \`${branch}\`\n\n## Tasks\n\n${section("Parser", marker)}`,
                 )
-                const task = initializeEntity(
+                const task = await initializeEntity(
                     {
                         entity: "task",
                         title: "Parser",

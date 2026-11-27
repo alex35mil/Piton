@@ -1,21 +1,21 @@
 // What the suites that run real pi in the real sandbox share (blocks.mjs, network.mjs, sandbox.mjs): a scratch
 // configuration with the faux model and Piton's pi package, the debug daemon, an attached client, and the loop that runs
-// each test against a daemon of its own. Sandboxes don't nest, so in a sandboxed session (PITON_RUNTIME=sandbox) a suite
-// skips every test.
+// each test against a daemon of its own. Sandboxes don't nest, so inside a sandbox (`piton sandbox inside`) a suite skips
+// every test.
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import assert from "node:assert/strict";
 
-import { writeConfig } from "./config.mjs";
+import { insideSandbox, pitonArgs, testEnv, writeConfig } from "./config.mjs";
 
 export const root = resolve(import.meta.dirname, "../..");
 export const piton = join(root, "target/debug/piton");
 export const ext = join(root, "tests/fixtures/faux-extension.ts");
 export const pkg = resolve(root, "../pi");
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-export const nested = process.env.PITON_RUNTIME === "sandbox";
+export const nested = insideSandbox(piton);
 
 /// Where writes outside every grant go: no profile's write root, and not the user's home folder. Each run makes a folder
 /// of its own there (`away()`); `runSuite` removes it, and removes earlier runs' folders older than a day first, since a
@@ -66,12 +66,13 @@ export function setup(prefix, { settings = {}, files = {} } = {}) {
         host: { default_attach_mode: "sandbox", stop_empty_session_after: "60s" },
         project: { tools: { permissions: { default_mode: "allow" } } },
     });
-    const env = { ...process.env, PITON_CONFIG_HOME: config, PI_CODING_AGENT_DIR: agent };
+    // The faux `lift` tool imports Piton's pi package's lift library from this checkout.
+    const env = testEnv({ PI_CODING_AGENT_DIR: agent, PITON_FAUX_LIFT_LIB: join(pkg, "extensions/__lib/lift.ts") });
     return { dir, ws, agent, config, env };
 }
 
 export async function startDaemon(ctx) {
-    const d = spawn(piton, ["daemon"], { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
+    const d = spawn(piton, pitonArgs(ctx.dir, ["daemon"]), { env: ctx.env, stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
     d.stderr.on("data", (c) => (err += c));
     for (let i = 0; i < 100 && !err.includes("listening"); i++) await sleep(50);
@@ -83,7 +84,7 @@ export async function startDaemon(ctx) {
 /// `piton trust allow|deny` for the workspace: a repository with grants or pi project files needs a decision first.
 export function trust(ctx, decision = "allow") {
     return new Promise((res, rej) => {
-        const p = spawn(piton, ["trust", decision, ctx.ws], { env: ctx.env, stdio: ["ignore", "pipe", "pipe"] });
+        const p = spawn(piton, pitonArgs(ctx.dir, ["trust", decision, ctx.ws]), { env: ctx.env, stdio: ["ignore", "pipe", "pipe"] });
         let err = "";
         p.stderr.on("data", (d) => (err += d));
         p.on("exit", (code) => (code === 0 ? res() : rej(new Error(`piton trust ${decision}: ${err}`))));
@@ -92,7 +93,7 @@ export function trust(ctx, decision = "allow") {
 
 /// `piton attach` in the workspace. `onRecord` sees every record as it arrives (to answer questions as they come).
 export function attach(ctx, { onRecord } = {}) {
-    const child = spawn(piton, ["attach"], { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(piton, pitonArgs(ctx.dir, ["attach"]), { cwd: ctx.ws, env: ctx.env, stdio: ["pipe", "pipe", "pipe"] });
     const c = { child, records: [], waiters: [], stderr: "", n: 0 };
     let buf = "";
     child.stdout.on("data", (chunk) => {

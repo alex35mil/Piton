@@ -10,7 +10,8 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import type { TSchema } from "typebox"
 
-import { agentChannel, isProtected, requestProtectedWrite, type ProtectedOutcome } from "../__lib/protected.js"
+import { channel, requestWrite, type ProtectedOutcome, type SessionChannel } from "../__lib/agent.js"
+import { isProtected } from "../__lib/protected.js"
 import { EditorChoiceValidator, fileReviewResult, isFileReviewDetails, type FileReviewDetails } from "./review.js"
 
 type FileKind = "edit" | "write"
@@ -91,13 +92,13 @@ async function reviewFile(
  * proposed; otherwise throws the outcome the agent gets.
  */
 async function writeThroughDaemon(
-    channel: { socket: string; token: string },
+    session: SessionChannel,
     file: string,
     content: string,
     signal: AbortSignal | undefined,
     abortTurn: () => void,
 ): Promise<void> {
-    const outcome: ProtectedOutcome = await requestProtectedWrite(channel, file, content, signal)
+    const outcome: ProtectedOutcome = await requestWrite(session, file, content, signal)
     switch (outcome.outcome) {
         case "approved": {
             if (!outcome.modified && outcome.notes.length === 0) return
@@ -187,10 +188,10 @@ function wrapFileTool<TParams extends TSchema, TDetails, TRenderState>(
             // A protected file always goes to the user, whatever the permission mode: through the daemon when this pi
             // runs under it (the sandbox can't write it), else with the review below.
             const protectedFile = isProtected(ctx.cwd, input.path)
-            const channel = protectedFile ? agentChannel() : undefined
-            if (channel) {
+            const current = protectedFile ? channel() : ({ kind: "noSession" } as const)
+            if (current.kind === "session") {
                 const tool = protectedTool(kind, ctx.cwd, (file, content) =>
-                    writeThroughDaemon(channel, file, content, signal, () => ctx.abort()),
+                    writeThroughDaemon(current, file, content, signal, () => ctx.abort()),
                 )
                 try {
                     return (await tool.execute(id, input as never, signal, onUpdate as never, ctx)) as never

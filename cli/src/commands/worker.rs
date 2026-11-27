@@ -26,9 +26,9 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
     let request = match action {
         WorkerAction::Create {
             name,
-            from,
+            source,
             label,
-            issue,
+            item_id,
             approve_source_update,
         } => {
             let update = match approve_source_update.map(sha).transpose() {
@@ -37,15 +37,15 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
                 Err(message) => return report(Err(message)),
             };
             ControlRequest::WorkerCreate(crate::project::CreateRequest {
-                from: from.unwrap_or_else(here),
+                source: source.unwrap_or_else(here),
                 name,
                 label,
-                issue,
+                item_id,
                 update,
             })
         }
-        WorkerAction::Ls { from } => ControlRequest::WorkerList {
-            from: from.unwrap_or_else(here),
+        WorkerAction::Ls { source } => ControlRequest::WorkerList {
+            source: source.unwrap_or_else(here),
         },
         WorkerAction::Delete {
             path,
@@ -114,7 +114,7 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
                     eprintln!("  {line}");
                 }
             }
-            if let crate::project::WorkerRefusal::ProtectedUpdate(blocked) = &refusal {
+            if let crate::project::WorkerRefusal::ProtectedFilesUpdate(blocked) = &refusal {
                 eprintln!(
                     "  Approving lets Piton write exactly these files from {}; the rest of the update, hooks \
                      included, runs in the sandbox. To approve, run the command again with --approve-source-update \

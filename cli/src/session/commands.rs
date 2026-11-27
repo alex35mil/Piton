@@ -19,9 +19,10 @@ use tokio::sync::oneshot;
 use crate::{
     agent::{
         Approved, Matched, PiShell, RunDecision, RunRequest, Runtime, Why,
+        answer::Once,
         block::PersistScope,
         grant_for,
-        question::{self, Answer, Question, RpcChoice, Target},
+        question::{self, Always, Answer, Question, RpcChoice, Target},
     },
     config::{AllGrant, CommandGrant, CommandPattern, CommandRuntime, ConfigFile, Grant, Paths, Sharing, WriteLevel},
     launch::{
@@ -121,72 +122,82 @@ pub struct Commands {
     pub grants: Vec<crate::config::Listed<CommandGrant>>,
     /// The configuration levels the launch read (its `.piton/` and `.agents/` folders, the global tier included).
     pub levels: Vec<PathBuf>,
+    /// Commands the user approved for this session, exactly as the agent or the extension sends them (with what widens
+    /// a run from pi's process), with where they run.
+    pub session_grants: HashMap<SessionGrantKey, Target>,
 }
 
-/// The question the user is being asked, and where the decision goes.
+/// What a session approval is for: a command's text, and for a run from pi's process, what it asked to be widened by
+/// (a bash rerun's sandbox side is always `all`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionGrantKey {
+    pub command: String,
+    pub widening: Widening,
+}
+
+/// What a run's widened sandbox opens: everything but the floor (a bash call's approved rerun), or the `[sandbox]`
+/// entries a run from pi's process named, kept as their TOML text so the key hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Widening {
+    All,
+    Grants(String),
+}
+
+impl Widening {
+    fn of(grants: &crate::config::GrantEntries) -> Self {
+        Widening::Grants(toml::to_string(grants).unwrap_or_default())
+    }
+}
+
+/// A block question for the user, and where the decision goes. The session's questions (`questions.rs`) hold it, with
+/// the dialog its `rpc` rendering shows.
 pub struct PendingQuestion {
     /// The typed question: its id is what `session.decide` names; its runtime is the one the `rpc` dialog shows.
     pub question: Question,
-    /// The `rpc` rendering's dialog showing now, and which one it is.
-    pub dialog_id: String,
+    /// Which `rpc` dialog shows it.
     pub stage: Stage,
-    /// The request, as the agent sent it.
+    /// The request, as the agent or the extension sent it.
     pub request: RunRequest,
     /// The tag the call's sandbox gets.
     pub tag: String,
+    /// What an approved run in the sandbox opens.
+    pub widen: Widen,
     pub reply: oneshot::Sender<RunDecision>,
-    /// When it's refused unanswered; none when `approval_timeout` is `"never"`.
-    pub deadline: Option<tokio::time::Instant>,
 }
 
-/// Blocked processes that aren't bash calls: the question showing, the refusals already offered (once per process,
-/// operation, and target), and what's waiting to be asked.
+/// Blocked processes that aren't bash calls: the refusals already offered (once per process, operation, and target).
+/// Their questions wait in the session's questions.
 #[derive(Default)]
 pub struct ProcessBlocks {
-    pub asking: Option<ProcessQuestion>,
     offered: std::collections::HashSet<(String, String, String)>,
-    waiting: std::collections::VecDeque<ProcessQuestion>,
 }
 
-/// One process question.
+/// One process question: the block, what it can lift in pi's live sandbox, and what it can save.
 #[derive(Debug, Clone)]
 pub struct ProcessQuestion {
-    pub id: String,
     pub process: String,
+    pub operation: String,
+    pub target: String,
+    /// The refused process's pid: pi's own, or a process pi started.
+    pub pid: i32,
     pub refusal: String,
-    pub offer: crate::launch::sandbox::grant::Offer,
+    pub live: crate::agent::block::Live,
+    /// The `[sandbox]` entry each scope saves, when a saved form exists.
+    pub offer: Option<crate::launch::sandbox::grant::Offer>,
 }
 
 impl ProcessBlocks {
-    pub fn asking(&self, id: &str) -> bool {
-        self.asking.as_ref().is_some_and(|q| q.id == id)
-    }
-
-    /// Whether this refusal is new: each (process, operation, target) is offered once per session.
+    /// Whether this refusal is new: each (process, operation, target) is offered once per session, until a live grant
+    /// that answered it ends ([`Self::forget`]).
     pub fn first(&mut self, process: &str, operation: &str, target: &str) -> bool {
         self.offered
             .insert((process.to_string(), operation.to_string(), target.to_string()))
     }
 
-    /// Every blocked process is asked about, in order: none is dropped.
-    pub fn queue(&mut self, question: ProcessQuestion) {
-        self.waiting.push_back(question);
-    }
-
-    /// The question showing is shown again, first: its dialog left unanswered (the run it showed in ended), or the user
-    /// chose the option that decides nothing.
-    pub fn requeue_unanswered(&mut self) {
-        if let Some(question) = self.asking.take() {
-            self.waiting.push_front(question);
-        }
-    }
-
-    /// The next question to show, when none is showing.
-    pub fn next(&mut self) -> Option<&ProcessQuestion> {
-        if self.asking.is_none() {
-            self.asking = self.waiting.pop_front();
-        }
-        self.asking.as_ref()
+    /// The block may be asked about again: the grant that answered it ended.
+    pub fn forget(&mut self, process: &str, operation: &str, target: &str) {
+        self.offered
+            .remove(&(process.to_string(), operation.to_string(), target.to_string()));
     }
 }
 
@@ -209,6 +220,35 @@ impl Commands {
         )
         .map_err(|e| e.to_string())?;
         Ok(path)
+    }
+
+    /// A saved process entry joins the session's command policies (the launch's, `all`, each narrowed grant's), so
+    /// calls started from now on get it, as after a restart. pi's own sandbox got it live. Only when this session's
+    /// configuration reads `file`.
+    pub fn add_saved_entry(&mut self, lift: &crate::launch::sandbox::grant::Lift, file: &Path) -> Result<(), String> {
+        use crate::launch::sandbox::grant::{Resolver, command_policies, widened_config};
+        if !self.reads(file) {
+            return Ok(());
+        }
+        let policies = &self.policies;
+        let config = widened_config(&policies.resolver.config, &lift.entries(), file);
+        let mut launch = policies.resolver.with(&lift.entries(), file)?;
+        launch.tag = policies.launch.tag.clone();
+        let resolver = Resolver {
+            config,
+            ..policies.resolver.clone()
+        };
+        let mut updated = command_policies(
+            &launch,
+            policies.credentials,
+            resolver,
+            policies.silence.clone(),
+            policies.claude_login,
+            policies.writable_vars.clone(),
+        );
+        updated.set_tag(&policies.launch.tag);
+        self.policies = updated;
+        Ok(())
     }
 
     /// Whether this session's configuration reads `file`: one of the files a network question saves to (its own
@@ -417,13 +457,13 @@ impl Calls {
 
     /// Takes the call a request names: it must be running, with the same command, and not taken before. Returns it with
     /// the tag its sandbox carries.
-    fn take(&mut self, request: &RunRequest) -> Result<(&mut BashCall, String), String> {
+    fn take(&mut self, call_id: &str, command: &str) -> Result<(&mut BashCall, String), String> {
         let prefix = self.tag_prefix.clone();
         let call = self
             .calls
-            .get_mut(&request.call_id)
+            .get_mut(call_id)
             .ok_or_else(|| "no such bash call is running".to_string())?;
-        if call.command != request.command {
+        if call.command != command {
             return Err("the command isn't the running call's".into());
         }
         if call.used {
@@ -440,13 +480,23 @@ impl Calls {
         format!("{}-u", self.tag_prefix)
     }
 
-    /// Whose sandbox a tag names: a call's (running or recently ended), a typed command's, or pi's own.
+    /// The tag of a run from pi's process (`<session tag>-p`): its own sandbox, so its refusals aren't taken for pi's
+    /// own (no notice, no lift question); its caller reads the exit and the output.
+    fn pi_run_tag(&self) -> String {
+        format!("{}-p", self.tag_prefix)
+    }
+
+    /// Whose sandbox a tag names: a call's (running or recently ended), a typed command's, a run from pi's process, or
+    /// pi's own.
     pub fn owner(&self, tag: &str) -> TagOwner {
         if tag == self.tag_prefix {
             return TagOwner::Session;
         }
         if tag == self.typed_tag() {
             return TagOwner::Typed;
+        }
+        if tag == self.pi_run_tag() {
+            return TagOwner::PiRun;
         }
         let Some(number) = tag
             .strip_prefix(&self.tag_prefix)
@@ -480,52 +530,90 @@ pub enum TagOwner {
     GoneCall,
     /// A command the user typed.
     Typed,
+    /// A run from pi's process (#407).
+    PiRun,
     /// Not this session's.
     Other,
+}
+
+/// What a saved `[[sandbox.commands]]` entry says for a command.
+enum Saved {
+    Runs(Box<Runtime>),
+    Unusable(String),
+    None,
 }
 
 /// What the daemon does with a request, before any question: run it (at the session's policy or a grant), ask, or
 /// refuse.
 pub enum First {
     Decided(RunDecision),
-    /// Ask the user; the refusals recorded for the call so far, the tag its sandbox gets, and what `open` would do.
+    /// Ask the user; the refusals recorded for the call so far, the tag its sandbox gets, what `open` would do, and what
+    /// the sandbox side opens.
     Ask {
         refusals: Vec<String>,
         tag: String,
         note: Option<String>,
+        widen: Widen,
     },
+}
+
+/// What an approved run in the sandbox gets: `all` (a bash call's rerun), or the policy a run from pi's process asked
+/// for, resolved before asking.
+#[derive(Debug, Clone)]
+pub enum Widen {
+    All,
+    Grants {
+        grants: Box<crate::config::GrantEntries>,
+        policy: Box<crate::launch::sandbox::Policy>,
+    },
+}
+
+impl Widen {
+    pub fn widening(&self) -> Widening {
+        match self {
+            Widen::All => Widening::All,
+            Widen::Grants { grants, .. } => Widening::of(grants),
+        }
+    }
 }
 
 impl Commands {
     /// The first decision for `request`. `calls` is the session's running calls.
     pub fn decide(&self, calls: &mut Calls, request: &RunRequest) -> First {
+        use crate::agent::run::Origin;
         let not_run = |reason: String| First::Decided(RunDecision::NotRun { reason });
         if !self.inside(&request.cwd) {
             return not_run(format!("{} is outside this session's checkout", request.cwd.display()));
         }
-        // A command the user typed: always at the session's policy, never widened.
-        if request.typed_by_user() {
-            if request.rerun.is_some() {
-                return not_run("a command you type runs in the sandbox".into());
+        let (call_id, command, rerun) = match &request.origin {
+            // A command the user typed: always at the session's policy, never widened.
+            Origin::Typed { .. } => {
+                return self.run(
+                    request,
+                    Runtime::Session(tagged(&self.policies.launch, &calls.typed_tag())),
+                );
             }
-            return self.run(
-                request,
-                Runtime::Session(tagged(&self.policies.launch, &calls.typed_tag())),
-            );
-        }
-        let (call, tag) = match calls.take(request) {
+            Origin::Pi { program, runtime } => return self.decide_pi(calls, request, program, runtime),
+            Origin::BashCall {
+                call_id,
+                command,
+                rerun,
+                ..
+            } => (call_id, command, rerun),
+        };
+        let (call, tag) = match calls.take(call_id, command) {
             Ok(taken) => taken,
             Err(reason) => return not_run(reason),
         };
-        match request.rerun {
+        match rerun {
             Some(asked) => match call.rerun {
                 Some(_) if call.declined => {
                     not_run("the user already declined to run this command outside the sandbox; don't ask again".into())
                 }
-                Some(called) if called == asked => {
+                Some(called) if called == *asked => {
                     use crate::agent::open::{self, OpenCheck};
                     let refusals = call.refusals.iter().map(CallRefusal::summary).collect();
-                    let nodes = match crate::agent::analyze(&request.command, Some(&request.cwd)) {
+                    let nodes = match crate::agent::analyze(command, Some(&request.cwd)) {
                         Ok(analysis) => analysis.commands,
                         Err(e) => return not_run(e.to_string()),
                     };
@@ -535,60 +623,146 @@ impl Commands {
                             refusals,
                             tag,
                             note: Some(note),
+                            widen: Widen::All,
                         },
                         OpenCheck::Other => First::Ask {
                             refusals,
                             tag,
                             note: None,
+                            widen: Widen::All,
                         },
                     }
                 }
                 Some(_) => not_run("the rerun isn't the one the call asked for".into()),
                 None => not_run("the call didn't ask for a rerun (`rerun`)".into()),
             },
-            None => match grant_for(&self.grants, &request.command, &request.cwd) {
-                Ok(Matched::Grant(entry)) => {
-                    let by = Why::Grant(entry.value.pattern.clone());
-                    match self.policies.of(entry) {
-                        Ok(EntryRuntime::Host) => self.run(request, Runtime::Host { by }),
-                        Ok(EntryRuntime::Sandbox(Ok(policy))) => self.run(
-                            request,
-                            Runtime::Widened {
-                                policy: tagged(policy, &tag),
-                                by,
-                            },
-                        ),
-                        Ok(EntryRuntime::Sandbox(Err(reason))) => not_run(format!(
-                            "the grant for `{}` can't be used: {reason}",
-                            entry.value.pattern.pattern()
-                        )),
-                        Err(reason) => not_run(format!(
-                            "the grant for `{}` can't be used: {reason}",
-                            entry.value.pattern.pattern()
-                        )),
-                    }
-                }
-                Ok(Matched::None | Matched::Redirect) | Err(_) => {
-                    self.run(request, Runtime::Session(tagged(&self.policies.launch, &tag)))
-                }
+            None => match self.saved(command, &request.cwd, &tag) {
+                Saved::Runs(runtime) => self.run(request, *runtime),
+                Saved::Unusable(reason) => not_run(reason),
+                // Not a saved entry's: the user's approval for this session, for exactly this command.
+                Saved::None => match self.session_grant(command, &Widen::All) {
+                    Some(target) => self.run(request, self.approved_runtime(&tag, target, &Widen::All, Why::Session)),
+                    None => self.run(request, Runtime::Session(tagged(&self.policies.launch, &tag))),
+                },
             },
         }
     }
 
+    /// A run from pi's process: a saved entry or a session approval for its text decides; its own sandbox runs without
+    /// asking; a widening the launch's own entries close is refused; otherwise the user is asked. Every pi run's sandbox
+    /// carries the pi-run tag.
+    fn decide_pi(
+        &self,
+        calls: &Calls,
+        request: &RunRequest,
+        program: &crate::agent::run::Program,
+        runtime: &crate::agent::run::Asked,
+    ) -> First {
+        use crate::agent::run::Asked;
+        let not_run = |reason: String| First::Decided(RunDecision::NotRun { reason });
+        let tag = calls.pi_run_tag();
+        let text = program.text();
+        match self.saved(&text, &request.cwd, &tag) {
+            Saved::Runs(runtime) => return self.run(request, *runtime),
+            Saved::Unusable(reason) => return not_run(reason),
+            Saved::None => {}
+        }
+        let widen = match runtime {
+            Asked::Sandbox {} => return self.run(request, Runtime::Session(tagged(&self.policies.launch, &tag))),
+            Asked::Host {} => Widen::All,
+            Asked::Widened { grants } => match self.widened(grants) {
+                Ok(policy) => Widen::Grants {
+                    grants: Box::new(grants.clone()),
+                    policy: Box::new(policy),
+                },
+                Err(reason) => return not_run(reason),
+            },
+        };
+        // The user's approval for this session, for exactly this program and widening, where they chose.
+        if let Some(target) = self.session_grant(&text, &widen) {
+            return self.run(request, self.approved_runtime(&tag, target, &widen, Why::Session));
+        }
+        First::Ask {
+            refusals: Vec::new(),
+            tag,
+            note: None,
+            widen,
+        }
+    }
+
+    /// The policy `grants` widen the launch's to, as a saved narrowed grant listed in this project's own file would:
+    /// refused when it would reopen what one of the launch's own entries closes ([`check_widening`]).
+    fn widened(&self, grants: &crate::config::GrantEntries) -> Result<crate::launch::sandbox::Policy, String> {
+        use crate::launch::sandbox::grant::check_widening;
+        let config = &self.policies.resolver.config;
+        let home = &self.paths.home;
+        check_widening(config, grants, |key| {
+            crate::launch::sandbox::expand_key(key.as_str(), home, &self.env)
+        })
+        .map_err(|why| format!("it can't be widened that way: {why}"))?;
+        let file = self
+            .scope_file(PersistScope::Project)
+            .ok_or_else(|| "this project has no configuration file to widen with".to_string())?;
+        self.policies.resolver.with(grants, &file)
+    }
+
+    /// What a saved `[[sandbox.commands]]` entry says for `command`: where it runs (tagged `tag`), or why the entry
+    /// can't be used, or nothing.
+    fn saved(&self, command: &str, cwd: &Path, tag: &str) -> Saved {
+        match grant_for(&self.grants, command, cwd) {
+            Ok(Matched::Grant(entry)) => {
+                let by = Why::Grant(entry.value.pattern.clone());
+                let unusable = |reason| {
+                    Saved::Unusable(format!(
+                        "the grant for `{}` can't be used: {reason}",
+                        entry.value.pattern.pattern()
+                    ))
+                };
+                match self.policies.of(entry) {
+                    Ok(EntryRuntime::Host) => Saved::Runs(Box::new(Runtime::Host { by })),
+                    Ok(EntryRuntime::Sandbox(Ok(policy))) => Saved::Runs(Box::new(Runtime::Widened {
+                        policy: tagged(policy, tag),
+                        by,
+                    })),
+                    Ok(EntryRuntime::Sandbox(Err(reason))) => unusable(reason.clone()),
+                    Err(reason) => unusable(reason),
+                }
+            }
+            Ok(Matched::None | Matched::Redirect) | Err(_) => Saved::None,
+        }
+    }
+
+    fn session_grant(&self, command: &str, widen: &Widen) -> Option<Target> {
+        self.session_grants
+            .get(&SessionGrantKey {
+                command: command.to_string(),
+                widening: widen.widening(),
+            })
+            .copied()
+    }
+
     /// What a call that failed in the session's own sandbox gets before the agent hears of it: Piton asks the user when
     /// a block it recorded for the call is one an approved rerun lifts; otherwise the blocks are reported. `last` is the
-    /// last look (the kernel's record had its time). `slot_taken`: another question is showing.
-    pub fn after_failure(&self, calls: &mut Calls, request: &RunRequest, last: bool, slot_taken: bool) -> AfterFailure {
+    /// last look (the kernel's record had its time). The question waits its turn in the session's questions.
+    pub fn after_failure(&self, calls: &mut Calls, request: &RunRequest, last: bool) -> AfterFailure {
         use crate::{
             agent::open::{self, OpenCheck},
             launch::sandbox::grant::{CommandBlock, command_block},
         };
         let report = |blocks, note| AfterFailure::Report { blocks, note };
         let prefix = calls.tag_prefix.clone();
-        let Some(call) = calls.calls.get_mut(&request.call_id) else {
+        // Only a bash call is asked about after it fails: a typed command's user saw it fail, and a run from pi's
+        // process already chose where it runs.
+        let (call_id, command) = match &request.origin {
+            crate::agent::run::Origin::BashCall { call_id, command, .. } => (call_id, command),
+            crate::agent::run::Origin::Typed { .. } | crate::agent::run::Origin::Pi { .. } => {
+                return report(Vec::new(), None);
+            }
+        };
+        let Some(call) = calls.calls.get_mut(call_id) else {
             return report(Vec::new(), None);
         };
-        if request.typed_by_user() || call.command != request.command || call.asked {
+        if call.command != *command || call.asked {
             return report(Vec::new(), None);
         }
         let refusals = call.refusals.clone();
@@ -641,15 +815,9 @@ impl Commands {
         if !treated.iter().any(|(_, t)| *t == Treated::Asked) {
             return report(blocks, None);
         }
-        if slot_taken {
-            return report(
-                blocks,
-                Some("Piton didn't ask about it: another question was waiting for the user".into()),
-            );
-        }
         let note = match refusals.iter().any(launch_ops) {
             true => match open::check(
-                &crate::agent::analyze(&request.command, Some(&request.cwd))
+                &crate::agent::analyze(command, Some(&request.cwd))
                     .map(|a| a.commands)
                     .unwrap_or_default(),
                 &request.cwd,
@@ -678,34 +846,66 @@ impl Commands {
         First::Decided(RunDecision::Run(Box::new(self.approved(request, runtime))))
     }
 
-    /// A rerun the user approved, where they chose: at `all` in the sandbox, or on the host.
-    pub fn approved_rerun(&self, request: &RunRequest, tag: &str, target: Target) -> Approved {
-        let runtime = match target {
-            Target::Sandbox => Runtime::Widened {
-                policy: tagged(&self.policies.all, tag),
-                by: Why::Approval,
-            },
-            Target::Host => Runtime::Host { by: Why::Approval },
-        };
-        self.approved(request, runtime)
+    /// A run the user approved, where they chose: widened in the sandbox (`all`, or what a run from pi's process asked
+    /// for), or on the host.
+    pub fn approved_rerun(&self, request: &RunRequest, tag: &str, target: Target, widen: &Widen) -> Approved {
+        self.approved(request, self.approved_runtime(tag, target, widen, Why::Approval))
     }
 
-    /// The command as the daemon runs it: where `runtime` says, the shell and prefix from pi's settings, and the
-    /// environment the runtime gets.
+    /// Runs `command` (with that widening) where `target` says, without asking, until the session ends.
+    pub fn allow_for_session(&mut self, command: &str, widen: &Widen, target: Target) {
+        self.session_grants.insert(
+            SessionGrantKey {
+                command: command.to_string(),
+                widening: widen.widening(),
+            },
+            target,
+        );
+    }
+
+    fn approved_runtime(&self, tag: &str, target: Target, widen: &Widen, by: Why) -> Runtime {
+        match (target, widen) {
+            (Target::Sandbox, Widen::All) => Runtime::Widened {
+                policy: tagged(&self.policies.all, tag),
+                by,
+            },
+            (Target::Sandbox, Widen::Grants { policy, .. }) => Runtime::Widened {
+                policy: tagged(policy, tag),
+                by,
+            },
+            (Target::Host, Widen::All | Widen::Grants { .. }) => Runtime::Host { by },
+        }
+    }
+
+    /// The command as the daemon runs it: where `runtime` says, the shell and prefix from pi's settings (or a program
+    /// with no shell), and the environment the runtime gets.
     fn approved(&self, request: &RunRequest, runtime: Runtime) -> Approved {
-        let env = match &runtime {
+        use crate::agent::run::{Origin, Program, Spawn};
+        let env = match (&runtime, &request.origin) {
             // The session's own sandbox: the extension's (pi's shell environment). It reaches only the command, inside
             // its sandbox (`launch::handoff::for_helper`), never the helper that applies it.
-            Runtime::Session(_) => request.env.clone(),
+            (Runtime::Session(_), Origin::BashCall { env, .. } | Origin::Typed { env, .. }) => env.clone(),
+            // A run from pi's process sends no environment: the session's launch environment.
+            (Runtime::Session(_), Origin::Pi { .. }) => self.env.clone(),
             // Widened: the session's launch environment, so a request can't point a granted command at its own `PATH`.
-            Runtime::Widened { .. } => self.env.clone(),
+            (Runtime::Widened { .. }, _) => self.env.clone(),
             // On the host: the launch environment without what marks a sandboxed pi.
-            Runtime::Host { .. } => crate::agent::host_env(&self.env),
+            (Runtime::Host { .. }, _) => crate::agent::host_env(&self.env),
+        };
+        let shell = |command: &str| Spawn::Shell {
+            shell: self.shell.shell.clone(),
+            command: self.shell.command(command),
+        };
+        let spawn = match &request.origin {
+            Origin::BashCall { command, .. } | Origin::Typed { command, .. } => shell(command),
+            Origin::Pi { program, .. } => match program {
+                Program::Shell { command } => shell(command),
+                Program::Exec { argv } => Spawn::Exec { argv: argv.clone() },
+            },
         };
         Approved {
             runtime,
-            shell: self.shell.shell.clone(),
-            command: self.shell.command(&request.command),
+            spawn,
             cwd: request.cwd.clone(),
             env,
             timeout: request
@@ -715,8 +915,8 @@ impl Commands {
         }
     }
 
-    /// The typed question for a rerun request (opens on the side the agent hinted) or for Piton's own after a failed
-    /// call (opens in the sandbox).
+    /// The typed question for a rerun request (opens on the side the agent hinted), for Piton's own after a failed call
+    /// (opens in the sandbox), or for a run from pi's process (opens on the side it asked for).
     pub fn question(
         &self,
         id: String,
@@ -724,26 +924,45 @@ impl Commands {
         asker: question::Asker,
         refusals: Vec<String>,
         note: Option<String>,
+        widen: &Widen,
     ) -> Question {
+        use crate::agent::run::{Asked, Origin};
+        let runtime = match &request.origin {
+            Origin::BashCall { rerun, .. } => rerun.map_or(Target::Sandbox, |r| r.runtime),
+            Origin::Typed { .. } => Target::Sandbox,
+            Origin::Pi { runtime, .. } => match runtime {
+                Asked::Host {} => Target::Host,
+                Asked::Sandbox {} | Asked::Widened { .. } => Target::Sandbox,
+            },
+        };
         Question {
             id,
-            command: request.command.clone(),
+            command: request.command_text(),
             asker,
             refusals,
             note,
             writable_vars: self.policies.writable_vars.clone(),
-            runtime: request.rerun.map_or(Target::Sandbox, |r| r.runtime),
+            runtime,
+            widening: match widen {
+                Widen::All => question::Widening::All,
+                Widen::Grants { grants, .. } => question::Widening::Grants(grants.clone()),
+            },
         }
     }
 
-    /// Saves a per-command entry for `pattern`: `runtime = "sandbox"` with `grant = "all"`, or `runtime = "host"`.
-    pub fn persist(&self, scope: PersistScope, pattern: CommandPattern, target: Target) -> Result<PathBuf, String> {
+    /// Saves a per-command entry for `always`'s pattern: `runtime = "host"`, or `runtime = "sandbox"` with `grant =
+    /// "all"` (a bash rerun) or the entries a run from pi's process asked for.
+    pub fn persist(&self, always: Always, widen: &Widen) -> Result<PathBuf, String> {
+        let Always { target, scope, pattern } = always;
         let file = self.file(scope);
         let grant = CommandGrant {
             pattern,
-            runtime: match target {
-                Target::Sandbox => CommandRuntime::Sandbox(Grant::All(AllGrant::All)),
-                Target::Host => CommandRuntime::Host,
+            runtime: match (target, widen) {
+                (Target::Sandbox, Widen::All) => CommandRuntime::Sandbox(Grant::All(AllGrant::All)),
+                (Target::Sandbox, Widen::Grants { grants, .. }) => {
+                    CommandRuntime::Sandbox(Grant::Entries((**grants).clone()))
+                }
+                (Target::Host, Widen::All | Widen::Grants { .. }) => CommandRuntime::Host,
             },
         };
         let path = file.path(&self.paths).map_err(|e| e.to_string())?;
@@ -786,18 +1005,19 @@ pub fn rpc_answer(stage: Stage, question: &Question, answer: &Map<String, Value>
         Stage::Choice => match question::read_rpc_choice(target, answer) {
             RpcChoice::AskAgain => Next::AskAgain,
             RpcChoice::Switch => Next::Switch,
-            RpcChoice::Once => Next::Decided(Answer::Once(target)),
-            RpcChoice::Deny => Next::Decided(Answer::Deny),
+            RpcChoice::Once => Next::Decided(Answer::Narrowest(Once(target))),
+            RpcChoice::Session => Next::Decided(Answer::Session(target)),
+            RpcChoice::Deny => Next::Decided(Answer::Deny(())),
             RpcChoice::Command(scope) => match CommandPattern::new(&question.command) {
-                Ok(pattern) => Next::Decided(Answer::Always { target, scope, pattern }),
+                Ok(pattern) => Next::Decided(Answer::Always(Always { target, scope, pattern })),
                 // A multi-line command can't be a pattern: run it once.
-                Err(_) => Next::Decided(Answer::Once(target)),
+                Err(_) => Next::Decided(Answer::Narrowest(Once(target))),
             },
             RpcChoice::Pattern(scope) => Next::AskPattern(target, scope),
         },
         Stage::Pattern(target, scope) => match question::read_pattern(answer) {
-            Some(pattern) => Next::Decided(Answer::Always { target, scope, pattern }),
-            None => Next::Decided(Answer::Deny),
+            Some(pattern) => Next::Decided(Answer::Always(Always { target, scope, pattern })),
+            None => Next::Decided(Answer::Deny(())),
         },
     }
 }
@@ -822,6 +1042,7 @@ mod tests {
             },
             listen: crate::launch::sandbox::Listen::Closed,
             tag: String::new(),
+            lifts: Default::default(),
         }
     }
 
@@ -875,6 +1096,7 @@ mod tests {
             },
             grants,
             levels: vec![dir.join("g"), dir.join(".piton")],
+            session_grants: HashMap::new(),
         }
     }
 
@@ -900,14 +1122,48 @@ mod tests {
     }
 
     fn request_with(dir: &Path, id: &str, command: &str, rerun: Option<crate::agent::Rerun>) -> RunRequest {
+        let env: Env = [("FROM".to_string(), "request".to_string())].into_iter().collect();
+        // A `user:` id stands for a typed command in these tests.
+        let origin = match id.strip_prefix("user:") {
+            Some(_) => crate::agent::run::Origin::Typed {
+                command: command.into(),
+                env,
+            },
+            None => crate::agent::run::Origin::BashCall {
+                call_id: id.into(),
+                command: command.into(),
+                env,
+                rerun,
+            },
+        };
         RunRequest {
-            call_id: id.into(),
-            command: command.into(),
+            origin,
             cwd: dir.to_path_buf(),
             timeout: Some(5.0),
-            env: [("FROM".to_string(), "request".to_string())].into_iter().collect(),
             reason: None,
-            rerun,
+        }
+    }
+
+    /// A run from pi's process.
+    fn pi_request(dir: &Path, argv: &[&str], runtime: crate::agent::run::Asked) -> RunRequest {
+        RunRequest {
+            origin: crate::agent::run::Origin::Pi {
+                program: crate::agent::run::Program::Exec {
+                    argv: crate::agent::run::Argv::try_from(argv.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                        .unwrap(),
+                },
+                runtime,
+            },
+            cwd: dir.to_path_buf(),
+            timeout: None,
+            reason: Some("r".into()),
+        }
+    }
+
+    fn shell_command(approved: &Approved) -> &str {
+        match &approved.spawn {
+            crate::agent::run::Spawn::Shell { command, .. } => command,
+            crate::agent::run::Spawn::Exec { .. } => panic!("not a shell command"),
         }
     }
 
@@ -956,7 +1212,7 @@ mod tests {
     }
 
     fn after(c: &Commands, calls: &mut Calls, req: &RunRequest, last: bool) -> AfterFailure {
-        c.after_failure(calls, req, last, false)
+        c.after_failure(calls, req, last)
     }
 
     /// A `[sandbox.network.connections]` entry saved from a network question reaches calls that start afterwards, at
@@ -1024,7 +1280,7 @@ mod tests {
             crate::launch::sandbox::Access::Write,
             home.join(".pi"),
             crate::launch::sandbox::Source::Piton {
-                what: "agent dir".into(),
+                area: crate::launch::sandbox::PitonArea::AgentDir,
             },
         );
         let ssh = deny(
@@ -1107,11 +1363,10 @@ mod tests {
         let (blocks, _) = reported(after(&c, &mut calls, &req, true));
         assert!(blocks[0].ends_with("(silenced)"), "{blocks:?}");
 
-        // Another question showing: reported, saying why.
+        // A liftable block always asks, whatever else is being asked: the question waits its turn.
         let req = begin(&c, &mut calls, &dir, "5", "touch ~/y");
         calls.note("5", refusal("file-write-create", &home.join("y").display().to_string()));
-        let (_, note) = reported(c.after_failure(&mut calls, &req, false, true));
-        assert!(note.is_some_and(|n| n.contains("another question")));
+        assert_eq!(kind(&after(&c, &mut calls, &req, false)), "ask");
 
         // A typed command is never asked about.
         let typed = request(&dir, "user:1", "touch ~/z", false);
@@ -1253,12 +1508,20 @@ mod tests {
         let req = request_with(&dir, "1", "probe", host);
         assert_eq!(kind(&c.decide(&mut calls, &req)), "ask");
         assert_eq!(
-            c.question("q".into(), &req, agent(), Vec::new(), None).runtime,
+            c.question("q".into(), &req, agent(), Vec::new(), None, &Widen::All)
+                .runtime,
             Target::Host
         );
         assert_eq!(
-            c.question("q".into(), &request(&dir, "2", "x", true), agent(), Vec::new(), None)
-                .runtime,
+            c.question(
+                "q".into(),
+                &request(&dir, "2", "x", true),
+                agent(),
+                Vec::new(),
+                None,
+                &Widen::All
+            )
+            .runtime,
             Target::Sandbox
         );
 
@@ -1330,7 +1593,7 @@ mod tests {
             "other command"
         );
         let granted = run(c.decide(&mut calls, &request(&dir, "1", "git push", false)));
-        assert_eq!(granted.command, "set -e\ngit push", "pi's prefix");
+        assert_eq!(shell_command(&granted), "set -e\ngit push", "pi's prefix");
         assert_eq!(granted.timeout, Some(Duration::from_secs(5)));
         assert_eq!(sandbox(&granted).tag, "7-ab-1");
         assert!(matches!(granted.runtime, Runtime::Widened { by: Why::Grant(_), .. }));
@@ -1361,10 +1624,7 @@ mod tests {
             "a typed command is never widened"
         );
         assert_eq!(calls.owner(&sandbox(&typed).tag), TagOwner::Typed);
-        assert_eq!(
-            kind(&c.decide(&mut calls, &request(&dir, "user:2", "ls", true))),
-            "refused"
-        );
+        assert_eq!(calls.owner("7-ab-p"), TagOwner::PiRun, "a run from pi's process");
 
         let First::Ask { tag, .. } = ({
             start(&mut calls, "9", "husky install", true);
@@ -1372,7 +1632,12 @@ mod tests {
         }) else {
             panic!("a rerun asks");
         };
-        let rerun = c.approved_rerun(&request(&dir, "9", "husky install", true), &tag, Target::Sandbox);
+        let rerun = c.approved_rerun(
+            &request(&dir, "9", "husky install", true),
+            &tag,
+            Target::Sandbox,
+            &Widen::All,
+        );
         assert!(sandbox(&rerun).keychain, "at `all`");
         assert_eq!(sandbox(&rerun).tag, tag);
         assert_eq!(rerun.env["FROM"], "launch");
@@ -1434,37 +1699,9 @@ mod tests {
         assert!(blocks.first("node", "file-write-create", "/h/x"));
         assert!(!blocks.first("node", "file-write-create", "/h/x"));
         assert!(blocks.first("node", "file-write-create", "/h/y"));
-        let question = |id: &str| ProcessQuestion {
-            id: id.into(),
-            process: "node".into(),
-            refusal: "file-write-create /h/x".into(),
-            offer: crate::launch::sandbox::grant::Offer {
-                project: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
-                everywhere: crate::launch::sandbox::grant::Lift::Write("/h/x".into()),
-            },
-        };
-        blocks.queue(question("a"));
-        blocks.queue(question("b"));
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()));
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()), "one at a time");
-        assert!(blocks.asking("a"));
-        // A question that lost its dialog unanswered (the run ended) is asked again, before the ones behind it.
-        blocks.requeue_unanswered();
-        assert!(blocks.asking.is_none());
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("a".into()));
-        blocks.asking = None;
-        assert_eq!(blocks.next().map(|q| q.id.clone()), Some("b".into()));
-        // Nothing is dropped, however many wait.
-        blocks.asking = None;
-        for i in 0..20 {
-            blocks.queue(question(&i.to_string()));
-        }
-        let mut shown = 0;
-        while blocks.next().is_some() {
-            shown += 1;
-            blocks.asking = None;
-        }
-        assert_eq!(shown, 20);
+        // A grant that answered a block ended: it's asked about again.
+        blocks.forget("node", "file-write-create", "/h/x");
+        assert!(blocks.first("node", "file-write-create", "/h/x"));
     }
 
     /// Each `rpc` option leads to the same typed answer a `view` client sends, in the runtime the dialog showed.
@@ -1482,6 +1719,7 @@ mod tests {
             },
             Vec::new(),
             None,
+            &Widen::All,
         );
         assert_eq!(sandbox.runtime, Target::Sandbox, "starts in the sandbox");
         let host = sandbox.switched();
@@ -1500,39 +1738,49 @@ mod tests {
         };
         let (s, h) = (labels(&sandbox), labels(&host));
         assert!(matches!(a(&sandbox, Stage::Choice, &s[0]), Next::AskAgain));
-        assert!(matches!(a(&sandbox, Stage::Choice, &s[7]), Next::Switch));
+        assert!(matches!(a(&sandbox, Stage::Choice, &s[8]), Next::Switch));
         assert_eq!(
             decided(a(&sandbox, Stage::Choice, &s[1])),
-            Answer::Once(Target::Sandbox)
+            Answer::Narrowest(Once(Target::Sandbox))
         );
-        assert_eq!(decided(a(&host, Stage::Choice, &h[1])), Answer::Once(Target::Host));
-        assert_eq!(decided(a(&host, Stage::Choice, &h[2])), Answer::Deny);
         assert_eq!(
-            decided(a(&host, Stage::Choice, &h[3])),
-            Answer::Always {
+            decided(a(&host, Stage::Choice, &h[1])),
+            Answer::Narrowest(Once(Target::Host))
+        );
+        assert_eq!(s[2], "Allow this command for this session");
+        assert_eq!(h[2], "On the host: Allow this command for this session");
+        assert_eq!(
+            decided(a(&sandbox, Stage::Choice, &s[2])),
+            Answer::Session(Target::Sandbox)
+        );
+        assert_eq!(decided(a(&host, Stage::Choice, &h[2])), Answer::Session(Target::Host));
+        assert_eq!(decided(a(&host, Stage::Choice, &h[3])), Answer::Deny(()));
+        assert_eq!(
+            decided(a(&host, Stage::Choice, &h[4])),
+            Answer::Always(Always {
                 target: Target::Host,
                 scope: PersistScope::Project,
                 pattern: CommandPattern::new("husky install").unwrap(),
-            }
+            })
         );
         assert!(matches!(
-            a(&host, Stage::Choice, &h[6]),
+            a(&host, Stage::Choice, &h[7]),
             Next::AskPattern(Target::Host, PersistScope::Global)
         ));
         assert_eq!(
             decided(a(&host, Stage::Pattern(Target::Host, PersistScope::Global), "husky *")),
-            Answer::Always {
+            Answer::Always(Always {
                 target: Target::Host,
                 scope: PersistScope::Global,
                 pattern: CommandPattern::new("husky *").unwrap(),
-            }
+            })
         );
         assert_eq!(
             decided(a(&host, Stage::Pattern(Target::Host, PersistScope::Global), "")),
-            Answer::Deny
+            Answer::Deny(())
         );
         // The sandbox dialog's labels don't approve a host run, nor the other way round.
-        assert_eq!(decided(a(&sandbox, Stage::Choice, &h[1])), Answer::Deny);
+        assert_eq!(decided(a(&sandbox, Stage::Choice, &h[1])), Answer::Deny(()));
     }
 
     /// An approved rerun runs where the user chose: at `all` with the launch environment, or on the host without the
@@ -1541,9 +1789,9 @@ mod tests {
     fn an_approved_rerun_runs_where_chosen() {
         let dir = tempfile::tempdir().unwrap();
         let mut c = commands(dir.path(), &[]);
-        c.env.insert("PITON_RUNTIME".into(), "sandbox".into());
+        c.env.insert(crate::agent::SOCKET_ENV.into(), "/s/agent.sock".into());
         let req = request(dir.path(), "1", "husky install", true);
-        let sandboxed = c.approved_rerun(&req, "t-1", Target::Sandbox);
+        let sandboxed = c.approved_rerun(&req, "t-1", Target::Sandbox, &Widen::All);
         match &sandboxed.runtime {
             Runtime::Widened { policy, by } => {
                 assert!(policy.keychain, "at `all`");
@@ -1552,12 +1800,198 @@ mod tests {
             }
             Runtime::Session(_) | Runtime::Host { .. } => panic!("not widened"),
         }
-        assert_eq!(sandboxed.env["PITON_RUNTIME"], "sandbox");
-        let host = c.approved_rerun(&req, "t-1", Target::Host);
+        assert_eq!(sandboxed.env[crate::agent::SOCKET_ENV], "/s/agent.sock");
+        let host = c.approved_rerun(&req, "t-1", Target::Host, &Widen::All);
         assert_eq!(host.runtime, Runtime::Host { by: Why::Approval });
         assert_eq!(host.env["FROM"], "launch");
-        assert!(!host.env.contains_key("PITON_RUNTIME"));
-        assert_eq!(host.command, "set -e\nhusky install");
+        assert!(!host.env.contains_key(crate::agent::SOCKET_ENV));
+        assert_eq!(shell_command(&host), "set -e\nhusky install");
+    }
+
+    /// A run from pi's process: its own sandbox runs without asking, a saved entry or a session approval for its text
+    /// decides, a widened or host run asks, and a widening the launch's own entries close is refused. Every pi run's
+    /// sandbox carries the pi-run tag and the launch environment, and an argv runs with no shell.
+    #[test]
+    fn a_run_from_pi_s_process_is_decided_by_the_daemon() {
+        use crate::agent::run::{Asked, Spawn};
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &["git fetch *"]);
+        // The resolver marks a policy it resolved with Git's control files open (keychain stands in for it).
+        c.policies.resolver = crate::launch::sandbox::grant::Resolver::new(c.policies.resolver.config.clone(), |cfg| {
+            let mut p = policy();
+            p.keychain = cfg.sandbox.allow_git_control_files.as_ref().is_some_and(|l| l.value);
+            Ok(p)
+        });
+        let mut calls = Calls::new("7-ab");
+        let git_control: crate::config::GrantEntries = toml::from_str("allow_git_control_files = true\n").unwrap();
+        let widened = || Asked::Widened {
+            grants: git_control.clone(),
+        };
+
+        // Its own sandbox: no question, the launch environment, the pi-run tag, and the argv as it is.
+        let own = run(c.decide(&mut calls, &pi_request(&dir, &["git", "status"], Asked::Sandbox {})));
+        assert!(matches!(own.runtime, Runtime::Session(_)));
+        assert_eq!(sandbox(&own).tag, "7-ab-p");
+        assert_eq!(calls.owner(&sandbox(&own).tag), TagOwner::PiRun);
+        assert_eq!(own.env["FROM"], "launch");
+        assert!(matches!(&own.spawn, Spawn::Exec { argv } if argv.words() == ["git", "status"]));
+
+        // A saved entry for its text decides, without asking.
+        let saved = run(c.decide(
+            &mut calls,
+            &pi_request(&dir, &["git", "fetch", "origin"], Asked::Host {}),
+        ));
+        assert!(matches!(saved.runtime, Runtime::Widened { by: Why::Grant(_), .. }));
+
+        // Widened: asked, with the policy the grants resolve to ready for the answer.
+        let delete = || pi_request(&dir, &["git", "branch", "-D", "x"], widened());
+        let First::Ask {
+            tag, widen, refusals, ..
+        } = c.decide(&mut calls, &delete())
+        else {
+            panic!("a widened run asks");
+        };
+        assert_eq!(tag, "7-ab-p");
+        assert!(refusals.is_empty());
+        let Widen::Grants { policy: resolved, .. } = &widen else {
+            panic!("the grants' widening");
+        };
+        assert!(resolved.keychain, "resolved with the grants");
+        let q = c.question(
+            "q".into(),
+            &delete(),
+            question::Asker::Pi { reason: None },
+            Vec::new(),
+            None,
+            &widen,
+        );
+        assert_eq!(q.command, "git branch -D x");
+        assert_eq!(q.runtime, Target::Sandbox);
+        let approved = c.approved_rerun(&delete(), &tag, Target::Sandbox, &widen);
+        assert!(sandbox(&approved).keychain, "the grants' policy, not `all`");
+        assert_eq!(sandbox(&approved).tag, "7-ab-p");
+
+        // The host: asked, opening on the host side.
+        let host = || pi_request(&dir, &["git", "gc"], Asked::Host {});
+        let First::Ask { widen: host_widen, .. } = c.decide(&mut calls, &host()) else {
+            panic!("a host run asks");
+        };
+        let q = c.question(
+            "q".into(),
+            &host(),
+            question::Asker::Pi { reason: None },
+            Vec::new(),
+            None,
+            &host_widen,
+        );
+        assert_eq!(q.runtime, Target::Host);
+
+        // Approved for the session: only that program with that widening runs without asking.
+        c.allow_for_session("git branch -D x", &widen, Target::Sandbox);
+        let again = run(c.decide(&mut calls, &delete()));
+        assert!(matches!(again.runtime, Runtime::Widened { by: Why::Session, .. }));
+        assert_eq!(
+            kind(&c.decide(
+                &mut calls,
+                &pi_request(&dir, &["git", "branch", "-D", "x"], Asked::Host {})
+            )),
+            "ask",
+            "another widening isn't approved"
+        );
+
+        // Outside the checkout: refused.
+        assert_eq!(
+            kind(&c.decide(&mut calls, &pi_request(Path::new("/"), &["ls"], Asked::Sandbox {}))),
+            "refused"
+        );
+    }
+
+    /// A widening that would reopen what the launch's own entries close is refused without asking: a `false` switch,
+    /// and a path at or inside the user's `"deny"` (or `"read"`, for a write), sockets too.
+    #[test]
+    fn a_widening_never_reopens_what_the_user_closed() {
+        use crate::agent::run::Asked;
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &[]);
+        let file = dir.join(".piton/config.local.toml");
+        let user: crate::config::SandboxTable = toml::from_str(
+            "allow_git_control_files = false\n[filesystem]\n\"~/secrets\" = \"deny\"\n\"~/docs\" = \"read\"\n",
+        )
+        .unwrap();
+        c.policies
+            .resolver
+            .config
+            .sandbox
+            .add(user, &file, crate::config::Origin::UsersOwn);
+        let mut calls = Calls::new("7-ab");
+        let ask = |c: &Commands, calls: &mut Calls, grants: &str| {
+            let grants: crate::config::GrantEntries = toml::from_str(grants).unwrap();
+            match c.decide(calls, &pi_request(&dir, &["x"], Asked::Widened { grants })) {
+                First::Decided(RunDecision::NotRun { reason }) => Err(reason),
+                First::Decided(RunDecision::Run(_)) => Ok("run"),
+                First::Ask { .. } => Ok("ask"),
+            }
+        };
+        let mut refused = |grants: &str| ask(&c, &mut calls, grants).unwrap_err();
+        assert!(refused("allow_git_control_files = true\n").contains("allow_git_control_files = false"));
+        for grants in [
+            "[filesystem]\n\"~/secrets\" = \"write\"\n",
+            "[filesystem]\n\"~/secrets/app\" = \"write\"\n",
+            "[filesystem]\n\"~/secrets/app\" = \"read\"\n",
+            "[filesystem]\n\"~/docs/x\" = \"write\"\n",
+            "[network.unix_socket_connections]\n\"~/secrets/agent.sock\" = \"allow\"\n",
+        ] {
+            assert!(refused(grants).contains("is inside"), "{grants}");
+        }
+        drop(refused);
+        // Reading inside the user's `read` is what it already allows; elsewhere asks.
+        assert_eq!(
+            ask(&c, &mut calls, "[filesystem]\n\"~/docs/x\" = \"read\"\n"),
+            Ok("ask")
+        );
+        assert_eq!(
+            ask(&c, &mut calls, "[filesystem]\n\"~/cache\" = \"write\"\n"),
+            Ok("ask")
+        );
+    }
+
+    /// A command approved for this session runs where approved without asking, for exactly that command; a saved entry
+    /// that matches still decides first, and another command runs in the session's sandbox.
+    #[test]
+    fn a_command_approved_for_the_session_runs_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let mut c = commands(&dir, &["cargo build *"]);
+        c.allow_for_session("npm install", &Widen::All, Target::Sandbox);
+        c.allow_for_session("cargo build", &Widen::All, Target::Host);
+        let mut calls = Calls::new("7-ab");
+        start(&mut calls, "1", "npm install", false);
+        let ran = run(c.decide(&mut calls, &request(&dir, "1", "npm install", false)));
+        match &ran.runtime {
+            Runtime::Widened { policy, by } => {
+                assert!(policy.keychain, "at `all`");
+                assert_eq!(*by, Why::Session);
+            }
+            Runtime::Session(_) | Runtime::Host { .. } => panic!("not widened"),
+        }
+        assert_eq!(
+            ran.runtime.ran(),
+            Some(crate::agent::Ran {
+                runtime: crate::agent::RanRuntime::Sandbox,
+                by: crate::agent::RanBy::Session,
+            })
+        );
+        start(&mut calls, "2", "npm install left-pad", false);
+        let other = run(c.decide(&mut calls, &request(&dir, "2", "npm install left-pad", false)));
+        assert!(matches!(other.runtime, Runtime::Session(_)), "only the exact command");
+        start(&mut calls, "3", "cargo build", false);
+        let saved = run(c.decide(&mut calls, &request(&dir, "3", "cargo build", false)));
+        assert!(
+            matches!(saved.runtime, Runtime::Widened { by: Why::Grant(_), .. }),
+            "the saved entry decides first"
+        );
     }
 
     /// A saved host entry runs its matching command on the host, without asking; a sandbox entry runs widened.
@@ -1597,9 +2031,12 @@ mod tests {
         let c = commands(dir.path(), &[]);
         let global = c
             .persist(
-                PersistScope::Global,
-                CommandPattern::new("husky install").unwrap(),
-                Target::Sandbox,
+                Always {
+                    scope: PersistScope::Global,
+                    pattern: CommandPattern::new("husky install").unwrap(),
+                    target: Target::Sandbox,
+                },
+                &Widen::All,
             )
             .unwrap();
         assert_eq!(global, dir.path().join("g/config.toml"));
@@ -1610,18 +2047,47 @@ mod tests {
         );
         let project = c
             .persist(
-                PersistScope::Project,
-                CommandPattern::new("git push *").unwrap(),
-                Target::Host,
+                Always {
+                    scope: PersistScope::Project,
+                    pattern: CommandPattern::new("git push *").unwrap(),
+                    target: Target::Host,
+                },
+                &Widen::All,
             )
             .unwrap();
         assert_eq!(project, dir.path().join(".piton/config.local.toml"));
-        let text = std::fs::read_to_string(project).unwrap();
+        let text = std::fs::read_to_string(&project).unwrap();
         assert!(
             text.contains("bash(git push *)") && text.contains("runtime = \"host\""),
             "{text}"
         );
         assert!(!text.contains("grant"), "{text}");
+
+        // A run from pi's process saves the entries it asked for as a narrowed grant, which reads back.
+        let grants: crate::config::GrantEntries = toml::from_str("allow_git_control_files = true\n").unwrap();
+        c.persist(
+            Always {
+                scope: PersistScope::Project,
+                pattern: CommandPattern::new("git branch *").unwrap(),
+                target: Target::Sandbox,
+            },
+            &Widen::Grants {
+                grants: Box::new(grants.clone()),
+                policy: Box::new(policy()),
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&project).unwrap();
+        let table: crate::config::SandboxTable = toml::from_str::<toml::Table>(&text).unwrap()["sandbox"]
+            .clone()
+            .try_into()
+            .unwrap();
+        let saved = table
+            .commands
+            .iter()
+            .find(|g| g.pattern.pattern() == "git branch *")
+            .expect("saved");
+        assert_eq!(saved.runtime, CommandRuntime::Sandbox(Grant::Entries(grants)), "{text}");
     }
 
     /// An Allow sets one key in the checkout's `config.local.toml` (a path quoted in its map, a boolean), beside the

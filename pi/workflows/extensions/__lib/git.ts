@@ -1,5 +1,39 @@
 import * as cp from "node:child_process"
 
+import { runProgram, type Program, type RunOptions, type RunOutcome } from "../../../extensions/__lib/run.js"
+
+/** Runs a program from pi's process: piton's daemon decides where in a sandboxed session (`runProgram`). */
+export type ProgramRunner = (program: Program, options: RunOptions) => Promise<RunOutcome>
+
+/**
+ * Deletes the local branch `branch` in `root`. Git also rewrites `.git/config` to drop the branch's section, which pi's
+ * sandbox keeps closed, so in a sandboxed session the daemon runs it with Git's control files open, after asking the
+ * user (or as a saved entry says). Returns how it ended.
+ */
+export function deleteBranch(
+    root: string,
+    branch: string,
+    reason: string,
+    runner: ProgramRunner = runProgram,
+): Promise<RunOutcome> {
+    return runner(
+        { kind: "exec", argv: ["git", "branch", "-D", branch] },
+        { cwd: root, where: { kind: "widened", grants: { allow_git_control_files: true } }, reason },
+    )
+}
+
+/** Why a run didn't succeed, for an error message; `undefined` when it exited 0. */
+export function runFailure(outcome: RunOutcome): string | undefined {
+    switch (outcome.kind) {
+        case "exited":
+            return outcome.code === 0 ? undefined : outcome.output.trim() || `exited with code ${outcome.code}`
+        case "timedOut":
+            return "timed out"
+        case "notRun":
+            return `not run: ${outcome.reason}`
+    }
+}
+
 // Inherited variables that relocate Git's repository, index, or configuration away from the working directory.
 export const GIT_RELOCATION_VARIABLES = [
     "GIT_DIR",

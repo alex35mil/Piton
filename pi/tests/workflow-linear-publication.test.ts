@@ -33,7 +33,7 @@ const token = "ab345678-1234-4567-8901-123456789abc"
 const documentId = "document-uuid"
 const url = "https://linear.app/example/document/plan-slug"
 
-function fixture(kind: "epic" | "task" | "gig" = "gig") {
+async function fixture(kind: "epic" | "task" | "gig" = "gig") {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "linear-publication-"))
     const git = (...args: string[]) => cp.execFileSync("git", args, { cwd: root, stdio: "pipe" })
     git("init", "-b", "main")
@@ -80,7 +80,7 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
     }
     let parentDirectory: string | undefined
     if (kind === "task") {
-        const parent = initializeEntity({ ...common, entity: "epic", object: project }, { cwd: root })
+        const parent = await initializeEntity({ ...common, entity: "epic", object: project }, { cwd: root })
         parentDirectory = parent.directory
         fs.writeFileSync(
             path.join(root, parent.directory, "epic.md"),
@@ -103,7 +103,7 @@ function fixture(kind: "epic" | "task" | "gig" = "gig") {
                     kind: "feature" as const,
                     object: issue,
                 }
-    const initialized = initializeEntity(initialization, { cwd: root })
+    const initialized = await initializeEntity(initialization, { cwd: root })
     const directory = initialized.directory
     // Every Epic here publishes `source`, whose accepted Task list is empty.
     for (const epic of [kind === "epic" ? directory : parentDirectory])
@@ -209,7 +209,7 @@ function envelope(value: unknown, kind: "raw" | "text" | "structured") {
 }
 
 describe("managed Linear plan documents", () => {
-    it("defines strict document states with native string identities", () => {
+    it("defines strict document states with native string identities", async () => {
         const fingerprint = planFingerprint(source)
         for (const state of [
             { state: "unpublished" },
@@ -229,7 +229,7 @@ describe("managed Linear plan documents", () => {
     })
     for (const kind of ["epic", "task", "gig"] as const)
         it(`publishes and updates ${kind}`, async () => {
-            const f = fixture(kind)
+            const f = await fixture(kind)
             try {
                 const brief = fs.readFileSync(path.join(f.root, f.directory, "brief.md"), "utf8")
                 const prepared = await f.prepare()
@@ -291,7 +291,7 @@ describe("managed Linear plan documents", () => {
         })
 
     it("validates tools and layout before consuming creation, and serializes concurrent preparation", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             await assert.rejects(f.prepare(source, new Map()), /unavailable/)
             await assert.rejects(f.prepare("invalid"), /Overview/)
@@ -308,7 +308,7 @@ describe("managed Linear plan documents", () => {
 
     for (const kind of ["raw", "text", "structured"] as const)
         it(`recovers a later-page document using full native reads (${kind})`, async () => {
-            const f = fixture()
+            const f = await fixture()
             try {
                 const prepared = await f.prepare()
                 assert.ok(prepared.state === "mutation-needed")
@@ -351,7 +351,7 @@ describe("managed Linear plan documents", () => {
         })
 
     it("preserves state for duplicate, incomplete, narrowed and failed recovery evidence", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed")
@@ -407,7 +407,7 @@ describe("managed Linear plan documents", () => {
     })
 
     it("rejects moved, archived and unverifiable published documents without reparenting or replacement", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed")
@@ -443,7 +443,7 @@ describe("managed Linear plan documents", () => {
     })
 
     it("rejects unsafe creation evidence while retaining the pending fingerprint", async () => {
-        const f = fixture()
+        const f = await fixture()
         try {
             const prepared = await f.prepare()
             assert.ok(prepared.state === "mutation-needed")
@@ -483,7 +483,7 @@ describe("managed Linear plan documents", () => {
 
     for (const kind of ["epic", "gig"] as const)
         it(`creates again when a complete listing finds no Plan document on the parent (${kind})`, async () => {
-            const f = fixture(kind)
+            const f = await fixture(kind)
             try {
                 const prepared = await f.prepare()
                 assert.ok(prepared.state === "mutation-needed")
@@ -518,7 +518,7 @@ describe("managed Linear plan documents", () => {
         })
 
     it("uses the parent Epic's own document state during synchronization", async () => {
-        const f = fixture("task")
+        const f = await fixture("task")
         try {
             assert.ok(f.parentDirectory)
             const child = fs.readFileSync(f.file, "utf8")
@@ -539,7 +539,7 @@ describe("managed Linear plan documents", () => {
 
     for (const kind of ["epic", "task", "gig"] as const)
         it(`announces a ${kind} plan update as a comment on its own parent with a folded diff`, async () => {
-            const f = fixture(kind)
+            const f = await fixture(kind)
             const parentArgument = kind === "epic" ? { projectId: "project-uuid" } : { issueId: "issue-uuid" }
             try {
                 const prepared = await f.prepare()
@@ -612,7 +612,7 @@ describe("managed Linear plan documents", () => {
         })
 
     it("lets a Task record carry an announcement only once its plan is published", async () => {
-        const f = fixture("task")
+        const f = await fixture("task")
         try {
             const pending = { state: "announcing", token, body: "**Plan updated**" }
             const write = (planDocument: Record<string, unknown>) => {

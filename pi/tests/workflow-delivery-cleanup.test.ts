@@ -11,6 +11,8 @@ import { describe, it } from "node:test"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
 import { phaseValues } from "./workflow-phase-fixtures.ts"
+import type { Program, RunOptions } from "../extensions/__lib/run.ts"
+import type { ProgramRunner } from "../workflows/extensions/__lib/git.ts"
 import { runDeliveryCleanup } from "../workflows/extensions/deliverable/cleanup.ts"
 import registerDeliverable, { githubMergeProof } from "../workflows/extensions/deliverable/index.ts"
 import {
@@ -115,8 +117,8 @@ function recordPullRequest(root: string, directory: string) {
     return { directory, branch: metadata.branch.name as string, target: metadata.branch.target as string }
 }
 
-function submittedGig(root: string, withPullRequest = true) {
-    const gig = initializeEntity(
+async function submittedGig(root: string, withPullRequest = true) {
+    const gig = await initializeEntity(
         {
             entity: "gig",
             title: "Cleanup",
@@ -168,7 +170,7 @@ function cloneBranchExists(root: string, branch: string): boolean {
 }
 
 describe("Deliverable branch cleanup", () => {
-    it("registers the cleanup, merge-resolution, and user-review tools under the Deliverable extension", () => {
+    it("registers the cleanup, merge-resolution, and user-review tools under the Deliverable extension", async () => {
         const tools: string[] = []
         registerDeliverable({
             on() {},
@@ -183,10 +185,10 @@ describe("Deliverable branch cleanup", () => {
         ])
     })
 
-    it("cleans a squash-merged branch in the current clone from verified PR evidence", () => {
+    it("cleans a squash-merged branch in the current clone from verified PR evidence", async () => {
         const { parent, root } = repository()
         try {
-            const gig = submittedGig(root)
+            const gig = await submittedGig(root)
             commitBranch(root, gig.branch)
             const headCommitSha = squashMerge(root, gig)
             fs.writeFileSync(path.join(root, "outside-git-notes.txt"), "keep me\n")
@@ -201,7 +203,7 @@ describe("Deliverable branch cleanup", () => {
                 [{ pullRequestNumber: 8 }, /locally recorded PR/],
             ]
             for (const [overrides, error] of wrong)
-                assert.throws(
+                await assert.rejects(
                     () =>
                         runDeliveryCleanup(
                             { ...input, merge: { ...input.merge, ...overrides } as never },
@@ -210,7 +212,7 @@ describe("Deliverable branch cleanup", () => {
                     error,
                 )
             assert.equal(cloneBranchExists(root, gig.branch), true)
-            const applied = runDeliveryCleanup(input, { cwd: root })
+            const applied = await runDeliveryCleanup(input, { cwd: root })
 
             assert.equal(applied.entity, "5-cleanup")
             assert.equal(applied.targetCommit, git(root, ["rev-parse", "FETCH_HEAD"]))
@@ -226,15 +228,15 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("cleans a Deliverable whose only commit is empty after its squash merge", () => {
+    it("cleans a Deliverable whose only commit is empty after its squash merge", async () => {
         const { parent, root } = repository()
         try {
-            const gig = submittedGig(root)
+            const gig = await submittedGig(root)
             git(root, ["switch", gig.branch])
             git(root, ["commit", "--allow-empty", "-m", "report-only delivery"])
             git(root, ["push", "-u", "origin", gig.branch])
             const headCommitSha = squashMerge(root, gig)
-            const applied = runDeliveryCleanup(
+            const applied = await runDeliveryCleanup(
                 { entityDir: gig.directory, merge: mergeProof(gig, headCommitSha) },
                 { cwd: root },
             )
@@ -245,13 +247,45 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("requires recorded PR intent and IDs before cleanup", () => {
+    it("deletes the branch through the program runner, widened by Git's control files, and keeps it when that fails", async () => {
         const { parent, root } = repository()
         try {
-            const gig = submittedGig(root, false)
+            const gig = await submittedGig(root)
+            commitBranch(root, gig.branch)
+            const merge = mergeProof(gig, squashMerge(root, gig))
+            const asked: Array<[Program, RunOptions]> = []
+            const refusing: ProgramRunner = async (program, options) => {
+                asked.push([program, options])
+                return { kind: "notRun", reason: "the user declined" }
+            }
+            await assert.rejects(
+                runDeliveryCleanup({ entityDir: gig.directory, merge }, { cwd: root, runner: refusing }),
+                /git branch -D .*not run: the user declined/,
+            )
+            assert.equal(cloneBranchExists(root, gig.branch), true, "kept")
+            const [[program, options]] = asked as [[Program, RunOptions]]
+            assert.deepEqual(program, { kind: "exec", argv: ["git", "branch", "-D", gig.branch] })
+            assert.deepEqual(options.where, { kind: "widened", grants: { allow_git_control_files: true } })
+            assert.equal(fs.realpathSync(options.cwd), fs.realpathSync(root))
+
+            const failing: ProgramRunner = async () => ({ kind: "exited", code: 1, output: "error: nope\n" })
+            await assert.rejects(
+                runDeliveryCleanup({ entityDir: gig.directory, merge }, { cwd: root, runner: failing }),
+                /error: nope/,
+            )
+            assert.equal(cloneBranchExists(root, gig.branch), true)
+        } finally {
+            fs.rmSync(parent, { recursive: true, force: true })
+        }
+    })
+
+    it("requires recorded PR intent and IDs before cleanup", async () => {
+        const { parent, root } = repository()
+        try {
+            const gig = await submittedGig(root, false)
             commitBranch(root, gig.branch)
             const sha = git(root, ["rev-parse", gig.branch])
-            assert.throws(
+            await assert.rejects(
                 () => runDeliveryCleanup({ entityDir: gig.directory, merge: mergeProof(gig, sha) }, { cwd: root }),
                 /stored PR intent/,
             )
@@ -261,10 +295,10 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("derives cleanup proof from exact PR-get evidence for the recorded PR", () => {
+    it("derives cleanup proof from exact PR-get evidence for the recorded PR", async () => {
         const { parent, root } = repository()
         try {
-            const gig = submittedGig(root)
+            const gig = await submittedGig(root)
             commitBranch(root, gig.branch)
             const sha = git(root, ["rev-parse", gig.branch])
             const catalog = workflowMcpCatalog("github")
@@ -325,13 +359,13 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("preserves a merged branch when origin is unavailable", () => {
+    it("preserves a merged branch when origin is unavailable", async () => {
         const { parent, root } = repository(false)
         try {
-            const gig = submittedGig(root)
+            const gig = await submittedGig(root)
             commitBranch(root, gig.branch, false)
             const sha = git(root, ["rev-parse", gig.branch])
-            assert.throws(
+            await assert.rejects(
                 () => runDeliveryCleanup({ entityDir: gig.directory, merge: mergeProof(gig, sha) }, { cwd: root }),
                 /origin/,
             )
@@ -342,10 +376,10 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("keeps Epic branches permanent", () => {
+    it("keeps Epic branches permanent", async () => {
         const { parent, root } = repository()
         try {
-            const epic = initializeEntity(
+            const epic = await initializeEntity(
                 {
                     entity: "epic",
                     title: "Permanent branch",
@@ -355,7 +389,7 @@ describe("Deliverable branch cleanup", () => {
                 },
                 { cwd: root },
             )
-            assert.throws(
+            await assert.rejects(
                 () =>
                     runDeliveryCleanup(
                         {
@@ -371,11 +405,11 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("preserves the branch when the local target is ahead or diverged", () => {
+    it("preserves the branch when the local target is ahead or diverged", async () => {
         for (const diverged of [false, true]) {
             const { parent, root } = repository()
             try {
-                const gig = submittedGig(root)
+                const gig = await submittedGig(root)
                 commitBranch(root, gig.branch)
                 const sha = squashMerge(root, gig)
                 git(root, ["switch", gig.target])
@@ -392,7 +426,7 @@ describe("Deliverable branch cleanup", () => {
                     git(other, ["push", "origin", "main"])
                 }
                 git(root, ["switch", gig.branch])
-                assert.throws(
+                await assert.rejects(
                     () => runDeliveryCleanup({ entityDir: gig.directory, merge: mergeProof(gig, sha) }, { cwd: root }),
                     diverged ? /git merge.*failed/ : /does not match freshly fetched origin/,
                 )
@@ -404,11 +438,11 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("cleans up an Epic-target Task on the synchronized Epic branch and leaves main untouched", () => {
+    it("cleans up an Epic-target Task on the synchronized Epic branch and leaves main untouched", async () => {
         const { parent, root } = repository()
         try {
             const mainCommit = git(root, ["rev-parse", "main"])
-            const epic = initializeEntity(
+            const epic = await initializeEntity(
                 { entity: "epic", title: "Umbrella", slug: "umbrella", request: "Deliver Tasks", object: issue(10) },
                 { cwd: root },
             )
@@ -418,7 +452,7 @@ describe("Deliverable branch cleanup", () => {
                 `# Epic\n\n## Task delivery strategy\n\n**Task target:** \`epic\`\n**Epic branch:** \`${epicBranch}\`\n\n## Tasks\n\n### [#11] Child\n\n**Kind:** \`feature\`\n**Summary:** Implement it.\n`,
             )
             git(root, ["push", "origin", epicBranch])
-            const task = initializeEntity(
+            const task = await initializeEntity(
                 {
                     entity: "task",
                     title: "Child",
@@ -432,7 +466,7 @@ describe("Deliverable branch cleanup", () => {
             const recorded = recordPullRequest(root, task.directory)
             commitBranch(root, recorded.branch)
             const sha = squashMerge(root, recorded)
-            const result = runDeliveryCleanup(
+            const result = await runDeliveryCleanup(
                 { entityDir: task.directory, merge: mergeProof(recorded, sha) },
                 { cwd: root },
             )
@@ -446,10 +480,10 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("accepts rebase delivery evidence without requiring source-commit ancestry", () => {
+    it("accepts rebase delivery evidence without requiring source-commit ancestry", async () => {
         const { parent, root } = repository()
         try {
-            const gig = submittedGig(root)
+            const gig = await submittedGig(root)
             commitBranch(root, gig.branch)
             const headCommitSha = git(root, ["rev-parse", gig.branch])
             git(root, ["switch", gig.target])
@@ -465,7 +499,7 @@ describe("Deliverable branch cleanup", () => {
                 { mergedAt: "" },
                 { mergedAt: undefined },
             ]) {
-                assert.throws(() =>
+                await assert.rejects(() =>
                     runDeliveryCleanup(
                         { ...input, merge: { ...input.merge, ...missingFacts } as never },
                         { cwd: root },
@@ -481,10 +515,10 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("preserves the branch and an outside-Git file when switching would overwrite it", () => {
+    it("preserves the branch and an outside-Git file when switching would overwrite it", async () => {
         const { parent, root } = repository()
         try {
-            const gig = submittedGig(root)
+            const gig = await submittedGig(root)
             commitBranch(root, gig.branch)
             const sha = squashMerge(root, gig)
             git(root, ["switch", gig.target])
@@ -495,7 +529,7 @@ describe("Deliverable branch cleanup", () => {
             git(root, ["reset", "--hard", "HEAD~1"])
             git(root, ["switch", gig.branch])
             fs.writeFileSync(path.join(root, "target-only.txt"), "outside Git\n")
-            assert.throws(
+            await assert.rejects(
                 () => runDeliveryCleanup({ entityDir: gig.directory, merge: mergeProof(gig, sha) }, { cwd: root }),
                 /git (switch|merge)/,
             )
@@ -512,10 +546,10 @@ describe("Deliverable merge-resolution comment", () => {
     const summary = "`README.md` conflicted; kept both lines, branch first."
 
     // A submitted Gig whose branch and target both changed the same README line.
-    function conflicted() {
+    async function conflicted() {
         const fixture = repository()
         const { root } = fixture
-        const gig = submittedGig(root)
+        const gig = await submittedGig(root)
         git(root, ["switch", gig.branch])
         fs.writeFileSync(path.join(root, "README.md"), "branch\n")
         git(root, ["commit", "-am", "branch change"])
@@ -537,8 +571,8 @@ describe("Deliverable merge-resolution comment", () => {
         return git(root, ["rev-parse", "HEAD"])
     }
 
-    it("renders the pushed resolution with the summary, folded remerge-diff, and marker", () => {
-        const { parent, root, gig } = conflicted()
+    it("renders the pushed resolution with the summary, folded remerge-diff, and marker", async () => {
+        const { parent, root, gig } = await conflicted()
         try {
             const prepare = () => prepareMergeResolutionComment(root, { entityDir: gig.directory, summary }, catalog)
             assert.throws(prepare, /doesn't end in a merge commit/)
@@ -561,8 +595,8 @@ describe("Deliverable merge-resolution comment", () => {
         }
     })
 
-    it("refuses a merge without conflicts, a merge of another branch, and a missing PR record", () => {
-        const { parent, root, gig } = conflicted()
+    it("refuses a merge without conflicts, a merge of another branch, and a missing PR record", async () => {
+        const { parent, root, gig } = await conflicted()
         try {
             const prepare = (directory = gig.directory) =>
                 prepareMergeResolutionComment(root, { entityDir: directory, summary }, catalog)
@@ -579,14 +613,14 @@ describe("Deliverable merge-resolution comment", () => {
             git(root, ["fetch", "origin"])
             assert.throws(prepare, /resolved no conflicts/)
 
-            const unsubmitted = submittedGigWithoutPr(root)
+            const unsubmitted = await submittedGigWithoutPr(root)
             assert.throws(() => prepare(unsubmitted), /forge intent|recorded PR/)
         } finally {
             fs.rmSync(parent, { recursive: true, force: true })
         }
     })
 
-    it("leaves out an oversized diff and names the local command instead", () => {
+    it("leaves out an oversized diff and names the local command instead", async () => {
         const merge = "a".repeat(40)
         const body = renderMergeResolutionComment({
             summary,
@@ -606,8 +640,8 @@ describe("Deliverable merge-resolution comment", () => {
 })
 
 // A second Gig in the same repository with no PR intent recorded.
-function submittedGigWithoutPr(root: string): string {
-    return initializeEntity(
+async function submittedGigWithoutPr(root: string): Promise<string> {
+    const gig = await initializeEntity(
         {
             entity: "gig",
             title: "Other",
@@ -617,14 +651,15 @@ function submittedGigWithoutPr(root: string): string {
             object: issue(6),
         },
         { cwd: root },
-    ).directory
+    )
+    return gig.directory
 }
 
 describe("Deliverable user review", () => {
     // A Gig branch one commit ahead of main, which moved on after the branch started.
-    function reviewing() {
+    async function reviewing() {
         const { parent, root } = repository()
-        const gig = submittedGig(root, false)
+        const gig = await submittedGig(root, false)
         const base = git(root, ["rev-parse", "main"])
         git(root, ["switch", gig.branch])
         fs.writeFileSync(path.join(root, "step.txt"), "step\n")
@@ -642,8 +677,8 @@ describe("Deliverable user review", () => {
     const attached = (root: string) =>
         cp.spawnSync("git", ["symbolic-ref", "-q", "HEAD"], { cwd: root }).stdout.toString().trim()
 
-    it("stages the branch diff over the merge base, keeps edits, and returns to the branch", () => {
-        const f = reviewing()
+    it("stages the branch diff over the merge base, keeps edits, and returns to the branch", async () => {
+        const f = await reviewing()
         try {
             fs.appendFileSync(path.join(f.root, "README.md"), "uncommitted\n")
             assert.equal(beginUserReview(f.root, f.gig.directory).state, "ready")
@@ -665,8 +700,8 @@ describe("Deliverable user review", () => {
         }
     })
 
-    it("refuses to end after a commit during the review, changing nothing", () => {
-        const f = reviewing()
+    it("refuses to end after a commit during the review, changing nothing", async () => {
+        const f = await reviewing()
         try {
             beginUserReview(f.root, f.gig.directory)
             git(f.root, ["commit", "-qm", "commit during review"])
@@ -678,8 +713,8 @@ describe("Deliverable user review", () => {
         }
     })
 
-    it("refuses to begin off the branch or during a Git operation", () => {
-        const f = reviewing()
+    it("refuses to begin off the branch or during a Git operation", async () => {
+        const f = await reviewing()
         try {
             git(f.root, ["switch", "main"])
             assert.throws(() => beginUserReview(f.root, f.gig.directory), /starts on the branch/)
@@ -692,10 +727,10 @@ describe("Deliverable user review", () => {
         }
     })
 
-    it("changes nothing when the branch has no commits ahead", () => {
+    it("changes nothing when the branch has no commits ahead", async () => {
         const { parent, root } = repository()
         try {
-            const gig = submittedGig(root, false)
+            const gig = await submittedGig(root, false)
             git(root, ["switch", gig.branch])
             const head = git(root, ["rev-parse", "HEAD"])
             assert.equal(beginUserReview(root, gig.directory).state, "uncommitted")

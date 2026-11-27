@@ -75,7 +75,8 @@ while [ ! -S "$host_sock" ] || [ ! -S "$listed_sock" ]; do sleep 0.1; done
 echo 'skill' > "$src/.agents/skills/s/SKILL.md"
 echo 'a' > "$src/src/a.rs"
 
-# The daemon's policy for this checkout, with the user's own global configuration (or PITON_CONFIG_HOME's).
+# The daemon's policy for this checkout, with the user's own global configuration (`$XDG_CONFIG_HOME/piton`, else
+# ~/.config/piton).
 if ! shown=$("$piton" sandbox show --workspace "$src"); then
     echo "piton sandbox show failed: fix the configuration it names, then run this again" >&2
     exit 1
@@ -83,7 +84,7 @@ fi
 policy=$(printf '%s' "$shown" | python3 -I -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["policy"]))')
 state=$HOME/.local/state/piton
 state_other_case=$HOME/.LOCAL/STATE/PITON
-config_home=${PITON_CONFIG_HOME:-$HOME/.config/piton}
+config_home=${XDG_CONFIG_HOME:-$HOME/.config}/piton
 
 # Every check runs in a shell of its own, so helpers are files, not shell functions.
 connect="$scratch/connect.py"

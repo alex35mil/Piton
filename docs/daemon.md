@@ -24,14 +24,38 @@ tail -f ~/.local/state/piton/logs/daemon/current.log  # bounded daemon log
 Copy-on-write clones for agents; see "Workers" in [design.md](design.md).
 
 ```sh
-piton worker create "Fix login" --issue KID-5   # from the current checkout: ../<repo>--fix-login
-piton worker ls
+piton worker create "Fix login" --item-id KID-5   # from the current checkout: ../<repo>--fix-login
+piton worker create "Fix login" --source ~/p/app  # from another checkout (or any of its workers)
+piton worker ls [--source <checkout>]
 piton worker delete ../<repo>--fix-login [--force]
 ```
 
+`--item-id` records the stable ID of the work item (a tracker issue or Project, an incoming pull request) the worker is
+for, as `agent.itemId` in the worker's Git config.
+
+An agent in a session can create, list, and delete its own project's workers too, through the `create_worker`,
+`list_workers`, and `delete_worker` tools (the pi package's `workers` extension). Piton asks you in the session first,
+unless `[workers.permissions]` answers (below); listing never asks. Deleting a worker with uncommitted or unpushed
+work asks again every time, showing that work. A session may delete the worker it runs in; it ends with it.
+
 Per-project settings live in `.piton/config.toml` in the source checkout (read only from there, never from a worker):
-`[workers] skip` lists paths not copied into new workers, `[sandbox]` adds grants for sandboxed pis (see "Sandbox"
-below).
+`[workers] skip` lists paths not copied into new workers, `[workers.permissions]` decides what Piton does without
+asking, and `[sandbox]` adds grants for sandboxed pis (see "Sandbox" below).
+
+```toml
+[workers]
+skip = ["apps/.build/index-build"]
+
+[workers.permissions]
+# "ask" | "allow" | "deny"; every key defaults to "ask".
+create_by_agent = "ask"          # a session's create_worker; "Always" in the question saves "allow" here
+delete_by_agent = "ask"          # a session's delete_worker
+protected_files_update = "ask"   # a source update that changes .piton/ or .pi/, whoever asked
+```
+
+`create_by_agent` and `delete_by_agent` apply only to an agent's requests: `piton worker` and the Neovim plugin are
+you. Each key can go in any level's `config.toml` or `config.local.toml`; the nearest that sets it wins. A repository's
+committed `"allow"` counts only once you trust the repository.
 
 Creating or deleting a worker fast-forwards its source checkout. The fetch and the fast-forward run in the sandbox a
 session in the source gets, with your hooks on; nothing of it runs outside the sandbox. The fetch authenticates the way
@@ -43,10 +67,12 @@ An update that changes protected files (`.piton/`, `.pi/`) needs your approval, 
 Piton asks before changing anything, naming the files. Approved, Piton writes exactly those files from the upstream
 commit itself, and the rest of the update, with your hooks, still runs in the sandbox, so a hook can't change any
 other protected file. Declined, nothing changes (when deleting, you can delete without updating the source). The
-Neovim plugin asks; `piton worker` refuses and prints the flag that answers it (`--approve-source-update <sha>`, or
-`--skip-source-update` when deleting). To answer once for all updates, add `piton(git-pull)` to the source's
-`[tools.permissions]`: in `allow`, the files are applied without asking; in `deny`, creating a worker is refused and deleting
-one leaves the source as it is.
+Neovim plugin and a session's question ask; `piton worker` refuses (`protected_files_update`) and prints the flag that
+answers it (`--approve-source-update <sha>`, or `--skip-source-update` when deleting). To answer once for all updates,
+set `protected_files_update` in `[workers.permissions]`: `"allow"` applies the files without asking; `"deny"` refuses
+creating a worker and leaves the source as it is when deleting one.
+
+Operations on one source run one at a time, whoever asks: a second create or delete there waits for the first.
 
 ## pi.nvim
 
@@ -64,7 +90,7 @@ ended, 1 when the connection was lost. `:PiContinue` / `:PiResume` onto a sessio
 ## Configuration
 
 Optional, in the global configuration folder `$XDG_CONFIG_HOME/piton/` (default `~/.config/piton/`; `--config-home`
-or `PITON_CONFIG_HOME` for tests). Every key has the default shown.
+for tests). Inside a session, `piton` uses the session's (it asks the daemon). Every key has the default shown.
 
 - **`config.host.toml`** (and `config.host.local.toml`, not committed): how the daemon runs on this host and this
   host's preferences. Only this file can stop the daemon from starting; a typo in it does.
@@ -96,9 +122,9 @@ roots = []                # where the apps may browse and start sessions; none u
 favorites = []
 default_attach_mode = "sandbox"   # mode for `piton attach` when none is given
 stop_empty_session_after = "10s"  # stop a pi with no messages this long after its last client leaves
-approval_timeout = "10m"  # an approval (a blocked command, a held connection) waits this long for your answer;
-                          # then the action doesn't happen. "never" waits until it's answered, dismissed, or the
-                          # run ends, holding the session's one question slot meanwhile
+approval_timeout = "10m"  # an approval (a blocked command, a held connection, a protected write, delete, or
+                          # rename, a lift, a worker operation) waits this long for your answer, counted from when it's shown; then the
+                          # action doesn't happen. "never" waits until it's answered, dismissed, or the run ends
 keep_awake = true         # hold the Mac awake while sessions are live; toggled from the apps
                           # (put it in config.host.local.toml to keep toggles out of a dotfiles diff)
 
@@ -152,8 +178,9 @@ device, the app's default applies. Unset, the fonts are the system font. Setting
 (Every device, Every Mac, iPhone and iPad, Every iPhone or iPad, or only this device, kept in the app); choosing a
 section there also removes the narrower sections that would hide it on that device.
 
-A pi gets `PITON_RUNTIME` (sandbox launches), `PITON_CONFIG_HOME`, and `PITON_BIN` after the workspace's mise
-environment.
+A pi gets `PITON_AGENT_SOCKET`, `PITON_AGENT_TOKEN`, and `PITON_BIN` after the workspace's mise environment. What
+else a session needs to know (its runtime, kept grants, protected files, global tier, workspace) `piton` and the pi
+package ask the daemon for (`facts`, see "The channel to the daemon" in `docs/design.md`).
 
 For a sandboxed launch, `mise env` runs inside the launch's sandbox, so whatever a workspace's mise configuration runs
 (`exec()` templates, `_.source` scripts) is contained. A configuration that reads a secret manager while `mise env`
@@ -347,7 +374,9 @@ The base, the same idea as Claude Code's, Codex's, and Gemini CLI's:
   `.git` file or symlink in a subfolder pointing at a repository it built elsewhere, whose settings Git uses when run
   in that folder; check a folder an agent created before running Git there. Hooks still run in the sandbox; only
   writing these files is closed. `allow_git_control_files = true` (below) lifts it.
-- **Unix sockets:** closed, except DNS (`mDNSResponder`) and `agent.sock`: no process may connect to a socket (a
+- **Unix sockets:** closed, except DNS (`mDNSResponder`) and `agent.sock`, the channel to the daemon (each process
+  there has a token of its own, which the daemon accepts only from that process: a bash call can't send pi's
+  requests): no process may connect to a socket (a
   running Neovim, Docker, the SSH and gpg agents) or create one, unless a `[sandbox.network.unix_socket_connections]`
   or `[sandbox.network.unix_socket_bindings]` entry (below) opens it.
 - **Network:** filtered. A process reaches only DNS, the port entries, and Piton's gate (below), which decides named
@@ -694,6 +723,11 @@ at most 50 ms after the failure for the kernel's record. A block it didn't see i
 the agent, which can ask to run the command again, hinting where (the sandbox or the host). Either way the agent's
 result lists the blocks Piton recorded.
 
+A session shows one question at a time. The others wait their turn, oldest first, whatever they're about (a command,
+a connection, a protected file, a worker, a blocked process), and none is refused because another is showing. A
+question also waits while one of pi's own dialogs is open (a file review, an extension's prompt), and shows once you've
+answered it.
+
 Some blocks aren't asked about, only listed for the agent: credential reads (ssh opens your private keys on every SSH
 Git command and recovers), what the floor protects (signals to other processes and `sysctl` writes included: only a
 host run passes them), and silenced paths. A few refusals programs always hit and recover from (`open`'s CPU-type
@@ -712,9 +746,10 @@ again, then answer:
   files it runs and into the files that set its environment (`mise.toml` can set `PATH` or `BASH_ENV`). The question
   lists those variables, by file (folded in the apps).
 
-Then: **Allow once** (or **Run once on the host**), **Deny** (it stays failed), or **always** for this command or an
-edited pattern, in this project or everywhere, which saves a per-command entry for that runtime and runs it. The
-whole command runs again, so its side effects repeat. The agent's result says where it ran. When Piton asked, the
+Then: **Allow once** (or **Run once on the host**); **for this session**, which runs it and then runs exactly this
+command there without failing or asking until the session ends, saving nothing; **Deny** (it stays failed); or
+**always** for this command or an edited pattern, in this project or everywhere, which saves a per-command entry for
+that runtime and runs it. The whole command runs again, so its side effects repeat. The agent's result says where it ran. When Piton asked, the
 rerun's output and exit are the agent's result; after a denial, it gets the failed run's.
 
 The apps show a switch (left and right arrows with a keyboard) and the pattern inline. pi.nvim shows pi's dialog: its
@@ -727,6 +762,14 @@ No answer within `approval_timeout` (10 minutes by default): it doesn't run. The
 and is refused when no app handles it or the app is one the sandbox could have written. A blocked Mach service of a
 process that isn't a command (an MCP server, an extension) is asked about with `"<name>" = "allow"` in
 `[sandbox.macos.services]`.
+
+An extension or workflow tool can ask to run a program outside the session's sandbox too: with a few `[sandbox]`
+entries added ("Run in a wider sandbox?", which names them), or on the host. The question says an extension asks, and
+the answers are the same. **Always** saves a per-command entry whose `grant` is the entries it asked for (or
+`runtime = "host"`), and runs that exact command without asking for the rest of the session. A request that would
+reopen what your own entries close (a `false` switch, a path at or inside your `"deny"`, or a write inside your
+`"read"`) is refused without asking. The workflow deletes a branch this way after shipping, with Git's control files
+open, since `git branch -D` rewrites `.git/config`; saving `bash(git branch -D *)` in the sandbox stops the question.
 
 Per-command entries, in any `config.toml` or `config.local.toml` (a repository's committed one only once you trust it).
 `runtime` is required: `"sandbox"` with a `grant`, or `"host"` without one.
@@ -758,22 +801,35 @@ of a compound command must match the same entry; a command that writes a file wi
 `[tools.permissions]` rules still decide first whether it runs at all.
 
 When something other than a command is blocked (an MCP server, an extension, pi), you're asked once per process and
-path, one question at a time. The question names the exact entry each answer saves:
+path, in its turn. These questions never time out: nothing waits on your answer. On macOS, pi's running sandbox is widened on your answer, with no restart: the daemon
+writes a small addon for this to `<state>/native/lift.node` when it starts, and pi loads it from there.
 
-- **Allow in this project / everywhere, and restart:** adds the entry that lifts it: `"<path>" = "write"` in
+- **Allow until the end of this turn:** open now, closed when the agent hands the turn back to you (pi's
+  `agent_settled`: retries and queued follow-ups stay inside the turn). The same block
+  in a later run is asked about again.
+- **Allow for this session:** open until the session ends; nothing saved.
+
+While a path is open, the agent's write and edit tools can change it too; the question says so. Bash commands can't:
+each runs in a sandbox of its own.
+These two answers are offered only for pi's own process: a background job a bash call left running can't be widened
+while it runs.
+
+- **Always in this project / everywhere:** saves the entry that lifts it and opens it now; the session's later bash
+  calls get it too, and new sessions read it. The entry: `"<path>" = "write"` in
   `[sandbox.filesystem]` for a file or folder it writes (what it writes inside isn't blocked again),
   `"<path>" = "allow"` in `[sandbox.network.unix_socket_connections]` for a socket it connects to (in a credential
   folder too, for that socket only) or in `[sandbox.network.unix_socket_bindings]` for one it creates,
   `allow_tcp_listening = true` for a TCP listen (pi's OAuth sign-in callback, an MCP server's). "Everywhere" saves
   the folder above a path's per-project part (Claude Code's `~/Library/Caches/claude-cli-nodejs/<project>` saves
-  `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block.
+  `claude-cli-nodejs`), so it helps every project. An entry is offered only when it actually lifts the block. Git's
+  control files and the keychain have no entry to save, so they get only the first two answers.
 
 A path named after the blocked process itself (its pid is a whole number in a component: Claude Code's
 `cc-socks/64421.sock`, Neovim's `nvim.64421.0`) is never offered as that path, since the entry would never match
 again. The question offers the folder above it when that folder isn't temp (`/tmp`, `$TMPDIR`, and what's below them,
 where other processes keep their sockets), the home folder or a folder directly in it, and listing it lifts the block;
 otherwise it's a notice naming that folder.
-- **Not now** (or dismissing it): it stays blocked; a new session asks again.
+- **Not now** (or dismissing it): it stays blocked; it's asked again later.
 
 There's no Deny: like Codex's prompt, a question never saves a denial. A block you never want is an entry you write,
 and a block decided by your own entry (a `"deny"`, a `"read"` path something writes to, a `false` switch) is only
@@ -791,13 +847,15 @@ a time:
   key to read its public half before signing through your SSH agent, so every SSH Git command shows one. To keep ssh
   from opening private keys at all, point `IdentityFile` at the `.pub` file in `~/.ssh/config`, with
   `IdentitiesOnly yes`; ssh then signs through the agent (which must hold the key: `ssh-add -l`).
-- **The keychain** (its services, and `~/Library/Keychains`). With fnox off, the warning names
-  `"~/Library/Keychains" = "read"`. With fnox on it says the keychain stays closed: the credentials of fnox's secret
-  sources live there, and a sandbox that can read it isn't started. For `claude`, it names the `pi-claude-code`
-  preset with a setup token.
-- **Git's hooks and configuration** (`.git/hooks/`, `.git/config`): what Git skipped (`git push -u` sets an
-  upstream; `git branch -D` drops a branch's section; a hook isn't installed). Git carries on.
-- What the floor blocks, and what no entry can lift.
+- **The keychain** (its services, and `~/Library/Keychains`), when pi's sandbox can't be widened while it runs. With
+  fnox off, the warning names `"~/Library/Keychains" = "read"`; in pi's own process its services are asked about
+  instead. With fnox on it says the keychain stays closed: the credentials of fnox's secret sources live there, and a
+  sandbox that can read it isn't started. For `claude`, it names the `pi-claude-code` preset with a setup token.
+- **Git's hooks and configuration** (`.git/hooks/`, `.git/config`), when pi's sandbox can't be widened while it runs
+  (otherwise pi's own write is asked about): what Git skipped (`git push -u` sets an upstream; `git branch -D` drops a
+  branch's section; a hook isn't installed). Git carries on. The workflow's own branch deletions don't hit this: they
+  run through the daemon with Git's control files open.
+- What the floor blocks, and what nothing can lift.
 
 A command the agent runs keeps the rerun question for every block, credentials and Git's files included.
 

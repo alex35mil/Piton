@@ -50,7 +50,10 @@ export const DeliveryCleanupInputSchema = Type.Object(
 )
 export const DeliveryCleanupInputValidator = compile(DeliveryCleanupInputSchema)
 
-export function runDeliveryCleanup(input: { entityDir: string; merge: MergeEvidence }, options: { cwd: string }) {
+export async function runDeliveryCleanup(
+    input: { entityDir: string; merge: MergeEvidence },
+    options: { cwd: string; runner?: Git.ProgramRunner },
+) {
     const merge = parse(MergeEvidenceValidator, input.merge)
     const root = project.resolveRootDir(options.cwd)
     assertArtifactPersistencePrepared(root)
@@ -92,7 +95,9 @@ export function runDeliveryCleanup(input: { entityDir: string; merge: MergeEvide
     if (targetCommit !== originTargetCommit) {
         throw new Error(`target ${target} does not match freshly fetched origin; branch ${branch} was preserved`)
     }
-    Git.run(root, ["branch", "-D", branch])
+    const deleted = await Git.deleteBranch(root, branch, `delete the shipped branch ${branch}`, options.runner)
+    const failure = Git.runFailure(deleted)
+    if (failure) throw new Error(`git branch -D ${branch} failed: ${failure}`)
     if (Git.succeeds(root, ["show-ref", "--verify", `refs/heads/${branch}`])) {
         throw new Error(`branch deletion in the current clone did not complete: ${branch}`)
     }
