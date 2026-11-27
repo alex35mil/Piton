@@ -95,6 +95,7 @@
       {
         "id": "piton:question:3",
         "kind": "command",
+        "asker": "agent",
         "command": "sh cli/tests/probe/protected.sh",
         "reason": "it starts a sandbox of its own",
         "refusals": [

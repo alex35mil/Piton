@@ -28,7 +28,7 @@ pub mod lift;
 pub mod open;
 mod protected;
 pub mod question;
-mod run;
+pub mod run;
 mod socket;
 pub mod workers;
 mod write;

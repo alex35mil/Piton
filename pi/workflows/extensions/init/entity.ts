@@ -147,6 +147,8 @@ export interface InitializeEntityOptions {
     cwd: string
     now?: Date
     tools?: McpToolCatalog
+    /** Runs the branch cleanup after a failed initialization (tests); piton's daemon in a sandboxed session. */
+    runner?: Git.ProgramRunner
 }
 
 export interface InitializedEntity {
@@ -211,7 +213,10 @@ export function preflightEntity(input: PreflightInput, options: InitializeEntity
     }
 }
 
-export function initializeEntity(input: EntityInitialization, options: InitializeEntityOptions): InitializedEntity {
+export async function initializeEntity(
+    input: EntityInitialization,
+    options: InitializeEntityOptions,
+): Promise<InitializedEntity> {
     if (!EntityInitializationValidator.check(input)) {
         const details = describeErrors(EntityInitializationValidator.errors(input)).join("; ")
         throw new Error(`invalid entity initialization: ${details}`)
@@ -273,7 +278,7 @@ export function initializeEntity(input: EntityInitialization, options: Initializ
         }
     } catch (error) {
         fs.rmSync(absoluteDirectory, { recursive: true, force: true })
-        if (createdBranch) deleteCreatedBranch(root, createdBranch)
+        if (createdBranch) await deleteCreatedBranch(root, createdBranch, options.runner)
         throw error
     }
 }
@@ -289,7 +294,10 @@ export type LocalGigInitialization = Static<typeof LocalGigInitializationSchema>
  * Initializes a Gig with no tracker item, whether or not a tracker is configured. Its creation date names it
  * (`<YYYYMMDD>-<slug>`); it has no Phase and records no Resource IDs. Every tracker step refuses for it.
  */
-export function initializeLocalGig(input: LocalGigInitialization, options: InitializeEntityOptions): InitializedEntity {
+export async function initializeLocalGig(
+    input: LocalGigInitialization,
+    options: InitializeEntityOptions,
+): Promise<InitializedEntity> {
     parse(LocalGigInitializationValidator, input)
     const { root, projectConfig } = prepareRepository(options.cwd)
     const slug = slugify(input.slug)
@@ -323,7 +331,7 @@ export function initializeLocalGig(input: LocalGigInitialization, options: Initi
         return { directory: relativeDirectory, status: readEntityStatus(absoluteDirectory), resourceIds: [] }
     } catch (error) {
         fs.rmSync(absoluteDirectory, { recursive: true, force: true })
-        if (createdBranch) deleteCreatedBranch(root, createdBranch)
+        if (createdBranch) await deleteCreatedBranch(root, createdBranch, options.runner)
         throw error
     }
 }
@@ -552,7 +560,12 @@ function createBranch(root: string, contract: ReadyBranchContract): void {
     Git.run(root, ["branch", contract.name, contract.start])
 }
 
-function deleteCreatedBranch(root: string, branch: string): void {
+/** Best effort: removes the branch a failed initialization created. The initialization's own error is what's reported. */
+async function deleteCreatedBranch(root: string, branch: string, runner?: Git.ProgramRunner): Promise<void> {
     if (!Git.succeeds(root, ["show-ref", "--verify", `refs/heads/${branch}`])) return
-    Git.tryRun(root, ["branch", "-D", branch])
+    try {
+        await Git.deleteBranch(root, branch, `remove the branch ${branch} a failed initialization created`, runner)
+    } catch {
+        // Left in place; the next initialization reports it as an existing branch.
+    }
 }

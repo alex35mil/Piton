@@ -218,7 +218,7 @@ function fileSnapshot(root: string): [string, string][] {
 }
 
 describe("workflow-source queue context", () => {
-    it("requires an explicit target only on project inspection and queue intake", () => {
+    it("requires an explicit target only on project inspection and queue intake", async () => {
         for (const target of ["current", "workflow"]) {
             assert.equal(IntegrationContextValidator.check({ operation: "inspect", target }), true)
             assert.equal(IntegrationContextValidator.check({ ...queueSelection, target }), true)
@@ -480,7 +480,7 @@ describe("workflow-source queue context", () => {
 })
 
 describe("workflow integration configuration", () => {
-    it("requires exact provider Markdown and returns a concise remediation hint", () => {
+    it("requires exact provider Markdown and returns a concise remediation hint", async () => {
         assert.deepEqual(verifyMarkdownProjection("same\n", "same\n"), {
             result: "exact",
             verified: true,
@@ -557,7 +557,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("loads each integration role as on or off", () => {
+    it("loads each integration role as on or off", async () => {
         const cwd = temporaryProject()
         try {
             assert.deepEqual(loadIntegrationRoles(cwd), {
@@ -595,7 +595,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("rejects an entity bound to another tracker provider", () => {
+    it("rejects an entity bound to another tracker provider", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
@@ -611,7 +611,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("plans an item's complete label set and keeps the selection on a Kind change", () => {
+    it("plans an item's complete label set and keeps the selection on a Kind change", async () => {
         const cwd = temporaryProject()
         try {
             const area = {
@@ -626,7 +626,7 @@ describe("workflow integration configuration", () => {
             }
             prepareWorkflowProject(cwd, { ...config(), labels: { groups: { ...kindLabels().groups, area, perf } } })
             prepareArtifactPersistence(cwd)
-            const gig = initializeEntity(
+            const gig = await initializeEntity(
                 {
                     entity: "gig",
                     title: "Work",
@@ -677,7 +677,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("returns queue intake labels from the Kind and the selection, on both trackers", () => {
+    it("returns queue intake labels from the Kind and the selection, on both trackers", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
@@ -725,13 +725,13 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("requires an exact configured Priority or explicit not set", () => {
+    it("requires an exact configured Priority or explicit not set", async () => {
         assert.doesNotThrow(() => assertConfiguredPriority(config("project"), "High"))
         assert.doesNotThrow(() => assertConfiguredPriority(config("project"), "not set"))
         assert.throws(() => assertConfiguredPriority(config("project"), "Critical"), /not configured/)
     })
 
-    it("requires complete, distinct Linear status mappings and native priorities", () => {
+    it("requires complete, distinct Linear status mappings and native priorities", async () => {
         assert.equal(linearPriorityNumber("Urgent"), 1)
         assert.equal(linearPriorityNumber("High"), 2)
         assert.equal(linearPriorityNumber("Medium"), 3)
@@ -777,7 +777,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("reads GitHub mappings with their scopes, Phase optional", () => {
+    it("reads GitHub mappings with their scopes, Phase optional", async () => {
         // piton's config module checks the mappings (distinct options and fields); see its tracker tests.
         const cwd = temporaryProject()
         try {
@@ -801,7 +801,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("reads tracker and forge configuration without provider preflight", () => {
+    it("reads tracker and forge configuration without provider preflight", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
@@ -826,7 +826,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("returns only what each operation uses", () => {
+    it("returns only what each operation uses", async () => {
         const cwd = temporaryProject()
         try {
             const tracker = {
@@ -919,7 +919,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("renders entity provider bodies with only same-repository GitHub closing references", () => {
+    it("renders entity provider bodies with only same-repository GitHub closing references", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
@@ -997,7 +997,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("keeps Linear tracker and GitHub forge contexts independent", () => {
+    it("keeps Linear tracker and GitHub forge contexts independent", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd, linearConfig())
@@ -1027,7 +1027,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("runs forge steps with the tracker off, and tracker steps with the forge off", () => {
+    it("runs forge steps with the tracker off, and tracker steps with the forge off", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
@@ -1076,13 +1076,13 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("treats a local Gig as tracker-off while the forge steps still run", () => {
+    it("treats a local Gig as tracker-off while the forge steps still run", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
             prepareArtifactPersistence(cwd)
             const ctx = { cwd } as ExtensionContext
-            const { directory: entityDir } = initializeLocalGig(
+            const { directory: entityDir } = await initializeLocalGig(
                 { title: "Local", slug: "local", request: "Local work.", kind: "chore" },
                 { cwd, now: new Date("2026-03-04T00:00:00Z") },
             )
@@ -1118,7 +1118,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("renders Epic and Gig trackers losslessly without local mutations", () => {
+    it("renders Epic and Gig trackers losslessly without local mutations", async () => {
         const githubEpic = {
             provider: "github",
             repository: { owner: "alex", repo: "example" },
@@ -1172,7 +1172,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("returns the lossless projection contract with the saved plan publication state", () => {
+    it("returns the lossless projection contract with the saved plan publication state", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd, linearConfig())
@@ -1198,7 +1198,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("permits a personal Project to use issue-scoped fields", () => {
+    it("permits a personal Project to use issue-scoped fields", async () => {
         const cwd = temporaryProject()
         try {
             writeProjectConfig(cwd, {
@@ -1211,7 +1211,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("validates native Phase through runtime context", () => {
+    it("validates native Phase through runtime context", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd)
@@ -1378,7 +1378,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("calculates Linear whole-label updates through runtime context", () => {
+    it("calculates Linear whole-label updates through runtime context", async () => {
         const cwd = temporaryProject()
         try {
             prepareWorkflowProject(cwd, linearConfig())
@@ -1434,7 +1434,7 @@ describe("workflow integration configuration", () => {
         }
     })
 
-    it("fails loudly with piton's message for invalid configuration, without substituting labels", () => {
+    it("fails loudly with piton's message for invalid configuration, without substituting labels", async () => {
         // piton's config module owns the tracker's rules and their tests; the loader only surfaces its errors.
         const cwd = temporaryProject()
         try {

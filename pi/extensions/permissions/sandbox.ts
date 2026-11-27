@@ -237,13 +237,16 @@ export async function registerSandboxBash(
                 async exec(_resolved, cwd, options) {
                     // The agent's command: the daemon applies pi's prefix and shell itself, from pi's settings files.
                     const request: RunRequest = {
-                        call_id: toolCallId,
-                        command,
+                        origin: {
+                            kind: "bash_call",
+                            call_id: toolCallId,
+                            command,
+                            env: piShellEnv(options.env),
+                            rerun,
+                        },
                         cwd,
                         timeout,
-                        env: piShellEnv(options.env),
                         reason,
-                        rerun,
                     }
                     return requestRun(
                         session,
@@ -276,17 +279,18 @@ export async function registerSandboxBash(
             }
         },
     })
-    let typed = 0
     pi.on("user_bash", (event) => {
         const { commandPrefix } = piShellSettings(event.cwd)
         const operations: BashOperations = {
             exec(resolved, cwd, options) {
                 const request: RunRequest = {
-                    call_id: `user:${++typed}`,
-                    command: unprefixed(resolved, commandPrefix),
+                    origin: {
+                        kind: "typed",
+                        command: unprefixed(resolved, commandPrefix),
+                        env: piShellEnv(options.env),
+                    },
                     cwd,
                     timeout: options.timeout,
-                    env: piShellEnv(options.env),
                 }
                 return requestRun(session, request, options.onData, options.signal)
             },

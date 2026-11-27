@@ -107,7 +107,7 @@ export default function (pi: ExtensionAPI): void {
                         ...parse(validator, params),
                         entity: variant.entity,
                     })
-                    const initialized = initializeEntity(input, { cwd: ctx.cwd, tools: mcpTools })
+                    const initialized = await initializeEntity(input, { cwd: ctx.cwd, tools: mcpTools })
                     await seedInitializedEntityResourceIds(initialized, ctx.cwd)
                     return {
                         content: [{ type: "text" as const, text: formatInitializedEntity(initialized) }],
@@ -125,7 +125,9 @@ export default function (pi: ExtensionAPI): void {
             "Initialize an approved Gig with no tracker item, for a project without a tracker or work the user keeps off it. Names the directory and branch from today's date and the slug (<YYYYMMDD>-<slug>), starting from and targeting the repository default branch. A local Gig has no Phase, lifecycle, Priority, labels, or plan publication; every tracker step refuses for it.",
         parameters: LocalGigInitializationSchema,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-            const initialized = initializeLocalGig(parse(LocalGigInitializationValidator, params), { cwd: ctx.cwd })
+            const initialized = await initializeLocalGig(parse(LocalGigInitializationValidator, params), {
+                cwd: ctx.cwd,
+            })
             return {
                 content: [{ type: "text" as const, text: formatInitializedEntity(initialized) }],
                 details: initialized,

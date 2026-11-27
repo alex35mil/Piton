@@ -1,7 +1,7 @@
 //! `agent.sock`: the socket sandboxed processes reach the daemon on, next to the control socket but separate from it. A
 //! sandbox may connect to this one socket (a built-in allow in every launch's policy) and never to the control socket.
 //!
-//! One request per connection, one JSON line each way, except `run_command`, which streams the command's output as
+//! One request per connection, one JSON line each way, except `run`, which streams the command's output as
 //! lines before its last one. The server is only a transport: it reads the connecting process ([`Peer`]), parses the
 //! [`Envelope`], accepts its token for that process, authorizes the request for its caller, and dispatches to the
 //! request's own handler (`facts.rs`, `write.rs`, `run.rs`, the daemon's launch). The contract is `channel.rs`.
@@ -112,7 +112,7 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
                 _ = closed(&mut lines) => {}
             }
         }
-        Authorized::RunCommand { session, request } => {
+        Authorized::Run { session, request } => {
             // Streams: the output lines, then the end. Closing the connection (the agent's stop or timeout) drops the
             // run, which kills the command's process group.
             tokio::select! {

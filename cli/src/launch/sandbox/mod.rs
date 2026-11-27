@@ -12,7 +12,12 @@ mod policy;
 mod resolve;
 mod rules;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// A `[sandbox]` path key (`/x`, `~/x`, `$VAR/x`) as the sandbox expands it, with `env` for variables.
+pub fn expand_key(key: &str, home: &Path, env: &crate::launch::Env) -> Result<PathBuf, String> {
+    resolve::expand_grant(key, home, env).map_err(|e| e.to_string())
+}
 
 #[cfg(test)]
 pub use self::policy::PitonArea;

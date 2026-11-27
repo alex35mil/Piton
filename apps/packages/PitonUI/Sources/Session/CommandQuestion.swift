@@ -27,11 +27,19 @@ struct CommandQuestionCard: View {
         }
     }
 
+    /// A bash call runs again; a program from pi's process runs for the first time.
+    private var title: String {
+        switch question.asker {
+        case .agent, .piton: "Run again?"
+        case .pi: "Run?"
+        }
+    }
+
     private var variableCount: Int { question.writableVars.reduce(0) { $0 + $1.names.count } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SectionLabel("Run again?", color: color)
+            SectionLabel(title, color: color)
             Text(question.command).font(typography.data(.callout)).textSelection(.enabled)
             if let reason = question.reason {
                 Text("Why: \(reason)").font(typography.content(.callout)).foregroundStyle(Theme.secondary)
