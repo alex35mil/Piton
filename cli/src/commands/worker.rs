@@ -1,4 +1,5 @@
-//! `piton worker create|ls|delete`: workers through the daemon. With `--json` it prints the daemon's response for
+//! `piton worker create|ls|delete`: workers through the daemon. `piton worker info` answers here, without it: it only
+//! reads the checkout's Git config and the layout, as the daemon does. With `--json` each prints the response for
 //! scripts and editor tooling (nvim's `cli.lua`); refusals exit 4 so callers can tell them from failures.
 
 use std::{path::PathBuf, process::ExitCode};
@@ -21,9 +22,18 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
     let sha = |value: String| Sha::try_from(value).map_err(|e| format!("--approve-source-update: {e}"));
     let is_delete = match &action {
         WorkerAction::Delete { .. } => true,
-        WorkerAction::Create { .. } | WorkerAction::Ls { .. } => false,
+        WorkerAction::Create { .. } | WorkerAction::Ls { .. } | WorkerAction::Info { .. } => false,
     };
     let request = match action {
+        WorkerAction::Info { path } => {
+            let path = path.unwrap_or_else(here);
+            let response = match tokio::task::spawn_blocking(move || crate::project::worker_containing(&path)).await {
+                Ok(Ok(worker)) => ControlResponse::Worker { worker },
+                Ok(Err(refusal)) => ControlResponse::WorkerRefused { refusal },
+                Err(e) => return report(Err(e.to_string())),
+            };
+            return print(response, json, is_delete);
+        }
         WorkerAction::Create {
             name,
             source,
@@ -67,6 +77,11 @@ pub async fn run(config: &DaemonConfig, action: WorkerAction, json: bool) -> Exi
         Ok(response) => response,
         Err(message) => return report(Err(message)),
     };
+    print(response, json, is_delete)
+}
+
+/// Prints a worker command's response, as JSON or as lines, and returns its exit code.
+fn print(response: ControlResponse, json: bool, is_delete: bool) -> ExitCode {
     let code = match &response {
         ControlResponse::Worker { .. } | ControlResponse::Workers { .. } | ControlResponse::WorkerDeleted { .. } => {
             ExitCode::SUCCESS

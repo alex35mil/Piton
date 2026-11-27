@@ -1,6 +1,7 @@
-//! Workers: disposable APFS copy-on-write clones of a source checkout, created next to it as `<parent>/<repo>--<name>`,
-//! where agents work in isolation. Everything is cloned except `.piton/.local`, which is linked to the source's, and
-//! the `[workers] skip` paths of the source's configuration. See "Workers" in docs/design.md.
+//! Workers: disposable APFS copy-on-write clones of a source checkout, created next to it as
+//! `<parent>/<repo>.workers/<name>`, where agents work in isolation. The `<repo>.workers` folder is created with the
+//! first worker and removed with the last. Everything is cloned except `.piton/.local`, which is linked to the
+//! source's, and the `[workers] skip` paths of the source's configuration. See "Workers" in docs/design.md.
 
 use std::{
     ffi::CString,
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     launch::Env,
     project::{
-        self, ProjectError, Relation, SHARED_PATH, WORKER_SEPARATOR,
+        self, ProjectError, Relation, SHARED_PATH,
         source::{self, Blocked, CreateUpdate, DeleteUpdate, GitRunner, Plan, UpdateError},
     },
 };
@@ -106,6 +107,9 @@ pub enum WorkerRefusal {
     InvalidName { name: String },
     #[error("{path} already exists")]
     Exists { path: PathBuf },
+    /// The folder the source's workers go in (`<repo>.workers`) exists but isn't a plain folder Piton can put them in.
+    #[error("{} can't hold workers: it's {}; move it aside", path.display(), what.describe())]
+    BadWorkersDir { path: PathBuf, what: NotAWorkersDir },
     #[error("{checkout} has uncommitted changes")]
     SourceDirty { checkout: PathBuf, status: Vec<String> },
     #[error("{checkout} is on {}, not its default branch {default}", branch.as_deref().unwrap_or("a detached HEAD"))]
@@ -149,6 +153,37 @@ pub enum WorkerRefusal {
     },
     #[error("{message}")]
     Failed { message: String },
+}
+
+/// Why an existing `<repo>.workers` can't hold workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotAWorkersDir {
+    /// A file, or anything else that isn't a folder.
+    NotAFolder,
+    /// A symbolic link: Piton never follows one to put a worker somewhere else.
+    Symlink,
+    /// A Git checkout of its own: a worker is never put inside another repository.
+    Checkout,
+}
+
+impl NotAWorkersDir {
+    fn describe(self) -> &'static str {
+        match self {
+            NotAWorkersDir::NotAFolder => "not a folder",
+            NotAWorkersDir::Symlink => "a symbolic link",
+            NotAWorkersDir::Checkout => "a Git checkout of its own",
+        }
+    }
+}
+
+/// The state of the folder a source's workers go in, before a worker is created in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkersDir {
+    /// It isn't there yet: this creation makes it, and removes it again when the creation fails.
+    Missing,
+    /// A plain folder, holding the source's other workers (or nothing).
+    Present,
 }
 
 impl WorkerRefusal {
@@ -262,9 +297,8 @@ pub fn create(
             name: request.name.clone(),
         });
     }
-    if source.parent().is_none() {
-        return Err(failed("source has no parent"));
-    }
+    let container = project::workers_dir(&source).ok_or_else(|| failed("source has no parent"))?;
+    let container_state = workers_dir_state(&container)?;
     let path = path(&source, &request.name);
     if path.symlink_metadata().is_ok() {
         return Err(WorkerRefusal::Exists { path });
@@ -285,7 +319,17 @@ pub fn create(
     source::apply(git, &source, &plan)?;
 
     // Created outside the cleanup below, so a failure never removes a directory this call didn't create.
-    mkdir_like(&source, &path)?;
+    match container_state {
+        WorkersDir::Missing => mkdir_like(&source, &container)?,
+        WorkersDir::Present => {}
+    }
+    if let Err(e) = mkdir_like(&source, &path) {
+        match container_state {
+            WorkersDir::Missing => remove_if_empty(&container),
+            WorkersDir::Present => {}
+        }
+        return Err(e);
+    }
     let label = request.label.clone().unwrap_or_else(|| request.name.clone());
     let result = (|| {
         let mut skip: Vec<Vec<String>> = skip_list.iter().map(|s| segments(s)).collect();
@@ -311,6 +355,10 @@ pub fn create(
     })();
     if let Err(e) = result {
         let _ = std::fs::remove_dir_all(&path);
+        match container_state {
+            WorkersDir::Missing => remove_if_empty(&container),
+            WorkersDir::Present => {}
+        }
         return Err(e);
     }
     crate::log!("worker created: {} (from {})", path.display(), source.display());
@@ -322,14 +370,67 @@ pub fn create(
     })
 }
 
-/// Where a worker of `source` named `name` lives: `<parent>/<repo>--<normalized name>`.
+/// Where a worker of `source` named `name` lives: `<parent>/<repo>.workers/<normalized name>`. A source with no parent
+/// (the file system root) can't have workers; its path is never created, since creation refuses first.
 pub fn path(source: &Path, name: &str) -> PathBuf {
-    let file_name = format!(
-        "{}{WORKER_SEPARATOR}{}",
-        source.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-        normalize_name(name)
-    );
-    source.parent().unwrap_or(source).join(file_name)
+    project::workers_dir(source)
+        .unwrap_or_else(|| source.to_path_buf())
+        .join(normalize_name(name))
+}
+
+/// Whether `container` can hold a new worker, without following a symlink: missing, or a plain folder that isn't a
+/// checkout of its own.
+fn workers_dir_state(container: &Path) -> Result<WorkersDir> {
+    let refuse = |what| WorkerRefusal::BadWorkersDir {
+        path: container.to_path_buf(),
+        what,
+    };
+    let meta = match container.symlink_metadata() {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(WorkersDir::Missing),
+        Err(e) => return Err(failed(format!("can't read {}: {e}", container.display()))),
+    };
+    let kind = meta.file_type();
+    match (kind.is_symlink(), kind.is_dir()) {
+        (true, _) => Err(refuse(NotAWorkersDir::Symlink)),
+        (false, false) => Err(refuse(NotAWorkersDir::NotAFolder)),
+        (false, true) if container.join(".git").symlink_metadata().is_ok() => Err(refuse(NotAWorkersDir::Checkout)),
+        (false, true) => Ok(WorkersDir::Present),
+    }
+}
+
+/// Finder's folder view settings, the one file a folder Piton made can gain without anyone putting it there.
+const FINDER_STATE: &str = ".DS_Store";
+
+/// Removes the folder a source's workers live in once it holds none: empty, or holding only Finder's `.DS_Store`. A
+/// folder with anything else in it stays, and a failure is only logged: an empty folder left behind is harmless.
+fn remove_if_empty(container: &Path) {
+    let entries = match std::fs::read_dir(container) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            crate::log!("warning: can't read {}: {e}", container.display());
+            return;
+        }
+    };
+    let mut finder_state = false;
+    for entry in entries {
+        match entry {
+            Ok(entry) if entry.file_name() == FINDER_STATE => finder_state = true,
+            Ok(_) => return,
+            Err(e) => {
+                crate::log!("warning: can't read {}: {e}", container.display());
+                return;
+            }
+        }
+    }
+    if finder_state && let Err(e) = std::fs::remove_file(container.join(FINDER_STATE)) {
+        crate::log!("warning: can't remove {}: {e}", container.join(FINDER_STATE).display());
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir(container) {
+        crate::log!("warning: can't remove {}: {e}", container.display());
+    }
 }
 
 /// The source's default branch when it's clean and on it.
@@ -445,18 +546,22 @@ fn link_shared(source: &Path, worker: &Path) -> Result<()> {
     std::os::unix::fs::symlink(&shared, &target).map_err(|e| failed(format!("can't link {SHARED_PATH}: {e}")))
 }
 
+/// The workers of `from`'s source: the folders in its `<repo>.workers` that resolve to it. No such folder, no workers.
 pub fn list(from: &Path) -> Result<Vec<WorkerInfo>> {
     let source = source_of(from)?;
-    let parent = source.parent().ok_or_else(|| failed("source has no parent"))?;
-    let prefix = format!(
-        "{}{WORKER_SEPARATOR}",
-        source.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-    );
+    let container = project::workers_dir(&source).ok_or_else(|| failed("source has no parent"))?;
+    let entries = match workers_dir_state(&container) {
+        Ok(WorkersDir::Missing) => return Ok(Vec::new()),
+        Ok(WorkersDir::Present) => {
+            std::fs::read_dir(&container).map_err(|e| failed(format!("can't read {}: {e}", container.display())))?
+        }
+        // A file or link by that name holds no workers of this source.
+        Err(WorkerRefusal::BadWorkersDir { .. }) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
     let mut workers = Vec::new();
-    let entries = std::fs::read_dir(parent).map_err(|e| failed(format!("can't read {}: {e}", parent.display())))?;
     for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(&prefix) || !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         if let Ok(info) = info(&entry.path())
@@ -467,6 +572,20 @@ pub fn list(from: &Path) -> Result<Vec<WorkerInfo>> {
     }
     workers.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(workers)
+}
+
+/// The worker containing `path`: the worker itself, or the worker a folder inside it belongs to. `NotAWorker` when it's
+/// in none, including a checkout whose `agent.source` claim doesn't match the layout. Read from the checkout's Git
+/// config and the layout, as the daemon decides it, so editors never check the layout themselves.
+pub fn containing(path: &Path) -> Result<WorkerInfo> {
+    let canonical = std::fs::canonicalize(path).map_err(|_| WorkerRefusal::NotAWorker { path: path.into() })?;
+    match project::resolve(&canonical) {
+        Ok(workspace) => match workspace.relation {
+            Relation::Worker { .. } => info(&workspace.checkout),
+            Relation::Source => Err(WorkerRefusal::NotAWorker { path: canonical }),
+        },
+        Err(ProjectError::BadWorker { path, .. }) => Err(WorkerRefusal::NotAWorker { path }),
+    }
 }
 
 /// The worker at `path`.
@@ -634,6 +753,9 @@ pub fn remove(removal: &Removal, mise: Option<&Mise>, git: source::SourceGit<'_>
         );
     }
     crate::log!("worker deleted: {}", worker.path.display());
+    if let Some(container) = worker.path.parent() {
+        remove_if_empty(container);
+    }
     Ok(match (&removal.source, git) {
         (AfterRemoval::Stale { warning }, _) => Some(warning.clone()),
         // A plan exists only when Git was there to make it.
@@ -907,8 +1029,10 @@ mod tests {
             &paths(source.parent().unwrap()),
         )
         .unwrap();
-        let worker = source.parent().unwrap().join("repo--fix-x");
+        let container = source.parent().unwrap().join("repo.workers");
+        let worker = container.join("fix-x");
         assert_eq!(info.path, worker);
+        assert!(container.is_dir(), "the first worker creates the container");
         assert_eq!(info.label, "Fix X");
         assert!(worker.join("README").is_file());
         assert!(
@@ -947,10 +1071,8 @@ mod tests {
         let listed: Vec<_> = list(&source).unwrap().into_iter().map(|w| w.path).collect();
         assert_eq!(
             listed,
-            [
-                source.parent().unwrap().join("repo--fix-x"),
-                source.parent().unwrap().join("repo--two")
-            ]
+            [container.join("fix-x"), container.join("two")],
+            "only the container's workers of this source"
         );
 
         // Leftovers refuse a delete unless forced; the source's shared folder survives.
@@ -961,7 +1083,107 @@ mod tests {
         }
         remove_now(&info, true, None).unwrap();
         assert!(!worker.exists());
+        assert!(container.is_dir(), "kept while another worker is in it");
         assert!(source.join(SHARED_PATH).join("gigs").is_dir());
+
+        // The last worker takes the container with it, Finder's `.DS_Store` included.
+        std::fs::write(container.join(".DS_Store"), "").unwrap();
+        remove_now(&second, true, None).unwrap();
+        assert!(!container.exists(), "removed with the last worker");
+        assert!(list(&source).unwrap().is_empty(), "no container, no workers");
+    }
+
+    /// A container with something of the user's in it outlives its last worker.
+    #[test]
+    fn a_container_holding_other_files_stays() {
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        let one = create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p).unwrap();
+        let container = source.parent().unwrap().join("repo.workers");
+        std::fs::write(container.join("notes.txt"), "mine").unwrap();
+        remove_now(&one, true, None).unwrap();
+        assert!(
+            container.join("notes.txt").is_file(),
+            "the user's file and its folder stay"
+        );
+        assert!(list(&source).unwrap().is_empty(), "a file isn't a worker");
+    }
+
+    /// A `<repo>.workers` that isn't a plain folder refuses creation before anything changes, naming why.
+    #[test]
+    fn a_container_that_isnt_a_plain_folder_refuses() {
+        let (dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        let container = source.parent().unwrap().join("repo.workers");
+        let before = git_ok(&source, &["rev-parse", "HEAD"]).unwrap();
+        let refused = |what: NotAWorkersDir| {
+            match create_with_host(&request(&source, "one", CreateUpdate::Ask), None, &p) {
+                Err(WorkerRefusal::BadWorkersDir { path, what: got }) => {
+                    assert_eq!((path, got), (container.clone(), what));
+                }
+                other => panic!("expected BadWorkersDir {what:?}, got {other:?}"),
+            }
+            assert_eq!(
+                git_ok(&source, &["rev-parse", "HEAD"]).unwrap(),
+                before,
+                "the source wasn't updated"
+            );
+        };
+
+        std::fs::write(&container, "x").unwrap();
+        refused(NotAWorkersDir::NotAFolder);
+        std::fs::remove_file(&container).unwrap();
+
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &container).unwrap();
+        refused(NotAWorkersDir::Symlink);
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "nothing went through the link"
+        );
+        std::fs::remove_file(&container).unwrap();
+
+        std::fs::create_dir_all(&container).unwrap();
+        git(&container, &["init", "-q"]);
+        refused(NotAWorkersDir::Checkout);
+        assert!(list(&source).unwrap().is_empty());
+
+        let json = serde_json::to_value(WorkerRefusal::BadWorkersDir {
+            path: container.clone(),
+            what: NotAWorkersDir::Checkout,
+        })
+        .unwrap();
+        assert_eq!(
+            (json["kind"].as_str(), json["what"].as_str()),
+            (Some("bad_workers_dir"), Some("checkout"))
+        );
+    }
+
+    /// A creation that fails after making the container leaves nothing behind; one that finds it already there leaves
+    /// it alone.
+    #[test]
+    fn a_failed_creation_removes_only_what_it_made() {
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        let container = source.parent().unwrap().join("repo.workers");
+        // Fails after cloning: checking mise's trust in the source runs a program that isn't there.
+        let broken = Mise {
+            program: "/nonexistent/mise".into(),
+            args: Vec::new(),
+            env: Env::new(),
+        };
+        assert!(create_with_host(&request(&source, "one", CreateUpdate::Ask), Some(&broken), &p).is_err());
+        assert!(!container.exists(), "the container this creation made is gone");
+
+        std::fs::create_dir_all(container.join("kept")).unwrap();
+        assert!(create_with_host(&request(&source, "two", CreateUpdate::Ask), Some(&broken), &p).is_err());
+        assert!(!container.join("two").exists());
+        assert!(
+            container.join("kept").is_dir(),
+            "a container that was there stays as it was"
+        );
     }
 
     /// An upstream commit to the source's origin, made from a clone of it.
@@ -1020,7 +1242,7 @@ mod tests {
         assert_eq!(blocked.files, [".piton/config.toml"]);
         assert_eq!(blocked.target, target);
         assert_eq!(git_ok(&source, &["rev-parse", "HEAD"]).unwrap(), before);
-        assert!(!source.parent().unwrap().join("repo--one").exists());
+        assert!(!source.parent().unwrap().join("repo.workers/one").exists());
         assert_eq!(git.ran("merge"), 0);
 
         // Typed for clients: the refusal's fields at the top level.
@@ -1270,17 +1492,47 @@ mod tests {
     #[test]
     fn a_worker_claim_needs_the_layout() {
         let (_dir, source) = fixture();
-        let elsewhere = source.parent().unwrap().join("other");
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        git(&elsewhere, &["init", "-q"]);
-        git(
-            &elsewhere,
-            &["config", "--local", "agent.source", source.to_str().unwrap()],
-        );
+        let parent = source.parent().unwrap();
+        // Next to the source the old way, in another repository's container, or nested deeper: all refused.
+        for claimant in ["other", "repo--fix", "else.workers/fix", "repo.workers/fix/deeper"] {
+            let elsewhere = parent.join(claimant);
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            git(&elsewhere, &["init", "-q"]);
+            git(
+                &elsewhere,
+                &["config", "--local", "agent.source", source.to_str().unwrap()],
+            );
+            assert!(
+                matches!(project::resolve(&elsewhere), Err(ProjectError::BadWorker { .. })),
+                "{claimant}"
+            );
+        }
+    }
+
+    /// `containing` answers for the worker and every folder in it, and refuses a source or a folder in none.
+    #[test]
+    fn the_worker_containing_a_path() {
+        let (_dir, source) = fixture();
+        let p = paths(source.parent().unwrap());
+        let worker = create_with_host(&request(&source, "fix", CreateUpdate::Ask), None, &p).unwrap();
+        assert_eq!(containing(&worker.path).unwrap().path, worker.path);
+        let inner = containing(&worker.path.join("apps/.build/xcode")).unwrap();
+        assert_eq!((inner.path, inner.source), (worker.path.clone(), source.clone()));
+        assert!(matches!(containing(&source), Err(WorkerRefusal::NotAWorker { .. })));
         assert!(matches!(
-            project::resolve(&elsewhere),
-            Err(ProjectError::BadWorker { .. })
+            containing(&source.parent().unwrap().join("repo.workers")),
+            Err(WorkerRefusal::NotAWorker { .. })
         ));
+        assert!(matches!(
+            containing(&source.join("missing")),
+            Err(WorkerRefusal::NotAWorker { .. })
+        ));
+        // A claim without the layout is no worker to an editor either, not a failure.
+        let stray = source.parent().unwrap().join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        git(&stray, &["init", "-q"]);
+        git(&stray, &["config", "--local", "agent.source", source.to_str().unwrap()]);
+        assert!(matches!(containing(&stray), Err(WorkerRefusal::NotAWorker { .. })));
     }
 
     /// A folder inside a worker is part of it: its sandbox settings come from the source, never from the folder, and

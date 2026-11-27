@@ -1556,7 +1556,7 @@ mod tests {
             key: 7,
             id: Some("01a1-session".into()),
             file: Some("/Users/me/.config/pi/agent/sessions/--app--/s.jsonl".into()),
-            workspace: "/Users/me/Projects/app--fix-login".into(),
+            workspace: "/Users/me/Projects/app.workers/fix-login".into(),
             checkout: crate::session::Checkout::Worker {
                 source: "/Users/me/Projects/app".into(),
                 name: "fix-login".into(),

@@ -21,6 +21,7 @@
 ---| { kind: "not_a_repository", path: string }
 ---| { kind: "invalid_name", name: string }
 ---| { kind: "exists", path: string }
+---| { kind: "bad_workers_dir", path: string, what: "not_a_folder" | "symlink" | "checkout" }
 ---| { kind: "source_dirty", checkout: string, status: string[] }
 ---| { kind: "source_off_default", checkout: string, branch: string?, default: string }
 ---| { kind: "unknown_default", checkout: string }
@@ -47,6 +48,10 @@
 ---| { kind: "deleted", stopped: integer, warning: string? }
 ---| { kind: "refused", refusal: PitonWorkerRefusal }
 
+---@alias PitonInfoResult
+---| { kind: "worker", worker: PitonWorker }
+---| { kind: "not_a_worker" }
+
 local util = require("piton.util")
 local source = require("piton.source")
 
@@ -56,6 +61,7 @@ local REFUSAL_KINDS = {
     not_a_repository = true,
     invalid_name = true,
     exists = true,
+    bad_workers_dir = true,
     source_dirty = true,
     source_off_default = true,
     unknown_default = true,
@@ -182,6 +188,27 @@ function M.create(request)
     error("unreachable")
 end
 
+--- The worker containing `path` (the worker itself or a folder inside it),
+--- as piton decides it from the checkout's Git config and folder layout. Read
+--- by the CLI itself, so it works without the daemon. Refuses only when piton
+--- fails.
+---@param path string
+---@return PitonInfoResult
+function M.info(path)
+    local response = run({ "info", path })
+    if response.type == "worker" then
+        return { kind = "worker", worker = worker(response.worker) }
+    elseif response.type == "worker_refused" then
+        local r = refusal(response.refusal)
+        if r.kind == "not_a_worker" then
+            return { kind = "not_a_worker" }
+        end
+        util.refuse("Can't tell whether " .. path .. " is an agent: " .. M.describe(r))
+    end
+    unexpected(response, "info")
+    error("unreachable")
+end
+
 --- The workers of `from`'s source, with their live sessions. Refuses when
 --- piton can't list them.
 ---@param from string The source checkout or any of its workers.
@@ -226,32 +253,6 @@ function M.delete(path, force, update)
     end
     unexpected(response, "delete")
     error("unreachable")
-end
-
---- The folder piton will create for `name`, for previews only: mirrors
---- piton's `worker::normalize_name` (ASCII letters and digits kept and
---- lowercased; runs of spaces, `_`, `-` become one `-`; anything else dropped).
---- piton stays the authority: creation uses the path it returns. Nil when the
---- name normalizes to nothing.
----@param source_path string
----@param name string
----@return string?
-function M.preview_folder(source_path, name)
-    local out, dash = {}, false
-    for c in name:lower():gmatch(".") do
-        if c:match("[a-z0-9]") then
-            table.insert(out, c)
-            dash = false
-        elseif c:match("[%s_%-]") and not dash and #out > 0 then
-            table.insert(out, "-")
-            dash = true
-        end
-    end
-    local normalized = table.concat(out):gsub("%-+$", "")
-    if normalized == "" then
-        return nil
-    end
-    return vim.fs.basename(source_path) .. "--" .. normalized
 end
 
 ---@alias PitonTrustState "nothing_to_trust" | "trusted" | "declined" | "needed"
@@ -354,6 +355,13 @@ function M.describe(refusal_value)
         return "Invalid agent name: " .. r.name
     elseif r.kind == "exists" then
         return "Already exists: " .. r.path
+    elseif r.kind == "bad_workers_dir" then
+        local what = ({
+            not_a_folder = "isn't a folder",
+            symlink = "is a symbolic link",
+            checkout = "is a Git checkout of its own",
+        })[r.what] or ("is unusable (" .. tostring(r.what) .. ")")
+        return r.path .. " can't hold agents: it " .. what .. "; move it aside"
     elseif r.kind == "source_dirty" then
         return source.describe_state({ kind = "dirty", checkout = r.checkout, status = r.status })
     elseif r.kind == "source_off_default" then

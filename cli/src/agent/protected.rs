@@ -583,7 +583,7 @@ mod tests {
         let agent = home.join(".pi/agent");
         let parent = home.join("p/.piton");
         let source = home.join("p/repo");
-        let checkout = home.join("p/repo--w");
+        let checkout = home.join("p/repo.workers/w");
         for d in [
             dotfiles.join("piton"),
             dotfiles.join("pi/extensions"),
@@ -666,10 +666,10 @@ mod tests {
         // agent's.
         assert_eq!(root(&home.join("p/repo/.piton/config.toml")), Some(home.join("p/repo")));
         assert_eq!(root(&home.join("p/repo/.piton/.local/x")), None);
-        assert_eq!(root(&home.join("p/repo--w/.agents/rules/r.md")), None);
+        assert_eq!(root(&home.join("p/repo.workers/w/.agents/rules/r.md")), None);
         assert_eq!(
-            root(&home.join("p/repo--w/.pi/settings.json")),
-            Some(home.join("p/repo--w"))
+            root(&home.join("p/repo.workers/w/.pi/settings.json")),
+            Some(home.join("p/repo.workers/w"))
         );
         // pi's agent directory, not its runtime state.
         assert_eq!(root(&agent.join("keybindings.json")), Some(agent.clone()));
@@ -716,7 +716,7 @@ mod tests {
             ".zshrc",
             "notes.txt",
             "p/repo/src/main.rs",
-            "p/repo--w/src/main.rs",
+            "p/repo.workers/w/src/main.rs",
         ] {
             assert_eq!(root(&home.join(never)), None, "{never}");
         }
@@ -792,10 +792,10 @@ mod tests {
             (agent.join("bin/rg"), Controls::Code),
             (agent.join("keybindings.json"), Controls::Other),
             (agent.join("prompts/p.md"), Controls::Other),
-            (home.join("p/repo--w/.pi/extensions/x.ts"), Controls::Code),
-            (home.join("p/repo--w/apps/.pi/settings.json"), Controls::Code),
-            (home.join("p/repo--w/.pi/prompts/p.md"), Controls::Other),
-            (home.join("p/repo--w/fnox.toml"), Controls::Secrets),
+            (home.join("p/repo.workers/w/.pi/extensions/x.ts"), Controls::Code),
+            (home.join("p/repo.workers/w/apps/.pi/settings.json"), Controls::Code),
+            (home.join("p/repo.workers/w/.pi/prompts/p.md"), Controls::Other),
+            (home.join("p/repo.workers/w/fnox.toml"), Controls::Secrets),
             (home.join(".config/fnox/config.toml"), Controls::Secrets),
             // Linked into dotfiles: by the link.
             (h.dotfiles.join("piton/config.toml"), Controls::Sandbox),
@@ -838,7 +838,7 @@ mod tests {
     fn roots() -> ProtectedRoots {
         ProtectedRoots {
             source: "/u/p/repo".into(),
-            checkout: "/u/p/repo--w".into(),
+            checkout: "/u/p/repo.workers/w".into(),
         }
     }
 
@@ -847,29 +847,29 @@ mod tests {
         let r = roots();
         let c = |p: &str| r.protected_root(Path::new(p)).map(Path::to_path_buf);
         let source = Some(PathBuf::from("/u/p/repo"));
-        let checkout = Some(PathBuf::from("/u/p/repo--w"));
+        let checkout = Some(PathBuf::from("/u/p/repo.workers/w"));
         assert_eq!(c("/u/p/repo/.piton/config.toml"), source);
         assert_eq!(c("/u/p/repo/.piton/.local/gigs/x/notes.md"), None);
         // A worker's own `.piton/` isn't read, so it isn't protected; its `.pi/` is.
-        assert_eq!(c("/u/p/repo--w/.piton/config.toml"), None);
-        assert_eq!(c("/u/p/repo--w/.pi/settings.json"), checkout);
-        assert_eq!(c("/u/p/repo--w/apps/sub/.pi/extensions/x.ts"), checkout);
+        assert_eq!(c("/u/p/repo.workers/w/.piton/config.toml"), None);
+        assert_eq!(c("/u/p/repo.workers/w/.pi/settings.json"), checkout);
+        assert_eq!(c("/u/p/repo.workers/w/apps/sub/.pi/extensions/x.ts"), checkout);
         // Skills are agent-editable: their `allowed-tools` grant nothing unless the user opts in.
-        assert_eq!(c("/u/p/repo--w/.agents/skills/deploy/SKILL.md"), None);
-        assert_eq!(c("/u/p/repo--w/apps/.agents/skills/tools/run.md"), None);
+        assert_eq!(c("/u/p/repo.workers/w/.agents/skills/deploy/SKILL.md"), None);
+        assert_eq!(c("/u/p/repo.workers/w/apps/.agents/skills/tools/run.md"), None);
         // Any case: APFS is case-insensitive.
-        assert_eq!(c("/u/p/repo--w/.PI/settings.json"), checkout);
+        assert_eq!(c("/u/p/repo.workers/w/.PI/settings.json"), checkout);
         assert_eq!(c("/u/p/repo/.PITON/config.toml"), source);
         assert_eq!(c("/u/p/repo/.piton/.LOCAL/x"), None);
-        assert_eq!(c("/u/p/repo--w/.agents/rules/r.md"), None);
-        assert_eq!(c("/u/p/repo--w/src/main.rs"), None);
-        assert_eq!(c("/u/p/repo--w/apps/.pix/f"), None);
+        assert_eq!(c("/u/p/repo.workers/w/.agents/rules/r.md"), None);
+        assert_eq!(c("/u/p/repo.workers/w/src/main.rs"), None);
+        assert_eq!(c("/u/p/repo.workers/w/apps/.pix/f"), None);
         assert_eq!(c("/elsewhere/.pi/x"), None);
         // The lock pi takes to read the project's settings, and only it.
-        assert_eq!(c("/u/p/repo--w/.pi/settings.json.lock"), None);
-        assert_eq!(c("/u/p/repo--w/apps/.PI/Settings.json.LOCK"), None);
-        assert_eq!(c("/u/p/repo--w/.pi/settings.json.lock/x"), checkout);
-        assert_eq!(c("/u/p/repo--w/.pi/extensions/settings.json.lock"), checkout);
+        assert_eq!(c("/u/p/repo.workers/w/.pi/settings.json.lock"), None);
+        assert_eq!(c("/u/p/repo.workers/w/apps/.PI/Settings.json.LOCK"), None);
+        assert_eq!(c("/u/p/repo.workers/w/.pi/settings.json.lock/x"), checkout);
+        assert_eq!(c("/u/p/repo.workers/w/.pi/extensions/settings.json.lock"), checkout);
         // fnox's config files, by name at any depth, in any case.
         for name in [
             "fnox.toml",
@@ -883,7 +883,7 @@ mod tests {
             "apps/sub/fnox.toml",
             "FNOX.TOML",
         ] {
-            assert_eq!(c(&format!("/u/p/repo--w/{name}")), checkout, "{name}");
+            assert_eq!(c(&format!("/u/p/repo.workers/w/{name}")), checkout, "{name}");
         }
         for name in [
             "fnox.json",
@@ -893,7 +893,7 @@ mod tests {
             "fnox.toml/x",
             "docs/fnox.md",
         ] {
-            assert_eq!(c(&format!("/u/p/repo--w/{name}")), None, "{name}");
+            assert_eq!(c(&format!("/u/p/repo.workers/w/{name}")), None, "{name}");
         }
     }
 
@@ -919,7 +919,7 @@ mod tests {
             "fnox..toml",
             "fnox.toml/x",
         ] {
-            let path = format!("/u/p/repo--w/{name}");
+            let path = format!("/u/p/repo.workers/w/{name}");
             assert_eq!(
                 regex.is_match(&path),
                 roots().protected_root(Path::new(&path)).is_some(),

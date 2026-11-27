@@ -73,7 +73,8 @@ them. All notifications use `vim.notify` with title `Piton`.
   question was open, it asks again) and opens the tab; Cancel or dismissing records nothing and opens nothing. pi.nvim
   started on its own in such a repository can't ask: its attach fails naming `piton trust allow` (#390).
 - **`get(path)`** returns the agent containing a path, or nil. The record has `path`, `source`, `label`, and optional
-  `issue`. Use this from your own tab-close action to distinguish workers from ordinary tabs.
+  `item_id`. piton decides it (`piton worker info`, which works without the daemon), so the plugin never checks the
+  folder layout itself. Use this from your own tab-close action to distinguish workers from ordinary tabs.
 - **`close_tab(agent)`** offers “Close tab” or “Delete agent”. Closing only closes the editor tab: the daemon's pi keeps
   running. Deleting uses the daemon, which checks everything before changing anything, and confirms each question in
   turn: discarding modified buffers, a dirty/unpushed checkout, and, when the source's update changes protected files,

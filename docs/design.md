@@ -203,12 +203,26 @@ The mode is chosen per launch, not per workspace. Seatbelt, through the `nono` l
 
 ### Workers
 
-A worker is an APFS copy-on-write clone of a source checkout, `<parent>/<repo>--<name>` next to `<parent>/<repo>`,
-with `.piton/.local` linked to the source's.
+A worker is an APFS copy-on-write clone of a source checkout, `<parent>/<repo>.workers/<name>` next to
+`<parent>/<repo>`, with `.piton/.local` linked to the source's.
 
+- **Layout:** each source's workers share one folder beside it, `<repo>.workers`, so a folder of repositories gains
+  one entry per repository that has workers, and none for one without. The name is fixed, not configurable. The
+  daemon creates the folder with the first worker and removes it with the last (a folder holding only Finder's
+  `.DS_Store` counts as empty; anything else keeps it).
+  - **Why next to the source:** a worker stays inside the source's parent folders, so whatever looks for its
+    configuration in every parent folder (mise, fnox, pi's `AGENTS.md` and `CLAUDE.md`, Piton's levels) behaves in a
+    worker exactly as in its source. A worker of `~/Projects/work/acme/app` lives at
+    `~/Projects/work/acme/app.workers/fix-x` and still gets `~/Projects/work/acme/`'s mise environment and fnox
+    secrets. A data folder elsewhere (`~/.local/share/...`) would lose them.
+  - **Why not inside the source:** the source's Git status, editors, searches, cleanup commands (`git clean -dfx`),
+    and sandbox would all reach its workers, and each worker would copy the others.
+  - **Refused:** a `<repo>.workers` that isn't a plain folder (`bad_workers_dir`: a file, a symbolic link, or a Git
+    checkout of its own) refuses creation before anything changes. Piton never follows a link there or nests a
+    worker inside another repository.
 - **Relation:** a workspace is a worker when its local git config has `agent.source` and the folder layout matches;
   otherwise it's a source. A claim without the layout is refused, so a stray config value can't point a sandbox
-  elsewhere.
+  elsewhere. A repository whose own name ends in `.workers` stays a source.
 - **Source-only settings:** `.piton/` (sandbox grants, permissions, workflows, the shared artifacts folder) is read
   from the source, never from the worker, so an agent can't widen its own sandbox or change what new workers copy by
   editing its clone. An agent running in the source checkout itself is held back by the protected-file rules (see
@@ -225,7 +239,11 @@ with `.piton/.local` linked to the source's.
   reports it (see "Launching pi"). It writes no pi.nvim
   descriptor: pi.nvim's global spec attaches through Piton, and a workspace descriptor would override that and bypass
   Piton (no phone access, no keep-awake). The worker's sandbox comes from Piton at launch (see "Launch mode").
-- **`piton worker ls`:** the source's workers with their live sessions.
+- **`piton worker ls`:** the source's workers with their live sessions: the folders in `<repo>.workers` that resolve
+  to it.
+- **`piton worker info [<path>]`:** the worker containing a path (the worker itself or a folder inside it), or
+  `not_a_worker`. Read by the CLI itself with the daemon's own resolver, so it works without the daemon. The Neovim
+  plugin asks it instead of checking the layout itself.
 - **`piton worker delete <path> [--force] [--approve-source-update <sha> | --skip-source-update]`:** refuses with
   the uncommitted changes and unpushed commits unless forced, and plans the source's update, both before changing
   anything; then stops the worker's sessions, drops mise's trust in the folder, unlinks `.piton/.local`, deletes the
@@ -269,8 +287,9 @@ with `.piton/.local` linked to the source's.
   `.pi/`, `.piton/`), and editors (Neovim, VS Code, Zed, JetBrains). Each entry lists the repository files the tool
   reads, as case-insensitive Git pathspecs that match at any depth. Incoming-PR review keeps those files at a
   trusted revision on disk.
-- **`--json`:** every `piton worker` command prints the daemon's response; refusals are typed (`kind`: `exists`,
-  `source_dirty`, `source_off_default`, `unknown_default`, `invalid_name`, `not_a_repository`, `not_a_worker`,
+- **`--json`:** every `piton worker` command prints its response, the daemon's (`info` builds the same shape itself);
+  refusals are typed (`kind`: `exists`,
+  `bad_workers_dir`, `source_dirty`, `source_off_default`, `unknown_default`, `invalid_name`, `not_a_repository`, `not_a_worker`,
   `leftovers`, `outside_project`, `invalid_configuration`, `source_fetch`, `protected_files_update`, `update_denied`,
   `integration_unavailable`, `failed`) with what a caller needs to explain or answer them, and exit 4.
 - **One at a time per source.** A create or delete holds its source checkout's lock (`daemon/workers.rs`) from its
@@ -325,8 +344,8 @@ versions that shaped Piton:
 
 Piton's config lists workspace roots (`roots`; `cli/src/apps/workspaces.rs`). There are none by default: until the owner
 lists some, `workspaces.browse` and `session.start` from a `view` client refuse with "no workspace roots configured",
-and the apps say so. A root is a tree of grouping folders with repositories at varying depth, e.g. `~/Projects/personal/apps/app` and its worker clone `~/Projects/personal/apps/app--fix-login`
-next to it. A **workspace** is a folder under a root that
+and the apps say so. A root is a tree of grouping folders with repositories at varying depth, e.g. `~/Projects/personal/apps/app` and its worker clone `~/Projects/personal/apps/app.workers/fix-login`
+beside it. A **workspace** is a folder under a root that
 contains `.git`; Piton doesn't descend into a workspace, so subfolders of a repository aren't shown. Hidden folders are
 skipped.
 
@@ -337,7 +356,8 @@ skipped.
   first, so `..` can't climb out).
 - Not yet: `workspaces.recent` (workspaces Piton launched pi in, newest first), `workspaces.search {query}`, and live
   session counts per workspace.
-- Worker clones are ordinary workspaces in that tree. Grouping them under their main repository is a later refinement.
+- A repository's workers are in its `<repo>.workers` folder, which has no `.git`, so it's a group next to the
+  repository, holding them.
 - `session.start` from a `view` client rejects a path that isn't a git checkout under a root.
 - `piton attach` and `piton start` are not limited by roots: they run locally, in a workspace you chose yourself.
 
@@ -536,9 +556,9 @@ arrive out of request order.
 | `session.decide {session, question, answer}` | `{}`; a typed answer to a pending Piton question. The block question takes `{"once": "sandbox" \| "host"}`, `"deny"`, or `{"always": {runtime, scope: "project" \| "global", pattern}}`. Refused when already answered, expired, or invalid |
 
 A session's `checkout` is `{kind: "source"}` (the workspace is the project) or `{kind: "worker", source, name}` for a
-worker `<repo>--<name>` of the project at `source`. The daemon decides it the way it does for the sandbox (the worker's
-`agent.source` git config, accepted only for the `<repo>--<name>` layout next to `<repo>`), so clients never parse
-folder names: a repository whose own name contains `--` stays a project. The apps group the session list by project:
+worker `<repo>.workers/<name>` of the project at `source`. The daemon decides it the way it does for the sandbox (the
+worker's `agent.source` git config, accepted only for the `<repo>.workers/<name>` layout next to `<repo>`), so clients
+never parse folder names: a repository whose own name ends in `.workers` stays a project. The apps group the session list by project:
 projects ordered by their most urgent session, the project's own checkout first, then its workers by name. Cards share
 one alignment and spacing, with `origin` or the worker slug at top left and status at top right; there are no separate
 worker headers. Selection changes only the card border to cyan, without the native Mac row highlight.

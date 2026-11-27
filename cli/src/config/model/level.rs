@@ -143,8 +143,8 @@ mod tests {
     #[test]
     fn a_worker_reads_piton_from_its_source() {
         let workspace = Workspace {
-            path: "/Users/a/p/repo--w".into(),
-            checkout: "/Users/a/p/repo--w".into(),
+            path: "/Users/a/p/repo.workers/w".into(),
+            checkout: "/Users/a/p/repo.workers/w".into(),
             relation: Relation::Worker {
                 source: "/Users/a/p/repo".into(),
                 name: "w".into(),
@@ -154,10 +154,10 @@ mod tests {
         assert_eq!(chain.piton.last().unwrap().dir, PathBuf::from("/Users/a/p/repo/.piton"));
         assert_eq!(
             chain.agents.last().unwrap().dir,
-            PathBuf::from("/Users/a/p/repo--w/.agents")
+            PathBuf::from("/Users/a/p/repo.workers/w/.agents")
         );
         assert_eq!(chain.source, PathBuf::from("/Users/a/p/repo"));
-        assert_eq!(chain.checkout, PathBuf::from("/Users/a/p/repo--w"));
+        assert_eq!(chain.checkout, PathBuf::from("/Users/a/p/repo.workers/w"));
     }
 
     #[test]

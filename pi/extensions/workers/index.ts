@@ -51,7 +51,7 @@ export function registerWorkerTools(pi: ExtensionAPI, session: SessionChannel): 
         label: "create worker",
         description: `Create a worker: a copy-on-write clone of this project's source checkout, next to it, where another session can work in isolation. ${ASKS}`,
         parameters: Type.Object({
-            name: Type.String({ description: "The worker's name; its folder is <repo>--<name>, normalized" }),
+            name: Type.String({ description: "The worker's name; its folder is <repo>.workers/<name>, normalized" }),
             label: Type.Optional(Type.String({ description: "The name shown for it; defaults to `name`" })),
             item_id: Type.Optional(
                 Type.String({ description: "The stable ID of the work item (issue, pull request) it's for" }),

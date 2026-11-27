@@ -795,7 +795,7 @@ describe("workflow project configuration", () => {
 
     it("requires a worker's project-local folder to link to its source's", () => {
         const root = fs.realpathSync(repository())
-        const worker = `${root}--w`
+        const worker = path.join(`${root}.workers`, "w")
         const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-local-elsewhere-"))
         try {
             writeConfig(root, config())
@@ -803,6 +803,7 @@ describe("workflow project configuration", () => {
             git(root, ["add", ".gitignore", ".piton/config.toml"])
             git(root, ["commit", "-m", "config"])
             prepareArtifactPersistence(root)
+            fs.mkdirSync(path.dirname(worker))
             git(path.dirname(root), ["clone", "-q", root, worker])
             git(worker, ["config", "--local", "agent.source", root])
             clearSettingsCache()
@@ -829,15 +830,16 @@ describe("workflow project configuration", () => {
             assert.equal(prepareArtifactPersistence(worker).state, "ready")
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
-            fs.rmSync(worker, { recursive: true, force: true })
+            fs.rmSync(path.dirname(worker), { recursive: true, force: true })
             fs.rmSync(elsewhere, { recursive: true, force: true })
         }
     })
 
     it("refuses project setup in a worker clone, whose files piton never reads", async () => {
         const root = repository()
-        const worker = `${root}--w`
+        const worker = path.join(`${root}.workers`, "w")
         try {
+            fs.mkdirSync(path.dirname(worker))
             git(path.dirname(root), ["clone", "-q", root, worker])
             git(worker, ["config", "--local", "agent.source", root])
             const refusal = /run it in .*workflow-project-config-/
@@ -859,7 +861,7 @@ describe("workflow project configuration", () => {
             assert.equal(fs.existsSync(path.join(worker, ".piton")), false)
         } finally {
             fs.rmSync(root, { recursive: true, force: true })
-            fs.rmSync(worker, { recursive: true, force: true })
+            fs.rmSync(path.dirname(worker), { recursive: true, force: true })
         }
     })
 

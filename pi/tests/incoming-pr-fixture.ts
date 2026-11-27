@@ -224,9 +224,10 @@ export function fixture(options: FixtureOptions = {}) {
         evidence.response.merged = true
         evidence.response.merged_at = "2026-10-21T12:00:00Z"
     }
-    /** A worker of `root`: a clone at its own path sharing `.piton/.local`, as `piton worker create` lays it out. */
+    /** A worker of `root`: a clone in `<root>.workers/` sharing `.piton/.local`, as `piton worker create` lays it out. */
     const worker = (name: string) => {
-        const dir = `${root}--${name}`
+        const dir = path.join(`${root}.workers`, name)
+        fs.mkdirSync(path.dirname(dir), { recursive: true })
         git(temp, "clone", "--quiet", "git@github.com:upstream/app.git", dir)
         fs.cpSync(path.join(root, ".piton"), path.join(dir, ".piton"), {
             recursive: true,

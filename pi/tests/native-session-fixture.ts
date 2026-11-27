@@ -194,6 +194,8 @@ export async function nativeSessionFixture(options: {
     let session = await open()
     return {
         root,
+        /** The fixture's folder: `root` itself, or the folder `workspace` is relative to. */
+        fixture,
         manager,
         settingsManager,
         requests,

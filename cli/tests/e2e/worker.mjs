@@ -190,7 +190,7 @@ const tests = {
         assert.equal(created.code, 0, created.err);
         assert.equal(created.json.type, "worker");
         const worker = created.json.worker.path;
-        assert.equal(worker, join(ctx.dir, "repo--fix-x"));
+        assert.equal(worker, join(ctx.dir, "repo.workers", "fix-x"));
         assert.equal(created.json.worker.item_id, "KID-5");
         assert.ok(lstatSync(join(worker, ".piton/.local")).isSymbolicLink());
         assert.ok(!existsSync(join(worker, "apps/.build/index-build")), "skip list honored");
@@ -303,7 +303,7 @@ const tests = {
         assert.equal(refused.json.refusal.target, target);
         assert.deepEqual(refused.json.refusal.files, [".piton/config.toml"]);
         assert.equal(head(), before, "the source is unchanged");
-        assert.ok(!existsSync(join(ctx.dir, "repo--two")));
+        assert.ok(!existsSync(join(ctx.dir, "repo.workers", "two")));
         const human = await cli(ctx, ["worker", "create", "two"]);
         assert.match(human.err, new RegExp(`--approve-source-update ${target}`));
         assert.match(human.err, /runs in the sandbox/);
@@ -362,7 +362,7 @@ const tests = {
         assert.notEqual(second.id, first.id);
         await c.answer(key, second, "Deny");
         assert.equal((await waiting).type, "not_done");
-        assert.ok(!existsSync(join(ctx.dir, "repo--one")));
+        assert.ok(!existsSync(join(ctx.dir, "repo.workers", "one")));
         const once = ask({ type: "worker_create", name: "one", item_id: "github:7" });
         const dialog = await c.dialog();
         assert.match(dialog.title, /create a worker/);
@@ -378,9 +378,9 @@ const tests = {
         await c.answer(key, await c.dialog(), "Allow for this session");
         c.abandon.destroy();
         await abandoned;
-        for (let i = 0; i < 100 && !existsSync(join(ctx.dir, "repo--two", ".git")); i++) await sleep(100);
+        for (let i = 0; i < 100 && !existsSync(join(ctx.dir, "repo.workers", "two", ".git")); i++) await sleep(100);
         await sleep(500);
-        assert.ok(existsSync(join(ctx.dir, "repo--two")), "created after the call left");
+        assert.ok(existsSync(join(ctx.dir, "repo.workers", "two")), "created after the call left");
         // For this session: no more questions for creating.
         const third = await ask({ type: "worker_create", name: "three" });
         assert.equal(third.type, "worker_created");
@@ -391,23 +391,23 @@ const tests = {
         assert.equal(outside.refusal.kind, "not_a_worker");
 
         // Leftovers: "Delete anyway" after the delete question.
-        writeFileSync(join(ctx.dir, "repo--three", "wip"), "x");
-        const deleting = ask({ type: "worker_delete", path: join(ctx.dir, "repo--three") });
+        writeFileSync(join(ctx.dir, "repo.workers", "three", "wip"), "x");
+        const deleting = ask({ type: "worker_delete", path: join(ctx.dir, "repo.workers", "three") });
         await c.answer(key, await c.dialog(), "Allow once");
         const leftovers = await c.dialog();
         assert.match(leftovers.title, /isn't pushed/);
         await c.answer(key, leftovers, "Delete anyway (this work is lost)");
         assert.equal((await deleting).type, "worker_deleted");
-        assert.ok(!existsSync(join(ctx.dir, "repo--three")));
+        assert.ok(!existsSync(join(ctx.dir, "repo.workers", "three")));
 
         // A setting decides first: deny refuses, allow runs without asking.
         writeFileSync(join(ctx.source, ".git/info/exclude"), "/.piton/*.local.*\n");
         writeFileSync(join(ctx.source, ".piton/config.local.toml"), '[workers.permissions]\ndelete_by_agent = "deny"\n');
-        const off = await ask({ type: "worker_delete", path: join(ctx.dir, "repo--two") });
+        const off = await ask({ type: "worker_delete", path: join(ctx.dir, "repo.workers", "two") });
         assert.equal(off.type, "not_done");
         assert.match(off.reason, /delete_by_agent/);
         writeFileSync(join(ctx.source, ".piton/config.local.toml"), '[workers.permissions]\ndelete_by_agent = "allow"\n');
-        assert.equal((await ask({ type: "worker_delete", path: join(ctx.dir, "repo--two") })).type, "worker_deleted");
+        assert.equal((await ask({ type: "worker_delete", path: join(ctx.dir, "repo.workers", "two") })).type, "worker_deleted");
         c.close();
     },
 

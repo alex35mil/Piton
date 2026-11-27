@@ -252,15 +252,15 @@ private let decoder = JSONDecoder()
     }
     let groups = Store.group([
         try session(1, "/p/app", .source, .idle),
-        try session(2, "/p/app--fix", .worker(source: "/p/app", name: "fix"), .idle),
-        try session(3, "/p/app--add", .worker(source: "/p/app", name: "add"), .idle),
-        // A project whose own name contains the separator is still a project, not a worker of `site`.
-        try session(4, "/p/site--v2", .source, .needsInput),
+        try session(2, "/p/app.workers/fix", .worker(source: "/p/app", name: "fix"), .idle),
+        try session(3, "/p/app.workers/add", .worker(source: "/p/app", name: "add"), .idle),
+        // A project named like a workers folder is still a project, not a worker of `site`: the daemon decides.
+        try session(4, "/p/site.workers", .source, .needsInput),
         try session(5, "/p/app", .source, .working),
     ])
-    #expect(groups.map(\.name) == ["site--v2", "app"], "the project with a session needing input first")
+    #expect(groups.map(\.name) == ["site.workers", "app"], "the project with a session needing input first")
     let app = groups[1]
-    #expect(app.checkouts.map(\.workspace) == ["/p/app", "/p/app--add", "/p/app--fix"])
+    #expect(app.checkouts.map(\.workspace) == ["/p/app", "/p/app.workers/add", "/p/app.workers/fix"])
     #expect(app.checkouts[0].sessions.map(\.key) == [5, 1], "working before idle")
     #expect(app.sessionCount == 4)
 }

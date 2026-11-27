@@ -15,21 +15,10 @@ local cli = require("piton.cli")
 
 local M = {}
 
---- Whether `worker` is laid out as a worker of `source`: `<parent>/<repo>--<name>` next to `<parent>/<repo>`. The
---- daemon accepts an `agent.source` claim only with this layout (`project::is_worker_layout`); the editor follows it,
---- so a stray config value doesn't make a checkout an agent here when piton wouldn't treat it as one.
----@param worker string
----@param source string
----@return boolean
-function M.is_worker_layout(worker, source)
-    local prefix = vim.fs.basename(source) .. "--"
-    local name = vim.fs.basename(worker)
-    return vim.fs.dirname(worker) == vim.fs.dirname(source)
-        and #name > #prefix
-        and name:sub(1, #prefix) == prefix
-end
-
---- The agent containing `path`, or nil when it isn't inside one.
+--- The agent containing `path`, or nil when it isn't inside one. piton decides
+--- (`piton worker info`), from the checkout's Git config and folder layout, so
+--- the editor never checks the layout itself and a stray `agent.source` value
+--- isn't an agent here when piton wouldn't treat it as one.
 ---@param path string
 ---@return Agent?
 function M.get(path)
@@ -37,18 +26,13 @@ function M.get(path)
     if not root then
         return nil
     end
-    local source = util.git(root, { "config", "--local", "--get", "agent.source" })
-    if source.code ~= 0 or not M.is_worker_layout(root, vim.trim(source.stdout)) then
+    local result = cli.info(root)
+    if result.kind == "worker" then
+        return result.worker
+    elseif result.kind == "not_a_worker" then
         return nil
     end
-    local label = util.git(root, { "config", "--local", "--get", "agent.label" })
-    local item_id = util.git(root, { "config", "--local", "--get", "agent.itemId" })
-    return {
-        path = root,
-        source = vim.trim(source.stdout),
-        label = label.code == 0 and vim.trim(label.stdout) or vim.fs.basename(root),
-        item_id = item_id.code == 0 and vim.trim(item_id.stdout) or nil,
-    }
+    error("unknown info result: " .. vim.inspect(result))
 end
 
 --- The source's agents with their live sessions, from piton, sorted by path.

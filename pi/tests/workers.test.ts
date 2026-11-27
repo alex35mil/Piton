@@ -53,7 +53,7 @@ const run = async (tool: ToolDefinition | undefined, params: object) => {
     return { text: result.content.map((part) => ("text" in part ? part.text : "")).join("\n"), details: result.details }
 }
 
-const worker = { path: "/p/repo--fix", source: "/p/repo", label: "fix", item_id: "github:7" }
+const worker = { path: "/p/repo.workers/fix", source: "/p/repo", label: "fix", item_id: "github:7" }
 
 describe("workers extension", () => {
     it("sends each operation as its own request with pi's token, and reports the typed outcome", async () => {
@@ -72,10 +72,10 @@ describe("workers extension", () => {
         try {
             const tools = register(daemon.socket)
             const created = await run(tools.get("create_worker"), { name: "fix", item_id: "github:7" })
-            assert.match(created.text, /repo--fix/)
+            assert.match(created.text, /repo\.workers\/fix/)
             assert.deepEqual(created.details, { kind: "done", value: worker })
             assert.match((await run(tools.get("list_workers"), {})).text, /item=github:7/)
-            assert.match((await run(tools.get("delete_worker"), { path: "/p/repo--fix" })).text, /1 session/)
+            assert.match((await run(tools.get("delete_worker"), { path: "/p/repo.workers/fix" })).text, /1 session/)
             assert.deepEqual(
                 daemon.requests.map((r) => [r.type, r.token]),
                 [

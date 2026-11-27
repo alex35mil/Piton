@@ -342,7 +342,7 @@ pub enum WhyAccess {
 
 #[derive(Subcommands)]
 enum WorkerAction {
-    /// Clone SOURCE into `<parent>/<repo>--<name>`.
+    /// Clone SOURCE into `<parent>/<repo>.workers/<name>`.
     Create {
         name: String,
         /// The source checkout or any of its workers (default: current directory).
@@ -362,6 +362,12 @@ enum WorkerAction {
         /// The source checkout or any of its workers (default: current directory).
         #[usage(long)]
         source: Option<PathBuf>,
+    },
+    /// The worker containing PATH (the worker itself or a folder inside it), or a `not_a_worker` refusal. Read here,
+    /// without the daemon.
+    Info {
+        /// Default: current directory.
+        path: Option<PathBuf>,
     },
     /// Stop the worker's sessions and delete it.
     Delete {
