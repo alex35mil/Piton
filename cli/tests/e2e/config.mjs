@@ -41,8 +41,6 @@ export function testEnv(extra = {}) {
     const env = { ...process.env, ...extra };
     delete env.PITON_AGENT_SOCKET;
     delete env.PITON_AGENT_TOKEN;
-    // Variables an installed daemon that predates facts gives its sessions: not this test's.
-    for (const name of ["PITON_RUNTIME", "PITON_TRUST", "PITON_PROTECTED", "PITON_CONFIG_HOME"]) delete env[name];
     return env;
 }
 
