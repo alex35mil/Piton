@@ -1216,7 +1216,7 @@ Changes are gated where they're written:
    other cases, and the rest of the policy).
 2. **Writes through the daemon.** `write`, `edit`, and project setup write protected files through one operation in
    the pi package. In every session the daemon launched, sandboxed or on the host, it sends the path and contents
-   as a `protected_write` request ("The channel to the daemon"); the daemon checks the path, shows the confirmation with the diff in the apps
+   as a `write` request ("The channel to the daemon"); the daemon checks the path, shows the confirmation with the diff in the apps
    and in pi.nvim (as an extension dialog it inserts), and writes only on approval. The agent can request but never
    approve: answers come only from clients. A request waits its turn in the session's questions ("Questions" under
    "The channel to the daemon"); it ends when the agent stops waiting, its run ends, or `approval_timeout` passes.
@@ -1232,6 +1232,18 @@ Changes are gated where they're written:
    sandbox.
    Only a pi running outside Piton (no channel) has the permissions extension ask itself and write directly,
    whatever `defaultMode` or auto-accept says.
+3. **Deletes and renames through the daemon.** The permissions extension's `delete_protected_file {path}` and
+   `rename_protected_file {from, to}` send `delete` and `rename` requests; they're registered only in a session the
+   daemon launched, and no permission rule or session mode applies to them, so the daemon's question is the only one.
+   They act only on protected files: the daemon refuses any other path (bash changes those). A delete removes one
+   file or symlink (the link, not its target), never a folder, then the folders it leaves empty. A rename needs both
+   ends protected and a destination that doesn't exist: it never replaces, creates the destination's missing folders,
+   and removes the source's emptied ones. With only one end protected it's refused with the way out that works: into
+   protection, write the destination and remove the source with bash; out of it, copy with bash and delete the source
+   with `delete_protected_file`. Each walks its paths without following symlinks, as a write does. The dialog is a
+   `select` that says what happens (`delete (protected): <path> (<what it controls>)` and the file's size or the
+   link's target; `rename (protected): <from> → <to> (…)`, with the destination's label first, since it's what the
+   file will control). When a sandboxed `rm` or `mv` is denied on a protected file, the hint names the tool for it.
 
 A rejected change never reaches disk. Limits: shell writes in host sessions aren't gated (as in Claude Code without
 its sandbox); the rule is macOS-only. Codex and Claude Code don't need step 2 because they sandbox each shell command and run their
@@ -1291,7 +1303,8 @@ adds `reason`: `unknown_token`, `wrong_process`, or `not_yet`; `not_allowed` add
 | Request | Callers | Asks the user | Narrowest answer |
 | --- | --- | --- | --- |
 | `facts` | pi, a process pi started, a bash call | no | — |
-| `protected_write` | pi | yes (diff) | once |
+| `write` | pi | yes (diff) | once |
+| `delete`, `rename` | pi | yes (what it does) | once |
 | `run_command` | pi | for a rerun | once |
 | `launched` | launch helper | no | — |
 | `lift` | pi | unless a session approval covers it | once |
@@ -1339,7 +1352,7 @@ one it doesn't offer can't be built.
 - **Deny.**
 
 **Questions** (`session/questions.rs`, #416). Every question a session asks the user is one value of one sum type:
-a protected write, a block question (the agent's rerun or Piton's own), a process question, a network question, a
+a protected write, delete, or rename, a block question (the agent's rerun or Piton's own), a process question, a network question, a
 worker question, or a lift. The session holds one showing and the rest in one queue, in arrival order across kinds,
 with one path to show, answer, show again, settle, and expire; nothing is refused because another question is open.
 
@@ -1368,7 +1381,7 @@ and by block reports; the daemon checks it again before granting anything.
 | --- | --- | --- |
 | The control socket | A sandbox that reached it could approve its own requests and start host sessions | None; the daemon's operations go through the channel |
 | The state folder, for writing | It holds trust decisions and the agent socket | None; reads go through fact requests |
-| Configuration levels, pi's agent directory, protected files, fnox's files, and the folders on their way | They decide what later sessions may do | An approved write (diff) through the channel |
+| Configuration levels, pi's agent directory, protected files, fnox's files, and the folders on their way | They decide what later sessions may do | An approved write (diff), delete, or rename through the channel |
 | A socket an entry allows, and the folders on its way | Moved aside, another socket could take its place | None |
 | The user's own `"deny"`, `"read"`, and `false` switches | The user's explicit choice | None; the user edits the entry |
 | Credentials while fnox is on | The sandbox could run `fnox get` | A host run the user approves |

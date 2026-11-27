@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import type { TSchema } from "typebox"
 
-import { channel, protectedWrite, type ProtectedOutcome, type SessionChannel } from "../__lib/agent.js"
+import { channel, requestWrite, type ProtectedOutcome, type SessionChannel } from "../__lib/agent.js"
 import { isProtected } from "../__lib/protected.js"
 import { EditorChoiceValidator, fileReviewResult, isFileReviewDetails, type FileReviewDetails } from "./review.js"
 
@@ -98,7 +98,7 @@ async function writeThroughDaemon(
     signal: AbortSignal | undefined,
     abortTurn: () => void,
 ): Promise<void> {
-    const outcome: ProtectedOutcome = await protectedWrite(session, file, content, signal)
+    const outcome: ProtectedOutcome = await requestWrite(session, file, content, signal)
     switch (outcome.outcome) {
         case "approved": {
             if (!outcome.modified && outcome.notes.length === 0) return

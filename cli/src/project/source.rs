@@ -20,7 +20,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::{FileMode, ProtectedRoots, remove_file, write_file};
+use crate::agent::{FileMode, ProtectedRoots, Removable, Removed, remove_entry, write_file};
 
 /// A full commit SHA, validated where it enters (a request, Git's output).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,7 +334,10 @@ fn set_entries(checkout: &Path, root: &Path, entries: &[Entry]) -> Result<(), St
                 host_read(checkout, &["update-index", "--add", "--cacheinfo", &cacheinfo])?;
             }
             Entry::Missing { path } => {
-                remove_file(root, &root.join(path)).map_err(|e| format!("{path}: {e}"))?;
+                // A symlink there refuses, as for a write: Git's blobs say what's written, and a link is changed by hand.
+                match remove_entry(root, &root.join(path), Removable::File).map_err(|e| format!("{path}: {e}"))? {
+                    Removed::Removed | Removed::Missing => {}
+                }
                 host_read(checkout, &["update-index", "--force-remove", "--", path])?;
             }
         }

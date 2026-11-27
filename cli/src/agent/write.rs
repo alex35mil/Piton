@@ -1,7 +1,8 @@
-//! A protected write an agent asks for: the daemon asks the user (a dialog in every client), then writes the file
-//! itself. The agent can ask (over `agent.sock`, see `socket.rs`) but never answer: answers come only from clients.
+//! A change to a protected file an agent asks for: a write, a delete, or a rename. The daemon asks the user (a dialog in
+//! every client), then makes the change itself. The agent can ask (over `agent.sock`, see `socket.rs`) but never
+//! answer: answers come only from clients.
 //!
-//! The dialog is pi's file review format, so pi.nvim opens its diff view and the apps their review sheet: a `select`
+//! A delete or rename shows a plain `select` that says what it does. A write's dialog is pi's file review format, so pi.nvim opens its diff view and the apps their review sheet: a `select`
 //! whose title is `{"prompt", "toolName", "toolInput"}` with `toolName` `write` and `toolInput {path, content}`, plus
 //! `current` (the file's content now, null for a new file) so a client that can't read the file shows a diff. pi.nvim
 //! answers `"Reject"` or a JSON `{"result": "Accepted" | "AcceptModified" | "Rejected", "content"?, "notes"?}`; on
@@ -17,13 +18,51 @@ use serde_json::{Value, json};
 use super::answer::{Never, Once};
 use crate::{daemon::Daemon, session::SessionCmd};
 
-/// A request from the agent.
+/// A write from the agent.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WriteRequest {
     /// Absolute path (the agent's view of it; resolved and checked by the daemon).
     pub path: PathBuf,
     /// The whole new content.
     pub content: String,
+}
+
+/// A delete from the agent: one file or symlink (the link, not its target).
+#[derive(Debug, Clone)]
+pub struct DeleteRequest {
+    pub path: PathBuf,
+}
+
+/// A rename from the agent: a file or symlink to a path that doesn't exist yet. Both ends must be protected.
+#[derive(Debug, Clone)]
+pub struct RenameRequest {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+/// A change to a protected file, as the session gets it: the request and where its outcome goes.
+#[derive(Debug)]
+pub enum ProtectedAsk {
+    Write {
+        request: WriteRequest,
+        reply: tokio::sync::oneshot::Sender<WriteOutcome>,
+    },
+    Delete {
+        request: DeleteRequest,
+        reply: tokio::sync::oneshot::Sender<ChangeOutcome>,
+    },
+    Rename {
+        request: RenameRequest,
+        reply: tokio::sync::oneshot::Sender<ChangeOutcome>,
+    },
+}
+
+/// A change to a protected file, as the channel authorized it.
+#[derive(Debug)]
+pub enum ProtectedRequest {
+    Write(WriteRequest),
+    Delete(DeleteRequest),
+    Rename(RenameRequest),
 }
 
 /// The outcome the agent gets back.
@@ -45,34 +84,70 @@ pub enum WriteOutcome {
     },
 }
 
-/// What `protected_write` answers: the write's outcome, or that the session ended before the user answered.
+/// What a delete or rename came to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ChangeOutcome {
+    /// The user approved, and it's done.
+    Done,
+    /// The user denied it.
+    Denied,
+    /// Not done, with why and what works instead: not protected, missing, a folder, the target exists, a failure.
+    Refused { reason: String },
+}
+
+/// What `write`, `delete`, and `rename` answer: the outcome, or that the session ended before the user answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum WriteResponse {
-    ProtectedWrite(WriteOutcome),
+pub enum ProtectedResponse {
+    Write(WriteOutcome),
+    Delete(ChangeOutcome),
+    Rename(ChangeOutcome),
     /// The session ended before the user answered.
     Ended,
 }
 
-/// Asks `session` to write: the user answers in a client, as long as it takes. The agent's tool call holds the
+/// Asks `session` for the change: the user answers in a client, as long as it takes. The agent's tool call holds the
 /// connection meanwhile; when it closes, the caller drops this future, and the session closes the dialog.
-pub async fn protected_write(
+pub async fn serve(
     daemon: &Daemon,
     session: crate::session::SessionKey,
-    request: WriteRequest,
-) -> WriteResponse {
+    request: ProtectedRequest,
+) -> ProtectedResponse {
     let Some(handle) = daemon.session(session) else {
-        return WriteResponse::Ended;
+        return ProtectedResponse::Ended;
     };
-    let (reply, outcome) = tokio::sync::oneshot::channel();
-    if handle.tx.send(SessionCmd::ProtectedWrite { request, reply }).is_err() {
-        return WriteResponse::Ended;
-    }
     // Wakes the session when the agent stops waiting, so it closes the dialog at once.
     let _wake = super::socket::WakeOnDrop(handle.tx.clone());
-    match outcome.await {
-        Ok(outcome) => WriteResponse::ProtectedWrite(outcome),
-        Err(_) => WriteResponse::Ended,
+    match request {
+        ProtectedRequest::Write(request) => {
+            let (reply, outcome) = tokio::sync::oneshot::channel();
+            let ask = ProtectedAsk::Write { request, reply };
+            if handle.tx.send(SessionCmd::Protected(ask)).is_err() {
+                return ProtectedResponse::Ended;
+            }
+            outcome.await.map_or(ProtectedResponse::Ended, ProtectedResponse::Write)
+        }
+        ProtectedRequest::Delete(request) => {
+            let (reply, outcome) = tokio::sync::oneshot::channel();
+            let ask = ProtectedAsk::Delete { request, reply };
+            if handle.tx.send(SessionCmd::Protected(ask)).is_err() {
+                return ProtectedResponse::Ended;
+            }
+            outcome
+                .await
+                .map_or(ProtectedResponse::Ended, ProtectedResponse::Delete)
+        }
+        ProtectedRequest::Rename(request) => {
+            let (reply, outcome) = tokio::sync::oneshot::channel();
+            let ask = ProtectedAsk::Rename { request, reply };
+            if handle.tx.send(SessionCmd::Protected(ask)).is_err() {
+                return ProtectedResponse::Ended;
+            }
+            outcome
+                .await
+                .map_or(ProtectedResponse::Ended, ProtectedResponse::Rename)
+        }
     }
 }
 
@@ -142,6 +217,186 @@ pub fn write_dialog(id: &str, path: &Path, controls: super::Controls, current: O
     })
 }
 
+/// A protected entry a delete or rename acts on, checked before the user is asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checked {
+    /// The folder the change walks from without following symlinks.
+    pub root: PathBuf,
+    /// The entry as the file system names it: its folder resolved, its own name kept (a symlink stays the link).
+    pub path: PathBuf,
+    pub controls: super::Controls,
+}
+
+/// `path` with its folder resolved ([`super::canonical_target`]) and its last name kept, so a symlink names itself.
+fn canonical_entry(path: &Path) -> Option<PathBuf> {
+    let clean = super::lexical(path);
+    let name = clean.file_name()?.to_os_string();
+    Some(super::canonical_target(clean.parent()?).join(name))
+}
+
+fn checked(protected: &super::Protected, path: &Path) -> Option<Checked> {
+    let path = canonical_entry(path)?;
+    let file = protected.check(&path)?;
+    Some(Checked {
+        root: file.root,
+        path,
+        controls: file.controls,
+    })
+}
+
+/// What a delete removes: a protected file or symlink that exists. Refusals say what works instead.
+pub fn check_delete(protected: &super::Protected, requested: &Path) -> Result<Checked, String> {
+    let Some(entry) = checked(protected, requested) else {
+        return Err(format!(
+            "{} isn't a protected file of this session; delete it with bash",
+            requested.display()
+        ));
+    };
+    match std::fs::symlink_metadata(&entry.path) {
+        Ok(meta) if meta.file_type().is_file() || meta.file_type().is_symlink() => Ok(entry),
+        Ok(_) => Err(format!(
+            "{} is a folder; delete_protected_file removes one file or symlink at a time",
+            requested.display()
+        )),
+        Err(_) => Err(format!("{} doesn't exist", requested.display())),
+    }
+}
+
+/// What a rename moves, and where: both ends protected, the source a file or symlink that exists, the destination
+/// missing. With one end unprotected, the refusal names the way out that works.
+pub fn check_rename(protected: &super::Protected, from: &Path, to: &Path) -> Result<(Checked, Checked), String> {
+    let (source, target) = match (checked(protected, from), checked(protected, to)) {
+        (Some(source), Some(target)) => (source, target),
+        (None, None) => {
+            return Err(format!(
+                "neither {} nor {} is a protected file of this session; rename it with bash",
+                from.display(),
+                to.display()
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(format!(
+                "only {} is protected: write it with the write tool, then remove {} with bash",
+                to.display(),
+                from.display()
+            ));
+        }
+        (Some(_), None) => {
+            return Err(format!(
+                "only {} is protected: copy it to {} with bash, then delete it with delete_protected_file",
+                from.display(),
+                to.display()
+            ));
+        }
+    };
+    match std::fs::symlink_metadata(&source.path) {
+        Ok(meta) if meta.file_type().is_file() || meta.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(format!(
+                "{} is a folder; rename_protected_file moves one file or symlink at a time",
+                from.display()
+            ));
+        }
+        Err(_) => return Err(format!("{} doesn't exist", from.display())),
+    }
+    if std::fs::symlink_metadata(&target.path).is_ok() {
+        return Err(format!("{} already exists; a rename never replaces it", to.display()));
+    }
+    Ok((source, target))
+}
+
+/// What the user decided about a delete or rename: once, or deny. Like a write, it changes what later sessions may do,
+/// so nothing broader is offered.
+pub type ChangeAnswer = super::answer::Answer<Once<()>, Never, Never, ()>;
+
+const CHOOSE_BELOW: &str = super::block::CHOOSE_BELOW;
+const DELETE: &str = "Delete";
+const RENAME: &str = "Rename";
+const DENY: &str = "Deny";
+
+/// A client's answer to a delete or rename dialog: `None` asks again (the first option); a dismissal or an unknown value
+/// denies.
+pub fn read_change_answer(answer: &serde_json::Map<String, Value>) -> Option<ChangeAnswer> {
+    match answer.get("value").and_then(Value::as_str) {
+        Some(CHOOSE_BELOW) => None,
+        Some(DELETE | RENAME) => Some(ChangeAnswer::Narrowest(Once(()))),
+        Some(_) | None => Some(ChangeAnswer::Deny(())),
+    }
+}
+
+/// What a delete removes, for its dialog: a file of some size, or a symlink to somewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    File { bytes: u64 },
+    Link { target: PathBuf },
+}
+
+impl Entry {
+    /// The entry at `path`, not following a symlink there; `None` when it's missing or anything else (a folder).
+    pub fn at(path: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        let kind = meta.file_type();
+        if kind.is_symlink() {
+            return Some(Entry::Link {
+                target: std::fs::read_link(path).ok()?,
+            });
+        }
+        kind.is_file().then_some(Entry::File { bytes: meta.len() })
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Entry::File { bytes: 1 } => "a file of 1 byte".into(),
+            Entry::File { bytes } => format!("a file of {bytes} bytes"),
+            Entry::Link { target } => format!("a symlink to {}", target.display()),
+        }
+    }
+}
+
+fn prompt(operation: &str, what: String, labels: &[Option<&'static str>]) -> String {
+    let mut labels: Vec<&str> = labels.iter().flatten().copied().collect();
+    labels.dedup();
+    match labels.as_slice() {
+        [] => format!("{operation} (protected): {what}"),
+        labels => format!("{operation} (protected): {what} ({})", labels.join("; ")),
+    }
+}
+
+/// A delete's dialog: `delete (protected): <path> (<what it controls>)`, then what the entry is.
+pub fn delete_dialog(id: &str, path: &Path, controls: super::Controls, entry: Option<&Entry>) -> Value {
+    let mut title = prompt("delete", path.display().to_string(), &[controls.label()]);
+    if let Some(entry) = entry {
+        title.push('\n');
+        title.push_str(&entry.describe());
+    }
+    json!({
+        "type": "extension_ui_request",
+        "id": id,
+        "method": "select",
+        "title": title,
+        "options": [CHOOSE_BELOW, DELETE, DENY],
+    })
+}
+
+/// A rename's dialog: `rename (protected): <from> → <to> (<what it controls>)`. The destination's label comes first,
+/// since it says what the file will control; the source's follows when it differs.
+pub fn rename_dialog(
+    id: &str,
+    from: &Path,
+    from_controls: super::Controls,
+    to: &Path,
+    to_controls: super::Controls,
+) -> Value {
+    let what = format!("{} → {}", from.display(), to.display());
+    json!({
+        "type": "extension_ui_request",
+        "id": id,
+        "method": "select",
+        "title": prompt("rename", what, &[to_controls.label(), from_controls.label()]),
+        "options": [CHOOSE_BELOW, RENAME, DENY],
+    })
+}
+
 /// The permissions an approved write gives its file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileMode {
@@ -206,25 +461,54 @@ pub fn write_file(root: &Path, path: &Path, content: &[u8], mode: FileMode) -> s
     written
 }
 
-/// Removes the regular file at `path` (canonical, as approved), then each folder it leaves empty, up to `root`,
-/// without following any symlink. A file already missing is fine.
-pub fn remove_file(root: &Path, path: &Path) -> std::io::Result<()> {
+/// What [`remove_entry`] may remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removable {
+    /// Only a regular file: a symlink there refuses (a source update, which writes only what Git's blobs say).
+    File,
+    /// A regular file or a symlink, the link itself (an approved delete).
+    FileOrLink,
+}
+
+/// Whether [`remove_entry`] removed something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removed {
+    Removed,
+    /// Nothing was there.
+    Missing,
+}
+
+/// Removes the entry at `path` (canonical, as approved) that `accept` allows, then each folder it leaves empty, up to
+/// `root`, without following any symlink. A folder refuses.
+pub fn remove_entry(root: &Path, path: &Path, accept: Removable) -> std::io::Result<Removed> {
     use nix::unistd::{UnlinkatFlags, unlinkat};
 
     let Some((name, dirs)) = walk(root, path, Walk::Existing)? else {
-        return Ok(());
+        return Ok(Removed::Missing);
     };
     let dir = dirs.last().expect("the walk starts at the root");
-    if regular_file(dir, &name, path)?.is_none() {
-        return Ok(());
+    let present = match accept {
+        Removable::File => regular_file(dir, &name, path)?.is_some(),
+        Removable::FileOrLink => file_or_link(dir, &name, path)?,
+    };
+    if !present {
+        return Ok(Removed::Missing);
     }
     unlinkat(dir.as_fd(), name.as_os_str(), UnlinkatFlags::NoRemoveDir)?;
-    // Folders left empty, innermost first; the first one that isn't empty stops it.
+    remove_emptied(root, path, &dirs)?;
+    Ok(Removed::Removed)
+}
+
+/// Removes the folders on the way from `root` to `path` that are left empty, innermost first; the first one that isn't
+/// empty stops it. `dirs` are the walk's folders.
+fn remove_emptied(root: &Path, path: &Path, dirs: &[OwnedFd]) -> std::io::Result<()> {
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
     let relative = path
         .strip_prefix(root)
         .map_err(|_| refused("outside the root".into()))?;
     let folders: Vec<&std::ffi::OsStr> = relative.parent().into_iter().flat_map(Path::iter).collect();
-    for (folder, parent) in folders.iter().zip(&dirs).rev() {
+    for (folder, parent) in folders.iter().zip(dirs).rev() {
         match unlinkat(parent.as_fd(), *folder, UnlinkatFlags::RemoveDir) {
             Ok(()) => {}
             Err(nix::errno::Errno::ENOTEMPTY | nix::errno::Errno::EEXIST) => break,
@@ -232,6 +516,93 @@ pub fn remove_file(root: &Path, path: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Renames the file or symlink at `from` (canonical, below `from_root`) to `to` (below `to_root`), which must not exist,
+/// without following any symlink on either path. The destination's missing folders are created, as for a write; the
+/// source's folders left empty are removed.
+pub fn rename_entry(from_root: &Path, from: &Path, to_root: &Path, to: &Path) -> std::io::Result<()> {
+    let (from_name, from_dirs) = walk(from_root, from, Walk::Existing)?
+        .ok_or_else(|| refused(format!("{} no longer exists", from.display())))?;
+    let from_dir = from_dirs.last().expect("the walk starts at the root");
+    if !file_or_link(from_dir, &from_name, from)? {
+        return Err(refused(format!("{} no longer exists", from.display())));
+    }
+    let (to_name, to_dirs) = walk(to_root, to, Walk::Create)?.ok_or_else(|| refused("a folder vanished".into()))?;
+    let to_dir = to_dirs.last().expect("the walk starts at the root");
+    match rename_exclusive(from_dir, &from_name, to_dir, &to_name) {
+        Ok(()) => {}
+        Err(RenameFailed::Exists) => {
+            return Err(refused(format!("{} already exists; it isn't replaced", to.display())));
+        }
+        Err(RenameFailed::OtherVolume) => {
+            return Err(refused(format!(
+                "{} and {} are on different volumes; write the new file and delete the old one instead",
+                from.display(),
+                to.display()
+            )));
+        }
+        Err(RenameFailed::Os(e)) => return Err(e.into()),
+    }
+    remove_emptied(from_root, from, &from_dirs)
+}
+
+/// Why an exclusive rename failed.
+enum RenameFailed {
+    /// The destination exists.
+    Exists,
+    /// The two folders are on different volumes.
+    OtherVolume,
+    Os(nix::errno::Errno),
+}
+
+/// `renameat` that never replaces an existing entry.
+#[allow(unsafe_code)]
+fn rename_exclusive(
+    from_dir: &OwnedFd,
+    from: &std::ffi::OsStr,
+    to_dir: &OwnedFd,
+    to: &std::ffi::OsStr,
+) -> Result<(), RenameFailed> {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    let c = |name: &std::ffi::OsStr| {
+        std::ffi::CString::new(name.as_bytes()).map_err(|_| RenameFailed::Os(nix::errno::Errno::EINVAL))
+    };
+    let (from, to) = (c(from)?, c(to)?);
+    // SAFETY: both descriptors are open folders, and both names are NUL-terminated strings that outlive the call, which
+    // only reads them.
+    #[cfg(target_os = "macos")]
+    let rc = unsafe {
+        libc::renameatx_np(
+            from_dir.as_raw_fd(),
+            from.as_ptr(),
+            to_dir.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    // SAFETY: as above.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::renameat2(
+            from_dir.as_raw_fd(),
+            from.as_ptr(),
+            to_dir.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    let errno = nix::errno::Errno::last();
+    Err(if errno == nix::errno::Errno::EEXIST {
+        RenameFailed::Exists
+    } else if errno == nix::errno::Errno::EXDEV {
+        RenameFailed::OtherVolume
+    } else {
+        RenameFailed::Os(errno)
+    })
 }
 
 use std::os::fd::{AsFd, OwnedFd};
@@ -298,6 +669,20 @@ fn walk(root: &Path, path: &Path, mode: Walk) -> std::io::Result<Option<(std::ff
         dirs.push(next);
     }
     Ok(Some((name.to_os_string(), dirs)))
+}
+
+/// Whether a regular file or a symlink is there (`false` when nothing is); anything else (a folder) refuses.
+fn file_or_link(dir: &OwnedFd, name: &std::ffi::OsStr, path: &Path) -> std::io::Result<bool> {
+    use nix::{fcntl::AtFlags, sys::stat::fstatat};
+    match fstatat(dir.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) if matches!(stat.st_mode & libc::S_IFMT, libc::S_IFREG | libc::S_IFLNK) => Ok(true),
+        Ok(_) => Err(refused(format!(
+            "{} isn't a file or a symlink (a folder?); change it by hand",
+            path.display()
+        ))),
+        Err(nix::errno::Errno::ENOENT) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// An existing regular file's permissions, or `None` when it's missing; anything else (a symlink, a folder) refuses.
@@ -414,11 +799,14 @@ mod tests {
         assert_eq!(std::fs::metadata(&hook).unwrap().permissions().mode() & 0o777, 0o644);
         std::fs::write(root.join(".pi/keep"), "k").unwrap();
 
-        remove_file(&root, &hook).unwrap();
+        assert_eq!(remove_entry(&root, &hook, Removable::File).unwrap(), Removed::Removed);
         assert!(!root.join(".pi/bin").exists(), "the emptied folder goes");
         assert!(root.join(".pi/keep").exists(), "a folder with other files stays");
-        remove_file(&root, &hook).unwrap();
-        remove_file(&root, &root.join("missing/x")).unwrap();
+        assert_eq!(remove_entry(&root, &hook, Removable::File).unwrap(), Removed::Missing);
+        assert_eq!(
+            remove_entry(&root, &root.join("missing/x"), Removable::File).unwrap(),
+            Removed::Missing
+        );
 
         // Through a symlinked folder: refused, nothing removed there.
         let elsewhere = root.join("../elsewhere");
@@ -426,8 +814,190 @@ mod tests {
         let elsewhere = std::fs::canonicalize(elsewhere).unwrap();
         std::fs::write(elsewhere.join("x"), "theirs").unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join("link")).unwrap();
-        assert!(remove_file(&root, &root.join("link/x")).is_err());
+        assert!(remove_entry(&root, &root.join("link/x"), Removable::FileOrLink).is_err());
         assert!(elsewhere.join("x").exists());
+
+        // A symlink at the path: a source update refuses it, as before; an approved delete removes the link alone.
+        std::fs::write(elsewhere.join("target"), "t").unwrap();
+        let link = root.join(".pi/linked");
+        std::os::unix::fs::symlink(elsewhere.join("target"), &link).unwrap();
+        assert!(remove_entry(&root, &link, Removable::File).is_err());
+        assert_eq!(
+            remove_entry(&root, &link, Removable::FileOrLink).unwrap(),
+            Removed::Removed
+        );
+        assert!(link.symlink_metadata().is_err(), "the link is gone");
+        assert!(elsewhere.join("target").exists(), "its target stays");
+        // A folder refuses.
+        std::fs::create_dir_all(root.join(".pi/dir/inner")).unwrap();
+        assert!(remove_entry(&root, &root.join(".pi/dir/inner"), Removable::FileOrLink).is_err());
+    }
+
+    /// A rename never replaces, creates the destination's folders, removes the source's emptied ones, and follows no
+    /// symlink on either side.
+    #[test]
+    fn renames_without_replacing_or_following_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let root = base.join("repo");
+        let other = base.join("level");
+        std::fs::create_dir_all(root.join(".pi/notes")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(root.join(".pi/notes/a.ts"), "a").unwrap();
+
+        // Into a missing folder: created; the emptied source folder goes.
+        let to = root.join(".pi/extensions/a/index.ts");
+        rename_entry(&root, &root.join(".pi/notes/a.ts"), &root, &to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "a");
+        assert!(!root.join(".pi/notes").exists());
+
+        // Across roots (a level outside the checkout).
+        let moved = other.join("rules/a.ts");
+        rename_entry(&root, &to, &other, &moved).unwrap();
+        assert!(moved.exists() && !to.exists());
+
+        // An existing target isn't replaced.
+        std::fs::write(other.join("b.ts"), "b").unwrap();
+        let refused = rename_entry(&other, &moved, &other, &other.join("b.ts")).unwrap_err();
+        assert!(refused.to_string().contains("already exists"), "{refused}");
+        assert_eq!(std::fs::read_to_string(other.join("b.ts")).unwrap(), "b");
+        assert!(moved.exists());
+
+        // A symlink: the link moves, not its target.
+        std::os::unix::fs::symlink(&moved, other.join("link")).unwrap();
+        rename_entry(&other, &other.join("link"), &other, &other.join("link2")).unwrap();
+        assert!(other.join("link2").symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(moved.exists());
+
+        // A symlinked folder on the destination's path: refused, nothing written through it.
+        let elsewhere = base.join("home");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        // The cross-root move emptied `.pi`, which went with it.
+        std::fs::create_dir_all(root.join(".pi")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join(".pi/out")).unwrap();
+        assert!(rename_entry(&other, &moved, &root, &root.join(".pi/out/a.ts")).is_err());
+        assert!(!elsewhere.join("a.ts").exists());
+        assert!(moved.exists());
+        // Nor on the source's.
+        std::fs::write(elsewhere.join("theirs"), "t").unwrap();
+        assert!(rename_entry(&root, &root.join(".pi/out/theirs"), &root, &root.join(".pi/mine")).is_err());
+        assert!(elsewhere.join("theirs").exists());
+    }
+
+    /// The checks before a delete or rename is asked: protected entries only, each refusal naming what works instead.
+    #[test]
+    fn checks_deletes_and_renames_before_asking() {
+        use super::super::{Protected, ProtectedFacts};
+        let dir = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(dir.path()).unwrap().join("repo");
+        std::fs::create_dir_all(repo.join(".pi/extensions/x")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join(".pi/settings.json"), "{}").unwrap();
+        std::fs::write(repo.join(".pi/old.json"), "{}").unwrap();
+        std::fs::write(repo.join("src/a.ts"), "a").unwrap();
+        std::os::unix::fs::symlink(repo.join("src/a.ts"), repo.join(".pi/link")).unwrap();
+        let protected = Protected::new(&ProtectedFacts {
+            source: &repo,
+            checkout: &repo,
+            levels: &[],
+            agent_dirs: &[],
+            fnox_files: &[],
+            global: &repo.join("global"),
+            home: &repo.join("home"),
+            excluded: &[],
+        });
+        let delete = |p: &str| check_delete(&protected, &repo.join(p));
+        assert_eq!(
+            delete(".pi/settings.json").unwrap().path,
+            repo.join(".pi/settings.json")
+        );
+        assert_eq!(
+            delete(".pi/link").unwrap().path,
+            repo.join(".pi/link"),
+            "the link, not its target"
+        );
+        assert!(delete("src/a.ts").unwrap_err().contains("with bash"));
+        assert!(delete(".pi/extensions/x").unwrap_err().contains("is a folder"));
+        assert!(delete(".pi/missing").unwrap_err().contains("doesn't exist"));
+
+        let rename = |from: &str, to: &str| check_rename(&protected, &repo.join(from), &repo.join(to));
+        let (from, to) = rename(".pi/old.json", ".pi/extensions/new.json").unwrap();
+        assert_eq!(
+            (from.path, to.path),
+            (repo.join(".pi/old.json"), repo.join(".pi/extensions/new.json"))
+        );
+        assert!(
+            rename(".pi/old.json", ".pi/settings.json")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert!(rename(".pi/missing", ".pi/new").unwrap_err().contains("doesn't exist"));
+        assert!(rename(".pi/extensions/x", ".pi/y").unwrap_err().contains("is a folder"));
+        assert!(
+            rename("src/a.ts", "src/b.ts")
+                .unwrap_err()
+                .contains("rename it with bash")
+        );
+        let into = rename("src/a.ts", ".pi/a.ts").unwrap_err();
+        assert!(into.contains("write tool") && into.contains("with bash"), "{into}");
+        let out = rename(".pi/old.json", "src/old.json").unwrap_err();
+        assert!(
+            out.contains("copy it") && out.contains("delete_protected_file"),
+            "{out}"
+        );
+    }
+
+    /// Delete and rename dialogs say what happens and what the file controls, the destination's first.
+    #[test]
+    fn delete_and_rename_dialogs() {
+        use super::super::Controls;
+        let d = delete_dialog(
+            "piton:delete:1",
+            Path::new("/w/.pi/settings.json"),
+            Controls::Code,
+            Some(&Entry::File { bytes: 12 }),
+        );
+        assert_eq!(d["method"], "select");
+        assert_eq!(
+            d["title"],
+            "delete (protected): /w/.pi/settings.json (runs code in every session)\na file of 12 bytes"
+        );
+        assert_eq!(d["options"], json!([CHOOSE_BELOW, "Delete", "Deny"]));
+        let title = |from, to| {
+            rename_dialog("piton:rename:2", Path::new("/w/.pi/a"), from, Path::new("/w/.pi/b"), to)["title"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            title(Controls::Other, Controls::Code),
+            "rename (protected): /w/.pi/a → /w/.pi/b (runs code in every session)"
+        );
+        assert_eq!(
+            title(Controls::Code, Controls::Other),
+            "rename (protected): /w/.pi/a → /w/.pi/b (runs code in every session)",
+            "the source's label when only it has one"
+        );
+        assert_eq!(
+            title(Controls::Secrets, Controls::Code),
+            "rename (protected): /w/.pi/a → /w/.pi/b (runs code in every session; decides where secrets go)"
+        );
+        assert_eq!(
+            title(Controls::Other, Controls::Other),
+            "rename (protected): /w/.pi/a → /w/.pi/b"
+        );
+        let answer = |v: Value| read_change_answer(v.as_object().unwrap());
+        assert_eq!(answer(json!({"value": CHOOSE_BELOW})), None);
+        assert_eq!(
+            answer(json!({"value": "Delete"})),
+            Some(ChangeAnswer::Narrowest(Once(())))
+        );
+        assert_eq!(
+            answer(json!({"value": "Rename"})),
+            Some(ChangeAnswer::Narrowest(Once(())))
+        );
+        assert_eq!(answer(json!({"value": "Deny"})), Some(ChangeAnswer::Deny(())));
+        assert_eq!(answer(json!({"cancelled": true})), Some(ChangeAnswer::Deny(())));
     }
 
     #[test]

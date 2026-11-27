@@ -175,13 +175,13 @@ export type ProtectedOutcome =
     | { outcome: "rejected"; notes: unknown[] }
     | { outcome: "refused"; reason: string }
 
-type WriteLine = ({ type: "protected_write" } & ProtectedOutcome) | { type: "ended" }
+type WriteLine = ({ type: "write" } & ProtectedOutcome) | { type: "ended" }
 
 /**
  * Asks the daemon to write `content` to `file` (absolute): it asks the user in every client and writes on approval.
  * Waits as long as the user takes; `signal` stops waiting (the dialog closes).
  */
-export function protectedWrite(
+export function requestWrite(
     session: SessionChannel,
     file: string,
     content: string,
@@ -189,10 +189,10 @@ export function protectedWrite(
 ): Promise<ProtectedOutcome> {
     return send<WriteLine, ProtectedOutcome>(
         session,
-        { type: "protected_write", path: path.resolve(file), content },
+        { type: "write", path: path.resolve(file), content },
         (line) => {
             switch (line.type) {
-                case "protected_write": {
+                case "write": {
                     const { type: _, ...outcome } = line
                     return { done: outcome as ProtectedOutcome }
                 }
@@ -202,6 +202,54 @@ export function protectedWrite(
         },
         signal,
     )
+}
+
+/** What the daemon did with a protected delete or rename. */
+export type ChangeOutcome = { outcome: "done" } | { outcome: "denied" } | { outcome: "refused"; reason: string }
+
+function change(
+    session: SessionChannel,
+    request: { type: "delete" | "rename" } & Record<string, unknown>,
+    signal?: AbortSignal,
+): Promise<ChangeOutcome> {
+    type Line = ({ type: "delete" | "rename" } & ChangeOutcome) | { type: "ended" }
+    return send<Line, ChangeOutcome>(
+        session,
+        request,
+        (line) => {
+            switch (line.type) {
+                case "delete":
+                case "rename": {
+                    const { type: _, ...outcome } = line
+                    return { done: outcome as ChangeOutcome }
+                }
+                case "ended":
+                    throw new Error("the session ended before the user answered")
+            }
+        },
+        signal,
+    )
+}
+
+/**
+ * Asks the daemon to delete the protected file or symlink `file` (the link itself): it asks the user in every client
+ * and deletes on approval, with the folders the delete leaves empty.
+ */
+export function requestDelete(session: SessionChannel, file: string, signal?: AbortSignal): Promise<ChangeOutcome> {
+    return change(session, { type: "delete", path: path.resolve(file) }, signal)
+}
+
+/**
+ * Asks the daemon to rename the protected file or symlink `from` to `to`, also protected, which must not exist: it asks
+ * the user in every client and renames on approval.
+ */
+export function requestRename(
+    session: SessionChannel,
+    from: string,
+    to: string,
+    signal?: AbortSignal,
+): Promise<ChangeOutcome> {
+    return change(session, { type: "rename", from: path.resolve(from), to: path.resolve(to) }, signal)
 }
 
 /**

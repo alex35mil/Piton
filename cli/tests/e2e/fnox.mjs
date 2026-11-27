@@ -189,8 +189,8 @@ const tests = {
         assert.deepEqual(args.slice(0, 2), ["--no-sandbox", "--"]);
         // pi is fnox's child, not the process the daemon started: the helper reported pi's process before becoming pi,
         // so pi's token works from pi (a request reaches its handler) and the launch token is spent.
-        const answer = await agentLine(env.relay, env.token, { type: "protected_write", path: join(ctx.ws, "x"), content: "" });
-        assert.equal(answer.type, "protected_write", JSON.stringify(answer));
+        const answer = await agentLine(env.relay, env.token, { type: "write", path: join(ctx.ws, "x"), content: "" });
+        assert.equal(answer.type, "write", JSON.stringify(answer));
         assert.equal(answer.outcome, "refused", "not a protected file");
         assert.ok(!c.items(session.key).some((i) => i.type === "notice"), "no warning when every secret resolves");
         c.close();
