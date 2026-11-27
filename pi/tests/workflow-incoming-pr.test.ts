@@ -398,8 +398,9 @@ describe("incoming PR identity and context", () => {
 
     it("refuses incoming-PR evidence in a worker without a linked local root", () => {
         const f = fixture()
-        const worker = `${f.root}--w`
+        const worker = path.join(`${f.root}.workers`, "w")
         try {
+            fs.mkdirSync(path.dirname(worker))
             cp.execFileSync("git", ["clone", "-q", f.root, worker])
             cp.execFileSync("git", ["config", "--local", "agent.source", f.root], { cwd: worker })
             const local = path.join(worker, ".piton", ".local")
@@ -409,7 +410,7 @@ describe("incoming PR identity and context", () => {
             fs.symlinkSync(path.join(f.root, ".piton", ".local"), local)
             assert.doesNotThrow(() => incomingPullRequestContext(worker, "#12", mcpTools))
         } finally {
-            fs.rmSync(worker, { recursive: true, force: true })
+            fs.rmSync(path.dirname(worker), { recursive: true, force: true })
             f.close()
         }
     })

@@ -714,7 +714,7 @@ mod tests {
             r#"{"token":"t","request":{"type":"lifts"}}"#,
             r#"{"token":"t","request":{"type":"worker_create","name":"x","item_id":"github:1"}}"#,
             r#"{"token":"t","request":{"type":"worker_list"}}"#,
-            r#"{"token":"t","request":{"type":"worker_delete","path":"/p/r--x"}}"#,
+            r#"{"token":"t","request":{"type":"worker_delete","path":"/p/r.workers/x"}}"#,
         ];
         let allowed = |line: &str, caller| {
             let request = serde_json::from_str::<Envelope>(line).unwrap().request;

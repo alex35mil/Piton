@@ -185,7 +185,7 @@ export function repositoryRoot(cwd: string): string {
 
 /**
  * What the workspace's checkout is, as piton's resolver decides it (`agent.source` in the local Git config plus the
- * `<repo>--<name>` layout): an original source checkout, or a disposable worker cloned from `source`. Independent of
+ * `<repo>.workers/<name>` layout): an original source checkout, or a disposable worker cloned from `source`. Independent of
  * the runtime: a source checkout may run sandboxed, and a worker may run on the host.
  */
 export type CheckoutRelation =

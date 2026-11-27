@@ -340,7 +340,8 @@ describe("workflow-source queue context", () => {
         prepareArtifactPersistence(f.source)
         prepareWorkflowProject(f.consumer)
         prepareArtifactPersistence(f.consumer)
-        const worker = `${f.consumer}--w`
+        const worker = path.join(`${f.consumer}.workers`, "w")
+        fs.mkdirSync(path.dirname(worker))
         cp.execFileSync("git", ["clone", "-q", f.consumer, worker])
         cp.execFileSync("git", ["config", "--local", "agent.source", f.consumer], { cwd: worker })
         // Piton reads .piton/ from the source; the worker's clone has only the link.

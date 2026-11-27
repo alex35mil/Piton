@@ -1,5 +1,6 @@
--- Creating an agent next to its source, as `<parent>/<repo>--<name>`. piton
--- creates the checkout (`piton worker create`); this plans it and opens its tab.
+-- Creating an agent next to its source, in `<parent>/<repo>.workers/<name>`.
+-- piton creates the checkout (`piton worker create`) and returns its path; this
+-- plans it and opens its tab.
 
 ---@alias AgentRequest
 ---| { kind: "named", name: string } A plain agent with a typed name.
@@ -20,7 +21,7 @@ M.PROTECTED_UPDATE_NOTE =
     "Piton writes these files from the upstream commit; the rest of the update and your Git hooks run in the sandbox."
 
 ---@class AgentPlan
----@field name string Directory suffix; piton normalizes it.
+---@field name string The worker's name; piton normalizes it into its folder name.
 ---@field label string
 ---@field item_id string?
 ---@field draft string? Kickoff command pre-filled in the Pi prompt.
@@ -100,11 +101,13 @@ function M.refusal_message(refusal)
         or kind == "source_fetch"
         or kind == "protected_files_update"
         or kind == "update_denied"
+        or kind == "bad_workers_dir"
     then
         return "Can't create an agent: " .. cli.describe(refusal)
     elseif
         kind == "invalid_name"
         or kind == "exists"
+        or kind == "integration_unavailable"
         or kind == "not_a_repository"
         or kind == "not_a_worker"
         or kind == "leftovers"

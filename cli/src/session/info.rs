@@ -25,13 +25,14 @@ pub struct SessionInfo {
 }
 
 /// A session's workspace relative to its project (see crate::project): decided from the worker's git config and folder
-/// layout, so a repository whose own name contains `--` isn't mistaken for a worker.
+/// layout, so clients never parse folder names: a repository named like a workers folder (`app.workers`) stays a
+/// project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Checkout {
     /// The project's own checkout: the workspace is the project.
     Source,
-    /// A worker `<repo>--<name>` of the project at `source`.
+    /// A worker `<repo>.workers/<name>` of the project at `source`.
     Worker { source: PathBuf, name: String },
 }
 

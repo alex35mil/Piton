@@ -791,7 +791,7 @@ test("a protected source update asks before creating, and retries with the appro
     replace(cli, "create", function(request)
         updates[#updates + 1] = request.update and request.update.target or "ask"
         if not request.update then return { kind = "refused", refusal = PROTECTED } end
-        return { kind = "created", worker = { path = source .. "--x", source = source, label = "x" } }
+        return { kind = "created", worker = { path = source .. ".workers/x", source = source, label = "x" } }
     end)
 
     local asked = answers({ false })
@@ -804,7 +804,7 @@ test("a protected source update asks before creating, and retries with the appro
     answers({ true })
     create.create({ kind = "named", name = "x" })
     equal({ "ask", PROTECTED.target }, updates)
-    equal({ source .. "--x" }, opened)
+    equal({ source .. ".workers/x" }, opened)
 end)
 
 test("cli passes the answers and describes the new refusals", function()
@@ -846,19 +846,41 @@ test("unsaved buffers require confirmation before any daemon deletion", function
     vim.api.nvim_buf_delete(buf, { force = true })
 end)
 
-test("an agent.source claim counts only with the worker layout", function()
-    local function git(results)
-        replace(util, "git_root", function(path) return path end)
-        replace(util, "git", function(_, args)
-            local value = results[args[#args]]
-            return value and { code = 0, stdout = value .. "\n" } or { code = 1, stdout = "" }
-        end)
-    end
-    git({ ["agent.source"] = "/p/repo", ["agent.label"] = "Fix" })
-    equal({ path = "/p/repo--fix", source = "/p/repo", label = "Fix" }, lookup.get("/p/repo--fix"))
-    equal(nil, lookup.get("/q/repo--fix"))
-    equal(nil, lookup.get("/p/elsewhere"))
-    equal(nil, lookup.get("/p/repo--"))
+test("piton decides whether a checkout is an agent", function()
+    replace(util, "git_root", function(path) return path ~= "/loose" and path or nil end)
+    local asked = {}
+    replace(util, "exec", function(cmd)
+        local path = cmd[4]
+        asked[#asked + 1] = table.concat(cmd, " ")
+        if path == "/p/repo.workers/fix" then
+            local worker = { path = path, source = "/p/repo", label = "Fix", item_id = "github:7" }
+            return { code = 0, stdout = vim.json.encode({ type = "worker", worker = worker }) }
+        end
+        local refusal = { kind = "not_a_worker", path = path }
+        return { code = 4, stdout = vim.json.encode({ type = "worker_refused", refusal = refusal }) }
+    end)
+    equal(
+        { path = "/p/repo.workers/fix", source = "/p/repo", label = "Fix", item_id = "github:7" },
+        lookup.get("/p/repo.workers/fix")
+    )
+    -- piton refuses a claim without the layout as `not_a_worker`: no agent, no error.
+    equal(nil, lookup.get("/p/repo--fix"))
+    equal(nil, lookup.get("/p/repo"))
+    -- Outside any checkout nothing is asked.
+    equal(nil, lookup.get("/loose"))
+    equal({
+        "piton worker info /p/repo.workers/fix --json",
+        "piton worker info /p/repo--fix --json",
+        "piton worker info /p/repo --json",
+    }, asked)
+
+    -- Any other refusal is piton failing, not a plain checkout.
+    replace(util, "exec", function()
+        local refusal = { kind = "failed", message = "git is missing" }
+        return { code = 4, stdout = vim.json.encode({ type = "worker_refused", refusal = refusal }) }
+    end)
+    local ok, err = pcall(lookup.get, "/p/repo")
+    assert(not ok and type(err) == "table" and err.message:find("git is missing", 1, true), vim.inspect(err))
 end)
 
 test("get delegates lookup and notifications use vim.notify", function()

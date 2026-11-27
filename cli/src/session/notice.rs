@@ -339,7 +339,7 @@ mod tests {
         let push = blocked(
             "git",
             "file-write-create",
-            "/h/Projects/tooling/Piton--1-x/.git/config",
+            "/h/Projects/tooling/Piton.workers/1-x/.git/config",
             "x",
         );
         let text = notice(&push, &why, &context);

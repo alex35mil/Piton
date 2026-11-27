@@ -358,7 +358,7 @@ describe("workflow model-facing contracts", () => {
     })
 
     // "directory" is the source checkout itself, whose .piton/.local is a real directory in either runtime. "linked" is a
-    // worker (`<repo>--w` with agent.source) whose .piton/.local is a symlink to its source checkout's directory;
+    // worker (`<repo>.workers/w` with agent.source) whose .piton/.local is a symlink to its source checkout's directory;
     // "unlinked" is a worker without it, where setup must refuse.
     for (const layout of ["directory", "linked", "unlinked"] as const)
         it(`keeps discovery, setup, real initialization and Phase transitions working through reload and resume (${layout} local root)`, async () => {
@@ -370,7 +370,7 @@ describe("workflow model-facing contracts", () => {
                     ...workflowFactories,
                 ],
                 tools: ["+codemode"],
-                workspace: worker ? "app--w" : "app",
+                workspace: worker ? "app.workers/w" : "app",
                 setup(fixture, global) {
                     const root = path.join(fixture, "app")
                     fs.mkdirSync(root)
@@ -421,7 +421,8 @@ describe("workflow model-facing contracts", () => {
                     })
                     if (!worker) return
                     fs.mkdirSync(path.join(root, ".piton/.local"))
-                    const clone = path.join(fixture, "app--w")
+                    const clone = path.join(fixture, "app.workers", "w")
+                    fs.mkdirSync(path.dirname(clone))
                     git(fixture, "clone", "-q", root, clone)
                     git(clone, "config", "--local", "agent.source", root)
                     fs.mkdirSync(path.join(clone, ".piton"))
@@ -429,7 +430,7 @@ describe("workflow model-facing contracts", () => {
                         fs.symlinkSync(path.join(root, ".piton/.local"), path.join(clone, ".piton/.local"))
                 },
             })
-            const source = path.join(path.dirname(h.root), "app")
+            const source = path.join(h.fixture, "app")
             async function invoke(code: string) {
                 h.respond(call({ name: "codemode", arguments: { code } }), answer("Done."))
                 await h.prompt("Continue the workflow fixture.")

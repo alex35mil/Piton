@@ -605,7 +605,7 @@ mod tests {
         (
             Asked::Operation {
                 op: WorkerOp::Create,
-                lines: vec!["Worker: /p/r--x".into()],
+                lines: vec!["Worker: /p/r.workers/x".into()],
                 reply,
             },
             rx,
@@ -663,7 +663,7 @@ mod tests {
     fn follow_ups_offer_their_own_answers() {
         let (reply, mut rx) = oneshot::channel();
         let asked = Asked::Leftovers {
-            path: "/p/r--x".into(),
+            path: "/p/r.workers/x".into(),
             lines: vec!["Unpushed commits:".into()],
             reply,
         };

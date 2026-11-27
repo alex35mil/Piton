@@ -288,8 +288,8 @@ mod tests {
             }),
             global: global.to_path_buf(),
             workspace: FactWorkspace {
-                path: "/r--w".into(),
-                checkout: "/r--w".into(),
+                path: "/r.workers/w".into(),
+                checkout: "/r.workers/w".into(),
                 relation: FactRelation::Worker {
                     source: "/r".into(),
                     name: "w".into(),

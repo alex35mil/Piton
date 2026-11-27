@@ -24,11 +24,16 @@ tail -f ~/.local/state/piton/logs/daemon/current.log  # bounded daemon log
 Copy-on-write clones for agents; see "Workers" in [design.md](design.md).
 
 ```sh
-piton worker create "Fix login" --item-id KID-5   # from the current checkout: ../<repo>--fix-login
+piton worker create "Fix login" --item-id KID-5   # from the current checkout: ../<repo>.workers/fix-login
 piton worker create "Fix login" --source ~/p/app  # from another checkout (or any of its workers)
 piton worker ls [--source <checkout>]
-piton worker delete ../<repo>--fix-login [--force]
+piton worker info [<path>]                         # the worker containing a path; works without the daemon
+piton worker delete ../<repo>.workers/fix-login [--force]
 ```
+
+Each repository's workers live in one folder beside it, `<repo>.workers/`, created with the first worker and removed
+with the last. Workers stay inside the repository's parent folders, so mise, fnox, and `AGENTS.md` files there apply in
+workers as in the repository.
 
 `--item-id` records the stable ID of the work item (a tracker issue or Project, an incoming pull request) the worker is
 for, as `agent.itemId` in the worker's Git config.

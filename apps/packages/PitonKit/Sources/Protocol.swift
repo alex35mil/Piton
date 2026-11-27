@@ -57,7 +57,7 @@ public struct SessionInfo: Codable, Sendable, Hashable, Identifiable {
 }
 
 /// A session's workspace relative to its project. The daemon decides it from the worker's git config and folder layout
-/// (`<repo>--<name>` next to `<repo>`), so a repository whose own name contains `--` isn't mistaken for a worker.
+/// (`<repo>.workers/<name>` next to `<repo>`), so clients never parse folder names.
 public enum Checkout: Codable, Sendable, Hashable {
     case source
     case worker(source: String, name: String)

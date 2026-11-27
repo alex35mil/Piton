@@ -1129,7 +1129,7 @@ deny = ["bash(rm *)"]
     fn a_worker_reads_its_sources_settings() {
         let t = tree();
         let src = t.home.join("p/repo");
-        let worker = t.home.join("p/repo--w");
+        let worker = t.home.join("p/repo.workers/w");
         write(
             &src.join(".piton/config.toml"),
             "[tools.permissions]\ndeny = [\"bash(*)\"]\n",

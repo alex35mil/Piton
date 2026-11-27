@@ -17,7 +17,6 @@ local log = require("piton.notify")
 local lookup = require("piton.lookup")
 local create = require("piton.create")
 local queue = require("piton.queue")
-local cli = require("piton.cli")
 
 local M = {}
 
@@ -182,7 +181,8 @@ function M.pick()
                 ctx.preview:set_lines({
                     "Plain agent, no tracker item",
                     "",
-                    "Agent: " .. (cli.preview_folder(source, ctx.item.text) or "(type a name)"),
+                    "Agent: " .. (vim.trim(ctx.item.text) ~= "" and ctx.item.text or "(type a name)"),
+                    "Source: " .. source,
                 })
                 return
             end
@@ -193,7 +193,8 @@ function M.pick()
                 "Kind: " .. kind_text(queued),
                 "Status: " .. (position_text(queued) or "not on the board"),
                 "URL: " .. queued.url,
-                "Agent: " .. (cli.preview_folder(source, queue.agent_name(queued)) or "(no name)"),
+                "Agent: " .. (queue.agent_name(queued) ~= "" and queue.agent_name(queued) or "(no name)"),
+                "Source: " .. source,
                 "Prompt: " .. (queue.command(queued) or "(empty)"),
             })
         end,
