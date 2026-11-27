@@ -24,8 +24,8 @@ use crate::{agent, launch::sandbox::grant::LiveLift};
 
 /// A question for the user, of one of the kinds the session asks.
 pub enum Question {
-    /// A protected write the agent asked for (`agent.sock` `protected_write`).
-    ProtectedWrite(PendingWrite),
+    /// A change to a protected file the agent asked for (`agent.sock` `write`, `delete`, `rename`).
+    Protected(PendingChange),
     /// The block question for a bash call: the agent's rerun request, or Piton's own after the call failed on a block.
     Block(Box<commands::PendingQuestion>),
     /// A blocked process that isn't a bash call (an MCP server, an extension, pi).
@@ -36,6 +36,73 @@ pub enum Question {
     Worker(agent::workers::Asked),
     /// An explicit lift from code in pi's process.
     Lift(PendingLift),
+}
+
+/// A change to a protected file waiting for the user, one per kind, each with where its outcome goes.
+pub enum PendingChange {
+    Write(PendingWrite),
+    Delete(PendingDelete),
+    Rename(PendingRename),
+}
+
+/// A protected delete waiting for the user.
+pub struct PendingDelete {
+    /// The folder the delete walks from without following symlinks.
+    pub root: PathBuf,
+    /// The entry itself (a symlink, not its target).
+    pub path: PathBuf,
+    pub controls: agent::Controls,
+    pub reply: oneshot::Sender<agent::ChangeOutcome>,
+}
+
+/// A protected rename waiting for the user: both ends are protected, each with its own root.
+pub struct PendingRename {
+    pub from_root: PathBuf,
+    pub from: PathBuf,
+    pub from_controls: agent::Controls,
+    pub to_root: PathBuf,
+    pub to: PathBuf,
+    pub to_controls: agent::Controls,
+    pub reply: oneshot::Sender<agent::ChangeOutcome>,
+}
+
+impl PendingChange {
+    fn kind(&self) -> &'static str {
+        match self {
+            PendingChange::Write(_) => "write",
+            PendingChange::Delete(_) => "delete",
+            PendingChange::Rename(_) => "rename",
+        }
+    }
+
+    fn abandoned(&self) -> bool {
+        match self {
+            PendingChange::Write(write) => write.reply.is_closed(),
+            PendingChange::Delete(delete) => delete.reply.is_closed(),
+            PendingChange::Rename(rename) => rename.reply.is_closed(),
+        }
+    }
+
+    /// Tells the asker it ended unanswered, with `reason` given what didn't happen.
+    fn unanswered(self, reason: impl Fn(&str) -> String) {
+        match self {
+            PendingChange::Write(write) => {
+                let _ = write.reply.send(agent::WriteOutcome::Refused {
+                    reason: reason("it wasn't written"),
+                });
+            }
+            PendingChange::Delete(delete) => {
+                let _ = delete.reply.send(agent::ChangeOutcome::Refused {
+                    reason: reason("it wasn't deleted"),
+                });
+            }
+            PendingChange::Rename(rename) => {
+                let _ = rename.reply.send(agent::ChangeOutcome::Refused {
+                    reason: reason("it wasn't renamed"),
+                });
+            }
+        }
+    }
 }
 
 /// A protected write waiting for the user, and where the outcome goes.
@@ -80,7 +147,7 @@ impl Question {
     /// The kind's name, in dialog ids (`piton:<kind>:<n>`) and the daemon log.
     pub fn kind(&self) -> &'static str {
         match self {
-            Question::ProtectedWrite(_) => "write",
+            Question::Protected(change) => change.kind(),
             Question::Block(_) => "block",
             Question::Process(_) => "process",
             Question::Network(_) => "network",
@@ -91,7 +158,7 @@ impl Question {
 
     pub fn timeout(&self) -> Timeout {
         match self {
-            Question::ProtectedWrite(_)
+            Question::Protected(_)
             | Question::Block(_)
             | Question::Network(_)
             | Question::Worker(_)
@@ -112,7 +179,7 @@ impl Question {
     /// abandoned when none is left.
     pub fn abandoned(&mut self) -> bool {
         match self {
-            Question::ProtectedWrite(write) => write.reply.is_closed(),
+            Question::Protected(change) => change.abandoned(),
             Question::Block(block) => block.reply.is_closed(),
             Question::Process(_) => false,
             Question::Network(network) => network.prune(),
@@ -139,12 +206,10 @@ impl Question {
                 network.settle(&verdict);
                 None
             }
-            (Question::ProtectedWrite(write), why) => {
-                let _ = write.reply.send(agent::WriteOutcome::Refused {
-                    reason: match why {
-                        Unanswered::TimedOut => ran_out("it wasn't written"),
-                        Unanswered::RunEnded | Unanswered::AskerLeft => ran_out("ask again if it's still needed"),
-                    },
+            (Question::Protected(change), why) => {
+                change.unanswered(|undone| match why {
+                    Unanswered::TimedOut => ran_out(undone),
+                    Unanswered::RunEnded | Unanswered::AskerLeft => ran_out("ask again if it's still needed"),
                 });
                 None
             }
@@ -218,7 +283,7 @@ impl Questions {
                     .find_map(|q| match q {
                         Question::Network(same) if same.to == asked.to => Some(same),
                         Question::Network(_)
-                        | Question::ProtectedWrite(_)
+                        | Question::Protected(_)
                         | Question::Block(_)
                         | Question::Process(_)
                         | Question::Worker(_)
@@ -231,7 +296,7 @@ impl Questions {
                     None => Question::Network(asked),
                 }
             }
-            question @ (Question::ProtectedWrite(_)
+            question @ (Question::Protected(_)
             | Question::Block(_)
             | Question::Process(_)
             | Question::Worker(_)
@@ -253,7 +318,7 @@ impl Questions {
         let showing = self.showing.as_ref()?;
         match &showing.question {
             Question::Block(block) => Some((block, showing.dialog.as_str())),
-            Question::ProtectedWrite(_)
+            Question::Protected(_)
             | Question::Process(_)
             | Question::Network(_)
             | Question::Worker(_)
@@ -319,7 +384,7 @@ impl Questions {
         let showing = self.showing.take()?;
         match showing.question {
             Question::Block(block) => Some((block, showing.dialog)),
-            other @ (Question::ProtectedWrite(_)
+            other @ (Question::Protected(_)
             | Question::Process(_)
             | Question::Network(_)
             | Question::Worker(_)
@@ -384,7 +449,7 @@ mod tests {
     use super::*;
     use crate::{
         agent::{
-            RunDecision, RunRequest, WriteOutcome,
+            ChangeOutcome, RunDecision, RunRequest, WriteOutcome,
             block::{Live, NoLive},
             lift::LiftDecision,
             question::{Asker, Target},
@@ -409,13 +474,38 @@ mod tests {
 
     fn write() -> (Question, oneshot::Receiver<WriteOutcome>) {
         let (reply, outcome) = oneshot::channel();
-        let question = Question::ProtectedWrite(PendingWrite {
+        let question = Question::Protected(PendingChange::Write(PendingWrite {
             root: "/w".into(),
             path: "/w/.piton/config.toml".into(),
             controls: agent::Controls::Sandbox,
             content: String::new(),
             reply,
-        });
+        }));
+        (question, outcome)
+    }
+
+    fn delete() -> (Question, oneshot::Receiver<ChangeOutcome>) {
+        let (reply, outcome) = oneshot::channel();
+        let question = Question::Protected(PendingChange::Delete(PendingDelete {
+            root: "/w".into(),
+            path: "/w/.pi/settings.json".into(),
+            controls: agent::Controls::Code,
+            reply,
+        }));
+        (question, outcome)
+    }
+
+    fn rename() -> (Question, oneshot::Receiver<ChangeOutcome>) {
+        let (reply, outcome) = oneshot::channel();
+        let question = Question::Protected(PendingChange::Rename(PendingRename {
+            from_root: "/w".into(),
+            from: "/w/.pi/a".into(),
+            from_controls: agent::Controls::Other,
+            to_root: "/w".into(),
+            to: "/w/.pi/b".into(),
+            to_controls: agent::Controls::Other,
+            reply,
+        }));
         (question, outcome)
     }
 
@@ -494,7 +584,7 @@ mod tests {
     fn target(question: &Question) -> String {
         match question {
             Question::Process(p) => p.target.clone(),
-            Question::ProtectedWrite(_)
+            Question::Protected(_)
             | Question::Block(_)
             | Question::Network(_)
             | Question::Worker(_)
@@ -575,6 +665,22 @@ mod tests {
         let ended = questions.settle(|_| false).unwrap();
         assert_eq!(ended.why, Unanswered::RunEnded);
         assert!(matches!(outcome.await, Ok(WriteOutcome::Refused { reason }) if reason.contains("the run ended")));
+
+        // A delete and a rename are refused the same way, each named by its kind.
+        let mut changes = Questions::default();
+        let (d, deleted) = delete();
+        let (r, renamed) = rename();
+        changes.enqueue(d);
+        changes.enqueue(r);
+        assert_eq!(show(&mut changes, "dd", false), Some("delete"));
+        changes.settle(|_| false);
+        assert!(matches!(deleted.await, Ok(ChangeOutcome::Refused { reason }) if reason.contains("the run ended")));
+        assert_eq!(show(&mut changes, "dr", false), Some("rename"));
+        drop(renamed);
+        assert_eq!(
+            changes.settle(|_| true).map(|e| (e.kind, e.why)),
+            Some(("rename", Unanswered::AskerLeft))
+        );
 
         questions.enqueue(process("/b"));
         show(&mut questions, "d2", false);

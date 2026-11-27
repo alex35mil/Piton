@@ -1,7 +1,7 @@
 // End-to-end tests of the `view` protocol (native clients) against real pi with the faux extension.
 // Usage (in cli/): cargo build && node tests/e2e/view.mjs, or `mise run cli:test`.
 import { execFileSync, spawn } from "node:child_process";
-import { lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import net from "node:net";
@@ -160,14 +160,14 @@ const tests = {
         assert.equal(facts.workspace.path, realpathSync(ctx.ws));
         assert.deepEqual(facts.workspace.relation, { kind: "source" });
         assert.deepEqual(await agentRequest(childRelay, token, { type: "facts" }), facts);
-        const childWrite = await agentRequest(childRelay, token, { type: "protected_write", path: join(ctx.ws, ".piton/config.toml"), content: "{}" });
+        const childWrite = await agentRequest(childRelay, token, { type: "write", path: join(ctx.ws, ".piton/config.toml"), content: "{}" });
         assert.deepEqual([childWrite.type, childWrite.why, childWrite.caller], ["refused", "not_allowed", "pi_child"]);
         assert.equal((await agentRequest(socket, token, { type: "facts" })).reason, "wrong_process", "not pi's, nor started by it");
-        const write = (path, content, as = token) => agentRequest(relay, as, { type: "protected_write", path, content });
+        const write = (path, content, as = token) => agentRequest(relay, as, { type: "write", path, content });
 
         const target = join(ctx.ws, ".piton", "config.toml");
         // pi's token from another process (this test's): refused, whatever it asks.
-        const stolen = await agentRequest(socket, token, { type: "protected_write", path: target, content: "{}" });
+        const stolen = await agentRequest(socket, token, { type: "write", path: target, content: "{}" });
         assert.deepEqual([stolen.type, stolen.why, stolen.reason], ["refused", "token", "wrong_process"]);
         // A request only the launch helper may send: refused for pi.
         const launched = await agentRequest(relay, token, { type: "launched" });
@@ -175,7 +175,7 @@ const tests = {
         // Not this session's, or not protected, or not a request at all: refused without asking.
         const guessed = await write(target, "{}", "guess");
         assert.deepEqual([guessed.type, guessed.reason], ["refused", "unknown_token"]);
-        assert.equal((await agentRequest(relay, token, { type: "protected_write", path: target })).why, "invalid");
+        assert.equal((await agentRequest(relay, token, { type: "write", path: target })).why, "invalid");
         const plain = await write(join(ctx.ws, "src.rs"), "x");
         assert.equal(plain.outcome, "refused");
 
@@ -203,7 +203,7 @@ const tests = {
             answer: { value: JSON.stringify({ result: "AcceptModified", content: '{"allow":[]}\n', notes: [{ note: "n" }] }) },
         });
         const outcome = await pending;
-        assert.deepEqual(outcome, { type: "protected_write", outcome: "approved", modified: true, content: '{"allow":[]}\n', notes: [{ note: "n" }] });
+        assert.deepEqual(outcome, { type: "write", outcome: "approved", modified: true, content: '{"allow":[]}\n', notes: [{ note: "n" }] });
         assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
         const secondDialog = (await shown).change.state.dialogs[0];
         assert.match(secondDialog.id, /^piton:write:/);
@@ -245,7 +245,7 @@ const tests = {
         // The agent stops waiting (its tool call was aborted): the dialog closes, and the next request is asked again
         // instead of being refused as "another is waiting".
         const abandoned = net.connect(relay);
-        abandoned.write(JSON.stringify({ token, request: { type: "protected_write", path: target, content: "left" } }) + "\n");
+        abandoned.write(JSON.stringify({ token, request: { type: "write", path: target, content: "left" } }) + "\n");
         await c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
         const closing = c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 0);
         abandoned.destroy();
@@ -256,10 +256,44 @@ const tests = {
         assert.equal((await next).outcome, "rejected");
         assert.equal(readFileSync(target, "utf8"), '{"allow":[]}\n');
 
+        // Deletes and renames: asked like a write, with a dialog that says what happens; only protected files.
+        const change = (request) => agentRequest(relay, token, request);
+        const shownChange = () => c.waitNew((m) => m.type === "change" && m.change.op === "state" && m.change.state.dialogs.length === 1);
+        const answerChange = async (pending, value) => {
+            const dialog = (await shownChange()).change.state.dialogs[0];
+            await c.req("session.answer", { session: key, request_id: dialog.id, answer: { value } });
+            return [dialog, await pending];
+        };
+        const old = join(ctx.ws, ".pi", "old.json");
+        mkdirSync(join(ctx.ws, ".pi"), { recursive: true });
+        writeFileSync(old, "{}");
+        const [renameDialog, renamed] = await answerChange(
+            change({ type: "rename", from: old, to: join(ctx.ws, ".pi", "extensions", "new.json") }),
+            "Rename",
+        );
+        assert.match(renameDialog.id, /^piton:rename:/);
+        assert.match(renameDialog.title, /^rename \(protected\): .*old\.json → .*new\.json \(runs code in every session\)$/);
+        assert.deepEqual(renamed, { type: "rename", outcome: "done" });
+        const moved = join(ctx.ws, ".pi", "extensions", "new.json");
+        assert.ok(existsSync(moved) && !existsSync(old));
+        const [, kept] = await answerChange(change({ type: "delete", path: moved }), "Deny");
+        assert.deepEqual(kept, { type: "delete", outcome: "denied" });
+        assert.ok(existsSync(moved), "denied: nothing deleted");
+        const [deleteDialog, deleted] = await answerChange(change({ type: "delete", path: moved }), "Delete");
+        assert.match(deleteDialog.id, /^piton:delete:/);
+        assert.match(deleteDialog.title, /\na file of 2 bytes$/);
+        assert.deepEqual(deleted, { type: "delete", outcome: "done" });
+        assert.ok(!existsSync(moved) && !existsSync(join(ctx.ws, ".pi", "extensions")), "the emptied folder went too");
+        const plainDelete = await change({ type: "delete", path: join(ctx.ws, "src.rs") });
+        assert.equal(plainDelete.outcome, "refused");
+        assert.match(plainDelete.reason, /with bash/);
+        assert.equal((await agentRequest(childRelay, token, { type: "delete", path: target })).why, "not_allowed");
+        assert.equal(c.model(key).state.dialogs.length, 0, "refusals ask nothing");
+
         // The session ends: its token stops working.
         await c.req("session.stop", { session: key });
         await sleep(300);
-        const ended = await agentRequest(socket, token, { type: "protected_write", path: target, content: "{}" });
+        const ended = await agentRequest(socket, token, { type: "write", path: target, content: "{}" });
         assert.deepEqual([ended.type, ended.reason], ["refused", "unknown_token"]);
         c.close();
     },

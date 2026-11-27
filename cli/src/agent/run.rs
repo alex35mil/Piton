@@ -240,7 +240,7 @@ pub enum RanBy {
 /// ask the channel.
 const SESSION_ONLY: [&str; 2] = [super::TOKEN_ENV, super::SOCKET_ENV];
 
-/// What `run_command` answers, line by line: where it runs, its output, then how it ended.
+/// What `run` answers, line by line: where it runs, its output, then how it ended.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunLine {

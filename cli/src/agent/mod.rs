@@ -12,7 +12,8 @@
 //! - [`facts`]: the session's view (runtime, kept grants, protected files, global tier, workspace), asked over the
 //!   channel.
 //! - [`answer`]: the answers every approval-gated request shares.
-//! - [`write`]: a protected write an agent asks for: the user's dialog, and the daemon's write once approved.
+//! - [`write`]: a protected write, delete, or rename an agent asks for: the user's dialog, and the daemon's change once
+//!   approved.
 //! - [`lift`]: tokens that widen pi's live sandbox, and the addon pi consumes them with.
 //! - [`workers`]: worker operations an agent asks for: `[workers.permissions]`, the user's questions, and the operation.
 
@@ -44,7 +45,8 @@ pub use self::{
     run::{Approved, Failed, PiShell, Rerun, RunDecision, RunRequest, Runtime, Why, host_env},
     socket::{FILE, bind, random_hex, serve},
     write::{
-        FileMode, WriteAnswer, WriteApproval, WriteOutcome, WriteRequest, read_answer as read_write_answer,
-        remove_file, write_approved, write_dialog, write_file,
+        ChangeAnswer, ChangeOutcome, Entry, FileMode, ProtectedAsk, Removable, Removed, WriteAnswer, WriteApproval,
+        WriteOutcome, WriteRequest, check_delete, check_rename, delete_dialog, read_answer as read_write_answer,
+        read_change_answer, remove_entry, rename_dialog, rename_entry, write_approved, write_dialog, write_file,
     },
 };

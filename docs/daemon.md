@@ -122,8 +122,8 @@ roots = []                # where the apps may browse and start sessions; none u
 favorites = []
 default_attach_mode = "sandbox"   # mode for `piton attach` when none is given
 stop_empty_session_after = "10s"  # stop a pi with no messages this long after its last client leaves
-approval_timeout = "10m"  # an approval (a blocked command, a held connection, a protected write, a lift, a worker
-                          # operation) waits this long for your answer, counted from when it's shown; then the
+approval_timeout = "10m"  # an approval (a blocked command, a held connection, a protected write, delete, or
+                          # rename, a lift, a worker operation) waits this long for your answer, counted from when it's shown; then the
                           # action doesn't happen. "never" waits until it's answered, dismissed, or the run ends
 keep_awake = true         # hold the Mac awake while sessions are live; toggled from the apps
                           # (put it in config.host.local.toml to keep toggles out of a dotfiles diff)

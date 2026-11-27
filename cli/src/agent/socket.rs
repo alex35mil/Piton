@@ -102,11 +102,11 @@ async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
             };
             send(&mut write, &answer).await;
         }
-        Authorized::ProtectedWrite { session, request } => {
+        Authorized::Protected { session, request } => {
             // The agent's tool call holds the connection while the user decides; when it's aborted, the connection
             // closes and the wait ends, which the session sees (its reply channel closes) and settles.
             tokio::select! {
-                response = super::write::protected_write(&daemon, session, request) => {
+                response = super::write::serve(&daemon, session, request) => {
                     send(&mut write, &response).await;
                 }
                 _ = closed(&mut lines) => {}

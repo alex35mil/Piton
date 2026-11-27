@@ -67,6 +67,8 @@ Exact literal `true` and `false` Bash commands are built-in allow rules. Session
 
 The [workers](../workers/) extension's tools (`create_worker`, `list_workers`, `delete_worker`) are left to piton's daemon, which decides them from `[workers.permissions]` and asks the user itself: no rule or session mode here applies to them.
 
+The same goes for `delete_protected_file` and `rename_protected_file`, which this extension registers in a session piton's daemon launched: they delete or rename a protected file (`.piton/`, `.pi/`, fnox's files, Piton's configuration levels, pi's agent directory), which the sandbox denies to shell commands, and the daemon asks the user before it acts. Any other path is refused; bash changes those. When a sandboxed `rm` or `mv` is denied on a protected file, the bash result names the tool to use instead.
+
 **What a block does:**
 
 - A `deny` blocks only that call and returns the cause to the model without ending the turn, so the model can recover. The reason names the matched rule, plus the command node for Bash, or the session mode, `default_mode`, an unparseable command, or missing MCP metadata.

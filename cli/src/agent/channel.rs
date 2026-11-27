@@ -345,7 +345,14 @@ pub enum Request {
     /// unknown field is refused as for every other request.
     Facts {},
     /// Write a protected file, after the user approves the diff (`write.rs`).
-    ProtectedWrite { path: std::path::PathBuf, content: String },
+    Write { path: std::path::PathBuf, content: String },
+    /// Delete a protected file or symlink, after the user approves (`write.rs`).
+    Delete { path: std::path::PathBuf },
+    /// Rename a protected file or symlink to another protected path that doesn't exist, after the user approves.
+    Rename {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+    },
     /// Run a bash call, a `!` command, or a program from pi's process through the daemon (`run.rs`).
     Run {
         origin: super::run::Origin,
@@ -390,7 +397,9 @@ impl Request {
     pub fn kind(&self) -> &'static str {
         match self {
             Request::Facts {} => "facts",
-            Request::ProtectedWrite { .. } => "protected_write",
+            Request::Write { .. } => "write",
+            Request::Delete { .. } => "delete",
+            Request::Rename { .. } => "rename",
             Request::Run { .. } => "run",
             Request::Launched { .. } => "launched",
             Request::WorkerCreate { .. } => "worker_create",
@@ -405,8 +414,10 @@ impl Request {
     pub fn asks(&self) -> Asks {
         match self {
             Request::Facts {} => Asks::Never,
-            // A write changes what later sessions may do: once (the diff as shown or the user's version), or deny.
-            Request::ProtectedWrite { .. } => Asks::Always(super::write::WriteAnswer::OFFERED),
+            // A change to a protected file changes what later sessions may do: once (a write's diff as shown or the user's
+            // version), or deny.
+            Request::Write { .. } => Asks::Always(super::write::WriteAnswer::OFFERED),
+            Request::Delete { .. } | Request::Rename { .. } => Asks::Always(super::write::ChangeAnswer::OFFERED),
             // A plain call, a typed command, or a run in the session's own sandbox runs as the policy and saved entries
             // say; a rerun, or a widened or host run from pi's process, asks.
             Request::Run { .. } => Asks::When(super::question::Answer::OFFERED),
@@ -429,9 +440,9 @@ pub enum Authorized {
     Facts {
         session: SessionKey,
     },
-    ProtectedWrite {
+    Protected {
         session: SessionKey,
-        request: super::write::WriteRequest,
+        request: super::write::ProtectedRequest,
     },
     Run {
         session: SessionKey,
@@ -455,7 +466,7 @@ pub enum Authorized {
 }
 
 /// Which callers may send each request: everyone in the session but the launch helper reads facts; only pi's process
-/// writes protected files, runs bash calls, widens its own sandbox (only its process can consume a token), and asks for
+/// changes protected files, runs bash calls, widens its own sandbox (only its process can consume a token), and asks for
 /// worker operations; the launch helper reports pi's start.
 pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused> {
     let not_allowed = |request: &Request| Refused::NotAllowed {
@@ -467,9 +478,17 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
             Ok(Authorized::Facts { session })
         }
         (request @ Request::Facts {}, Caller::Launcher { .. }) => Err(not_allowed(&request)),
-        (Request::ProtectedWrite { path, content }, Caller::Pi { session }) => Ok(Authorized::ProtectedWrite {
+        (Request::Write { path, content }, Caller::Pi { session }) => Ok(Authorized::Protected {
             session,
-            request: super::write::WriteRequest { path, content },
+            request: super::write::ProtectedRequest::Write(super::write::WriteRequest { path, content }),
+        }),
+        (Request::Delete { path }, Caller::Pi { session }) => Ok(Authorized::Protected {
+            session,
+            request: super::write::ProtectedRequest::Delete(super::write::DeleteRequest { path }),
+        }),
+        (Request::Rename { from, to }, Caller::Pi { session }) => Ok(Authorized::Protected {
+            session,
+            request: super::write::ProtectedRequest::Rename(super::write::RenameRequest { from, to }),
         }),
         (
             Request::Run {
@@ -509,7 +528,9 @@ pub fn authorize(request: Request, caller: Caller) -> Result<Authorized, Refused
         }),
         (Request::Lifts {}, Caller::Pi { session }) => Ok(Authorized::Lifts { session }),
         (
-            request @ (Request::ProtectedWrite { .. }
+            request @ (Request::Write { .. }
+            | Request::Delete { .. }
+            | Request::Rename { .. }
             | Request::Run { .. }
             | Request::Lift { .. }
             | Request::Lifts {}
@@ -683,7 +704,9 @@ mod tests {
         let launcher = Caller::Launcher { session: 1 };
         let lines = [
             r#"{"token":"t","request":{"type":"facts"}}"#,
-            r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":""}}"#,
+            r#"{"token":"t","request":{"type":"write","path":"/p","content":""}}"#,
+            r#"{"token":"t","request":{"type":"delete","path":"/p"}}"#,
+            r#"{"token":"t","request":{"type":"rename","from":"/p","to":"/q"}}"#,
             r#"{"token":"t","request":{"type":"run","origin":{"kind":"bash_call","call_id":"c","command":"ls"},"cwd":"/w"}}"#,
             r#"{"token":"t","request":{"type":"run","origin":{"kind":"pi","program":{"kind":"exec","argv":["git","branch","-D","x"]},"runtime":{"kind":"widened","grants":{"allow_git_control_files":true}}},"cwd":"/w","reason":"r"}}"#,
             r#"{"token":"t","request":{"type":"launched","upstream":"http://u"}}"#,
@@ -712,6 +735,10 @@ mod tests {
             table,
             [
                 [true, true, true, false],
+                // Only pi's process changes protected files: a bash call's own writes reach them only through pi's
+                // tools.
+                [true, false, false, false],
+                [true, false, false, false],
                 [true, false, false, false],
                 // Runs: a bash call's run and a run from pi's process, both pi's own requests; a call, or a process pi
                 // started, can't ask for more than its own sandbox.
@@ -731,14 +758,14 @@ mod tests {
         let request = serde_json::from_str::<Envelope>(lines[1]).unwrap().request;
         assert_eq!(
             authorize(request, child).unwrap_err().to_string(),
-            "a process pi started can't send protected_write"
+            "a process pi started can't send write"
         );
-        let request = serde_json::from_str::<Envelope>(lines[1]).unwrap().request;
+        let request = serde_json::from_str::<Envelope>(lines[2]).unwrap().request;
         assert_eq!(
             authorize(request, call).unwrap_err(),
             Refused::NotAllowed {
                 caller: CallerKind::Call,
-                request: "protected_write"
+                request: "delete"
             }
         );
     }
@@ -753,10 +780,13 @@ mod tests {
             session,
             always,
         };
-        assert_eq!(
-            parse(r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":""}}"#).asks(),
-            Asks::Always(offered(false, false))
-        );
+        for line in [
+            r#"{"token":"t","request":{"type":"write","path":"/p","content":""}}"#,
+            r#"{"token":"t","request":{"type":"delete","path":"/p"}}"#,
+            r#"{"token":"t","request":{"type":"rename","from":"/p","to":"/q"}}"#,
+        ] {
+            assert_eq!(parse(line).asks(), Asks::Always(offered(false, false)), "{line}");
+        }
         assert_eq!(
             parse(r#"{"token":"t","request":{"type":"run","origin":{"kind":"typed","command":"ls"},"cwd":"/w"}}"#)
                 .asks(),
@@ -795,9 +825,12 @@ mod tests {
     #[test]
     fn envelopes_are_strict() {
         for bad in [
-            r#"{"type":"protected_write","token":"t","path":"/p","content":""}"#,
+            r#"{"type":"write","token":"t","path":"/p","content":""}"#,
             r#"{"token":"t","request":{"type":"answer","id":"x"}}"#,
-            r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":"","x":1}}"#,
+            r#"{"token":"t","request":{"type":"write","path":"/p","content":"","x":1}}"#,
+            r#"{"token":"t","request":{"type":"protected_write","path":"/p","content":""}}"#,
+            r#"{"token":"t","request":{"type":"delete","path":"/p","x":1}}"#,
+            r#"{"token":"t","request":{"type":"rename","from":"/p"}}"#,
             r#"{"token":"t","request":{"type":"launched"},"x":1}"#,
             r#"{"token":"t","request":{"type":"facts","x":1}}"#,
             r#"{"token":"t","request":{"type":"lift","targets":[{"kind":"exec","path":"/x"}],"reason":"r"}}"#,
@@ -811,12 +844,12 @@ mod tests {
     fn refusals_say_why() {
         let line = refused_line(&Refused::NotAllowed {
             caller: CallerKind::Call,
-            request: "protected_write",
+            request: "write",
         });
         assert_eq!(line["type"], "refused");
         assert_eq!(line["why"], "not_allowed");
         assert_eq!(line["caller"], "call");
-        assert_eq!(line["message"], "a bash call can't send protected_write");
+        assert_eq!(line["message"], "a bash call can't send write");
         let line = refused_line(&Refused::Token(Unaccepted::WrongProcess));
         assert_eq!(line["why"], "token");
         assert_eq!(line["reason"], "wrong_process");
