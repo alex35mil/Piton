@@ -5,13 +5,14 @@ import { describe, it } from "node:test"
 import { createEventBus, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
 
+import { PROTECTED_TOOLS, registerProtectedTools } from "../extensions/permissions/protected.ts"
 import { registerWorkerTools, WORKER_TOOLS } from "../extensions/workers/index.ts"
 import { claudeCodeSchema } from "./claude-code-schema-fixture.ts"
 import { codingFactories, workflowFactories } from "./workflow-tools-fixture.ts"
 
 const json = (value: unknown) => JSON.parse(JSON.stringify(value))
 
-/** Every tool the pi package registers, the workers extension's as in a Piton session. */
+/** Every tool the pi package registers, the workers extension's and the protected-file tools as in a Piton session. */
 async function registeredTools(): Promise<ToolDefinition[]> {
     const tools: ToolDefinition[] = []
     const pi = {
@@ -27,6 +28,7 @@ async function registeredTools(): Promise<ToolDefinition[]> {
     } as unknown as ExtensionAPI
     for (const factory of [...codingFactories, ...workflowFactories]) await factory(pi)
     registerWorkerTools(pi, { kind: "session", socket: "/nowhere", token: "t" })
+    registerProtectedTools(pi, { kind: "session", socket: "/nowhere", token: "t" })
     return tools
 }
 
@@ -55,6 +57,6 @@ describe("every registered tool's schema", () => {
 
     it("includes the worker tools, one per operation", async () => {
         const names = (await registeredTools()).map((t) => t.name)
-        for (const name of WORKER_TOOLS) assert.ok(names.includes(name), name)
+        for (const name of [...WORKER_TOOLS, ...PROTECTED_TOOLS]) assert.ok(names.includes(name), name)
     })
 })

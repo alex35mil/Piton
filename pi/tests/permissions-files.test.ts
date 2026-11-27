@@ -19,7 +19,8 @@ import {
 } from "@earendil-works/pi-coding-agent"
 import { clearFactsCache } from "../extensions/__lib/agent.ts"
 import { clearProtectedCache } from "../extensions/__lib/protected.ts"
-import registerPermission, { deniedProtectedWrite } from "../extensions/permissions/index.ts"
+import registerPermission, { daemonDecides, deniedProtected } from "../extensions/permissions/index.ts"
+import { PROTECTED_TOOLS, registerProtectedTools } from "../extensions/permissions/protected.ts"
 import { decorateReviewCodemode, isFileReviewDetails } from "../extensions/permissions/review.ts"
 import registerRules from "../extensions/rules/index.ts"
 import { nativeMcpFixture } from "./native-mcp-fixture.ts"
@@ -457,7 +458,7 @@ describe("native file permission execution", () => {
 function fakeDaemon(workspace: string, outcomes: unknown[]) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "piton-agent-"))
     const socket = path.join(dir, "agent.sock")
-    const requests: { token: string; path: string; content: string }[] = []
+    const requests: { token: string; type: string; path?: string; content?: string; from?: string; to?: string }[] = []
     let worker: Worker | undefined
     const env = {
         PITON_AGENT_SOCKET: process.env.PITON_AGENT_SOCKET,
@@ -478,7 +479,7 @@ function fakeDaemon(workspace: string, outcomes: unknown[]) {
                         const envelope = JSON.parse(buf);
                         if (envelope.request.type === "facts") return c.end(JSON.stringify(workerData.facts) + "\\n");
                         parentPort.postMessage(envelope);
-                        c.end(JSON.stringify({ type: "protected_write", ...outcomes.shift() }) + "\\n");
+                        c.end(JSON.stringify({ type: envelope.request.type, ...outcomes.shift() }) + "\\n");
                     });
                 }).listen(workerData.socket, () => parentPort.postMessage("listening"));`,
                 { eval: true, workerData: { socket, outcomes, facts: factsLine("host", workspace) } },
@@ -488,14 +489,9 @@ function fakeDaemon(workspace: string, outcomes: unknown[]) {
                     if (message === "listening") return resolve()
                     const envelope = message as {
                         token: string
-                        request: { type: string; path: string; content: string }
+                        request: { type: string; path?: string; content?: string; from?: string; to?: string }
                     }
-                    assert.equal(envelope.request.type, "protected_write")
-                    requests.push({
-                        token: envelope.token,
-                        path: envelope.request.path,
-                        content: envelope.request.content,
-                    })
+                    requests.push({ token: envelope.token, ...envelope.request })
                 }),
             )
             process.env.PITON_AGENT_SOCKET = socket
@@ -533,9 +529,10 @@ describe("protected files", () => {
                 assert.equal(outcome.isError, false, textOf(outcome))
                 assert.equal(daemon.requests.length, 1)
                 const request = daemon.requests[0]!
+                assert.equal(request.type, "write")
                 assert.equal(request.token, "t0ken")
                 // The daemon canonicalizes the path itself; the pi sends it as the tool resolved it.
-                assert.equal(fs.realpathSync(request.path), path.join(fs.realpathSync(h.root), ".piton/config.toml"))
+                assert.equal(fs.realpathSync(request.path!), path.join(fs.realpathSync(h.root), ".piton/config.toml"))
                 assert.equal(request.content, kind === "edit" ? before.replace('"codemode"', '"codemode", "read"') : "")
                 // The daemon writes; the pi never does.
                 assert.equal(fs.readFileSync(path.join(h.root, ".piton/config.toml"), "utf-8"), before)
@@ -575,6 +572,78 @@ describe("protected files", () => {
         }
     })
 
+    it("deletes and renames protected files through the daemon, which decides them alone", async () => {
+        // A deny rule on everything: the daemon's question is the only one, and no rule here applies.
+        const h = await fixture("deny")
+        const daemon = fakeDaemon(h.root, [
+            { outcome: "done" },
+            { outcome: "done" },
+            { outcome: "refused", reason: "src/a.ts isn't a protected file of this session; delete it with bash" },
+            { outcome: "denied" },
+        ])
+        await daemon.start()
+        try {
+            registerProtectedTools(h.pi, { kind: "session", socket: process.env.PITON_AGENT_SOCKET!, token: "t0ken" })
+            for (const tool of PROTECTED_TOOLS) assert.equal(daemonDecides(tool), true, tool)
+
+            const deleted = await h.run("delete_protected_file", { path: ".pi/settings.json" })
+            assert.equal(deleted.isError, false, textOf(deleted))
+            const renamed = await h.run("rename_protected_file", { from: ".pi/a.json", to: "/abs/.pi/b.json" })
+            assert.equal(renamed.isError, false, textOf(renamed))
+            assert.deepEqual(
+                daemon.requests.map(({ type, path: p, from, to }) => ({ type, path: p, from, to })),
+                [
+                    {
+                        type: "delete",
+                        path: path.join(h.context.cwd, ".pi/settings.json"),
+                        from: undefined,
+                        to: undefined,
+                    },
+                    {
+                        type: "rename",
+                        path: undefined,
+                        from: path.join(h.context.cwd, ".pi/a.json"),
+                        to: "/abs/.pi/b.json",
+                    },
+                ],
+                "paths are sent resolved",
+            )
+
+            const refused = await h.run("delete_protected_file", { path: "src/a.ts" })
+            assert.equal(refused.isError, true)
+            assert.match(textOf(refused), /with bash/)
+            assert.equal(h.aborted(), false, "a refusal keeps the turn")
+
+            const denied = await h.run("delete_protected_file", { path: ".pi/settings.json" })
+            assert.match(textOf(denied), /^\[rejected\]/)
+            assert.equal(h.aborted(), true, "a denial ends the turn")
+            assert.equal(h.prompts(), 0, "nothing asked here")
+        } finally {
+            await daemon.stop()
+            await h.cleanup()
+        }
+    })
+
+    it("registers the protected-file tools only in a session", async () => {
+        const names = async () => {
+            const h = await fixture()
+            try {
+                return h.pi.getAllTools().map((tool) => tool.name)
+            } finally {
+                await h.cleanup()
+            }
+        }
+        assert.equal((await names()).includes("delete_protected_file"), false)
+        const daemon = fakeDaemon(os.tmpdir(), [])
+        await daemon.start()
+        try {
+            const inSession = await names()
+            for (const tool of PROTECTED_TOOLS) assert.ok(inSession.includes(tool), tool)
+        } finally {
+            await daemon.stop()
+        }
+    })
+
     it("recognizes a shell write the sandbox denied on a protected file of this workspace", () => {
         // This workspace's protected files, as the resolver answers.
         const asked: string[] = []
@@ -584,7 +653,6 @@ describe("protected files", () => {
         }
         for (const output of [
             "sh: .piton/config.toml: Operation not permitted",
-            "rm: /u/repo/.pi/settings.json: Operation not permitted",
             "error: unable to unlink old '.piton/config.toml': Operation not permitted",
             "sh: .PITON/config.toml: Operation not permitted",
             "sh: apps/fnox.local.toml: Operation not permitted",
@@ -592,7 +660,20 @@ describe("protected files", () => {
             "sh: /Users/a/.config/piton/config.toml: Operation not permitted",
             "mkdir: /Users/a/.pi/agent/extensions/x: Operation not permitted",
         ]) {
-            assert.equal(deniedProtectedWrite(output, isProtected), true, output)
+            assert.equal(deniedProtected(output, isProtected), "write", output)
+        }
+        // A delete, a rename, and a move in or out: each gets the way out that works for it.
+        for (const [output, change] of [
+            ["rm: /u/repo/.pi/settings.json: Operation not permitted", "delete"],
+            ["mv: rename .pi/a.json to .pi/b.json: Operation not permitted", "rename"],
+            ["mv: rename /tmp/x.ts to .pi/extensions/x.ts: Operation not permitted", "moveIn"],
+            ["mv: rename .pi/extensions/x.ts to /tmp/x.ts: Operation not permitted", "moveOut"],
+        ] as const) {
+            assert.equal(
+                deniedProtected(output, (file) => !file.startsWith("/tmp/") && isProtected(file)),
+                change,
+                output,
+            )
         }
         asked.length = 0
         for (const output of [
@@ -605,7 +686,7 @@ describe("protected files", () => {
             // Another checkout's folder the sandbox can't read: not a protected write here.
             "ls: /other/repo/.piton: Operation not permitted",
         ]) {
-            assert.equal(deniedProtectedWrite(output, isProtected), false, output)
+            assert.equal(deniedProtected(output, isProtected), undefined, output)
         }
         // Only absolute paths and names that could be protected are asked about.
         assert.deepEqual(asked, ["/etc/hosts", "/other/repo/.piton"])

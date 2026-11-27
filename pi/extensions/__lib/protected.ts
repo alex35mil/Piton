@@ -6,16 +6,16 @@
  * piton's binary is the one definition (`piton config protected`, which in a session answers from the session's facts,
  * asked of the daemon), shared with the sandbox rules and the daemon's check.
  *
- * Every pi the daemon launches, sandboxed or on the host, writes them through the daemon (the channel, `agent.ts`),
- * which asks the user in every client and writes on approval; in a sandbox the OS also denies every direct write. Only
- * a pi running outside piton (no channel) asks the user itself before the tool writes.
+ * Every pi the daemon launches, sandboxed or on the host, writes, deletes, and renames them through the daemon (the
+ * channel, `agent.ts`), which asks the user in every client and acts on approval; in a sandbox the OS also denies every
+ * direct change. Only a pi running outside piton (no channel) asks the user itself before the write or edit tool writes.
  */
 
 import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import * as path from "node:path"
 
-import { channel, protectedWrite } from "./agent.js"
+import { channel, requestWrite } from "./agent.js"
 import { BIN_ENV, pitonBinary, RESOLVE_FORMAT } from "./settings.js"
 
 /**
@@ -78,7 +78,7 @@ export async function writeProtected(file: string, content: string, signal?: Abo
         case "session":
             break
     }
-    const outcome = await protectedWrite(current, file, content, signal)
+    const outcome = await requestWrite(current, file, content, signal)
     switch (outcome.outcome) {
         case "approved":
             if (outcome.modified) throw new Error(`the user changed ${file} before approving it; read it again`)
@@ -90,6 +90,23 @@ export async function writeProtected(file: string, content: string, signal?: Abo
     }
 }
 
-/** The message that explains a protected file to the agent, for a write the sandbox denied. */
-export const PROTECTED_HINT =
-    "This file is protected (it decides what agents may do): shell commands can't write it. Use the edit or write tool, which asks the user."
+/** What a shell command did to a protected file when the sandbox denied it, as its output says. */
+export type DeniedChange = "write" | "delete" | "rename" | "moveIn" | "moveOut"
+
+const PROTECTED = "This file is protected (it decides what agents may do): shell commands can't change it."
+
+/** The message that explains a protected file to the agent, for a change the sandbox denied: what works instead. */
+export function protectedHint(change: DeniedChange): string {
+    switch (change) {
+        case "write":
+            return `${PROTECTED} Use the edit or write tool, which asks the user.`
+        case "delete":
+            return `${PROTECTED} Use the delete_protected_file tool, which asks the user; it deletes one file at a time (a folder goes with its last file).`
+        case "rename":
+            return `${PROTECTED} Use the rename_protected_file tool, which asks the user.`
+        case "moveIn":
+            return `${PROTECTED} To move a file into it, write the destination with the write tool (it asks the user), then remove the original with bash.`
+        case "moveOut":
+            return `${PROTECTED} To move it out, copy it with bash, then delete the original with the delete_protected_file tool (it asks the user).`
+    }
+}

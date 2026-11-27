@@ -37,7 +37,10 @@ pub use self::{
 };
 use self::{
     prompts::PromptQueue,
-    questions::{Ended, PendingLift, PendingWrite, Question, Questions, Showing, Unanswered},
+    questions::{
+        Ended, PendingChange, PendingDelete, PendingLift, PendingRename, PendingWrite, Question, Questions, Showing,
+        Unanswered,
+    },
     replay::Replay,
     view::{Change, StateInput, View},
 };
@@ -185,11 +188,9 @@ pub enum SessionCmd {
         reason: StopReason,
         done: Option<oneshot::Sender<StopOutcome>>,
     },
-    /// A protected write the agent asked for (agent.sock): asked of the user in every client, written on approval.
-    ProtectedWrite {
-        request: crate::agent::WriteRequest,
-        reply: oneshot::Sender<crate::agent::WriteOutcome>,
-    },
+    /// A change to a protected file the agent asked for (agent.sock): asked of the user in every client, made on
+    /// approval.
+    Protected(crate::agent::ProtectedAsk),
     /// A worker operation's question (agent.sock): it waits its turn in the session's questions.
     WorkerQuestion {
         asked: crate::agent::workers::Asked,
@@ -984,7 +985,7 @@ impl SessionTask {
                 command,
                 reply,
             } => self.view_command(watcher, command, reply),
-            SessionCmd::ProtectedWrite { request, reply } => self.protected_write(request, reply),
+            SessionCmd::Protected(ask) => self.protected(ask),
             SessionCmd::WorkerQuestion { asked } => self.worker_question(asked),
             SessionCmd::Settle => self.settle(),
             SessionCmd::RunCommand { request, reply } => self.run_command(request, reply),
@@ -1000,8 +1001,44 @@ impl SessionTask {
         }
     }
 
-    /// A protected write the agent asked for: refused unless the path is one of this session's protected files and no
-    /// other is pending; otherwise asked of the user with a dialog every client shows. Every protected write asks.
+    /// A change to a protected file the agent asked for: refused unless the paths are this session's protected files
+    /// (and, for a delete or rename, the entries are as it needs); otherwise asked of the user with a dialog every client
+    /// shows. Every change asks.
+    fn protected(&mut self, ask: crate::agent::ProtectedAsk) {
+        use crate::agent::{ChangeOutcome, ProtectedAsk};
+        match ask {
+            ProtectedAsk::Write { request, reply } => self.protected_write(request, reply),
+            ProtectedAsk::Delete { request, reply } => match crate::agent::check_delete(&self.protected, &request.path)
+            {
+                Ok(entry) => self.enqueue(Question::Protected(PendingChange::Delete(PendingDelete {
+                    root: entry.root,
+                    path: entry.path,
+                    controls: entry.controls,
+                    reply,
+                }))),
+                Err(reason) => {
+                    let _ = reply.send(ChangeOutcome::Refused { reason });
+                }
+            },
+            ProtectedAsk::Rename { request, reply } => {
+                match crate::agent::check_rename(&self.protected, &request.from, &request.to) {
+                    Ok((from, to)) => self.enqueue(Question::Protected(PendingChange::Rename(PendingRename {
+                        from_root: from.root,
+                        from: from.path,
+                        from_controls: from.controls,
+                        to_root: to.root,
+                        to: to.path,
+                        to_controls: to.controls,
+                        reply,
+                    }))),
+                    Err(reason) => {
+                        let _ = reply.send(ChangeOutcome::Refused { reason });
+                    }
+                }
+            }
+        }
+    }
+
     fn protected_write(
         &mut self,
         request: crate::agent::WriteRequest,
@@ -1019,13 +1056,93 @@ impl SessionTask {
             });
             return;
         };
-        self.enqueue(Question::ProtectedWrite(PendingWrite {
+        self.enqueue(Question::Protected(PendingChange::Write(PendingWrite {
             root: file.root,
             path,
             controls: file.controls,
             content: request.content,
             reply,
-        }));
+        })));
+    }
+
+    /// A client's answer to a protected change's dialog.
+    fn answer_protected(&mut self, change: PendingChange, deadline: Option<Instant>, answer: &Map<String, Value>) {
+        match change {
+            PendingChange::Write(write) => self.answer_protected_write(write, answer),
+            PendingChange::Delete(delete) => self.answer_protected_delete(delete, deadline, answer),
+            PendingChange::Rename(rename) => self.answer_protected_rename(rename, deadline, answer),
+        }
+    }
+
+    /// Delete or not, and tell the agent; the first option asks again.
+    fn answer_protected_delete(
+        &mut self,
+        pending: PendingDelete,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
+        use crate::agent::{
+            ChangeAnswer, ChangeOutcome, Removable, Removed, answer::Once, read_change_answer, remove_entry,
+        };
+        let key = lock(&self.shared).key;
+        let outcome = match read_change_answer(answer) {
+            None => return self.show(Question::Protected(PendingChange::Delete(pending)), deadline),
+            Some(ChangeAnswer::Narrowest(Once(()))) => {
+                match remove_entry(&pending.root, &pending.path, Removable::FileOrLink) {
+                    Ok(Removed::Removed) => {
+                        crate::log!("session {key}: protected delete of {} approved", pending.path.display());
+                        ChangeOutcome::Done
+                    }
+                    Ok(Removed::Missing) => ChangeOutcome::Refused {
+                        reason: format!("approved, but {} no longer exists", pending.path.display()),
+                    },
+                    Err(e) => ChangeOutcome::Refused {
+                        reason: format!("approved, but can't delete {}: {e}", pending.path.display()),
+                    },
+                }
+            }
+            Some(ChangeAnswer::Deny(())) => {
+                crate::log!("session {key}: protected delete of {} denied", pending.path.display());
+                ChangeOutcome::Denied
+            }
+            Some(ChangeAnswer::Session(never) | ChangeAnswer::Always(never)) => match never {},
+        };
+        let _ = pending.reply.send(outcome);
+    }
+
+    /// Rename or not, and tell the agent; the first option asks again.
+    fn answer_protected_rename(
+        &mut self,
+        pending: PendingRename,
+        deadline: Option<Instant>,
+        answer: &Map<String, Value>,
+    ) {
+        use crate::agent::{ChangeAnswer, ChangeOutcome, answer::Once, read_change_answer, rename_entry};
+        let key = lock(&self.shared).key;
+        let outcome = match read_change_answer(answer) {
+            None => return self.show(Question::Protected(PendingChange::Rename(pending)), deadline),
+            Some(ChangeAnswer::Narrowest(Once(()))) => {
+                match rename_entry(&pending.from_root, &pending.from, &pending.to_root, &pending.to) {
+                    Ok(()) => {
+                        crate::log!(
+                            "session {key}: protected rename of {} to {} approved",
+                            pending.from.display(),
+                            pending.to.display()
+                        );
+                        ChangeOutcome::Done
+                    }
+                    Err(e) => ChangeOutcome::Refused {
+                        reason: format!("approved, but can't rename {}: {e}", pending.from.display()),
+                    },
+                }
+            }
+            Some(ChangeAnswer::Deny(())) => {
+                crate::log!("session {key}: protected rename of {} denied", pending.from.display());
+                ChangeOutcome::Denied
+            }
+            Some(ChangeAnswer::Session(never) | ChangeAnswer::Always(never)) => match never {},
+        };
+        let _ = pending.reply.send(outcome);
     }
 
     /// A client's answer to a protected write's dialog: write or not, and tell the agent.
@@ -1455,10 +1572,9 @@ impl SessionTask {
                 },
                 // The stream may have opened or closed since it was queued: decide liftability now.
                 Question::Process(process) => Question::Process(self.refresh_live(process)),
-                question @ (Question::ProtectedWrite(_)
-                | Question::Block(_)
-                | Question::Network(_)
-                | Question::Lift(_)) => question,
+                question @ (Question::Protected(_) | Question::Block(_) | Question::Network(_) | Question::Lift(_)) => {
+                    question
+                }
             };
             self.show(question, deadline);
             return;
@@ -1471,10 +1587,19 @@ impl SessionTask {
         self.next_internal += 1;
         let id = format!("piton:{}:{}", question.kind(), self.next_internal);
         let record = match &question {
-            Question::ProtectedWrite(write) => {
+            Question::Protected(PendingChange::Write(write)) => {
                 // The file as it is now, so the diff is against what the write replaces.
                 let before = std::fs::read_to_string(&write.path).ok();
                 crate::agent::write_dialog(&id, &write.path, write.controls, before.as_deref(), &write.content)
+            }
+            Question::Protected(PendingChange::Delete(delete)) => crate::agent::delete_dialog(
+                &id,
+                &delete.path,
+                delete.controls,
+                crate::agent::Entry::at(&delete.path).as_ref(),
+            ),
+            Question::Protected(PendingChange::Rename(rename)) => {
+                crate::agent::rename_dialog(&id, &rename.from, rename.from_controls, &rename.to, rename.to_controls)
             }
             Question::Block(block) => match block.stage {
                 commands::Stage::Choice => crate::agent::question::rpc_dialog(&id, &block.question),
@@ -1513,7 +1638,7 @@ impl SessionTask {
     fn answer(&mut self, showing: Showing, answer: &Map<String, Value>) {
         let Showing { question, deadline, .. } = showing;
         match question {
-            Question::ProtectedWrite(write) => self.answer_protected_write(write, answer),
+            Question::Protected(change) => self.answer_protected(change, deadline, answer),
             Question::Block(block) => self.answer_question(block, deadline, answer),
             Question::Process(process) => self.answer_process(process, answer),
             Question::Network(network) => self.answer_network(network, deadline, answer),
