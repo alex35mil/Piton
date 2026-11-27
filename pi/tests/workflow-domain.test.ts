@@ -1109,7 +1109,7 @@ describe("Task routing, parent checks, and restore", () => {
                     ),
                 /several remote branches match 49-/,
             )
-            // Without a single Kind label, the user decides.
+            // A Task already restored isn't restored again.
             await assert.rejects(
                 () =>
                     restoreTask(
@@ -1123,6 +1123,23 @@ describe("Task routing, parent checks, and restore", () => {
                     ),
                 /already has a local Task/,
             )
+            // A standalone Task's Kind is its single Kind label; none or several, and the user decides.
+            pushBranch(other, "50-unlabelled")
+            git(cwd, ["fetch", "-q", "origin"])
+            for (const labels of [[], ["Kind: Chore", "Kind: Feature"]])
+                await assert.rejects(
+                    () =>
+                        restoreTask(
+                            cwd,
+                            parse(RestoreTaskValidator, {
+                                reads: githubReads({ number: 50, labels }),
+                                fetched: true,
+                                pages: [comments(50)],
+                            }),
+                            catalog,
+                        ),
+                    new RegExp(`needs exactly one Kind label to be restored; it has ${labels.length}`),
+                )
         } finally {
             for (const directory of [cwd, origin, other]) fs.rmSync(directory, { recursive: true, force: true })
         }
@@ -1157,7 +1174,8 @@ describe("Task routing, parent checks, and restore", () => {
             assert.equal(status.tracker.planComment.state, "published")
             assert.match(fs.readFileSync(path.join(cwd, restored.directory, "plan.md"), "utf-8"), /Do it\./)
 
-            // A queued sibling isn't restored: it starts. An Epic this clone lacks refuses.
+            // A Task whose Epic this clone lacks refuses: restore the Epic first. (route_task sends only started
+            // issues here; queued ones start through init_task.)
             await assert.rejects(
                 () =>
                     restoreTask(
