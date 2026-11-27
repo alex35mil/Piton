@@ -31,20 +31,19 @@ Upgrading from an older version? See the [upgrade guide](UPGRADING.md).
 
 Workflow operations are discovered on demand through the existing permission-aware Codemode instead of declaring the full catalog in every request. See [tool discovery](workflows/references/tools.md). Reviewer subprocesses load the selected Claude Code provider only when needed, while retaining their read-only isolation.
 
-[`workflows/`](workflows/) contains reusable workflows for Epics, Tasks, and Gigs:
+[`workflows/`](workflows/) contains reusable workflows for Epics and Tasks:
 
 - `/project-setup` — interactively configure the tracker, forge, branches, and policies;
 - `/epic` — plan and maintain an initiative of Tasks; accepting the plan creates a queued issue per Task;
-- `/task` — start one of an Epic's queued Tasks, or resume it;
-- `/gig` — initialize or resume standalone work;
-- `/backlog` — future-work intake of Epics and Gigs into the tracker;
-- `/todo` — ready-work intake of Epics and Gigs into the tracker;
+- `/task` — start or resume a Task: standalone work, or one of an Epic's queued Tasks;
+- `/backlog` — future-work intake of Epics and standalone Tasks into the tracker;
+- `/todo` — ready-work intake of Epics and standalone Tasks into the tracker;
 - `/pr` — privately review an incoming PR. You approve a checkout only after seeing a safety score, and each fix, push, publication, and merge needs its own approval. See [incoming PR handling](workflows/references/pr/incoming.md).
 
 Say “Report this workflow issue” to prepare a sanitized report of a Piton problem. The agent drafts it, you approve it, and it gives you a link that opens a pre-filled GitHub issue on Piton for you to submit. See [workflow reporting](workflows/README.md#report-a-workflow-problem).
 
-Every project uses a tracker (GitHub or Linear) and a GitHub forge. The tracker object is each Epic, Task, and Gig's identity, and every Deliverable ships through a merged PR. Workflow artifacts live under `.piton/.local/` and never enter Git. Runtime provider operations use Pi-registered MCP tools through the same permission extension as every other agent. Guided setup may additionally inspect Linear and provision an explicitly approved GitHub Project through credential-isolated direct APIs. See the [workflow setup and artifact guide](workflows/README.md).
+Every project uses a tracker (GitHub or Linear) and a GitHub forge. The tracker object is each Epic and Task's identity, and every Deliverable ships through a merged PR. Workflow artifacts live under `.piton/.local/` and never enter Git. Runtime provider operations use Pi-registered MCP tools through the same permission extension as every other agent. Guided setup may additionally inspect Linear and provision an explicitly approved GitHub Project through credential-isolated direct APIs. See the [workflow setup and artifact guide](workflows/README.md).
 
 ## Parallel workers
 
-Run several Gigs or Tasks at once, each in its own copy-on-write copy of the repository with Pi inside Piton's sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and a sandboxed session's runtime lets them use separate `[tools.permissions.sandbox]` rules. Piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).
+Run several Tasks at once, each in its own copy-on-write copy of the repository with Pi inside Piton's sandbox on the macOS host. Workers share workflow artifacts with the source checkout through symlinks, and a sandboxed session's runtime lets them use separate `[tools.permissions.sandbox]` rules. Piton creates and deletes workers and launches Pi in them; see the [repository root](../README.md).

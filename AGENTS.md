@@ -4,7 +4,7 @@ Piton: the user's setup for running pi coding agents on macOS.
 
 ## Areas
 
-- `pi/`: the pi package (TypeScript): extensions, skills, and the Epic/Task/Gig workflows. Rules for it are in
+- `pi/`: the pi package (TypeScript): extensions, skills, and the Epic and Task workflows. Rules for it are in
   `.agents/rules/` and load by path.
 - `cli/`: the Rust crate for the `piton` binary (daemon + CLI). Owns `pi --mode rpc` processes so sessions outlive their clients, creates
   and deletes worker clones, and serves the apps. pi.nvim (public) attaches through `piton attach`.

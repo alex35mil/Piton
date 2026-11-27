@@ -3,10 +3,9 @@
 Reusable Epic and Task planning and delivery for pi.
 
 - **Epic**: an initiative and ordered plan of Tasks; accepting it creates a queued tracker issue per Task, so Epic progress reflects the whole plan. It does not implement them.
-- **Task**: a Deliverable belonging to exactly one Epic.
-- **Gig**: a standalone Deliverable.
+- **Task**: a Deliverable whose parent is an Epic or nothing (standalone).
 - **Deliverable**: the shared Task lifecycle, with Feature, Bugfix, Refactor, Research, Audit, and Chore strategies.
-- **Tracker**: optional GitHub or Linear work tracking. The tracker object (`#12`, `ENG-12`, or a Linear Project) is the entity's identity and holds native lifecycle, Phase, and Priority. Without one, Gigs run locally (`<YYYYMMDD>-<slug>`); Epics and Tasks need it.
+- **Tracker**: optional GitHub or Linear work tracking. The tracker object (`#12`, `ENG-12`, or a Linear Project) is the entity's identity and holds native lifecycle, Phase, and Priority. Without one, standalone Tasks run locally (`<YYYYMMDD>-<slug>`); Epics and their Tasks need it.
 - **Forge**: optional GitHub pull requests. With one, every Deliverable ships through a merged PR; without one, work stops after local commits.
 - **Standalone tools**: steps such as `review` work in any session, without an entity, tracker, or forge. The Epic and Task lifecycle composes them.
 - **Artifacts**: plans, notes, and reviews live under `.piton/.local/` and never enter Git.
@@ -16,14 +15,13 @@ Reusable Epic and Task planning and delivery for pi.
 ```text
 /project-setup [preferences]
 /epic <idea or existing Epic>
-/task <details & parent Epic, or existing Task>
-/gig <details or existing Gig>
+/task <details, tracker issue, or existing Task>
 /backlog <potential work>
 /todo <queued work>
 /pr <GitHub PR URL or #NN>
 ```
 
-New work creates the tracker object first; the local entity is named after it (`12-<slug>`, `ENG-12-<slug>`, or `<YYYYMMDD>-<slug>` for a Linear Epic, dated by the Project's creation). Planned Tasks and queued Backlog/Todo objects get a local entity only when explicitly started. `/todo` and `/backlog` queue only Epics and Gigs; a new Task comes from replanning its Epic.
+New work creates the tracker object first; the local entity is named after it (`12-<slug>`, `ENG-12-<slug>`, or `<YYYYMMDD>-<slug>` for a Linear Epic, dated by the Project's creation). Planned Tasks and queued Backlog/Todo objects get a local entity only when explicitly started. `/todo` and `/backlog` queue only Epics and standalone Tasks; a new Epic Task comes from replanning its Epic. `/task` decides through `route_task` whether an issue is an Epic's Task or standalone; you never say which.
 
 A local Task, started without a tracker or kept off it, is named from its creation date (`<YYYYMMDD>-<slug>`) and skips every tracker step.
 

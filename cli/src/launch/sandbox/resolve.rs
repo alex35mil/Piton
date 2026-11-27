@@ -1928,7 +1928,7 @@ mod tests {
         assert!(allowed(&p, Path::new("/etc/hosts"), Access::Read));
         assert!(allowed(&p, &h.join(".gitconfig"), Access::Read));
         assert!(allowed(&p, &f.repo.join("src/main.rs"), Access::Write));
-        assert!(allowed(&p, &f.repo.join(".piton/.local/gigs/x"), Access::Write));
+        assert!(allowed(&p, &f.repo.join(".piton/.local/tasks/x"), Access::Write));
         assert!(!allowed(&p, &f.home.join("elsewhere"), Access::Write));
         for denied in [
             ".ssh/id_ed25519",

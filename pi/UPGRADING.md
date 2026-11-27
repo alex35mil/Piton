@@ -1,5 +1,15 @@
 # Upgrading
 
+## Gigs become standalone Tasks
+
+`/gig`, the `gig` skill, and the Gig entity are gone. `/task` starts any Deliverable: describe new work, name a tracker issue, or give an existing Task's path, and the new `route_task` tool decides whether it's standalone or one of an Epic's Tasks.
+
+- **Tools:** `preflight_gig`, `init_github_gig`, `init_linear_gig`, `init_local_gig`, and `review_gig` are removed. Use `preflight_task`, `init_github_task` and `init_linear_task` (with a `parent` of `{ kind: "epic", epicDir }` or `{ kind: "none" }`, and the Kind), `init_local_task`, and `review_task`. `inspect_adoption` and `inspect_queue_intake` take `task` instead of `gig`.
+- **Artifacts:** standalone Tasks live under `.piton/.local/tasks/`. Linear Task records are now `resource: "issue"` with a `parent`, replacing `task-issue` and `gig-issue`.
+- **Permissions:** rules that name a `*_gig` tool no longer match anything; rename them to the `*_task` tool.
+
+**Before upgrading,** finish every Gig and every Linear Epic Task in flight. Nothing migrates: old `.piton/.local/gigs/` directories stay on disk and the new code doesn't read them, and Linear Task metadata written before this change fails validation.
+
 ## Tool permissions move to `[tools.permissions]`
 
 The tool-call rules move from `[permissions]` to `[tools.permissions]` in every `config.toml` and `config.local.toml`: `[permissions.host]` becomes `[tools.permissions.host]` and `[permissions.sandbox]` becomes `[tools.permissions.sandbox]`. Dotted keys move the same way (`permissions.allow = [...]` becomes `tools.permissions.allow = [...]`). Keys, values, and how rules combine don't change. A leftover `[permissions]` is an unknown key and makes the file invalid.

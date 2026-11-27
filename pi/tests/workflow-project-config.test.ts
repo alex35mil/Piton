@@ -870,9 +870,9 @@ describe("workflow project configuration", () => {
         try {
             writeConfig(root, config())
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
-            const gig = path.join(root, ".piton", ".local", "tasks", "example")
-            fs.mkdirSync(gig, { recursive: true })
-            fs.writeFileSync(path.join(gig, "metadata.json"), "{}\n")
+            const taskDir = path.join(root, ".piton", ".local", "tasks", "example")
+            fs.mkdirSync(taskDir, { recursive: true })
+            fs.writeFileSync(path.join(taskDir, "metadata.json"), "{}\n")
             prepareArtifactPersistence(root)
             git(root, ["add", ".gitignore", ".piton"])
             assert.deepEqual(git(root, ["diff", "--cached", "--name-only"]).split("\n"), [
@@ -915,9 +915,9 @@ describe("workflow project configuration", () => {
         try {
             writeConfig(root, config())
             fs.writeFileSync(path.join(root, ".gitignore"), `${PROJECT_LOCAL_IGNORE}\n`)
-            const gig = path.join(root, ".piton", ".local", "tasks", "example")
-            fs.mkdirSync(gig, { recursive: true })
-            fs.writeFileSync(path.join(gig, "notes.md"), "# Notes\n")
+            const taskDir = path.join(root, ".piton", ".local", "tasks", "example")
+            fs.mkdirSync(taskDir, { recursive: true })
+            fs.writeFileSync(path.join(taskDir, "notes.md"), "# Notes\n")
             git(root, ["add", "-f", ".piton/.local/tasks/example/notes.md"])
             const indexBefore = git(root, ["ls-files", "--stage"])
             assert.throws(() => prepareArtifactPersistence(root), /\.piton\/\.local\/ must remain outside Git/)
