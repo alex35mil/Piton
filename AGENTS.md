@@ -28,6 +28,8 @@ Piton: the user's setup for running pi coding agents on macOS.
 
 - Piton hasn't shipped: never add compatibility for earlier versions (format or schema version bumps, migrations,
   aliases, messages naming removed keys). Change formats in place.
+- Piton is a product: design for every user's setup. This machine's configuration, Git settings, and checkout state
+  are one example, never the basis for a design decision. Use them only to reproduce or verify behavior.
 - Run project tasks through mise from the repository root: `mise run <task>` (`pi:test`, `pi:typecheck`,
   `cli:build`, `cli:test`, `cli:lint`, `apps:build`, `apps:test`, `apps:test:unit`, `apps:test:e2e`, `nvim:test`,
   `build`, `test`, `lint`, `format`).
