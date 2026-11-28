@@ -95,17 +95,19 @@ export async function runDeliveryCleanup(
     if (targetCommit !== originTargetCommit) {
         throw new Error(`target ${target} does not match freshly fetched origin; branch ${branch} was preserved`)
     }
-    const deleted = await Git.deleteBranch(root, branch, `delete the shipped branch ${branch}`, options.runner)
-    const failure = Git.runFailure(deleted)
-    if (failure) throw new Error(`git branch -D ${branch} failed: ${failure}`)
-    if (Git.succeeds(root, ["show-ref", "--verify", `refs/heads/${branch}`])) {
-        throw new Error(`branch deletion in the current clone did not complete: ${branch}`)
-    }
+    const branchSettings = await Git.deleteBranch(
+        root,
+        branch,
+        merge.headCommitSha.toLowerCase(),
+        `remove the settings of the shipped branch ${branch} from .git/config`,
+        options.runner,
+    )
     return {
         entity: path.basename(entityDirectory),
         target,
         targetCommit,
         deletedBranch: branch,
+        branchSettings,
         remoteBranchDeleted: false as const,
     }
 }

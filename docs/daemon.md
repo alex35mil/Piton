@@ -773,8 +773,10 @@ entries added ("Run in a wider sandbox?", which names them), or on the host. The
 the answers are the same. **Always** saves a per-command entry whose `grant` is the entries it asked for (or
 `runtime = "host"`), and runs that exact command without asking for the rest of the session. A request that would
 reopen what your own entries close (a `false` switch, a path at or inside your `"deny"`, or a write inside your
-`"read"`) is refused without asking. The workflow deletes a branch this way after shipping, with Git's control files
-open, since `git branch -D` rewrites `.git/config`; saving `bash(git branch -D *)` in the sandbox stops the question.
+`"read"`) is refused without asking. The workflow deletes a branch after shipping in its own sandbox, without asking;
+only when `.git/config` has settings for that branch (an upstream, say) does it ask to remove them this way, with Git's
+control files open. Saving `bash(git config --local --remove-section branch.*)` in the sandbox stops the question;
+declining leaves the settings, and the branch is deleted either way.
 
 Per-command entries, in any `config.toml` or `config.local.toml` (a repository's committed one only once you trust it).
 `runtime` is required: `"sandbox"` with a `grant`, or `"host"` without one.
@@ -859,7 +861,7 @@ a time:
 - **Git's hooks and configuration** (`.git/hooks/`, `.git/config`), when pi's sandbox can't be widened while it runs
   (otherwise pi's own write is asked about): what Git skipped (`git push -u` sets an upstream; `git branch -D` drops a
   branch's section; a hook isn't installed). Git carries on. The workflow's own branch deletions don't hit this: they
-  run through the daemon with Git's control files open.
+  delete only the ref, and remove a branch's settings through the daemon with Git's control files open.
 - What the floor blocks, and what nothing can lift.
 
 A command the agent runs keeps the rerun question for every block, credentials and Git's files included.

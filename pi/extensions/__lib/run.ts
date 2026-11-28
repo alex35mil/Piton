@@ -5,8 +5,8 @@
  * never asks, and a widened or host run asks the user.
  *
  *     const outcome = await runProgram(
- *         { kind: "exec", argv: ["git", "branch", "-D", name] },
- *         { cwd, where: { kind: "widened", grants: { allow_git_control_files: true } }, reason: "delete the branch" },
+ *         { kind: "exec", argv: ["git", "config", "--local", "--remove-section", `branch.${name}`] },
+ *         { cwd, where: { kind: "widened", grants: { allow_git_control_files: true } }, reason: "remove the settings" },
  *     )
  *
  * Outside a session piton's daemon launched, or in a host session, pi isn't sandboxed: the program runs here.
