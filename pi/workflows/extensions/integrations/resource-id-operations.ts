@@ -42,7 +42,6 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
     const common = { entity: path.basename(directory) }
     let scope: ResourceIdsScope
     switch (resource) {
-        case "github-issue":
         case "github-project-item": {
             const configured = requireTracker(roles, `${resource} resource IDs`)
             if (configured.provider !== "github" || tracker.provider !== "github")
@@ -55,10 +54,7 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
                 repository: tracker.repository,
                 issueNumber: tracker.external.issueNumber,
             }
-            scope =
-                resource === "github-issue"
-                    ? { ...issue, kind: resource }
-                    : { ...issue, kind: resource, project: configured.project }
+            scope = { ...issue, kind: resource, project: configured.project }
             break
         }
         case "linear-project": {
@@ -141,8 +137,6 @@ interface AcceptedEvidence {
 function evidenceFor(resource: ResourceKind, server: string, purpose: EvidencePurpose): AcceptedEvidence[] {
     const accepted = (operation: string, method?: string) => ({ resource, server, operation, method })
     switch (resource) {
-        case "github-issue":
-            return purpose === "record" ? [accepted("issue_read", "get")] : []
         case "github-project-item":
             return purpose === "record"
                 ? [accepted("projects_get", "get_project_item"), accepted("projects_write", "add_project_item")]
@@ -177,7 +171,7 @@ export function evidenceResourceKind(
         const server = roles.tracker.config.mcpServer
         switch (tracker.provider) {
             case "github":
-                kinds.push({ resource: "github-issue", server }, { resource: "github-project-item", server })
+                kinds.push({ resource: "github-project-item", server })
                 break
             case "linear":
                 kinds.push({ resource: tracker.resource === "project" ? "linear-project" : "linear-issue", server })
@@ -247,25 +241,6 @@ export function resourceIdsFromRead(
 ): ResourceIds {
     const response = responseObject(evidence)
     switch (scope.kind) {
-        case "github-issue": {
-            requireCall(
-                evidence,
-                scope,
-                "issue_read",
-                { method: "get", ...scope.repository, issue_number: scope.issueNumber },
-                tools,
-            )
-            if (response.number !== scope.issueNumber)
-                throw new Error("provider issue number does not match durable identity")
-            if (response.id === undefined)
-                throw new Error(
-                    "exact issue response omits numeric ID; do not repeat this read merely to populate cache",
-                )
-            return parseResourceIds({
-                scope,
-                value: { issueId: positiveInteger(response.id, "issue ID"), url: text(response.html_url, "issue URL") },
-            })
-        }
         case "github-project-item": {
             requireProjectItemCall(evidence, scope, "projects_get", { method: "get_project_item" }, tools)
             const content = object(response.content, "Project item content")
@@ -401,21 +376,6 @@ export async function recordResourceIdsEvidence(
         })
     } else primary = resourceIdsFromRead(context.scope, evidence, tools)
     const resourceIds = [primary]
-    if (context.scope.kind === "github-project-item" && responseObject(evidence).content !== undefined) {
-        const content = object(responseObject(evidence).content, "Project item content")
-        if (content.id !== undefined && content.html_url !== undefined) {
-            const { project: _project, ...issueScope } = context.scope
-            resourceIds.push(
-                parseResourceIds({
-                    scope: { ...issueScope, kind: "github-issue" },
-                    value: {
-                        issueId: positiveInteger(content.id, "issue ID"),
-                        url: text(content.html_url, "issue URL"),
-                    },
-                }),
-            )
-        }
-    }
     await recordResourceIds(context.directory, resourceIds)
     for (const ids of resourceIds) memo.record(ids)
     return primary

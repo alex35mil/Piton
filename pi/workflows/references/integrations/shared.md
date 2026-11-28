@@ -58,7 +58,7 @@ These tools read local configuration, authority, and entity state. They never ca
 
 | Object | Durable identity and progress | Local Resource IDs |
 | --- | --- | --- |
-| GitHub tracker issue | repository and issue number; plan-comment state | numeric issue ID and URL; the configured Project-item ID |
+| GitHub tracker issue | repository and issue number; plan-comment state | the configured Project-item ID |
 | Linear Project | Project UUID; plan-document state | URL |
 | Linear issue | issue UUID and identifier; a Task's parent Project UUID; plan-document state | identifier and URL |
 | GitHub PR | immutable repository, head, and target intent | current PR number and URL |

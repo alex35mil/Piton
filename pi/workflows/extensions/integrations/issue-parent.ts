@@ -107,13 +107,11 @@ function githubParent(
     })
     const issue = read(reads.issue, "get", number, "issue")
     if (issue.number !== number) throw new Error("issue read is for another issue")
-    const issueId = typeof issue.id === "string" ? Number(issue.id) : issue.id
-    if (typeof issueId !== "number" || !Number.isSafeInteger(issueId) || issueId < 1)
-        throw new Error("issue read lacks its numeric issue ID")
+    // GitHub's issue read has no numeric ID; the number and URL are the issue.
     const url = issue.html_url ?? issue.url
     if (typeof url !== "string" || !url) throw new Error("issue read lacks its URL")
     const facts: IssueFacts = {
-        object: { provider: "github", issueId, issueNumber: number, issueUrl: url },
+        object: { provider: "github", issueNumber: number, issueUrl: url },
         label: `#${number}`,
         title: text(issue.title, "title"),
         body: typeof issue.body === "string" ? issue.body : "",

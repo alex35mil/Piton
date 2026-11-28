@@ -89,7 +89,7 @@ async function repo(tracker: "github" | "linear", labels?: unknown) {
             request: "Roll out",
             object:
                 tracker === "github"
-                    ? { issueId: 100, issueNumber: 10, issueUrl: "https://github.com/example/app/issues/10" }
+                    ? { issueNumber: 10, issueUrl: "https://github.com/example/app/issues/10" }
                     : {
                           projectId: "project-uuid",
                           projectUrl: "https://linear.app/example/project/rollout",
@@ -935,8 +935,8 @@ describe("Epic routing and restore", () => {
             const epic = {
                 tool: "mcp__github__issue_read",
                 arguments: { method: "get", ...repository, issue_number: 10 },
+                // A real issue read: no numeric `id`.
                 response: {
-                    id: 100,
                     number: 10,
                     title: "Rollout",
                     body: "Roll out\n\n<sub>Sent via Pi. Model: x/y.</sub>",

@@ -103,7 +103,6 @@ function temporaryRepository(tracker: "github" | "linear" = "github", format = "
 
 function issue(number: number) {
     return {
-        issueId: 1000 + number,
         issueNumber: number,
         issueUrl: `https://github.com/example/project/issues/${number}`,
         projectItemId: 2000 + number,
@@ -346,10 +345,7 @@ describe("workflow domain", () => {
                 assert.equal(fs.existsSync(path.join(epicDir, entry)), false, entry)
             assert.deepEqual(
                 created.resourceIds.map((ids) => [ids.scope.kind, ids.scope.entity]),
-                [
-                    ["github-issue", "12-shared-workflow"],
-                    ["github-project-item", "12-shared-workflow"],
-                ],
+                [["github-project-item", "12-shared-workflow"]],
             )
             assert.match(formatInitializedEntity(created), /Initialized \.piton\/\.local\/epics\/12-shared-workflow/)
 

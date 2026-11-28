@@ -10,6 +10,7 @@
   - New: `route_task` decides how a `/task` request starts, `check_task_parent` stops a resumed Task whose tracker parent changed, and `restore_task` rebuilds a Task started in another clone from the tracker and its pushed branch.
   - `inspect_adoption` and `inspect_queue_intake` take `task` instead of `gig`.
 - **Artifacts:** standalone Tasks live under `.piton/.local/tasks/`. Task metadata records its `parent`. Linear Task records are now `resource: "issue"`, replacing `task-issue` and `gig-issue`.
+- **GitHub issue IDs:** a GitHub issue is identified by repository and number only. `init_github_epic`'s `object` drops `issueId`, and the `github-issue` Resource IDs kind is gone, so `resolve_resource_ids` and `record_resource_ids` no longer take it. A `resource-ids.json` that still has a `github-issue` entry fails to read; it's a disposable cache, so delete it.
 - **Permissions:** rules that name a removed tool no longer match anything; rename them to the new one.
 
 **Before upgrading,** finish every Gig and every Task in flight. Nothing migrates: old `.piton/.local/gigs/` directories stay on disk and the new code doesn't read them, and Task metadata written before this change, without `parent`, fails validation.

@@ -80,12 +80,9 @@ function epicFacts(tracker: TrackerConfig, evidence: ProviderEvidence, tools: Mc
         if (args !== repository || response.number !== evidence.arguments.issue_number)
             throw new Error("Epic read is not an issue in the configured repository")
         const issueNumber = response.number as number
-        const issueId = typeof response.id === "string" ? Number(response.id) : response.id
-        if (!Number.isSafeInteger(issueId) || (issueId as number) < 1) throw new Error("Epic read lacks its issue ID")
         return {
             object: {
                 provider: "github",
-                issueId: issueId as number,
                 issueNumber,
                 issueUrl: text(response.html_url ?? response.url, "URL"),
             },

@@ -42,10 +42,10 @@ const GitHubRepositorySchema = Type.Object(
 )
 
 // The tracker object identified by create or adoption evidence. It exists before the
-// local entity and names it; initialization takes it whether new or adopted.
+// local entity and names it; initialization takes it whether new or adopted. A GitHub issue is
+// its repository and number; GitHub's issue read has no numeric ID, and nothing needs one.
 export const GitHubTrackerObjectSchema = Type.Object(
     {
-        issueId: Type.Integer({ minimum: 1 }),
         issueNumber: Type.Integer({ minimum: 1 }),
         issueUrl: OneLineSchema,
         projectItemId: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
