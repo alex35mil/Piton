@@ -12,6 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
 import { phaseValues } from "./workflow-phase-fixtures.ts"
 import type { Program, RunOptions } from "../extensions/__lib/run.ts"
+import * as Git from "../workflows/extensions/__lib/git.ts"
 import type { ProgramRunner } from "../workflows/extensions/__lib/git.ts"
 import { runDeliveryCleanup } from "../workflows/extensions/deliverable/cleanup.ts"
 import registerDeliverable, { githubMergeProof } from "../workflows/extensions/deliverable/index.ts"
@@ -167,6 +168,16 @@ function squashMerge(root: string, work: { branch: string; target: string }): st
     return headCommitSha
 }
 
+function branchSettings(root: string, branch: string): string[] {
+    const keys = cp.spawnSync("git", ["config", "--local", "--name-only", "--get-regexp", "^branch\\."], {
+        cwd: root,
+        encoding: "utf-8",
+    }).stdout
+    return keys
+        .split("\n")
+        .filter((key) => key.startsWith(`branch.${branch}.`) && !key.slice(`branch.${branch}.`.length).includes("."))
+}
+
 function cloneBranchExists(root: string, branch: string): boolean {
     return cp.spawnSync("git", ["show-ref", "--verify", `refs/heads/${branch}`], { cwd: root }).status === 0
 }
@@ -249,7 +260,25 @@ describe("Deliverable branch cleanup", () => {
         }
     })
 
-    it("deletes the branch through the program runner, widened by Git's control files, and keeps it when that fails", async () => {
+    it("deletes a branch with no settings without asking", async () => {
+        const { parent, root } = repository()
+        try {
+            const work = await submittedTask(root)
+            commitBranch(root, work.branch, false)
+            const merge = mergeProof(work, squashMerge(root, work))
+            const asking: ProgramRunner = async () => assert.fail("asked to widen")
+            const applied = await runDeliveryCleanup(
+                { entityDir: work.directory, merge },
+                { cwd: root, runner: asking },
+            )
+            assert.deepEqual(applied.branchSettings, { kind: "none" })
+            assert.equal(cloneBranchExists(root, work.branch), false)
+        } finally {
+            fs.rmSync(parent, { recursive: true, force: true })
+        }
+    })
+
+    it("removes a branch's settings through the program runner, widened by Git's control files, and keeps them when that fails", async () => {
         const { parent, root } = repository()
         try {
             const work = await submittedTask(root)
@@ -260,22 +289,45 @@ describe("Deliverable branch cleanup", () => {
                 asked.push([program, options])
                 return { kind: "notRun", reason: "the user declined" }
             }
-            await assert.rejects(
-                runDeliveryCleanup({ entityDir: work.directory, merge }, { cwd: root, runner: refusing }),
-                /git branch -D .*not run: the user declined/,
+            const applied = await runDeliveryCleanup(
+                { entityDir: work.directory, merge },
+                { cwd: root, runner: refusing },
             )
-            assert.equal(cloneBranchExists(root, work.branch), true, "kept")
+            assert.deepEqual(applied.branchSettings, { kind: "kept", reason: "not run: the user declined" })
+            assert.equal(cloneBranchExists(root, work.branch), false, "the branch is deleted anyway")
+            assert.equal(branchSettings(root, work.branch).length > 0, true, "settings kept")
             const [[program, options]] = asked as [[Program, RunOptions]]
-            assert.deepEqual(program, { kind: "exec", argv: ["git", "branch", "-D", work.branch] })
+            assert.deepEqual(program, {
+                kind: "exec",
+                argv: ["git", "config", "--local", "--remove-section", `branch.${work.branch}`],
+            })
             assert.deepEqual(options.where, { kind: "widened", grants: { allow_git_control_files: true } })
             assert.equal(fs.realpathSync(options.cwd), fs.realpathSync(root))
+        } finally {
+            fs.rmSync(parent, { recursive: true, force: true })
+        }
+    })
 
-            const failing: ProgramRunner = async () => ({ kind: "exited", code: 1, output: "error: nope\n" })
-            await assert.rejects(
-                runDeliveryCleanup({ entityDir: work.directory, merge }, { cwd: root, runner: failing }),
-                /error: nope/,
-            )
-            assert.equal(cloneBranchExists(root, work.branch), true)
+    it("deletes only a branch still at the verified commit and checked out nowhere", async () => {
+        const { parent, root } = repository()
+        try {
+            const at = git(root, ["rev-parse", "main"])
+            git(root, ["branch", "moved", at])
+            git(root, ["config", "branch.moved.remote", "origin"])
+            git(root, ["config", "branch.moved.x.remote", "origin"])
+            git(root, ["commit", "--allow-empty", "-m", "later"])
+            const later = git(root, ["rev-parse", "main"])
+            git(root, ["branch", "-f", "moved", later])
+            await assert.rejects(Git.deleteBranch(root, "moved", at, "r"), /is at .* but expected/)
+            assert.equal(cloneBranchExists(root, "moved"), true)
+            await assert.rejects(Git.deleteBranch(root, "main", later, "r"), /checked out/)
+            assert.equal(cloneBranchExists(root, "main"), true)
+
+            // Outside a session the default runner removes the settings here, and only that branch's.
+            assert.deepEqual(await Git.deleteBranch(root, "moved", later, "r"), { kind: "removed" })
+            assert.equal(cloneBranchExists(root, "moved"), false)
+            assert.deepEqual(branchSettings(root, "moved"), [])
+            assert.deepEqual(branchSettings(root, "moved.x"), ["branch.moved.x.remote"])
         } finally {
             fs.rmSync(parent, { recursive: true, force: true })
         }

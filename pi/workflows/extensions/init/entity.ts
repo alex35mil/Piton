@@ -346,10 +346,9 @@ export async function initializeEntity(
         configured.provider === "github" ? configured.repository : undefined,
     )
 
-    let createdBranch: string | undefined
+    let createdBranch: CreatedBranch | undefined
     try {
-        createBranch(root, contract)
-        createdBranch = contract.name
+        createdBranch = createBranch(root, contract)
         const common = {
             slug,
             title: input.title.trim(),
@@ -407,10 +406,9 @@ export async function initializeLocalTask(
     assertBranchAvailable(root, branch, start)
     const contract = readyBranch(branch, start, "generated")
 
-    let createdBranch: string | undefined
+    let createdBranch: CreatedBranch | undefined
     try {
-        createBranch(root, contract)
-        createdBranch = contract.name
+        createdBranch = createBranch(root, contract)
         const status = parse(EntityStatusValidator, {
             slug,
             title: input.title.trim(),
@@ -632,16 +630,28 @@ function assertBranchAvailable(root: string, branch: string, start: string): voi
     Git.run(root, ["check-ref-format", "--branch", branch])
 }
 
-function createBranch(root: string, contract: ReadyBranchContract): void {
+/** A branch this initialization created, and the commit it created it at. */
+interface CreatedBranch {
+    name: string
+    commit: string
+}
+
+function createBranch(root: string, contract: ReadyBranchContract): CreatedBranch {
     Git.run(root, ["branch", contract.name, contract.start])
+    return { name: contract.name, commit: Git.run(root, ["rev-parse", "--verify", `refs/heads/${contract.name}`]) }
 }
 
 /** Best effort: removes the branch a failed initialization created. The initialization's own error is what's reported. */
-async function deleteCreatedBranch(root: string, branch: string, runner?: Git.ProgramRunner): Promise<void> {
-    if (!Git.succeeds(root, ["show-ref", "--verify", `refs/heads/${branch}`])) return
+async function deleteCreatedBranch(root: string, branch: CreatedBranch, runner?: Git.ProgramRunner): Promise<void> {
     try {
-        await Git.deleteBranch(root, branch, `remove the branch ${branch} a failed initialization created`, runner)
+        await Git.deleteBranch(
+            root,
+            branch.name,
+            branch.commit,
+            `remove the settings of the branch ${branch.name} a failed initialization created from .git/config`,
+            runner,
+        )
     } catch {
-        // Left in place; the next initialization reports it as an existing branch.
+        // Left in place (it moved, or is checked out); the next initialization reports it as an existing branch.
     }
 }

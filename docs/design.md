@@ -1479,8 +1479,11 @@ workflow tool) asks the daemon to run a program where it needs to, and the daemo
   sends none. It isn't asked about after it fails: its caller reads the exit and the output.
 - **The client** is `pi/extensions/__lib/run.ts`, `runProgram(program, {cwd, where, reason})`, returning `exited`
   (code and output), `timedOut`, or `notRun`. Outside a session, or in a host session, it runs the program itself.
-  The workflow deletes branches through it, widened by `allow_git_control_files` (`git branch -D` rewrites
-  `.git/config`): after shipping and after a failed initialization.
+  The workflow deletes branches (after shipping and after a failed initialization) without it: `git update-ref -d
+  refs/heads/<branch> <commit>` in pi's own sandbox deletes only the ref, never asks, and refuses a branch that moved
+  off the commit the caller verified. Only when `.git/config` still has settings for the branch does it remove them
+  through a run widened by `allow_git_control_files`, which asks; a declined removal leaves them, and the branch is
+  still deleted.
 
 ### Asking when the sandbox blocks
 

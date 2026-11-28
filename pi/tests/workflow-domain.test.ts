@@ -21,6 +21,7 @@ import {
     taskParent,
     writeEntityStatus,
 } from "../workflows/extensions/__lib/entity.ts"
+import type { ProgramRunner } from "../workflows/extensions/__lib/git.ts"
 import { prepareArtifactPersistence } from "../workflows/extensions/__lib/project-config.ts"
 import {
     EntityInitializationValidator,
@@ -583,6 +584,38 @@ describe("workflow domain", () => {
             } finally {
                 fs.rmSync(cwd, { recursive: true, force: true })
             }
+        }
+    })
+
+    it("removes the branch a failed initialization created, asking only for its settings", async () => {
+        const cwd = temporaryRepository()
+        try {
+            writeProjectConfig(cwd, { tracker: { provider: "none" } })
+            prepareArtifactPersistence(cwd)
+            const now = new Date("2026-01-02T00:00:00Z")
+            // A Request that is only a publication signature fails after the branch exists.
+            const failing = {
+                title: "Empty",
+                slug: "empty",
+                request: "<sub>Sent via Pi. Model: a/b.</sub>",
+                kind: "chore" as const,
+            }
+            const asked: string[][] = []
+            const runner: ProgramRunner = async (program) => {
+                if (program.kind === "exec") asked.push(program.argv)
+                return { kind: "notRun", reason: "declined" }
+            }
+            await assert.rejects(() => initializeLocalTask(failing, { cwd, now, runner }), /request is empty/)
+            assert.equal(git(cwd, ["branch", "--list", "20260102-empty"]), "")
+            assert.deepEqual(asked, [], "no settings, no question")
+
+            // Git's own tracking option gives the new branch settings: only their removal asks.
+            git(cwd, ["config", "branch.autoSetupMerge", "always"])
+            await assert.rejects(() => initializeLocalTask(failing, { cwd, now, runner }), /request is empty/)
+            assert.equal(git(cwd, ["branch", "--list", "20260102-empty"]), "")
+            assert.deepEqual(asked, [["git", "config", "--local", "--remove-section", "branch.20260102-empty"]])
+        } finally {
+            fs.rmSync(cwd, { recursive: true, force: true })
         }
     })
 
