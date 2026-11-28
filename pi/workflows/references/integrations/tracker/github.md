@@ -38,7 +38,7 @@ Follow [initialize from the tracker object](../shared.md#initialize-from-the-tra
 
 - Call registered `get_me` once and use its `login` as the authenticated user for this operation.
 - One registered `issue_write` create with the intake title and Request, the labels preflight returned, issue-scoped Priority, and that login as the only assignee. Task issues come only from [Task issue processing](../../epic-tasks.md#task-issue-processing), with no assignee.
-- No duplicate, label, or option preflight. For an Epic, pass the returned numeric ID, number, and URL to `init_github_epic` as `object`. For a Task, read the new issue with `get` and `get_parent`, and pass them to `init_task`. A minimal ID-and-URL success isn't automatically uncertain.
+- No duplicate, label, or option preflight. The create returns the issue's URL, which ends in its number. For an Epic, pass that number and URL to `init_github_epic` as `object`. For a Task, read the new issue with `get` and `get_parent`, and pass them to `init_task`. A minimal URL-only success isn't automatically uncertain.
 
 **Board setup** (after initialization, for new and adopted work):
 
