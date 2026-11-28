@@ -19,11 +19,8 @@ export function resourceIdsFromTrackerObject(
             repository: tracker.repository,
             issueNumber: object.issueNumber,
         }
+        // A GitHub issue is addressed by number; only its Project item has an ID worth caching.
         return [
-            parseResourceIds({
-                scope: { ...scope, kind: "github-issue" },
-                value: { issueId: object.issueId, url: object.issueUrl },
-            }),
             ...(object.projectItemId === undefined
                 ? []
                 : [

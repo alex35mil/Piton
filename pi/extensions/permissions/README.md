@@ -103,15 +103,17 @@ the daemon through the channel (`__lib/agent.ts`, `run` with a `bash_call` origi
 call a token of its own), and handles `!` commands (`user_bash`) the same way: a sandboxed process can't start one with another
 sandbox, so the daemon runs each in its own, tagged with the call (`sandbox.ts`). pi's rendering, truncation,
 `shellPath`, `shellCommandPrefix`, and session environment stay. The tool takes two more parameters: `rerun`
-(`{ runtime: "sandbox" | "host" }`: after the sandbox blocked this exact command, run it again; the user is asked,
+(`{ runtime: "sandbox" | "host" }`: run the command outside the session's own sandbox; the user is asked,
 the question opens on that runtime, and the user may choose the sandbox with everything but the floor, the host with
-no sandbox, or deny) and `reason`. When a call ran anywhere but the session's own sandbox (a
+no sandbox, or deny) and `reason` (the block it hit, or how the agent knows the sandbox blocks it). When a call ran anywhere but the session's own sandbox (a
 per-command entry or the user's answer), the daemon says so before the output, and the result ends with one line
 naming where (`structuredContent.ran`). When a call fails, the daemon sends the blocks it recorded (`blocks`), and the
 result ends with them (`structuredContent.blocks`). When one of them is liftable, the daemon asks the user itself
 (`blocked`): the output gets a separator line, then the rerun's output and exit, or `not_rerun` with the reason and the
-first run's exit. The tool adds a system-prompt guideline: a failure like "Operation not permitted" or `open` error
--54 is likely a block even when none is listed, so ask with `rerun`, unless the user already declined. Permission
+first run's exit. The tool adds a system-prompt guideline: run commands in the sandbox first; a failure like "Operation not
+permitted" or `open` error -54 is likely a block even when none is listed, so ask with `rerun`; ask up front only for
+a command known to be blocked (earlier in the session, or the project says so), naming that evidence in `reason`;
+and never after the user declined. Permission
 rules still decide first. Elsewhere pi's own bash stays. See "Asking when the sandbox blocks" in `docs/design.md`.
 
 Code in pi's process that needs to run a program outside the session's sandbox uses `__lib/run.ts` (`runProgram`):

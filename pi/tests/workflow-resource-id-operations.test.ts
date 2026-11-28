@@ -298,7 +298,7 @@ describe("resource ID operations", () => {
         }
     })
 
-    it("records the exact required Project read and reuses its issue ID", async () => {
+    it("records the exact required Project read, and only its Project item ID", async () => {
         const f = fixture()
         try {
             const context = resolveResourceIdsContext(f.root, f.directory, "github-project-item")
@@ -329,7 +329,7 @@ describe("resource ID operations", () => {
             )
             assert.deepEqual(
                 readResourceIdsCache(f.directory)!.resourceIds.map((x) => x.scope.kind),
-                ["github-project-item", "github-issue"],
+                ["github-project-item"],
             )
             assert.throws(
                 () => resourceIdsFromRead(prScope, { ...evidence, tool: "mcp__other__pull_request_read" }, mcpTools),
@@ -422,7 +422,8 @@ describe("resource ID operations", () => {
                     purpose,
                     mcpTools,
                 )
-            assert.equal(kind("mcp__github__issue_read", "get"), "github-issue")
+            // An issue read records nothing: GitHub issues are addressed by number.
+            assert.throws(() => kind("mcp__github__issue_read", "get"))
             assert.equal(kind("mcp__github__projects_get", "get_project_item"), "github-project-item")
             assert.equal(kind("mcp__github__projects_write", "add_project_item"), "github-project-item")
             assert.equal(kind("mcp__github__pull_request_read", "get"), "github-pull-request")
@@ -435,7 +436,7 @@ describe("resource ID operations", () => {
                     ) &&
                     /mcp__github__projects_get \(method get_project_item\)/.test(error.message) &&
                     /mcp__github__projects_write \(method add_project_item\)/.test(error.message) &&
-                    /mcp__github__issue_read \(method get\)/.test(error.message) &&
+                    !/issue_read/.test(error.message.split("accepted evidence:")[1]) &&
                     /mcp__github__pull_request_read \(method get\)/.test(error.message),
             )
             assert.throws(() => kind("mcp__github__projects_get", "get_project_field"), /accepted evidence/)

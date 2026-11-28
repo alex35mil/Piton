@@ -17,10 +17,9 @@ import {
     resolveResourceIds,
 } from "./resource-id-operations.js"
 
-const ResourceSchema = Type.Enum(
-    ["github-issue", "github-project-item", "linear-project", "linear-issue", "github-pull-request"],
-    { type: "string" },
-)
+const ResourceSchema = Type.Enum(["github-project-item", "linear-project", "linear-issue", "github-pull-request"], {
+    type: "string",
+})
 const common = { entityDir: Type.String({ minLength: 1 }), resource: ResourceSchema }
 export const EvidenceSchema = Type.Object(
     {

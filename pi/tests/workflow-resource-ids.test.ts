@@ -22,8 +22,9 @@ import {
 const entity = "7-example"
 const common = { entity, mcpServer: "github" }
 const repository = { owner: "alex", repo: "example" }
-const issue = {
-    scope: { ...common, kind: "github-issue" as const, repository, issueNumber: 23 },
+// The removed `github-issue` kind, as caches written before its removal hold it: the reader rejects it.
+const staleIssue = {
+    scope: { ...common, kind: "github-issue", repository, issueNumber: 23 },
     value: { issueId: 5644393424, url: "https://github.com/alex/example/issues/23" },
 }
 const projectItem = {
@@ -78,7 +79,7 @@ describe("local resource IDs storage", () => {
         const { directory, cleanup } = fixture()
         try {
             assert.equal(readResourceIdsCache(directory), undefined)
-            assert.equal(await resolveCachedResourceIds(directory, issue.scope), undefined)
+            assert.equal(await resolveCachedResourceIds(directory, projectItem.scope), undefined)
             assert.deepEqual(fs.readdirSync(directory), [])
         } finally {
             cleanup()
@@ -88,13 +89,13 @@ describe("local resource IDs storage", () => {
     it("records strict provider variants and reuses exact scopes", async () => {
         const { directory, cleanup } = fixture()
         try {
-            const resourceIds = [issue, projectItem, pullRequest, linearProject, linearIssue]
+            const resourceIds = [projectItem, pullRequest, linearProject, linearIssue]
             await recordResourceIds(directory, resourceIds)
             assert.equal(ResourceIdsCacheValidator.check(readResourceIdsCache(directory)), true)
             for (const ids of resourceIds) {
                 assert.deepEqual(await resolveCachedResourceIds(directory, ids.scope), ids)
             }
-            const returned = await resolveCachedResourceIds(directory, issue.scope)
+            const returned = await resolveCachedResourceIds(directory, projectItem.scope)
             returned!.scope.entity = "changed"
             assert.equal(readResourceIdsCache(directory)!.entity, entity)
         } finally {
@@ -106,13 +107,13 @@ describe("local resource IDs storage", () => {
         const { directory, cleanup } = fixture()
         try {
             await Promise.all(
-                [issue, projectItem, pullRequest, linearProject, linearIssue].map((ids) =>
+                [projectItem, pullRequest, linearProject, linearIssue].map((ids) =>
                     recordResourceIds(directory, [ids]),
                 ),
             )
-            assert.equal(readResourceIdsCache(directory)!.resourceIds.length, 5)
+            assert.equal(readResourceIdsCache(directory)!.resourceIds.length, 4)
             await recordResourceIds(directory, [{ ...projectItem, value: { itemId: 42 } }])
-            assert.deepEqual(await resolveCachedResourceIds(directory, issue.scope), issue)
+            assert.deepEqual(await resolveCachedResourceIds(directory, linearProject.scope), linearProject)
             assert.deepEqual(await resolveCachedResourceIds(directory, pullRequest.scope), pullRequest)
             assert.deepEqual((await resolveCachedResourceIds(directory, projectItem.scope))!.value, { itemId: 42 })
         } finally {
@@ -130,9 +131,9 @@ describe("local resource IDs storage", () => {
                 { ...projectItem.scope, project: { ...projectItem.scope.project, number: 4 } },
                 { ...projectItem.scope, project: { ...projectItem.scope.project, ownerType: "org" } },
             ]) {
-                await recordResourceIds(directory, [issue, projectItem])
+                await recordResourceIds(directory, [pullRequest, projectItem])
                 assert.equal(await resolveCachedResourceIds(directory, scope), undefined)
-                assert.deepEqual(readResourceIdsCache(directory)!.resourceIds, [issue])
+                assert.deepEqual(readResourceIdsCache(directory)!.resourceIds, [pullRequest])
             }
             await recordResourceIds(directory, [linearIssue])
             assert.equal(
@@ -152,12 +153,12 @@ describe("local resource IDs storage", () => {
     it("does not use another entity's structurally valid cache", async () => {
         const { directory, cleanup } = fixture()
         try {
-            await recordResourceIds(directory, [issue])
-            const scope = { ...issue.scope, entity: "8-other" }
+            await recordResourceIds(directory, [projectItem])
+            const scope = { ...projectItem.scope, entity: "8-other" }
             assert.equal(await resolveCachedResourceIds(directory, scope), undefined)
-            await recordResourceIds(directory, [{ ...issue, scope }])
+            await recordResourceIds(directory, [{ ...projectItem, scope }])
             assert.equal(readResourceIdsCache(directory)!.entity, "8-other")
-            assert.equal(await resolveCachedResourceIds(directory, issue.scope), undefined)
+            assert.equal(await resolveCachedResourceIds(directory, projectItem.scope), undefined)
         } finally {
             cleanup()
         }
@@ -166,11 +167,11 @@ describe("local resource IDs storage", () => {
     it("invalidates only the exact confirmed stale scope", async () => {
         const { directory, cleanup } = fixture()
         try {
-            await recordResourceIds(directory, [issue, projectItem])
-            await invalidateResourceIds(directory, { ...issue.scope, issueNumber: 24 })
+            await recordResourceIds(directory, [pullRequest, projectItem])
+            await invalidateResourceIds(directory, { ...projectItem.scope, issueNumber: 24 })
             assert.equal(readResourceIdsCache(directory)!.resourceIds.length, 2)
-            await invalidateResourceIds(directory, issue.scope)
-            assert.deepEqual(readResourceIdsCache(directory)!.resourceIds, [projectItem])
+            await invalidateResourceIds(directory, projectItem.scope)
+            assert.deepEqual(readResourceIdsCache(directory)!.resourceIds, [pullRequest])
         } finally {
             cleanup()
         }
@@ -181,11 +182,13 @@ describe("local resource IDs storage", () => {
         try {
             const file = path.join(directory, RESOURCE_IDS_CACHE_FILE)
             for (const raw of [
-                { entity, resourceIds: [issue], status: "Done" },
-                { entity, resourceIds: [{ ...issue, value: { ...issue.value, body: "snapshot" } }] },
-                { entity, resourceIds: [issue, issue] },
-                { entity: "wrong", resourceIds: [issue] },
-                { entity, resourceIds: [{ ...issue, scope: { ...issue.scope, priority: "High" } }] },
+                { entity, resourceIds: [pullRequest], status: "Done" },
+                { entity, resourceIds: [{ ...pullRequest, value: { ...pullRequest.value, body: "snapshot" } }] },
+                { entity, resourceIds: [pullRequest, pullRequest] },
+                { entity: "wrong", resourceIds: [pullRequest] },
+                { entity, resourceIds: [{ ...pullRequest, scope: { ...pullRequest.scope, priority: "High" } }] },
+                // A cache written before the `github-issue` kind was removed: the message says to delete it.
+                { entity, resourceIds: [staleIssue, projectItem] },
             ]) {
                 writeRaw(directory, raw)
                 const before = fs.readFileSync(file, "utf-8")
@@ -213,7 +216,7 @@ describe("local resource IDs storage", () => {
             git(["add", ".gitignore"])
             const status = git(["status", "--short"])
             const bytes = fs.readFileSync(metadata)
-            await recordResourceIds(directory, [issue, projectItem, pullRequest])
+            await recordResourceIds(directory, [projectItem, pullRequest])
             assert.equal(git(["status", "--short"]), status)
             assert.deepEqual(fs.readFileSync(metadata), bytes)
             assert.equal(
@@ -234,15 +237,13 @@ describe("local resource IDs storage", () => {
         assert.throws(
             () =>
                 parseResourceIds({
-                    ...issue,
-                    value: { ...issue.value, url: "https://github.com/other/example/issues/23" },
+                    ...pullRequest,
+                    value: { ...pullRequest.value, url: "https://github.com/other/example/pull/3" },
                 }),
             /exact GitHub resource/,
         )
-        assert.throws(
-            () => parseResourceIds({ ...issue, value: { ...issue.value, url: pullRequest.value.url } }),
-            /exact GitHub resource/,
-        )
+        // The removed `github-issue` kind is no longer a valid entry.
+        assert.throws(() => parseResourceIds(staleIssue), /invalid resource IDs/)
         assert.throws(
             () => parseResourceIds({ ...linearIssue, value: { ...linearIssue.value, url: linearProject.value.url } }),
             /wrong Linear resource/,
@@ -266,10 +267,13 @@ describe("local resource IDs storage", () => {
         assert.deepEqual(memo.resolve(pullRequest.scope), pullRequest)
         memo.invalidate(pullRequest.scope)
         assert.equal(memo.resolve(pullRequest.scope), undefined)
-        memo.record(issue)
-        assert.deepEqual(memo.resolve({ ...issue.scope, repository: { owner: "ALEX", repo: "EXAMPLE" } }), issue)
+        memo.record(projectItem)
+        assert.deepEqual(
+            memo.resolve({ ...projectItem.scope, repository: { owner: "ALEX", repo: "EXAMPLE" } }),
+            projectItem,
+        )
         memo.reset()
-        assert.equal(memo.resolve(issue.scope), undefined)
+        assert.equal(memo.resolve(projectItem.scope), undefined)
         assert.throws(
             () => memo.record({ ...pullRequest, value: { ...pullRequest.value, merged: true } }),
             /invalid resource IDs/,

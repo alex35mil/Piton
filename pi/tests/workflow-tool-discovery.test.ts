@@ -93,7 +93,7 @@ describe("workflow tool discovery", () => {
         assert.ok(!accepts(preflight, { ...input, kind: "unsupported" }))
         // New work is always standalone: preflight takes no parent.
         assert.ok(!accepts(preflight, { ...input, parent: { kind: "none" } }))
-        const issue = { issueId: 123, issueNumber: 4, issueUrl: "https://github.com/o/r/issues/4" }
+        const issue = { issueNumber: 4, issueUrl: "https://github.com/o/r/issues/4" }
         const read = { tool: "mcp__github__issue_read", arguments: {}, response: {} }
         const init = tools.find((tool) => tool.name === "init_task")!.parameters
         assert.ok(!tools.some((tool) => tool.name === "init_github_task" || tool.name === "init_linear_task"))
@@ -129,9 +129,7 @@ describe("workflow tool discovery", () => {
             for (const request of h.requests) {
                 const tools = getCurrentTools(request.messages)
                 assert.ok(!tools.some((tool) => tool.name === "init_task"))
-                assert.ok(
-                    !tools.find((tool) => tool.name === "codemode")!.description.includes("tools.init_task"),
-                )
+                assert.ok(!tools.find((tool) => tool.name === "codemode")!.description.includes("tools.init_task"))
             }
             const result = h.manager.buildSessionProjection().messages.find((message) => message.role === "toolResult")
             assert.match(JSON.stringify(result), /init_task/)

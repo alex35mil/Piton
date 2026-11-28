@@ -20,10 +20,6 @@ const Project = Type.Object(
 const commonScope = { entity: OneLine, mcpServer: OneLine }
 const githubIssueScope = { ...commonScope, repository: Repository, issueNumber: PositiveInteger }
 
-export const GitHubIssueResourceIdsScopeSchema = Type.Object(
-    { ...githubIssueScope, kind: Type.Literal("github-issue") },
-    { additionalProperties: false },
-)
 export const GitHubProjectItemResourceIdsScopeSchema = Type.Object(
     { ...githubIssueScope, kind: Type.Literal("github-project-item"), project: Project },
     { additionalProperties: false },
@@ -56,7 +52,6 @@ export const GitHubPullRequestResourceIdsScopeSchema = Type.Object(
     { additionalProperties: false },
 )
 export const ProviderResourceIdsScopeSchema = Type.Union([
-    GitHubIssueResourceIdsScopeSchema,
     GitHubProjectItemResourceIdsScopeSchema,
     LinearProjectResourceIdsScopeSchema,
     LinearIssueResourceIdsScopeSchema,
@@ -70,10 +65,6 @@ function entry<S extends TSchema, V extends TSchema>(scope: S, value: V) {
 }
 
 export const ResourceIdsSchema = Type.Union([
-    entry(
-        GitHubIssueResourceIdsScopeSchema,
-        Type.Object({ issueId: PositiveInteger, url: OneLine }, { additionalProperties: false }),
-    ),
     entry(
         GitHubProjectItemResourceIdsScopeSchema,
         Type.Object({ itemId: PositiveInteger }, { additionalProperties: false }),
@@ -113,9 +104,7 @@ export function parseResourceIdsScope(raw: unknown): ResourceIdsScope {
 export function parseResourceIds(raw: unknown): ResourceIds {
     if (!ResourceIdsValidator.check(raw)) throw new Error("invalid resource IDs")
     const result = { ...structuredClone(raw), scope: normalizeScope(raw.scope) } as ResourceIds
-    if (isResourceIdsKind(result, "github-issue")) {
-        assertGitHubResourceUrl(result.value.url, result.scope.repository, "issues", result.scope.issueNumber)
-    } else if (isResourceIdsKind(result, "github-pull-request")) {
+    if (isResourceIdsKind(result, "github-pull-request")) {
         assertGitHubResourceUrl(result.value.url, result.scope.repository, "pull", result.value.number)
     } else if (isResourceIdsKind(result, "linear-project") || isResourceIdsKind(result, "linear-issue")) {
         const url = new URL(result.value.url)

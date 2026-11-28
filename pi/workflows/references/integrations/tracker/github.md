@@ -23,10 +23,8 @@ Adoption applies only to an explicitly selected existing issue, before initializ
    - the numeric Project-item ID;
    - Status is Backlog or Todo;
    - Priority is a configured value, or `not set` when empty.
-
-   The Project item can supply a numeric issue ID that the issue read omits.
 5. Under the explicit-selection approval in [artifacts](../../artifacts.md#initialization-inputs), reuse the title, description, copied Priority, and any configured Kind without another confirmation. A Task's Kind comes from its plan section. Ask only for missing or conflicting information.
-6. For an Epic, call `init_github_epic` with the numeric issue ID, number, URL, and Project-item ID as `object`. For a Task, call `init_task` with the issue's `get` and `get_parent` reads (plus the parent's `get` when `route_task` asked for it) and the Project-item ID.
+6. For an Epic, call `init_github_epic` with the issue number, URL, and Project-item ID as `object`. A GitHub issue is its repository and number; no numeric issue ID is needed. For a Task, call `init_task` with the issue's `get` and `get_parent` reads (plus the parent's `get` when `route_task` asked for it) and the Project-item ID.
 
 **Stops adoption:** the wrong repository, Project, or parent, a non-queue Status, ambiguity, denied access, or an unconfigured Priority.
 
@@ -40,7 +38,7 @@ Follow [initialize from the tracker object](../shared.md#initialize-from-the-tra
 
 - Call registered `get_me` once and use its `login` as the authenticated user for this operation.
 - One registered `issue_write` create with the intake title and Request, the labels preflight returned, issue-scoped Priority, and that login as the only assignee. Task issues come only from [Task issue processing](../../epic-tasks.md#task-issue-processing), with no assignee.
-- No duplicate, label, or option preflight. For an Epic, pass the returned numeric ID, number, and URL to `init_github_epic` as `object`. For a Task, read the new issue with `get` and `get_parent`, and pass them to `init_task`. A minimal ID-and-URL success isn't automatically uncertain.
+- No duplicate, label, or option preflight. The create returns the issue's URL, which ends in its number. For an Epic, pass that number and URL to `init_github_epic` as `object`. For a Task, read the new issue with `get` and `get_parent`, and pass them to `init_task`. A minimal URL-only success isn't automatically uncertain.
 
 **Board setup** (after initialization, for new and adopted work):
 

@@ -1,5 +1,8 @@
 // Tracker reads for a Task issue, in the shapes real MCP responses use: GitHub `issue_read` `get` and
 // `get_parent` (`{"parent": null}` or the parent summary, checked against real issues), Linear `get_issue`.
+// A real GitHub `get` has no numeric `id`: its keys (read from alex35mil/Piton#376) are assignees,
+// author_association, closed_by_pull_requests, created_at, has_children, has_parent, html_url, labels, number,
+// reactions, state, status, title, updated_at, and user. Keep it that way here.
 // Task initialization, routing, restore, and the resume parent check take these as `reads`.
 
 const text = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] })
@@ -37,7 +40,6 @@ export function githubIssue(
     repository = { owner: "example", repo: "project" },
 ) {
     return {
-        id: 1000 + number,
         number,
         title: `Issue ${number}`,
         body: `Request ${number}.`,

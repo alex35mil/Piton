@@ -105,7 +105,6 @@ async function fixture(kind: "epic" | "task" | "standalone" = "standalone", adop
         trackerPublication(root, input, catalog, options)
     // A new and an adopted issue initialize the same way; only the selected object differs.
     const object = (issueNumber: number) => ({
-        issueId: 100 + issueNumber,
         issueNumber,
         issueUrl: `https://github.com/example/project/issues/${issueNumber}`,
         ...(adopted ? { projectItemId: 200 } : {}),

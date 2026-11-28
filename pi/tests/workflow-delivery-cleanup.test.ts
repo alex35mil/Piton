@@ -80,7 +80,6 @@ function repository(withOrigin = true) {
 
 function issue(number: number) {
     return {
-        issueId: 1000 + number,
         issueNumber: number,
         issueUrl: `https://github.com/example/project/issues/${number}`,
     }

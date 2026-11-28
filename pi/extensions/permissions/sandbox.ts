@@ -62,10 +62,12 @@ export function blockLines(report: BlockReport): string[] {
 
 /** The system-prompt guideline the sandboxed bash tool adds. */
 export const SANDBOX_GUIDELINE =
-    "Commands run in Piton's sandbox. When a command fails with 'Operation not permitted', a refused socket or " +
-    "keychain, or `open` error -54, the sandbox likely blocked it even when no block is listed: ask with `rerun` " +
-    "instead of explaining the failure or working around it, unless the user already declined to run that command " +
-    "again. When Piton saw the block it asks the user itself, and the result says so."
+    "Commands run in Piton's sandbox, and most work there: run them there first. When one fails with 'Operation not " +
+    "permitted', a refused socket or keychain, or `open` error -54, the sandbox likely blocked it even when no block is " +
+    "listed: ask with `rerun` instead of explaining the failure or working around it. Ask up front only for a command " +
+    "you know the sandbox blocks, because it was blocked earlier in this session or the project says so, and name " +
+    "that evidence in `reason`. A guess or a habit isn't evidence. Never ask after the user declined to run that " +
+    "command again. When Piton saw the block it asks the user itself, and the result says so."
 
 /** The bash tool's `rerun`: the side of the user's question it opens on. The user may choose the other or deny. */
 export const RerunSchema = Type.Object(
@@ -79,10 +81,11 @@ export const RerunSchema = Type.Object(
     {
         additionalProperties: false,
         description:
-            "Only after this exact command failed because the sandbox blocked it (Operation not permitted, a refused " +
-            "keychain or socket) and Piton didn't already ask: run it again where `runtime` says. The user is asked " +
-            "first and may choose the other runtime or deny; the whole command runs again. Never after the user " +
-            "declined to run it again.",
+            "Run the command where `runtime` says, after the user approves; they may choose the other runtime or deny. " +
+            "Use it only when this command failed because the sandbox blocked it (Operation not permitted, a refused " +
+            "keychain or socket) and Piton didn't already ask, or when you know the sandbox blocks it (blocked earlier " +
+            "in this session, or the project says so) and `reason` says how you know. Never for a command that wasn't " +
+            "tried in the sandbox on a guess, and never after the user declined to run it again.",
     },
 )
 
@@ -224,7 +227,12 @@ export async function registerSandboxBash(
         parameters: Type.Object({
             ...base.parameters.properties,
             rerun: Type.Optional(RerunSchema),
-            reason: Type.Optional(Type.String({ description: "With rerun: why it needs to run again." })),
+            reason: Type.Optional(
+                Type.String({
+                    description:
+                        "With rerun: why it needs to run outside the sandbox: the block it hit, or how you know the sandbox blocks it.",
+                }),
+            ),
         }),
         async execute(toolCallId, params, signal, onUpdate, ctx) {
             const { command, timeout, reason } = params
