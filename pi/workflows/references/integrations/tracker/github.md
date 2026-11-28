@@ -82,7 +82,7 @@ When a create result is uncertain, read [recovery](../recovery.md#uncertain-trac
 
 ## Queue and plan publication
 
-**Queue intake** follows [queue](../../queue.md). Queued work has no workflow artifact, cache, or checkpoint. Create the issue with no Phase, the `labels` that `inspect_queue_intake` returns, and set the selected Status and Priority.
+**Queue intake** follows [queue](../../queue.md). Queued work has no workflow artifact, cache, or checkpoint. Create the issue with no Phase and the `labels` that `inspect_queue_intake` returns. Take its number from the end of the returned URL, then add it to the Project and set the selected Status and Priority by that number.
 
 **Plan publication:**
 
