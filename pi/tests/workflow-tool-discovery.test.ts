@@ -78,7 +78,7 @@ describe("workflow tool discovery", () => {
             registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
         } as never)
         assert.equal(tools.length, 11)
-        assert.ok(!tools.some((tool) => tool.name === "init" || tool.name === "preflight_task"))
+        assert.ok(!tools.some((tool) => tool.name === "init" || tool.name.endsWith("_gig")))
         for (const tool of tools) {
             assert.ok(Type.IsObject(tool.parameters))
             assert.ok(!("anyOf" in tool.parameters))
@@ -86,33 +86,28 @@ describe("workflow tool discovery", () => {
             assert.equal(tool.namespace?.name, "workflows_initialization")
         }
         const input = { title: "Example", slug: "example", request: "Do the work.", kind: "refactor" }
-        const preflight = tools.find((tool) => tool.name === "preflight_gig")!.parameters
+        const preflight = tools.find((tool) => tool.name === "preflight_task")!.parameters
         assert.ok(accepts(preflight, input))
-        assert.ok(!accepts(preflight, { ...input, entity: "gig" }))
+        assert.ok(!accepts(preflight, { ...input, entity: "task" }))
         assert.ok(!accepts(preflight, { ...input, priority: "High" }))
         assert.ok(!accepts(preflight, { ...input, kind: "unsupported" }))
+        // New work is always standalone: preflight takes no parent.
+        assert.ok(!accepts(preflight, { ...input, parent: { kind: "none" } }))
         const issue = { issueId: 123, issueNumber: 4, issueUrl: "https://github.com/o/r/issues/4" }
-        const github = tools.find((tool) => tool.name === "init_github_gig")!.parameters
-        assert.ok(!accepts(github, input))
-        assert.ok(accepts(github, { ...input, object: issue }))
-        assert.ok(accepts(github, { ...input, object: { ...issue, projectItemId: 456 } }))
-        const linear = tools.find((tool) => tool.name === "init_linear_gig")!.parameters
-        assert.ok(!accepts(linear, { ...input, object: issue }))
-        const local = tools.find((tool) => tool.name === "init_local_gig")!.parameters
+        const read = { tool: "mcp__github__issue_read", arguments: {}, response: {} }
+        const init = tools.find((tool) => tool.name === "init_task")!.parameters
+        assert.ok(!tools.some((tool) => tool.name === "init_github_task" || tool.name === "init_linear_task"))
+        assert.ok(accepts(init, { ...input, reads: { issue: read, hierarchy: read } }))
+        assert.ok(accepts(init, { ...input, reads: { issue: read } }))
+        // The reads decide the issue and its parent; neither is input.
+        assert.ok(!accepts(init, { ...input, object: issue, reads: { issue: read } }), "no object input")
+        assert.ok(!accepts(init, { ...input, parent: { kind: "none" }, reads: { issue: read } }), "no parent input")
+        const { kind: _kind, ...withoutKind } = input
+        assert.ok(!accepts(init, { ...withoutKind, reads: { issue: read } }), "a Task always states its Kind")
+        const local = tools.find((tool) => tool.name === "init_local_task")!.parameters
         assert.ok(accepts(local, input))
         assert.ok(!accepts(local, { ...input, object: issue }))
-        assert.ok(
-            accepts(linear, {
-                ...input,
-                object: { issueId: "uuid", identifier: "ENG-4", issueUrl: "https://linear.app/x/issue/ENG-4" },
-            }),
-        )
-        const task = tools.find((tool) => tool.name === "init_github_task")!.parameters
-        const { kind: _kind, ...taskInput } = input
-        assert.ok(!accepts(task, { ...taskInput, object: issue }))
-        assert.ok(accepts(task, { ...taskInput, object: issue, parentEpicDir: ".piton/.local/epics/example" }))
-        // A Task takes its Kind from the plan section, never from initialization input.
-        assert.ok(!accepts(task, { ...input, object: issue, parentEpicDir: ".piton/.local/epics/example" }))
+        assert.ok(!accepts(local, { ...input, parent: { kind: "none" } }))
     })
 
     it("discovers initialization through native Codemode without declaring or inlining the catalog", async () => {
@@ -125,26 +120,26 @@ describe("workflow tool discovery", () => {
         })
         try {
             assert.ok(h.session.getActiveToolNames().includes("codemode"))
-            assert.ok(!h.session.getActiveToolNames().includes("init_github_gig"))
+            assert.ok(!h.session.getActiveToolNames().includes("init_task"))
             h.respond(
-                call({ name: "codemode", arguments: { code: 'text(await describeTool("init_github_gig"));' } }),
+                call({ name: "codemode", arguments: { code: 'text(await describeTool("init_task"));' } }),
                 answer("Discovered."),
             )
             await h.prompt("Find the standalone initialization operation.")
             for (const request of h.requests) {
                 const tools = getCurrentTools(request.messages)
-                assert.ok(!tools.some((tool) => tool.name === "init_github_gig"))
+                assert.ok(!tools.some((tool) => tool.name === "init_task"))
                 assert.ok(
-                    !tools.find((tool) => tool.name === "codemode")!.description.includes("tools.init_github_gig"),
+                    !tools.find((tool) => tool.name === "codemode")!.description.includes("tools.init_task"),
                 )
             }
             const result = h.manager.buildSessionProjection().messages.find((message) => message.role === "toolResult")
-            assert.match(JSON.stringify(result), /init_github_gig/)
-            assert.match(JSON.stringify(result), /issueNumber/)
+            assert.match(JSON.stringify(result), /init_task/)
+            assert.match(JSON.stringify(result), /get_parent/)
             assert.match(JSON.stringify(result), /refactor/)
             await h.reopen()
             assert.ok(h.session.getActiveToolNames().includes("codemode"))
-            assert.ok(!h.session.getActiveToolNames().includes("init_github_gig"))
+            assert.ok(!h.session.getActiveToolNames().includes("init_task"))
         } finally {
             await h.cleanup()
         }

@@ -37,7 +37,7 @@ const projectItem = {
     value: { itemId: 258514508 },
 }
 const pullRequest = {
-    scope: { ...common, kind: "github-pull-request" as const, repository, head: "gig-branch", target: "main" },
+    scope: { ...common, kind: "github-pull-request" as const, repository, head: "task-branch", target: "main" },
     value: { number: 3, url: "https://github.com/alex/example/pull/3" },
 }
 const linearProject = {
@@ -205,7 +205,7 @@ describe("local resource IDs storage", () => {
         try {
             const git = (args: string[]) => cp.execFileSync("git", args, { cwd: root, encoding: "utf-8" }).trim()
             git(["init", "-q"])
-            const directory = path.join(root, ".piton/.local/gigs/work")
+            const directory = path.join(root, ".piton/.local/tasks/work")
             fs.mkdirSync(directory, { recursive: true })
             const metadata = path.join(directory, "metadata.json")
             fs.writeFileSync(metadata, "immutable work identity\n")
@@ -218,7 +218,7 @@ describe("local resource IDs storage", () => {
             assert.deepEqual(fs.readFileSync(metadata), bytes)
             assert.equal(
                 git(["check-ignore", "--", path.relative(root, path.join(directory, RESOURCE_IDS_CACHE_FILE))]),
-                ".piton/.local/gigs/work/resource-ids.json",
+                ".piton/.local/tasks/work/resource-ids.json",
             )
         } finally {
             cleanup()

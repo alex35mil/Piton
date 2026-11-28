@@ -25,7 +25,7 @@ Phase is optional: a GitHub Project field, or Linear label groups, chosen at [se
 | Confirmed completion or cancellation | Done, Canceled | absent |
 
 - A direct-path Deliverable goes from Planning straight to Execution once it chose the path.
-- An Epic stays in Planning until the user accepts it, then moves to Execution. A Task or Gig whose plan [waits for approval](./planning.md#plan-approval) does the same.
+- An Epic stays in Planning until the user accepts it, then moves to Execution. A Task whose plan [waits for approval](./planning.md#plan-approval) does the same.
 - **A failed Phase read or write** is reported in one line, and work continues. The next Phase change or resume reconciles it.
 - **On resume,** take the activity from where the work stands (no plan yet, implementing, or stopped after final review), and set that Phase when the native one differs.
 
@@ -42,7 +42,7 @@ Provider automation can change native Status; for example, GitHub can move pushe
 During In Progress, Phase shows the current activity. Outside In Progress, clear it. Queued work has no Phase.
 
 - **GitHub:** the configured Project single-select Phase field.
-- **Linear:** the configured label group, a Project-label group for Epics and an issue-label group for Tasks and Gigs. The groups are mutually exclusive; apply only their children and keep every unrelated label.
+- **Linear:** the configured label group, a Project-label group for Epics and an issue-label group for Tasks. The groups are mutually exclusive; apply only their children and keep every unrelated label.
 
 ## Reconciling
 

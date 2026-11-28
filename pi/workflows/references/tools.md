@@ -20,14 +20,17 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 
 ## Initialization
 
-| Work | Before creating the tracker object | From a GitHub issue | From a Linear object |
-| --- | --- | --- | --- |
-| Epic | `preflight_epic` | `init_github_epic` | `init_linear_epic` |
-| Task | none: adopts its queued issue | `init_github_task` | `init_linear_task` |
-| Gig | `preflight_gig` | `init_github_gig` | `init_linear_gig` |
+| Work | Before creating the tracker object | Initialize |
+| --- | --- | --- |
+| Epic | `preflight_epic` | `init_github_epic` or `init_linear_epic`, with the tracker object |
+| Task | `preflight_task`, for standalone work; an Epic Task adopts its queued issue | `init_task`, with the issue's tracker reads |
 
-- Preflight runs the local checks and changes nothing. The init tools take the tracker object, newly created or selected for adoption, in `object`.
-- `init_local_gig` starts a Gig with no tracker item ([local Gigs](../skills/gig/SKILL.md#local-gig)). It needs no tracker.
+- The tracker decides a Task's parent. `route_task`, `init_task`, `check_task_parent`, and `restore_task` take the issue's reads (GitHub `issue_read` `get` and `get_parent`, plus the parent's `get` when asked; Linear `get_issue`) and derive the parent from them. None takes a parent as input. All read local artifacts and the given evidence only.
+- `route_task` decides how a `/task` request starts, from a Task path, an issue's reads and Status, or new work.
+- `check_task_parent` runs on every Task resume and stops a Task whose tracker parent changed.
+- `restore_task` recreates a Task started in another clone from its reads, its published plan, and its pushed branch.
+- Preflight runs the local checks and changes nothing.
+- `init_local_task` starts a standalone Task with no tracker item ([local Task](../skills/task/SKILL.md#local-task)). It needs no tracker.
 - `restore_epic` recreates a missing local Epic from its tracker read and published plan; `restore_epic_plan_source` returns an existing Epic's published plan as source without writing ([Epic restore](./epic.md#restore-an-epic)).
 - `accept_epic_tasks` saves an Epic's reviewed Task list as accepted after the user accepts it ([accepted Task list](./epic-tasks.md#accepted-task-list)).
 - `plan_epic_task_issues` reconciles an Epic's accepted Tasks with fresh child-issue facts into native steps, `record_epic_task_issue` tags a Task with its issue's marker, and `order_linear_epic_issues` puts a Linear Epic's issues in plan order ([Epic Tasks](./epic-tasks.md#task-issue-processing)).
@@ -46,7 +49,7 @@ Workflow operations are native deferred tools. In Codemode, find one with `searc
 | Prepare shipping; validate PR merge evidence | `prepare_integration_shipping`, `prepare_integration_merge` |
 | Prepare a lifecycle, Priority, or hierarchy change | `prepare_tracker_mutation` |
 | Prepare an item's label change | `prepare_label_mutation` |
-| Decide whether a Task or Gig waits for approval at a gate | `inspect_gate` |
+| Decide whether a Task waits for approval at a gate | `inspect_gate` |
 | Check whether a finished workflow ends with session analysis | `inspect_session_analysis` |
 | Set or clear native Phase | `prepare_github_phase_mutation`, `prepare_linear_phase_mutation` |
 
@@ -71,12 +74,12 @@ None of these turn identity, lifecycle, or merge facts into cache. They call pro
 - **Linear statuses:** `preview_linear_status_setup`, `apply_linear_status_setup`. Apply takes the approved `planHash` and only creates statuses.
 - **Label catalog:** `inspect_label_setup`, `preview_label_setup`, `apply_label_setup`, for both trackers.
 - **Standalone review:** `review` reviews uncommitted work, a commit, a range, a branch, or paths, with optional stated requirements. It needs no entity, tracker, or forge, and saves nothing ([review](./review.md#standalone-review)).
-- **Reviews:** `review_epic`, `review_task`, `review_gig`, and `record_review_response`. The review tool chooses between a review and a verification pass ([review](./review.md)). The reviewer uses an explicit model override or the configured startup default, not the current session's model, and loads only the selected Claude Code extension with rules and permissions.
-  - Task and Gig reviews also have `conflict-plan` and `conflict-merge` categories for [conflict resolution](./deliverable/conflicts.md).
-  - Epic, Task, and Gig reviewers read files with `read`, `grep`, `find`, and `ls`, and Git with the read-only `git_read`. They run headless under your permission settings, so with `default_mode = "ask"` those tools must be allowed. Incoming-PR reviewers get file reads only.
+- **Reviews:** `review_epic`, `review_task`, and `record_review_response`. The review tool chooses between a review and a verification pass ([review](./review.md)). The reviewer uses an explicit model override or the configured startup default, not the current session's model, and loads only the selected Claude Code extension with rules and permissions.
+  - Task reviews also have `conflict-plan` and `conflict-merge` categories for [conflict resolution](./deliverable/conflicts.md).
+  - Epic and Task reviewers read files with `read`, `grep`, `find`, and `ls`, and Git with the read-only `git_read`. They run headless under your permission settings, so with `default_mode = "ask"` those tools must be allowed. Incoming-PR reviewers get file reads only.
 - **Delivery cleanup:** `cleanup_delivery_branch` takes the merged PR read as `evidence`. It doesn't establish Done or authorize cleanup outside the shipping gates.
 - **Conflict resolution comment:** `prepare_merge_resolution_comment` returns the PR comment call that records a pushed conflict resolution.
-- **User review:** `begin_user_review` puts a Task or Gig branch's diff in the worktree for the user, and `end_user_review` returns to the branch ([user review](./deliverable/user-review.md)).
+- **User review:** `begin_user_review` puts a Task branch's diff in the worktree for the user, and `end_user_review` returns to the branch ([user review](./deliverable/user-review.md)).
 
 ## Incoming PRs
 

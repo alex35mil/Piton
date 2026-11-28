@@ -38,7 +38,7 @@ export const ResourceIdsToolSchema = Type.Union([
             evidence: Type.Optional(
                 Type.Union([EvidenceSchema], {
                     description:
-                        "A fresh read of the entity's tracker issue, for the PR title: GitHub issue_read get, or Linear get_issue by the stored issue UUID. Required when the entity has a tracker issue and the tracker is on; omit it for a local Gig or with the tracker off.",
+                        "A fresh read of the entity's tracker issue, for the PR title: GitHub issue_read get, or Linear get_issue by the stored issue UUID. Required when the entity has a tracker issue and the tracker is on; omit it for a local Task or with the tracker off.",
                 }),
             ),
         },

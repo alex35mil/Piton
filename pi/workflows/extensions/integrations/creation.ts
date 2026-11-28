@@ -40,7 +40,7 @@ function pullRequestCreateArguments(
 export type PullRequestTitleSync = { state: "unchanged" } | { state: "updated"; from: string; to: string }
 
 // The PR title: the tracker issue's current title from a fresh read, since the issue may have been
-// retitled after initialization. Without an issue to read (a local Gig, or the tracker role off),
+// retitled after initialization. Without an issue to read (a local Task, or the tracker role off),
 // the stored title stands and evidence is refused.
 function currentTitle(
     status: EntityStatus,

@@ -77,7 +77,7 @@ local function position_text(item)
     local kind = item.kind
     if kind.kind == "pr" then
         return kind.board and status_text(kind.board) or nil
-    elseif kind.kind == "epic" or kind.kind == "task" or kind.kind == "gig" or kind.kind == "unclassified" then
+    elseif kind.kind == "epic" or kind.kind == "task" or kind.kind == "unclassified" then
         local section = item.section
         if section == "todo" or section == "backlog" then
             return status_text(section)
@@ -96,9 +96,13 @@ local function kind_text(item)
     if kind.kind == "epic" then
         return "Epic"
     elseif kind.kind == "task" then
-        return "Task of Epic " .. (kind.epic.marker or kind.epic.title)
-    elseif kind.kind == "gig" then
-        return "Gig"
+        local parent = kind.parent
+        if parent.kind == "epic" then
+            return "Task of Epic " .. (parent.epic.marker or parent.epic.title)
+        elseif parent.kind == "none" then
+            return "Task"
+        end
+        error("unknown Task parent: " .. vim.inspect(parent))
     elseif kind.kind == "pr" then
         return "Pull request"
     elseif kind.kind == "unclassified" then
@@ -113,7 +117,7 @@ function M.icon(item)
     local kind = item.kind
     if kind.kind == "pr" then
         return PR_ICON
-    elseif kind.kind == "epic" or kind.kind == "task" or kind.kind == "gig" or kind.kind == "unclassified" then
+    elseif kind.kind == "epic" or kind.kind == "task" or kind.kind == "unclassified" then
         return ISSUE_ICON
     end
     error("unknown queue kind: " .. vim.inspect(kind))
@@ -161,10 +165,17 @@ function M.pick()
             table.insert(parts, { queued.title })
             local kind = queued.kind
             if kind.kind == "task" then
-                table.insert(parts, { " · Epic " .. (kind.epic.marker or kind.epic.title), "Comment" })
+                local parent = kind.parent
+                if parent.kind == "epic" then
+                    table.insert(parts, { " · Epic " .. (parent.epic.marker or parent.epic.title), "Comment" })
+                elseif parent.kind == "none" then
+                    -- A standalone Task: nothing to add.
+                else
+                    error("unknown Task parent: " .. vim.inspect(parent))
+                end
             elseif kind.kind == "epic" then
                 table.insert(parts, { " · Epic", "Comment" })
-            elseif kind.kind == "gig" or kind.kind == "pr" or kind.kind == "unclassified" then
+            elseif kind.kind == "pr" or kind.kind == "unclassified" then
                 -- The plain case: nothing to add.
             end
             local position = position_text(queued)

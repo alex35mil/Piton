@@ -186,7 +186,7 @@ export function linearPublication(
             return { state: "recovery-read-required", lookups: missing.map((id) => call("get_document", { id })) }
         return [...reads.values()]
     }
-    // Announcements are comments on the plan's own parent: the Epic's Project, or the Task or Gig issue.
+    // Announcements are comments on the plan's own parent: the Epic's Project, or the Task issue.
     const commentParent = parent.kind === "project" ? { projectId: parent.id } : { issueId: parent.id }
     const commentListing = { ...commentParent, limit: 250 }
     const announcements = (): AnnouncementAdapter => {

@@ -171,7 +171,7 @@ export async function buildStandaloneReviewPrompt(root: string, input: Standalon
         "You are read-only. Do not modify files. Do not ask the user questions directly.",
         "Follow all rules supplied by the rules extension. If reviewing files that may match path-scoped rules, read those files first so the rules extension can load applicable rules. A violated rule is a broken requirement.",
         ...REVIEW_AUTHORITY_INSTRUCTIONS,
-        "This review isn't part of an Epic, Task, or Gig. Don't ask for plans, results, branches, or workflow artifacts.",
+        "This review isn't part of an Epic or Task. Don't ask for plans, results, branches, or workflow artifacts.",
         REVIEW_GIT_INSTRUCTIONS,
         untracked
             ? "The diff leaves out untracked files. Read each untracked file that git status lists (`??`) with read; they are part of the change."
@@ -247,7 +247,7 @@ export function registerStandaloneReview(pi: ExtensionAPI): void {
         name: "review",
         label: "review",
         description:
-            "Run one independent read-only review of uncommitted work, one commit, a commit range, the current branch against a base, or a set of paths, optionally against stated requirements. Needs no Epic, Task, or Gig, and no tracker or forge. Returns the findings and signoff; saves nothing.",
+            "Run one independent read-only review of uncommitted work, one commit, a commit range, the current branch against a base, or a set of paths, optionally against stated requirements. Needs no Epic or Task, and no tracker or forge. Returns the findings and signoff; saves nothing.",
         parameters: StandaloneReviewSchema,
         async execute(_id, params, signal, onUpdate, ctx) {
             const input = parse(StandaloneReviewValidator, params)

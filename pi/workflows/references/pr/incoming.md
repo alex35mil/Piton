@@ -2,7 +2,7 @@
 
 Evaluate an existing contribution privately before the maintainer decides what to publish, fix, push, or merge.
 
-- Requires a configured GitHub forge and prepared project artifacts, not a tracker or an initialized Epic, Task, or Gig.
+- Requires a configured GitHub forge and prepared project artifacts, not a tracker or an initialized Epic or Task.
 - Creates no workflow identity, lifecycle, branch contract, or submission PR.
 - The [GitHub forge route](../integrations/forge/github.md) still handles workflow-created branches; both flows share the same repository merge operation.
 

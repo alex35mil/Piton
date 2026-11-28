@@ -107,13 +107,17 @@ function epicFacts(tracker: TrackerConfig, evidence: ProviderEvidence, tools: Mc
     }
 }
 
-function publishedPlan(
+/**
+ * The entity's published plan from the recovery reads, as source with the record marked published, or
+ * `none` when there's no plan. Several plans, or reads that need more pages, refuse.
+ */
+export function restorePublishedPlan(
     tracker: TrackerConfig,
     record: TrackerRecord,
     title: string,
     pages: ProviderEvidence[],
     tools: McpToolCatalog,
-) {
+): { state: "none" } | { state: "found"; source: string; tracker: TrackerRecord } {
     const server = tracker.mcpServer
     const noop = () => {
         throw new Error("plan restore never saves publication state")
@@ -128,28 +132,44 @@ function publishedPlan(
             throw new Error(
                 `read the remaining candidate documents first: ${candidates.lookups.map((call) => JSON.stringify(call.arguments)).join(", ")}`,
             )
-        if (candidates.length !== 1)
+        if (candidates.length > 1)
             throw new Error(
-                `found ${candidates.length} published plans; restore needs exactly one, so investigate with the maintainer`,
+                `found ${candidates.length} published plans; restore needs at most one, so investigate with the maintainer`,
             )
-        return { source: source(candidates[0].body), tracker: published(candidates[0].published) }
+        if (candidates.length === 0) return { state: "none" as const }
+        return {
+            state: "found" as const,
+            source: source(candidates[0].body),
+            tracker: published(candidates[0].published),
+        }
     }
-    let restored: { source: string; tracker: TrackerRecord }
     if (record.provider === "github") {
         const adapter = githubPublication(record, server, tools, noop)
-        restored = restore(
+        return restore(
             adapter.restoreCandidates(pages),
             (body) => adapter.restore(body, title),
             (planComment) => ({ ...record, planComment }),
         )
-    } else {
-        const adapter = linearPublication(record, server, tools, noop)
-        restored = restore(
-            adapter.restoreCandidates(pages),
-            (body) => adapter.restore(body, title),
-            (planDocument) => ({ ...record, planDocument }),
-        )
     }
+    const adapter = linearPublication(record, server, tools, noop)
+    return restore(
+        adapter.restoreCandidates(pages),
+        (body) => adapter.restore(body, title),
+        (planDocument) => ({ ...record, planDocument }),
+    )
+}
+
+function publishedPlan(
+    tracker: TrackerConfig,
+    record: TrackerRecord,
+    title: string,
+    pages: ProviderEvidence[],
+    tools: McpToolCatalog,
+) {
+    const found = restorePublishedPlan(tracker, record, title, pages, tools)
+    if (found.state === "none")
+        throw new Error("found 0 published plans; restore needs exactly one, so investigate with the maintainer")
+    const restored = { source: found.source, tracker: found.tracker }
     // The restored plan must be usable before anything relies on it.
     if (!hasEpicTasksSection(restored.source)) throw new Error("published plan has no `## Tasks` section")
     const tasks = epicTaskList(parseEpicTasks(restored.source))

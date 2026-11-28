@@ -178,7 +178,7 @@ checkout's `pi/`, next to `cli/`). Then:
 
 - "Report this workflow issue" files Todo work in this checkout's tracker (`[tracker]` of `.piton/config.toml`)
   instead of handing the user a pre-filled GitHub issue.
-- Every shipped Task or Gig, completed Epic, and shipped incoming PR ends with an in-chat analysis of the session for
+- Every shipped Task, completed Epic, and shipped incoming PR ends with an in-chat analysis of the session for
   workflow problems. It costs tokens; turn it off in the global `config.host.toml`:
 
   ```toml

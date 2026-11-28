@@ -1,6 +1,6 @@
 # Review
 
-How to run and handle every Epic, Task, and Gig review, in every category, and a standalone review of any change.
+How to run and handle every Epic and Task review, in every category, and a standalone review of any change.
 
 ## What blocks
 
@@ -54,7 +54,7 @@ Each round lives in `reviews/<category>-NNN/`; the files are listed in [artifact
 
 ## Standalone review
 
-`review` runs the same reviewer on any change, in any session: uncommitted work, a commit, a commit range, the current branch against a base, or a set of paths. It needs no Epic, Task, or Gig, and no tracker or forge.
+`review` runs the same reviewer on any change, in any session: uncommitted work, a commit, a commit range, the current branch against a base, or a set of paths. It needs no Epic or Task, and no tracker or forge.
 
 - Use it when the user asks for a review outside a workflow entity. Inside one, use the entity's review tool, which saves rounds and chooses passes.
 - Pass what the change must do as `context`: requirements, decisions, or earlier findings to verify. Without it, the reviewer checks correctness, regressions, and security.

@@ -26,7 +26,7 @@ Adoption applies only to an explicitly selected existing issue, before initializ
 
    The Project item can supply a numeric issue ID that the issue read omits.
 5. Under the explicit-selection approval in [artifacts](../../artifacts.md#initialization-inputs), reuse the title, description, copied Priority, and any configured Kind without another confirmation. A Task's Kind comes from its plan section. Ask only for missing or conflicting information.
-6. Call `init_github_epic`, `init_github_task`, or `init_github_gig` with the numeric issue ID, number, URL, and Project-item ID as `object`.
+6. For an Epic, call `init_github_epic` with the numeric issue ID, number, URL, and Project-item ID as `object`. For a Task, call `init_task` with the issue's `get` and `get_parent` reads (plus the parent's `get` when `route_task` asked for it) and the Project-item ID.
 
 **Stops adoption:** the wrong repository, Project, or parent, a non-queue Status, ambiguity, denied access, or an unconfigured Priority.
 
@@ -40,11 +40,11 @@ Follow [initialize from the tracker object](../shared.md#initialize-from-the-tra
 
 - Call registered `get_me` once and use its `login` as the authenticated user for this operation.
 - One registered `issue_write` create with the intake title and Request, the labels preflight returned, issue-scoped Priority, and that login as the only assignee. Task issues come only from [Task issue processing](../../epic-tasks.md#task-issue-processing), with no assignee.
-- No duplicate, label, or option preflight. Pass the returned numeric ID, number, and URL to `init_github_<entity>` as `object`. A minimal ID-and-URL success isn't automatically uncertain.
+- No duplicate, label, or option preflight. For an Epic, pass the returned numeric ID, number, and URL to `init_github_epic` as `object`. For a Task, read the new issue with `get` and `get_parent`, and pass them to `init_task`. A minimal ID-and-URL success isn't automatically uncertain.
 
 **Board setup** (after initialization, for new and adopted work):
 
-1. Add a new issue to the configured Project, and record the add evidence with `record_resource_ids`. Follow the [Project item ID rule](#project-item-ids). Skip this for adopted work: its item is already in the Project, and initialization recorded its ID from `object`.
+1. Add a new issue to the configured Project, and record the add evidence with `record_resource_ids`. Follow the [Project item ID rule](#project-item-ids). Skip this for adopted work: its item is already in the Project, and initialization recorded its ID.
 2. Set In Progress, Priority, and, when Phase is configured, Planning in the Phase field, with Project writes addressed by the issue, not by item ID. Combine supported issue-field writes.
 3. For adopted work and a started Task, call registered `get_me` once, then run one `issue_write` update that sets its login as the only assignee. A new issue already has it.
 4. Reuse labels and parent assignment proven at creation. For adopted work and a started Task, read the issue's labels and call `prepare_label_mutation` with only the groups whose values you derived ([labels](../shared.md#labels)). For a Task's parent, call `prepare_tracker_mutation` with `hierarchy` only when a correction is needed.

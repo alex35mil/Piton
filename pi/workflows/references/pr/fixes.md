@@ -74,7 +74,7 @@ Work in two phases: **contributor review only**, then **clean contributor head p
 4. Show the full relevant source and the published-head-to-fixes diff, with untracked additions separately. Freeze each reviewed draft's evidence independently.
 5. Report runtime checks not run. Never claim passing runtime verification from static inspection.
 
-Larger or independent work needs a separate scope decision, never automatic Epic, Task, or Gig initialization.
+Larger or independent work needs a separate scope decision, never automatic Epic or Task initialization.
 
 ### Consent and write access
 

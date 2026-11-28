@@ -3,7 +3,7 @@ import { type LabelFacts, linearLabelFacts, linearLabelsNamed } from "./label-se
 import { type Gate, GATE_GROUP_KEY } from "./labels.js"
 
 /**
- * Whether a Task or Gig waits for the user's approval at one gate. The user marks an item with the
+ * Whether a Task waits for the user's approval at one gate. The user marks an item with the
  * gate's configured label; the workflow only reads it.
  */
 export type GateOutcome =

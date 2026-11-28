@@ -1,6 +1,6 @@
 ---
 name: project-setup
-description: "Use to interactively initialize or reconfigure Epic/Task/Gig workflows for a repository, including branch naming, tracker and forge integrations, and Project Policies."
+description: "Use to interactively initialize or reconfigure Epic and Task workflows for a repository, including branch naming, tracker and forge integrations, and Project Policies."
 allowed-tools:
     - "inspect_project_setup"
     - "prepare_artifacts"
@@ -31,7 +31,7 @@ allowed-tools:
 
 # Project setup
 
-Interactively configure the repository for Epic, Task, and Gig workflows.
+Interactively configure the repository for Epic and Task workflows.
 
 **Allowed:**
 
@@ -101,7 +101,7 @@ Workflow work always stays local under `.piton/.local/`. When the user asks for 
 | tracker | GitHub, Linear | work items, Backlog and Todo, lifecycle, Priority, hierarchy, plan publication |
 | forge | GitHub | pull requests |
 
-- Both roles are optional. Ask which ones the user wants; recommend both for team work. Without a tracker, Gigs run locally and Epics and Tasks are unavailable; without a forge, work stops after local commits.
+- Both roles are optional. Ask which ones the user wants; recommend both for team work. Without a tracker, standalone Tasks run locally and Epics are unavailable; without a forge, work stops after local commits.
 - To turn off a role a parent folder configures, save `{ "provider": "none" }` for it. Never create placeholder or secret-bearing configuration.
 - Choose the tracker before branch naming; the forge doesn't affect branch options.
 
@@ -152,7 +152,7 @@ Workflow work always stays local under `.piton/.local/`. When the user asks for 
 | Tracker and choice | Format |
 | --- | --- |
 | GitHub | one static format the user selects |
-| Linear, Linear naming | `tracker` for Epic, Task, and Gig |
+| Linear, Linear naming | `tracker` for Epic and Task |
 | Linear, workflow naming | one static format the user selects |
 
 **Static formats:**
@@ -163,7 +163,7 @@ Workflow work always stays local under `.piton/.local/`. When the user asks for 
 **`tracker`:**
 
 - Save the branch format `tracker`.
-- Explain that a Task or Gig uses the issue's `gitBranchName`, and an Epic uses `<YYYYMMDD>-<slug>`, dated by the Linear Project's creation.
+- Explain that a Task uses the issue's `gitBranchName`, and an Epic uses `<YYYYMMDD>-<slug>`, dated by the Linear Project's creation.
 - Don't ask for or read username settings.
 
 **Username (`username/identifier-title`):**
@@ -315,6 +315,6 @@ After approval:
    - with a GitHub forge, head-branch deletion: on, confirmed, declined, or unknown;
    - changed files and validation results.
 
-   Don't label anything `Next` or imply another action is required. End with `Available workflow commands when you want to start work:` and briefly define `/epic <initiative>`, `/task <request and parent Epic>`, `/gig <standalone request>`, `/backlog <potential work>`, and `/todo <queued work>`.
+   Don't label anything `Next` or imply another action is required. End with `Available workflow commands when you want to start work:` and briefly define `/epic <initiative>`, `/task <request, issue, or existing Task>`, `/backlog <potential work>`, and `/todo <queued work>`.
 
 Never claim success until these checks pass. When one fails, keep approved files and any partially provisioned GitHub Project unless reverting is separately approved, explain the exact fix, and make no unapproved provider change.

@@ -1,6 +1,6 @@
 ---
 name: todo
-description: "Use for /todo, ‘todo it’, or requests to report a workflow defect or friction: create ordinary Todo work in the current or workflow-source project's tracker without initializing an Epic, Task, or Gig."
+description: "Use for /todo, ‘todo it’, or requests to report a workflow defect or friction: create ordinary Todo work in the current or workflow-source project's tracker without initializing an Epic or Task."
 allowed-tools:
     - "inspect_integrations"
     - "inspect_queue_intake"
@@ -18,4 +18,4 @@ Todo is work we've committed to and can pick up next. Use destination `todo`.
 - [Core rules](../../references/core.md)
 - [Queue](../../references/queue.md)
 
-Todo holds Epics and Gigs. Tasks come only from accepted Epic plans. The work stays uninitialized until the user starts it through `/epic`, `/task`, or `/gig`.
+Todo holds Epics and standalone Tasks. An Epic's Tasks come only from its accepted plan. The work stays uninitialized until the user starts it through `/epic` or `/task`.

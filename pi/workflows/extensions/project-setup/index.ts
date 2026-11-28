@@ -14,7 +14,7 @@ import {
     resolveSettings,
     settingsErrors,
 } from "../../../extensions/__lib/settings.js"
-import { EPIC_ROOT, GIG_ROOT } from "../__lib/domain.js"
+import { EPIC_ROOT, TASK_ROOT } from "../__lib/domain.js"
 import * as Git from "../__lib/git.js"
 import {
     globalConfigPaths,
@@ -475,6 +475,6 @@ function inspectBoundEntityTrackers(root: string) {
         }
     }
     visit(path.join(root, EPIC_ROOT))
-    visit(path.join(root, GIG_ROOT))
+    visit(path.join(root, TASK_ROOT))
     return results.sort((left, right) => left.path.localeCompare(right.path))
 }

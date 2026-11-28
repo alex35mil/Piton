@@ -7,7 +7,7 @@ export const WORKFLOW_CONTEXT_SECTION = "workflows"
 export const PROJECT_POLICIES_SECTION = "project_policies"
 
 export const WORKFLOW_CONTEXT =
-    "This repository uses workflows. Every repository change happens inside a workflow entity: a Gig (`/gig`) for standalone work, or a Task (`/task`) for work planned in an Epic. Before implementing anything, start or resume one, and follow its lifecycle through planning, review, delivery, and shipping. Never edit, commit, or ship repository changes outside it unless the user explicitly approves. Questions, design discussion, and standalone tools such as `review` need no entity."
+    "This repository uses workflows. Every repository change happens inside a workflow entity: a Task (`/task`), standalone or planned in an Epic. Before implementing anything, start or resume one, and follow its lifecycle through planning, review, delivery, and shipping. Never edit, commit, or ship repository changes outside it unless the user explicitly approves. Questions, design discussion, and standalone tools such as `review` need no entity."
 
 type Sections = Record<string, string>
 

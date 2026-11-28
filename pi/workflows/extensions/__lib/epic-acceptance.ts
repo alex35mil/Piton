@@ -16,8 +16,7 @@ function epicStatus(directory: string): EpicStatus {
         case "epic":
             return status
         case "task":
-        case "gig":
-            throw new Error(`Task list acceptance requires an Epic, not a ${status.entity}`)
+            throw new Error("Task list acceptance requires an Epic, not a Task")
     }
 }
 
@@ -56,7 +55,6 @@ export function acceptEpicTasks(directory: string): { state: "accepted"; tasks: 
 export function assertAcceptedTaskList(status: EntityStatus, source: string): void {
     switch (status.entity) {
         case "task":
-        case "gig":
             return
         case "epic":
             break

@@ -76,18 +76,30 @@ export function resolveResourceIdsContext(cwd: string, entityDir: string, resour
         }
         case "linear-issue": {
             const configured = requireTracker(roles, `${resource} resource IDs`)
-            if (configured.provider !== "linear" || tracker.provider !== "linear" || tracker.resource === "project")
+            if (
+                configured.provider !== "linear" ||
+                tracker.provider !== "linear" ||
+                tracker.resource === "project" ||
+                status.entity !== "task"
+            )
                 throw new Error("resource IDs require a Linear issue")
+            const parent = status.parent
             scope = {
                 ...common,
                 kind: resource,
                 mcpServer: configured.mcpServer,
                 team: configured.team,
                 issueId: tracker.external.issueId,
-                relationship:
-                    tracker.resource === "task-issue"
-                        ? { kind: "project", projectId: tracker.external.projectId }
-                        : { kind: "projectless" },
+                relationship: (() => {
+                    switch (parent.kind) {
+                        case "epic":
+                            if (parent.epic.provider !== "linear")
+                                throw new Error("a Linear Task's parent Epic must be a Linear Project")
+                            return { kind: "project" as const, projectId: parent.epic.projectId }
+                        case "none":
+                            return { kind: "projectless" as const }
+                    }
+                })(),
             }
             break
         }
@@ -280,7 +292,7 @@ export function resourceIdsFromRead(
                 if (response.projectId !== scope.relationship.projectId)
                     throw new Error("Linear issue does not match the durable Task Project")
             } else if (response.projectId !== undefined && response.projectId !== null)
-                throw new Error("Linear Gig issue is not projectless")
+                throw new Error("Linear standalone Task issue is not projectless")
             return parseResourceIds({
                 scope,
                 value: { identifier: text(response.id, "issue identifier"), url: text(response.url, "issue URL") },

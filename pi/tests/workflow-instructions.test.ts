@@ -104,7 +104,7 @@ describe("workflow guidance structure", () => {
     })
 
     it("keeps shared operational contracts reachable from every work skill", () => {
-        for (const skill of ["epic", "task", "gig"]) {
+        for (const skill of ["epic", "task"]) {
             const graph = guidanceGraph(`workflows/skills/${skill}/SKILL.md`)
             for (const reference of [
                 "core.md",
@@ -132,7 +132,7 @@ describe("workflow guidance structure", () => {
                     "deliverable/extras.md",
                 ])
                     assert.ok(graph.has(`workflows/references/${reference}`), `${skill} must reach ${reference}`)
-            if (skill !== "gig") assert.ok(graph.has("workflows/references/epic.md"), `${skill} must reach epic.md`)
+            assert.ok(graph.has("workflows/references/epic.md"), `${skill} must reach epic.md`)
         }
         for (const skill of ["backlog", "todo", "project-setup", "pr"]) {
             const graph = guidanceGraph(`workflows/skills/${skill}/SKILL.md`)
@@ -165,7 +165,7 @@ describe("workflow guidance structure", () => {
     })
 
     it("lets every skill reach the shared queue and reporting contract", () => {
-        for (const skill of ["epic", "task", "gig", "backlog", "todo", "project-setup"]) {
+        for (const skill of ["epic", "task", "backlog", "todo", "project-setup"]) {
             const graph = guidanceGraph(`workflows/skills/${skill}/SKILL.md`)
             assert.ok(graph.has("workflows/references/queue.md"), `${skill} must reach queue.md`)
         }
@@ -210,8 +210,6 @@ describe("workflow guidance structure", () => {
         const budgets: Record<string, number> = {
             backlog: 12_200,
             todo: 12_500,
-            // Raised in #24 for the find_pull_request grant.
-            gig: 33_500,
             task: 38_000,
             epic: 39_200,
             pr: 29_700,
@@ -243,14 +241,9 @@ describe("workflow guidance structure", () => {
                 "inspect_session_analysis",
                 "inspect_integrations",
                 "inspect_gate",
-            ],
-            gig: [
-                "review_gig",
-                "prepare_tracker_publication",
-                "render_provider_body",
-                "inspect_session_analysis",
-                "inspect_integrations",
-                "inspect_gate",
+                "route_task",
+                "preflight_task",
+                "init_local_task",
             ],
             pr: ["inspect_session_analysis", "inspect_integrations"],
             "project-setup": ["inspect_permissions", "inspect_project_setup"],

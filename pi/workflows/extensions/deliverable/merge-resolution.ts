@@ -15,7 +15,7 @@ import { isResourceIdsKind, readCachedResourceIds } from "../integrations/resour
 
 export const MergeResolutionCommentInputSchema = Type.Object(
     {
-        entityDir: Type.String({ minLength: 1, description: "Task or Gig directory" }),
+        entityDir: Type.String({ minLength: 1, description: "Task directory" }),
         summary: Type.String({
             minLength: 1,
             description:

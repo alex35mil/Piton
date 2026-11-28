@@ -21,7 +21,7 @@ No arbitrary command or path overrides, contributor-code execution, or unapprove
 
 The [Project procedure](../../references/pr/project.md) keeps maintainer-controlled Backlog/Todo -> In Review until confirmed Done/Canceled; fork-only [setup automation](../../references/pr/automation.md) adds membership without field resets. [Shipping](../../references/pr/shipping.md) uses the one shared repository merge operation and includes restoring the checkout in the exact shipping and merge set.
 
-The [PR skill](../../skills/pr/SKILL.md) and [incoming PR procedure](../../references/pr/incoming.md) own private inspection, exact-revision approval, contributor access, and execution/merge boundaries. Configuration and identity belong to `integrations/forge/github/incoming-pr-context.ts`; independent review belongs to `review/pull-request.ts`. This is not Epic/Task/Gig initialization or submission.
+The [PR skill](../../skills/pr/SKILL.md) and [incoming PR procedure](../../references/pr/incoming.md) own private inspection, exact-revision approval, contributor access, and execution/merge boundaries. Configuration and identity belong to `integrations/forge/github/incoming-pr-context.ts`; independent review belongs to `review/pull-request.ts`. This is not Epic and Task initialization or submission.
 
 ## Private evidence layout
 

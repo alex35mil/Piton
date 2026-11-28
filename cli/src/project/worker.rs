@@ -1007,7 +1007,7 @@ mod tests {
         git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]);
         git(&source, &["push", "-q", "-u", "origin", "main"]);
         git(&source, &["remote", "set-head", "origin", "main"]);
-        std::fs::create_dir_all(source.join(".piton/.local/gigs")).unwrap();
+        std::fs::create_dir_all(source.join(".piton/.local/tasks")).unwrap();
         std::fs::create_dir_all(source.join("apps/.build/index-build/x")).unwrap();
         std::fs::create_dir_all(source.join("apps/.build/xcode")).unwrap();
         std::fs::write(source.join("apps/.build/xcode/keep"), "k").unwrap();
@@ -1084,7 +1084,7 @@ mod tests {
         remove_now(&info, true, None).unwrap();
         assert!(!worker.exists());
         assert!(container.is_dir(), "kept while another worker is in it");
-        assert!(source.join(SHARED_PATH).join("gigs").is_dir());
+        assert!(source.join(SHARED_PATH).join("tasks").is_dir());
 
         // The last worker takes the container with it, Finder's `.DS_Store` included.
         std::fs::write(container.join(".DS_Store"), "").unwrap();

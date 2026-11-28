@@ -1,5 +1,5 @@
 -- Todo and Backlog work of a Linear team: Todo first, and within each status
--- Projects (Epics) first, then issues (Tasks in a Project, Gigs without one),
+-- Projects (Epics) first, then issues (Epic Tasks in a Project, standalone Tasks without one),
 -- each ordered by priority, then by Linear's manual order within a priority.
 
 local util = require("piton.util")
@@ -104,8 +104,11 @@ function M.issues(fetch, config, status)
             title = issue.title,
             url = issue.url,
             kind = type(project) == "table"
-                    and { kind = "task", epic = { mention = project.url, title = project.name } }
-                or { kind = "gig" },
+                    and {
+                        kind = "task",
+                        parent = { kind = "epic", epic = { mention = project.url, title = project.name } },
+                    }
+                or { kind = "task", parent = { kind = "none" } },
         }
         table.insert(result, item)
     end

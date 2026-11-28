@@ -849,7 +849,7 @@ mod tests {
         let source = Some(PathBuf::from("/u/p/repo"));
         let checkout = Some(PathBuf::from("/u/p/repo.workers/w"));
         assert_eq!(c("/u/p/repo/.piton/config.toml"), source);
-        assert_eq!(c("/u/p/repo/.piton/.local/gigs/x/notes.md"), None);
+        assert_eq!(c("/u/p/repo/.piton/.local/tasks/x/notes.md"), None);
         // A worker's own `.piton/` isn't read, so it isn't protected; its `.pi/` is.
         assert_eq!(c("/u/p/repo.workers/w/.piton/config.toml"), None);
         assert_eq!(c("/u/p/repo.workers/w/.pi/settings.json"), checkout);

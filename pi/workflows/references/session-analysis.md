@@ -1,6 +1,6 @@
 # Session analysis
 
-Read this when a finished workflow's `inspect_session_analysis` returns `enabled`: after a Task or Gig ships, an Epic completes, or an incoming PR ships. Look back over the session for workflow problems that Piton should fix, check whether they're already reported, and present them in chat.
+Read this when a finished workflow's `inspect_session_analysis` returns `enabled`: after a Task ships, an Epic completes, or an incoming PR ships. Look back over the session for workflow problems that Piton should fix, check whether they're already reported, and present them in chat.
 
 ## Scope
 

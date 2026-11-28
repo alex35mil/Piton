@@ -12,12 +12,15 @@
 ---@field marker string? Short reference, when the tracker has one.
 ---@field title string
 
+---@alias QueueTaskParent
+---| { kind: "epic", epic: QueueParent } One of an Epic's Tasks.
+---| { kind: "none" } A standalone Task.
+
 ---@alias QueueKind
 ---| { kind: "epic" }
----| { kind: "task", epic: QueueParent }
----| { kind: "gig" }
+---| { kind: "task", parent: QueueTaskParent }
 ---| { kind: "pr", board: QueueStatus? } An incoming pull request; `board` is its Project Status when it's on the board.
----| { kind: "unclassified" } Top-level work in a tracker with no Epic Kind label configured to tell an Epic from a Gig.
+---| { kind: "unclassified" } Top-level work in a tracker with no Epic Kind label configured to tell an Epic from a standalone Task.
 
 ---@alias QueueStatus
 ---| "todo"
@@ -389,9 +392,8 @@ function M.command(item)
     if kind.kind == "epic" then
         return "/epic " .. subject .. " "
     elseif kind.kind == "task" then
-        return "/task " .. subject .. " (Epic " .. kind.epic.mention .. ") "
-    elseif kind.kind == "gig" then
-        return "/gig " .. subject .. " "
+        -- route_task finds the parent Epic from the issue itself.
+        return "/task " .. subject .. " "
     elseif kind.kind == "pr" then
         return "/pr " .. subject .. " "
     elseif kind.kind == "unclassified" then

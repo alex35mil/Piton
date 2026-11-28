@@ -33,7 +33,7 @@ Call providers only through the configured registered MCP tools, under normal pe
 Ask the user only for clarifications and decisions. Do everything else and report it in one line; they can object or interrupt at any time.
 
 - **Chat decisions are final.** Record one where it belongs and act on it. Never ask again when it lands in a plan, an Epic, or a publication.
-- **Name work by what it is.** In chat and in writing, name issues, Epics, Tasks, Gigs, and PRs by what they are, with the reference in parentheses: "ship the fnox credential proxy (#229)", not "ship #229".
+- **Name work by what it is.** In chat and in writing, name issues, Epics, Tasks, and PRs by what they are, with the reference in parentheses: "ship the fnox credential proxy (#229)", not "ship #229".
 
 ## Approvals
 

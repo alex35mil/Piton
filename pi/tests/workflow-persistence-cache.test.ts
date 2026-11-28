@@ -14,7 +14,7 @@ import {
     prepareArtifactPersistence,
 } from "../workflows/extensions/__lib/project-config.ts"
 
-const GIG_NOTES = ".piton/.local/gigs/example/notes.md"
+const GIG_NOTES = ".piton/.local/tasks/example/notes.md"
 
 function fixture() {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "workflow-persistence-")))

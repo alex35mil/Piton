@@ -2,6 +2,7 @@ import { type Static, Type } from "typebox"
 
 import { compile } from "../../../extensions/__lib/schema.js"
 import {
+    type EntityType,
     LINEAR_IDENTIFIER_PATTERN,
     PRIORITY_NOT_SET,
     TIMESTAMP_PATTERN,
@@ -64,30 +65,32 @@ export const LinearProjectObjectSchema = Type.Object(
     { additionalProperties: false },
 )
 export const LinearProjectObjectValidator = compile(LinearProjectObjectSchema)
-const linearIssueObject = {
-    issueId: OneLineSchema,
-    identifier: LinearIdentifierSchema,
-    issueUrl: OneLineSchema,
-    gitBranchName: Type.Optional(OneLineSchema),
-}
-export const LinearTaskIssueObjectSchema = Type.Object(
-    { ...linearIssueObject, projectId: OneLineSchema },
+// A Task's Linear issue. `projectId` is the read fact: present exactly when the issue is in a Project,
+// which for a Task means its parent Epic's.
+export const LinearIssueObjectSchema = Type.Object(
+    {
+        issueId: OneLineSchema,
+        identifier: LinearIdentifierSchema,
+        issueUrl: OneLineSchema,
+        gitBranchName: Type.Optional(OneLineSchema),
+        projectId: Type.Optional(
+            Type.String({
+                minLength: 1,
+                pattern: "^[^\\r\\n]+$",
+                description: "The issue's Project UUID, when it's in a Project; omit it when the issue has none",
+            }),
+        ),
+    },
     { additionalProperties: false },
 )
-export const LinearTaskIssueObjectValidator = compile(LinearTaskIssueObjectSchema)
-export const LinearGigIssueObjectSchema = Type.Object(linearIssueObject, {
-    additionalProperties: false,
-})
-export const LinearGigIssueObjectValidator = compile(LinearGigIssueObjectSchema)
+export const LinearIssueObjectValidator = compile(LinearIssueObjectSchema)
 export type GitHubTrackerObject = Static<typeof GitHubTrackerObjectSchema>
 export type LinearProjectObject = Static<typeof LinearProjectObjectSchema>
-export type LinearTaskIssueObject = Static<typeof LinearTaskIssueObjectSchema>
-export type LinearGigIssueObject = Static<typeof LinearGigIssueObjectSchema>
+export type LinearIssueObject = Static<typeof LinearIssueObjectSchema>
 export type TrackerObject =
     | ({ provider: "github" } & GitHubTrackerObject)
     | ({ provider: "linear"; resource: "project" } & LinearProjectObject)
-    | ({ provider: "linear"; resource: "task-issue" } & LinearTaskIssueObject)
-    | ({ provider: "linear"; resource: "gig-issue" } & LinearGigIssueObject)
+    | ({ provider: "linear"; resource: "issue" } & LinearIssueObject)
 
 export const GitHubTrackerRecordSchema = Type.Object(
     {
@@ -114,27 +117,11 @@ export const LinearProjectRecordSchema = Type.Object(
     },
     { additionalProperties: false },
 )
-export const LinearTaskIssueRecordSchema = Type.Object(
+// A Task's Linear issue: identity only. Its parent Epic's Project, when it has one, lives in the Task's `parent`.
+export const LinearIssueRecordSchema = Type.Object(
     {
         provider: Type.Literal("linear"),
-        resource: Type.Literal("task-issue"),
-        external: Type.Object(
-            {
-                issueId: OneLineSchema,
-                identifier: LinearIdentifierSchema,
-                projectId: OneLineSchema,
-            },
-            { additionalProperties: false },
-        ),
-        planDocument: PlanDocumentSchema,
-        planAnnouncement: Type.Optional(PlanAnnouncementSchema),
-    },
-    { additionalProperties: false },
-)
-export const LinearGigIssueRecordSchema = Type.Object(
-    {
-        provider: Type.Literal("linear"),
-        resource: Type.Literal("gig-issue"),
+        resource: Type.Literal("issue"),
         external: Type.Object(
             { issueId: OneLineSchema, identifier: LinearIdentifierSchema },
             { additionalProperties: false },
@@ -147,30 +134,102 @@ export const LinearGigIssueRecordSchema = Type.Object(
 export const TrackerRecordSchema = Type.Union([
     GitHubTrackerRecordSchema,
     LinearProjectRecordSchema,
-    LinearTaskIssueRecordSchema,
-    LinearGigIssueRecordSchema,
+    LinearIssueRecordSchema,
 ])
 export const TrackerRecordValidator = compile(TrackerRecordSchema)
+
+/**
+ * A Task's parent as the tracker records it: an Epic, by its tracker item, or none. The tracker decides it
+ * (a GitHub sub-issue of an Epic-labelled issue, a Linear issue in a Project); the local directory mirrors it.
+ * Sub-tasks would add a Task parent here.
+ */
+export const TaskTrackerParentSchema = Type.Union([
+    Type.Object(
+        {
+            kind: Type.Literal("epic"),
+            epic: Type.Union([
+                Type.Object(
+                    { provider: Type.Literal("github"), issueNumber: Type.Integer({ minimum: 1 }) },
+                    { additionalProperties: false },
+                ),
+                Type.Object(
+                    { provider: Type.Literal("linear"), projectId: OneLineSchema },
+                    { additionalProperties: false },
+                ),
+            ]),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object({ kind: Type.Literal("none") }, { additionalProperties: false }),
+])
+export type TaskTrackerParent = Static<typeof TaskTrackerParentSchema>
+export type EpicTrackerItem = Extract<TaskTrackerParent, { kind: "epic" }>["epic"]
+
+/** Whether `record` is the Epic tracker item `epic` names. */
+export function isEpicTrackerItem(record: EntityTracker, epic: EpicTrackerItem): boolean {
+    switch (epic.provider) {
+        case "github":
+            return record.provider === "github" && record.external.issueNumber === epic.issueNumber
+        case "linear":
+            return (
+                record.provider === "linear" &&
+                record.resource === "project" &&
+                record.external.projectId === epic.projectId
+            )
+    }
+}
+
+/** Whether two parents are the same tracker fact. */
+export function sameTaskParent(left: TaskTrackerParent, right: TaskTrackerParent): boolean {
+    switch (left.kind) {
+        case "none":
+            return right.kind === "none"
+        case "epic": {
+            if (right.kind !== "epic") return false
+            const [a, b] = [left.epic, right.epic]
+            switch (a.provider) {
+                case "github":
+                    return b.provider === "github" && a.issueNumber === b.issueNumber
+                case "linear":
+                    return b.provider === "linear" && a.projectId === b.projectId
+            }
+        }
+    }
+}
+
+export function describeTaskParent(parent: TaskTrackerParent): string {
+    switch (parent.kind) {
+        case "none":
+            return "no parent (standalone)"
+        case "epic":
+            switch (parent.epic.provider) {
+                case "github":
+                    return `the Epic #${parent.epic.issueNumber}`
+                case "linear":
+                    return `the Epic Project ${parent.epic.projectId}`
+            }
+    }
+}
 export type TrackerRecord = Static<typeof TrackerRecordSchema>
 export type GitHubTrackerRecord = Static<typeof GitHubTrackerRecordSchema>
 export type LinearTrackerRecord = Exclude<TrackerRecord, GitHubTrackerRecord>
 
-// A local Gig: no tracker item. Its creation time names it, and every tracker step refuses for it.
+// A local Task: no tracker item. Its creation time names it, and every tracker step refuses for it.
 export const LocalTrackerRecordSchema = Type.Object(
     { provider: Type.Literal("local"), createdAt: TimestampSchema },
     { additionalProperties: false },
 )
 export type LocalTrackerRecord = Static<typeof LocalTrackerRecordSchema>
 
-/** An entity's tracker binding: its tracker item, or none for a local Gig. */
+/** An entity's tracker binding: its tracker item, or none for a local Task. */
 export const EntityTrackerSchema = Type.Union([...TrackerRecordSchema.anyOf, LocalTrackerRecordSchema])
 export type EntityTracker = TrackerRecord | LocalTrackerRecord
 
-/** The entity's tracker item, for a step that works on it; a local Gig has none. */
+/** The entity's tracker item, for a step that works on it; a local Task has none. */
 export function requireTrackerItem(tracker: EntityTracker, operation: string): TrackerRecord {
     switch (tracker.provider) {
         case "local":
-            throw new Error(`${operation} needs a tracker item, and this Gig is local (it has none)`)
+            throw new Error(`${operation} needs a tracker item, and this Task is local (it has none)`)
         case "github":
         case "linear":
             return tracker
@@ -236,21 +295,10 @@ export function trackerRecordFromObject(
                         },
                         planDocument: { state: "unpublished" },
                     }
-                case "task-issue":
+                case "issue":
                     return {
                         provider: "linear",
-                        resource: "task-issue",
-                        external: {
-                            issueId: object.issueId,
-                            identifier: object.identifier,
-                            projectId: object.projectId,
-                        },
-                        planDocument: { state: "unpublished" },
-                    }
-                case "gig-issue":
-                    return {
-                        provider: "linear",
-                        resource: "gig-issue",
+                        resource: "issue",
                         external: {
                             issueId: object.issueId,
                             identifier: object.identifier,
@@ -261,15 +309,23 @@ export function trackerRecordFromObject(
     }
 }
 
+/**
+ * The record's own invariants and its fit with the entity type. A Task's fit with its parent (local only
+ * when standalone, a Linear Project only under an Epic) is checked where the parent is known.
+ */
 export function assertTrackerRecordInvariants(
-    entity: "epic" | "task" | "gig",
+    entity: EntityType,
     tracker: EntityTracker,
     fail: (message: string) => never,
 ): void {
     if (tracker.provider === "local") {
-        // Epics create their Tasks' issues, and Tasks are those issues: only a Gig can be local.
-        if (entity !== "gig") fail(`only a Gig can be local; a ${entity} needs a tracker item`)
-        return
+        // An Epic creates its Tasks' issues on the tracker, so it always needs one.
+        switch (entity) {
+            case "epic":
+                return fail("an Epic can't be local; it needs a tracker item")
+            case "task":
+                return
+        }
     }
     if (tracker.provider === "github") {
         const comment = tracker.planComment
@@ -278,10 +334,20 @@ export function assertTrackerRecordInvariants(
         assertPlanAnnouncementState(tracker.planAnnouncement, comment.state, fail)
         return
     }
-    const expected = entity === "epic" ? "project" : entity === "task" ? "task-issue" : "gig-issue"
+    const expected = linearResourceFor(entity)
     if (tracker.resource !== expected) fail(`Linear tracker resource must be ${expected} for ${entity}`)
     if (tracker.planDocument.state === "published") assertPlanDocumentUrl(tracker.planDocument.url)
     assertPlanAnnouncementState(tracker.planAnnouncement, tracker.planDocument.state, fail)
+}
+
+/** The Linear resource an entity is: an Epic is a Project, a Task an issue. */
+export function linearResourceFor(entity: EntityType): "project" | "issue" {
+    switch (entity) {
+        case "epic":
+            return "project"
+        case "task":
+            return "issue"
+    }
 }
 
 // An update in flight needs a published plan.

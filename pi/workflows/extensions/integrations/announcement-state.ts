@@ -28,7 +28,6 @@ export function resolveAnnouncementOrigin(
             return taskMarker(readEntityStatus(task))
         }
         case "task":
-        case "gig":
-            throw new Error(`a ${status.entity} plan update has no Task origin; omit origin`)
+            throw new Error("a Task plan update has no Task origin; omit origin")
     }
 }

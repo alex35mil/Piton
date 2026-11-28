@@ -104,7 +104,7 @@ describe("one repository merge operation", () => {
             assert.deepEqual(planGitHubMerge(subject, read, mcpTools), expected)
             assert.deepEqual(shippingReadDecision(scope, read, sha, 12, mcpTools), expected)
             assert.deepEqual(f.plan(read), expected)
-            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/gigs")), false)
+            assert.equal(fs.existsSync(path.join(f.root, ".piton/.local/tasks")), false)
             assert.deepEqual(f.snapshot(), before)
         } finally {
             f.close()

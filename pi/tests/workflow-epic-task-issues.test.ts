@@ -9,6 +9,7 @@ import * as path from "node:path"
 import { describe, it } from "node:test"
 
 import { workflowMcpCatalog } from "./mcp-catalog-fixture.ts"
+import { githubReads, linearReads } from "./workflow-issue-reads-fixture.ts"
 import { kindLabels, linearKindGroup, linearPhases, phaseValues } from "./workflow-phase-fixtures.ts"
 import { acceptEpicTasks } from "../workflows/extensions/__lib/epic-acceptance.ts"
 import { readEntityStatus, writeEntityStatus } from "../workflows/extensions/__lib/entity.ts"
@@ -1126,22 +1127,13 @@ describe("Task design", () => {
                         title: "Parser",
                         slug: "parser",
                         request: "Parse the input.",
-                        parentEpicDir: directory,
-                        object:
+                        kind: "feature",
+                        reads:
                             provider === "github"
-                                ? {
-                                      issueId: 110,
-                                      issueNumber: 11,
-                                      issueUrl: "https://github.com/example/app/issues/11",
-                                  }
-                                : {
-                                      issueId: "issue-uuid",
-                                      identifier: "ENG-11",
-                                      issueUrl: "https://linear.app/example/issue/ENG-11",
-                                      projectId: "project-uuid",
-                                  },
+                                ? githubReads({ number: 11, parent: 10, repository })
+                                : linearReads({ identifier: "ENG-11", uuid: "issue-uuid", projectId: "project-uuid" }),
                     },
-                    { cwd: root },
+                    { cwd: root, tools },
                 )
                 const read = (body: string) =>
                     provider === "github"

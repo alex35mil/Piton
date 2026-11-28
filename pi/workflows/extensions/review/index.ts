@@ -8,13 +8,14 @@ import { workflowTools } from "../__lib/tools.js"
 
 import * as project from "../../../extensions/__lib/project.js"
 import { PITON_DIR } from "../../../extensions/__lib/settings.js"
-import { EPIC_ROOT, GIG_ROOT, type DeliverableKind } from "../__lib/domain.js"
+import { EPIC_ROOT, TASK_ROOT, type DeliverableKind } from "../__lib/domain.js"
 import {
     entityLabel,
     LOCAL_REVIEWS_DIR,
     readEntityStatus,
     readPendingEntries,
     resolveEntityPath,
+    taskParent,
 } from "../__lib/entity.js"
 import * as Git from "../__lib/git.js"
 import { assertArtifactPersistencePrepared, readProjectPolicies as readPolicies } from "../__lib/project-config.js"
@@ -59,7 +60,7 @@ import {
 
 /** Review categories whose rounds copy the reviewed document into `candidate.md`. */
 type SnapshotPhase = "plan" | "final"
-type ReviewEntity = "epic" | "task" | "gig"
+type ReviewEntity = "epic" | "task"
 
 /**
  * A merge conflict between a Deliverable branch and its target, as a `conflict-plan` round saw it.
@@ -116,8 +117,8 @@ const newReviewProperty = Type.String({
 })
 
 // One strict object per Deliverable review category, so each input exists only where it's used.
-function deliverableRequests<E extends "task" | "gig">(entity: E, directory: string) {
-    const base = { entity: Type.Literal(entity), entityDir: Type.String({ description: directory }) }
+function deliverableRequests(directory: string) {
+    const base = { entity: Type.Literal("task"), entityDir: Type.String({ description: directory }) }
     const strict = { additionalProperties: false } as const
     return [
         Type.Object(
@@ -170,14 +171,9 @@ const EpicReviewRequestSchema = Type.Object(
     },
     { additionalProperties: false },
 )
-const TASK_DIRECTORY = "Task directory under an Epic's tasks/ directory"
-const GIG_DIRECTORY = `Gig directory under ${GIG_ROOT}/`
+const TASK_DIRECTORY = `Task directory: under ${TASK_ROOT}/, or under an Epic's tasks/ directory`
 
-export const ReviewRequestSchema = Type.Union([
-    EpicReviewRequestSchema,
-    ...deliverableRequests("task", TASK_DIRECTORY),
-    ...deliverableRequests("gig", GIG_DIRECTORY),
-])
+export const ReviewRequestSchema = Type.Union([EpicReviewRequestSchema, ...deliverableRequests(TASK_DIRECTORY)])
 export const ReviewRequestValidator = compile(ReviewRequestSchema)
 type ReviewAgentParams = Static<typeof ReviewRequestSchema>
 
@@ -199,7 +195,7 @@ function deliverableToolParameters(directory: string) {
 
 export const RecordReviewResponseSchema = Type.Object(
     {
-        entityDir: Type.String({ description: "Epic, Task, or Gig directory" }),
+        entityDir: Type.String({ description: "Epic or Task directory" }),
         phase: Type.Enum(REVIEW_PHASES, { type: "string" }),
         round: Type.Integer({ minimum: 1 }),
         responses: Type.Array(ReviewResponseSchema, {
@@ -227,7 +223,6 @@ export default function (pi: ExtensionAPI) {
     const reviews = [
         ["epic", Type.Omit(EpicReviewRequestSchema, ["entity"])],
         ["task", deliverableToolParameters(TASK_DIRECTORY)],
-        ["gig", deliverableToolParameters(GIG_DIRECTORY)],
     ] as const
     for (const [entity, parameters] of reviews) {
         const validator = compile(parameters)
@@ -237,7 +232,7 @@ export default function (pi: ExtensionAPI) {
             description:
                 entity === "epic"
                     ? `Run one Epic planning review round on epic.md. ${PASS_MODEL} Persists one numbered local review round.`
-                    : `Run one Task/Gig review round: plan (plan.md), interim (optional subject), final (result.md or report.md, with the branch diff), conflict-plan (required resolution: the proposed merge-conflict resolution, reviewed against the actual conflicts with the fetched target), or conflict-merge (the committed merge of the target into the branch, reviewed against the approved resolution). ${PASS_MODEL} Persists one numbered local review round.`,
+                    : `Run one Task review round: plan (plan.md), interim (optional subject), final (result.md or report.md, with the branch diff), conflict-plan (required resolution: the proposed merge-conflict resolution, reviewed against the actual conflicts with the fetched target), or conflict-merge (the committed merge of the target into the branch, reviewed against the approved resolution). ${PASS_MODEL} Persists one numbered local review round.`,
             parameters,
 
             async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -331,7 +326,7 @@ export default function (pi: ExtensionAPI) {
         name: "record_review_response",
         label: "record_review_response",
         description:
-            "Record the findings of an Epic, Task, or Gig review round that you reject or that need the user's decision, each with a plain explanation. Accepted findings need no record. The verification pass and later reviews read this record. Calling it again replaces the round's record.",
+            "Record the findings of an Epic or Task review round that you reject or that need the user's decision, each with a plain explanation. Accepted findings need no record. The verification pass and later reviews read this record. Calling it again replaces the round's record.",
         parameters: RecordReviewResponseSchema,
 
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -344,7 +339,6 @@ export default function (pi: ExtensionAPI) {
                     if (input.phase !== "plan") throw new Error("Epic reviews have only the plan category")
                     break
                 case "task":
-                case "gig":
                     break
             }
 
@@ -390,7 +384,6 @@ export function assertReviewPreconditions(directory: string, phase: ReviewPhase)
                 throw new Error(`${entityLabel(status)} review requires epic.md`)
             return
         case "task":
-        case "gig":
             break
     }
     switch (phase) {
@@ -446,7 +439,6 @@ function reviewedDocument(entityDir: string, phase: SnapshotPhase): ReviewedDocu
         case "epic":
             return "epic.md"
         case "task":
-        case "gig":
             switch (phase) {
                 case "plan":
                     return "plan.md"
@@ -532,7 +524,6 @@ function deliverableStatus(entityDir: string) {
         case "epic":
             throw new Error(`expected Deliverable status in ${entityDir}`)
         case "task":
-        case "gig":
             return status
     }
 }
@@ -602,7 +593,7 @@ export async function conflictForMerge(root: string, entityDir: string) {
 export async function prepareDeliverableRound(
     cwd: string,
     entityDir: string,
-    input: Extract<ReviewAgentParams, { entity: "task" | "gig" }>,
+    input: Extract<ReviewAgentParams, { entity: "task" }>,
 ): Promise<PreparedDeliverableRound> {
     switch (input.phase) {
         case "plan":
@@ -763,13 +754,13 @@ function conflictContext(round: Extract<DeliverableReviewRound, { phase: "confli
 
 export async function buildDeliverableReviewPrompt(
     ctx: ExtensionContext,
-    gigDir: string,
+    deliverableDir: string,
     round: DeliverableReviewRound,
     instructions?: string,
     pass: PassPrompt = NO_PASS_PROMPT,
 ): Promise<string> {
     const phase = round.phase
-    const relDeliverableDir = path.relative(ctx.cwd, gigDir)
+    const relDeliverableDir = path.relative(ctx.cwd, deliverableDir)
     let planPath: string
     let completionSnapshot: string | undefined
     let subject: string | undefined
@@ -779,24 +770,24 @@ export async function buildDeliverableReviewPrompt(
             planPath = round.planSnapshot
             break
         case "interim":
-            planPath = path.join(gigDir, "plan.md")
+            planPath = path.join(deliverableDir, "plan.md")
             subject = round.subject
             break
         case "final":
-            planPath = path.join(gigDir, "plan.md")
+            planPath = path.join(deliverableDir, "plan.md")
             completionSnapshot = round.completionSnapshot
             break
         case "conflict-plan":
         case "conflict-merge":
-            planPath = path.join(gigDir, "plan.md")
+            planPath = path.join(deliverableDir, "plan.md")
             conflict = conflictContext(round)
             break
     }
     const relPlanPath = path.relative(ctx.cwd, planPath)
     const plan = await readOptional(planPath)
-    const brief = await readOptional(path.join(gigDir, "brief.md"))
-    const metadata = await readOptional(path.join(gigDir, "metadata.json"))
-    const entityStatus = deliverableStatus(gigDir)
+    const brief = await readOptional(path.join(deliverableDir, "brief.md"))
+    const metadata = await readOptional(path.join(deliverableDir, "metadata.json"))
+    const entityStatus = deliverableStatus(deliverableDir)
     const artifact = completionArtifact(entityStatus.kind)
     const completion = completionSnapshot ? await readOptional(completionSnapshot) : ""
     if (completionSnapshot && !completion.trim())
@@ -806,7 +797,7 @@ export async function buildDeliverableReviewPrompt(
     const context: string[] = []
     for (const name of ["report.md", "result.md"]) {
         if (completionSnapshot && name === artifact) continue
-        const content = await readOptional(path.join(gigDir, name))
+        const content = await readOptional(path.join(deliverableDir, name))
         if (content)
             context.push(
                 [`# ${name} (context)`, "", fence(truncate(content, MAX_EMBEDDED_FILE_BYTES), "markdown"), ""].join(
@@ -814,7 +805,7 @@ export async function buildDeliverableReviewPrompt(
                 ),
             )
     }
-    const parentEpic = await readParentEpicContext(ctx.cwd, gigDir)
+    const parentEpic = await readParentEpicContext(ctx.cwd, deliverableDir)
     const projectPolicies = await readProjectPolicies(ctx.cwd)
     const { branch } = entityStatus
     const diff = phase === "final" ? await branchDiff(ctx.cwd, branch.target) : ""
@@ -888,10 +879,17 @@ export async function buildDeliverableReviewPrompt(
 async function readParentEpicContext(cwd: string, deliverableDir: string): Promise<ParentEpicContext | undefined> {
     const status = readEntityStatus(deliverableDir)
     if (status.entity !== "task") return undefined
+    const parent = taskParent(deliverableDir)
+    switch (parent.kind) {
+        case "none":
+            return undefined
+        case "epic":
+            break
+    }
 
     const root = project.resolveRootDir(cwd)
     const epicsRoot = path.join(root, EPIC_ROOT)
-    const epicDir = path.dirname(path.dirname(path.resolve(deliverableDir)))
+    const epicDir = parent.directory
     const raw = path.relative(root, epicDir)
     if (!epicDir.startsWith(epicsRoot + path.sep) || !fs.existsSync(epicDir)) {
         throw new Error(`Parent Epic does not exist inside ${EPIC_ROOT}: ${raw}`)

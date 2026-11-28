@@ -260,7 +260,7 @@ local function has_label(issue, label)
     return false
 end
 
---- A Task is a sub-issue of an Epic; an Epic or a Gig is top-level, told
+--- An Epic Task is a sub-issue of an Epic; an Epic or a standalone Task is top-level, told
 --- apart by the configured Epic Kind label.
 ---@param issue table
 ---@param epic_label string?
@@ -269,7 +269,10 @@ function M.kind(issue, epic_label)
     local parent = issue.parent
     if type(parent) == "table" and (not epic_label or has_label(parent, epic_label)) then
         local marker = "#" .. parent.number
-        return { kind = "task", epic = { mention = marker, marker = marker, title = parent.title } }
+        return {
+            kind = "task",
+            parent = { kind = "epic", epic = { mention = marker, marker = marker, title = parent.title } },
+        }
     end
     if not epic_label then
         return { kind = "unclassified" }
@@ -277,7 +280,7 @@ function M.kind(issue, epic_label)
     if has_label(issue, epic_label) then
         return { kind = "epic" }
     end
-    return { kind = "gig" }
+    return { kind = "task", parent = { kind = "none" } }
 end
 
 return M

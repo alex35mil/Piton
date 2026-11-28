@@ -115,7 +115,7 @@ pub enum LinearCatalog {
 impl LinearCatalog {
     const ALL: [LinearCatalog; 2] = [LinearCatalog::Issue, LinearCatalog::Project];
 
-    /// The workflow items a catalog's labels go on: a Linear Epic is a Project; Tasks and Gigs are issues.
+    /// The workflow items a catalog's labels go on: a Linear Epic is a Project; Tasks are issues.
     fn item_type(self) -> ItemType {
         match self {
             LinearCatalog::Issue => ItemType::Deliverable,
@@ -204,7 +204,7 @@ pub struct LinearPhaseLabels {
 
 /// The reserved group whose value comes from the item's workflow Kind.
 const KIND: &str = "kind";
-/// The reserved group whose values mark the points where a Task or Gig waits for the user's approval.
+/// The reserved group whose values mark the points where a Task waits for the user's approval.
 const GATE: &str = "gate";
 /// The gates workflows know how to honor.
 const GATES: [&str; 1] = ["plan"];

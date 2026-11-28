@@ -183,7 +183,7 @@ describe("fork-only incoming PR intake", () => {
         assert.ok(result.file.content.includes("${{ secrets.PROJECT_TOKEN }}"))
         assert.doesNotMatch(
             result.file.content,
-            /actions\/checkout|npm |git fetch|updateProjectV2ItemFieldValue|\.piton\/|GIG-/,
+            /actions\/checkout|npm |git fetch|updateProjectV2ItemFieldValue|\.piton\/|TASK-/,
         )
         assert.deepEqual(
             result.prerequisites.map((entry) => entry.kind),

@@ -80,6 +80,6 @@ Read this when configuring a Linear tracker: the tracker object `configure_proje
 
 ## Branch names with `tracker`
 
-- A Task or Gig uses the exact provider-generated issue branch (`gitBranchName`).
+- A Task uses the exact provider-generated issue branch (`gitBranchName`).
 - An Epic, a Linear Project with no branch of its own, uses its dated name, `<YYYYMMDD>-<slug>`.
 - Linear `tracker` never uses local or global workflow username settings.

@@ -4,7 +4,7 @@ The map of workflow directories, what each file means, and how it's persisted. P
 
 ## Terminology
 
-- **Tracker:** an external work system, GitHub Projects or Linear. A **tracker item** is its native record for an entity: a GitHub issue for every entity; a Linear Project for an Epic, and a Linear issue for a Task or Gig.
+- **Tracker:** an external work system, GitHub Projects or Linear. A **tracker item** is its native record for an entity: a GitHub issue for every entity; a Linear Project for an Epic, and a Linear issue for a Task.
 - **In Git** or **outside Git:** general Git membership. Use **staged**, **unstaged**, **gitignored**, and **committed** for those specific states.
 - **Local:** files that always stay outside Git: everything under `.piton/.local/` and every `.piton/*.local.*` settings file. Every workflow entity is local.
 - **Tracker reference:** an entity's identity on the tracker: `#12` for a GitHub issue, `ENG-12` for a Linear issue. A Linear Project has no number, so its Epic is dated by the Project's UTC creation date to keep Epics chronological.
@@ -24,11 +24,11 @@ Before initialization, settle:
 - the title and a standalone Request;
 - Priority: a configured value or `not set`;
 - new tracker work, or adoption of one explicitly selected Backlog or Todo object;
-- for Task and Gig, the Deliverable kind; for Task, also the parent and Epic Task its skill requires.
+- for a Task, the Deliverable kind and its parent: an Epic and its plan Task, or none.
 
 **New work:**
 
-1. Build the Request from the user's input and agreed clarifications. The `/epic`, `/task`, and `/gig` commands wrap their argument in a generated label (`Epic:`, `Task:`, `Gig:`) and a routing line such as `Use the gig skill.`. Only the argument is user input.
+1. Build the Request from the user's input and agreed clarifications. The `/epic` and `/task` commands wrap their argument in a generated label (`Epic:`, `Task:`) and a routing line such as `Use the task skill.`. Only the argument is user input.
 2. Clean the title and Request (below). Pick the entity type, Kind, labels, and Priority from the request and Project Policies.
 3. Ask only when the entity type, Kind, or a required label value can't be derived. Otherwise run preflight and create the tracker item without an approval step ([initialize from the tracker object](./integrations/shared.md#initialize-from-the-tracker-object)).
 4. Report the created item in one line: its reference, URL, Kind, labels, and Priority. The user can correct any of them afterward.
@@ -79,12 +79,12 @@ Use concise lowercase kebab-case, with a soft cap around 48 characters; shorten 
 
 ## Names and initial branches
 
-- An entity's directory is `<reference>-<slug>`: `12-<slug>` for a GitHub issue, `ENG-12-<slug>` for a Linear issue, and `<YYYYMMDD>-<slug>` for a Linear Epic or a local Gig, dated by its creation.
-- A local Gig's branch uses that dated name: as is under `identifier-title` and `tracker`, with `<username>/` under `username/identifier-title`.
+- An entity's directory is `<reference>-<slug>`: `12-<slug>` for a GitHub issue, `ENG-12-<slug>` for a Linear issue, and `<YYYYMMDD>-<slug>` for a Linear Epic or a local Task, dated by its creation.
+- A local Task's branch uses that dated name: as is under `identifier-title` and `tracker`, with `<username>/` under `username/identifier-title`.
 - The `identifier-title` branch format uses that name in lowercase; `username/identifier-title` prefixes it with `<username>/`. Only initialized entities get directories and branches.
-- Epic and Gig start from and target the repository default branch. It's resolved, in order, from `origin/HEAD`, an existing workflow contract, the current attached local branch, or the sole local branch. A remote is optional.
-- A Task copies its parent Epic's current target. The Task skill owns its prerequisites and parent relation.
-- The initialization tool renders the one configured `branches.format` for every entity. Formats starting with `username` read the username from `.piton/config.local.toml` or the global `config.local.toml`; never infer it. The Linear `tracker` format uses exact issue branch names for Task and Gig, and the slug for an Epic (see [Linear tracker](./integrations/tracker/linear.md)). When configuring formats, read [setup](./setup.md#project-configuration).
+- An Epic and a standalone Task start from and target the repository default branch. It's resolved, in order, from `origin/HEAD`, an existing workflow contract, the current attached local branch, or the sole local branch. A remote is optional.
+- An Epic Task copies its parent Epic's current target. The Task skill owns its prerequisites and parent relation.
+- The initialization tool renders the one configured `branches.format` for every entity. Formats starting with `username` read the username from `.piton/config.local.toml` or the global `config.local.toml`; never infer it. The Linear `tracker` format uses exact issue branch names for Task, and the slug for an Epic (see [Linear tracker](./integrations/tracker/linear.md)). When configuring formats, read [setup](./setup.md#project-configuration).
 - Approved repository operations remain lifecycle gates.
 
 ## Brief and local working state
@@ -93,14 +93,14 @@ Entity files sit directly in the entity directory.
 
 - **`brief.md`:** only `# Brief`, a blank line, and the Request. Change the Request only with explicit user approval or a Task's [design change](./epic-tasks.md#task-designs). Never add decisions, findings, questions, paths, provider data, checkpoints, or history.
 - **`notes.md`:** free-form agent notes for transient context that doesn't belong in metadata, the plan, or a review round. Keep resume context here, and refresh it before compaction when possible. No lifecycle or completion gate.
-- **`pending.md`** (Task and Gig): Markdown task-list entries for current-scope work found during execution.
+- **`pending.md`** (Task): Markdown task-list entries for current-scope work found during execution.
   - An unchecked entry is active; checked entries may stay.
   - Independently schedulable or out-of-scope work goes to the queue as separate work.
   - Final review requires zero active entries.
   - A missing file, for example after a fresh checkout, counts as empty.
 - **`scratch/`:** temporary research, probes, scripts, and data.
 - **`designs/`:** design sketches and iterations.
-- Initialization creates the entity directory, `brief.md`, `metadata.json`, `notes.md`, `reviews/`, and `scratch/`. Task and Gig also get `pending.md` and `designs/`. Later gates create the rest.
+- Initialization creates the entity directory, `brief.md`, `metadata.json`, `notes.md`, `reviews/`, and `scratch/`. A Task also gets `pending.md` and `designs/`. Later gates create the rest.
 
 ## Project
 
@@ -111,7 +111,7 @@ Entity files sit directly in the entity directory.
   policies.md          # Optional repository-specific workflow additions or overrides; committed.
   .local/              # All workflow work; never committed.
     epics/             # Initialized Epics and their Tasks.
-    gigs/              # Initialized standalone Gigs.
+    tasks/             # Initialized standalone Tasks.
     pull-requests/     # Incoming PR evidence; no initialized entities.
 ```
 
@@ -149,13 +149,13 @@ Precedence is in [core approvals](./core.md#approvals).
 - Metadata holds the immutable branch identity. Routing lives in `epic.md` as `**Task target:**` and `**Epic branch:**` lines, published with the plan ([Epic routing](./epic.md#routing)).
 - Every Epic file here is a per-checkout copy, shared only when a worker links `.piton/.local` to its source checkout. A checkout without it [restores](./epic.md#restore-an-epic) the Epic from the tracker.
 
-### Task and Gig (Deliverables)
+### Task (Deliverable)
 
 ```text
 .piton/.local/epics/<epic>/tasks/<reference>-<slug>/
-.piton/.local/gigs/<reference>-<slug>/
+.piton/.local/tasks/<reference>-<slug>/
   brief.md             # Approved Request.
-  metadata.json        # Kind, tracker identity, branch contract, PR intent. A Task's parent comes from its directory.
+  metadata.json        # Kind, parent, tracker identity, branch contract, PR intent.
   plan.md              # Work plan; absent on the direct path.
   result.md            # Feature, Bugfix, Refactor, Chore: delivered outcome and actual verification.
   report.md            # Research, Audit: the result; kept when the work continues into implementation.
@@ -167,9 +167,9 @@ Precedence is in [core approvals](./core.md#approvals).
   reviews/<phase>-NNN/ # Review round files, below.
 ```
 
-- Task and Gig share the Deliverable lifecycle and these meanings. Only a Task has a parent Epic and may update parent Epic artifacts. Its parent identity is the containing Epic directory plus its exact marker.
+- Every Task shares the Deliverable lifecycle and these meanings. The tracker decides its parent (an Epic, or none); metadata records it, the directory mirrors it (an Epic's `tasks/`, or the `tasks/` root), and resume re-checks it. Only an Epic Task may update its Epic's artifacts; its parent identity is the containing Epic directory plus its exact marker.
 - `metadata.branch` records the branch name, start, target, and whether the name was generated or tracker-provided.
-- A Task's stored start and target never change when its Epic's routing later changes.
+- An Epic Task's stored start and target never change when its Epic's routing later changes.
 - `metadata.json` is authoritative for kind.
 - Completion artifacts follow the [Deliverable lifecycle](./deliverable.md#completion-artifact). Kind-only updates leave plans, results, and reports unchanged.
 
